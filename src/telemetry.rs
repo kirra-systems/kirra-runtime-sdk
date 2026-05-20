@@ -1,0 +1,44 @@
+// src/telemetry.rs
+
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CORRELATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StructuredLogEvent {
+    pub timestamp_epoch_secs: u64,
+    pub severity: String,
+    pub node_id: String,
+    pub correlation_id: String,
+    pub transaction_id: u16,
+    pub register_offset: u16,
+    pub raw_demand: f64,
+    pub sanitized_output: f64,
+    pub trust_score: u32,
+    pub trust_mode: String,
+    pub event_narrative: String,
+}
+
+pub struct EnterpriseTelemetryGateway { node_identifier: String }
+
+impl EnterpriseTelemetryGateway {
+    pub fn new(node_id: &str) -> Self { Self { node_identifier: node_id.to_string() } }
+
+    #[inline]
+    pub fn generate_correlation_id(&self, tx_id: u16) -> String {
+        let seq = CORRELATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!("AEGIS-NODE-{}-{:04X}-SEQ-{}", self.node_identifier, tx_id, seq)
+    }
+
+    pub fn emit_structured_event(&self, severity: &str, tx_id: u16, offset: u16, raw: f64, sanitized: f64, score: u32, mode: &str, narrative: &str) -> String {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let event = StructuredLogEvent {
+            timestamp_epoch_secs: now, severity: severity.to_string(), node_id: self.node_identifier.clone(),
+            correlation_id: self.generate_correlation_id(tx_id), transaction_id: tx_id, register_offset: offset,
+            raw_demand: raw, sanitized_output: sanitized, trust_score: score, trust_mode: mode.to_string(),
+            event_narrative: narrative.to_string(),
+        };
+        serde_json::to_string(&event).unwrap_or_else(|_| r#"{"error":"TELEMETRY_SERIALIZATION_FAILED"}"#.to_string())
+    }
+}

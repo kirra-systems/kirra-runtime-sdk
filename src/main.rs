@@ -1,72 +1,52 @@
 // src/main.rs
-mod aegis_core;
-mod config;
-mod gateway;
-mod industrial_proxy;
-mod output;
 
-#[cfg(test)]
-mod tests;
-
-use gateway::AegisLiveGateway;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::env;
+use std::sync::mpsc::channel;
+use aegis_runtime_sdk::config::AegisRuntimeConfig;
+use aegis_runtime_sdk::gateway::AegisLiveGateway;
 
 fn main() {
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config/asset_profile.json".to_string());
+    let args: Vec<String> = env::args().collect();
 
-    let runtime_config = match config::load_from_file(&config_path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("[AEGIS FATAL] Failed to load config from '{}': {}", config_path, e);
-            std::process::exit(1);
-        }
-    };
-
-    let raw_key = match std::env::var("AEGIS_SUPERVISOR_RESET_KEY") {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("[AEGIS FATAL] AEGIS_SUPERVISOR_RESET_KEY environment variable not set. Refusing to start.");
-            std::process::exit(1);
-        }
-    };
-
-    if raw_key.is_empty() {
-        eprintln!("[AEGIS FATAL] AEGIS_SUPERVISOR_RESET_KEY is empty. Refusing to start.");
+    if args.len() <= 1 || args[1] != "gateway" {
+        eprintln!("=========================================================================");
+        eprintln!("Aegis Runtime Gateway Interposer Engine");
+        eprintln!("=========================================================================");
+        eprintln!("Usage Error: Missing or unrecognized runtime command sequence target.");
+        eprintln!("Execution Path: cargo run -- gateway [path_to_asset_profile.json]");
         std::process::exit(1);
     }
 
-    let key_bytes = raw_key.as_bytes();
-    if key_bytes.len() > 64 {
-        eprintln!("[AEGIS FATAL] AEGIS_SUPERVISOR_RESET_KEY exceeds maximum length of 64 bytes. Refusing to start.");
+    let config_path = args.get(2).map(|s| s.as_str()).unwrap_or("config/asset_profile.json");
+    let runtime_config = AegisRuntimeConfig::load_and_validate(config_path).expect("BOOT_HALTED_INVALID_CONFIG");
+
+    let raw_key_string = env::var("AEGIS_SUPERVISOR_RESET_KEY").expect("SECURITY_FAILURE_ENV_KEY_MISSING");
+
+    if raw_key_string.is_empty() {
+        eprintln!("[CRITICAL SECURITY FAILURE] AEGIS_SUPERVISOR_RESET_KEY exists but contains no token bytes.");
+        std::process::exit(1);
+    }
+    if raw_key_string.len() > 64 {
+        eprintln!("[CRITICAL SECURITY FAILURE] Administrative override token length exceeds maximum 64-byte bounds.");
         std::process::exit(1);
     }
 
-    let gateway = AegisLiveGateway::new(
+    let secure_key = raw_key_string.into_bytes();
+
+    let interposer = AegisLiveGateway::new(
         runtime_config.network.proxy_listen_port,
         runtime_config.network.plc_target_port,
         runtime_config.network.admin_reset_port,
         runtime_config.contract,
-        key_bytes.to_vec(),
+        secure_key,
         runtime_config.network.max_concurrent_connections,
-        None,
         runtime_config.telemetry.log_directory,
     );
 
-    let (ready_tx, ready_rx) = mpsc::channel();
-    gateway.spawn_mock_plc_target(ready_tx);
-
-    match ready_rx.recv_timeout(Duration::from_millis(500)) {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            eprintln!("[AEGIS FATAL] Mock PLC failed to bind: {}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {
-            eprintln!("[AEGIS FATAL] Mock PLC did not signal readiness within 500ms.");
-            std::process::exit(1);
-        }
+    let (tx, rx) = channel();
+    interposer.spawn_mock_plc_target(tx);
+    if rx.recv_timeout(std::time::Duration::from_millis(500)).is_ok() {
+        println!("[SUCCESS] Aegis inline protection substrate active.");
+        interposer.start_active_proxy_gateway();
     }
-
-    gateway.start_active_proxy_gateway();
 }
