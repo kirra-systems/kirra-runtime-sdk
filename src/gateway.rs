@@ -19,14 +19,14 @@ impl ThreadPoolGuard { fn new(counter: Arc<std::sync::atomic::AtomicU32>) -> Sel
 impl Drop for ThreadPoolGuard { fn drop(&mut self) { self.counter.fetch_sub(1, Ordering::SeqCst); } }
 
 pub struct AegisLiveGateway {
-    pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16,
+    pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16, pub metrics_port: u16,
     pub runtime_config: ContractProfile, pub system_auth_key: Vec<u8>,
     pub max_allowed_workers: u32, pub log_directory: String, pub io_writer_lock: Arc<Mutex<()>>,
 }
 
 impl AegisLiveGateway {
-    pub fn new(proxy_port: u16, plc_target_port: u16, admin_port: u16, config: ContractProfile, auth_key: Vec<u8>, max_threads: u32, log_dir: String) -> Self {
-        Self { proxy_port, plc_target_port, admin_reset_port: admin_port, runtime_config: config, system_auth_key: auth_key, max_allowed_workers: max_threads.max(1), log_directory: log_dir, io_writer_lock: Arc::new(Mutex::new(())) }
+    pub fn new(proxy_port: u16, plc_target_port: u16, admin_port: u16, metrics_port: u16, config: ContractProfile, auth_key: Vec<u8>, max_threads: u32, log_dir: String) -> Self {
+        Self { proxy_port, plc_target_port, admin_reset_port: admin_port, metrics_port, runtime_config: config, system_auth_key: auth_key, max_allowed_workers: max_threads.max(1), log_directory: log_dir, io_writer_lock: Arc::new(Mutex::new(())) }
     }
 
     fn read_exact_frame<R: Read>(stream: &mut R, expected_len: usize, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
@@ -103,6 +103,51 @@ impl AegisLiveGateway {
                             }
                         }
                     }
+                }
+            }
+        });
+
+        let metrics_bind_port = self.metrics_port;
+        let metrics_clone_http = Arc::clone(&metrics);
+        let gov_health_clone = Arc::clone(&shared_governor);
+        thread::spawn(move || {
+            let http_listener = match TcpListener::bind(format!("127.0.0.1:{}", metrics_bind_port)) {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            for stream in http_listener.incoming() {
+                if let Ok(mut socket) = stream {
+                    let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+                    let mut request_buffer = [0u8; 512];
+                    let bytes_read = match socket.read(&mut request_buffer) {
+                        Ok(n) if n > 0 => n,
+                        _ => continue,
+                    };
+                    let request_str = std::str::from_utf8(&request_buffer[..bytes_read]).unwrap_or("");
+                    let first_line = request_str.lines().next().unwrap_or("");
+
+                    let (status, body) = if first_line.starts_with("GET /metrics") {
+                        let body = metrics_clone_http.format_prometheus_metrics("aegis-gateway");
+                        ("200 OK", body)
+                    } else if first_line.starts_with("GET /health/live") {
+                        ("200 OK", "{\"alive\":true}".to_string())
+                    } else if first_line.starts_with("GET /health/ready") {
+                        let trust = {
+                            let gov = gov_health_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            gov.trust_mode()
+                        };
+                        let ready = trust != crate::TrustMode::LockedOut;
+                        let body = format!("{{\"ready\":{}}}", ready);
+                        ("200 OK", body)
+                    } else {
+                        ("404 Not Found", "Not Found".to_string())
+                    };
+
+                    let response = format!(
+                        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+                        status, body.len(), body
+                    );
+                    let _ = socket.write_all(response.as_bytes());
                 }
             }
         });

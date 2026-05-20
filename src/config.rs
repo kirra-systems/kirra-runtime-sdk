@@ -11,6 +11,7 @@ pub struct NetworkConfig {
     pub proxy_listen_port: u16,
     pub plc_target_port: u16,
     pub admin_reset_port: u16,
+    pub metrics_http_port: u16,
     pub max_concurrent_connections: u32,
 }
 
@@ -31,8 +32,13 @@ impl AegisRuntimeConfig {
         let n = &self.network;
         let c = &self.contract;
 
-        if n.proxy_listen_port == n.plc_target_port || n.proxy_listen_port == n.admin_reset_port || n.plc_target_port == n.admin_reset_port {
-            return Err("CONFIG_INVALID: Network ports must be completely distinct loopback channels.");
+        let ports = [n.proxy_listen_port, n.plc_target_port, n.admin_reset_port, n.metrics_http_port];
+        for i in 0..ports.len() {
+            for j in (i + 1)..ports.len() {
+                if ports[i] == ports[j] {
+                    return Err("CONFIG_INVALID: Network ports must be completely distinct loopback channels.");
+                }
+            }
         }
         if n.max_concurrent_connections == 0 || n.max_concurrent_connections > 128 {
             return Err("CONFIG_INVALID: Thread pool limits must fall within the range [1, 128].");

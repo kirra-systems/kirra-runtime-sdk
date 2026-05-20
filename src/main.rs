@@ -37,6 +37,7 @@ fn main() {
         runtime_config.network.proxy_listen_port,
         runtime_config.network.plc_target_port,
         runtime_config.network.admin_reset_port,
+        runtime_config.network.metrics_http_port,
         runtime_config.contract,
         secure_key,
         runtime_config.network.max_concurrent_connections,

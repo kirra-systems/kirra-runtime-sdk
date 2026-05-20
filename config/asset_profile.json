@@ -3,15 +3,17 @@
     "proxy_listen_port": 5502,
     "plc_target_port": 5503,
     "admin_reset_port": 5504,
-    "max_concurrent_connections": 8
+    "metrics_http_port": 8080,
+    "max_concurrent_connections": 32
   },
   "telemetry": {
-    "log_directory": "./data/outputs"
+    "log_directory": "/var/log/aegis"
   },
   "contract": {
-    "asset_identifier": 10,
+    "asset_register_offset": 10,
     "min_permissible_ceiling": 1000.0,
     "max_permissible_ceiling": 3000.0,
+    "max_angular_velocity_ceiling": 1.5,
     "max_rate_of_change_dt": 100.0,
     "fallback_safe_setpoint": 1200.0,
     "constraint_cap_min": 1100.0,
