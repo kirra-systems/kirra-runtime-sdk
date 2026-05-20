@@ -93,19 +93,25 @@ fn test_dds_bridge_adds_cdr_encapsulation_header() {
     assert_eq!(&wrapped[..4], &[0x00, 0x01, 0x00, 0x00]);
 }
 
+#[test]
+fn test_startup_sentinel_trusted_when_tpm_feature_absent() {
+    // Without the tpm feature, the sentinel must pass through unconditionally.
+    #[cfg(not(feature = "tpm"))]
+    {
+        use crate::startup_sentinel::{StartupSentinel, StartupTrustState};
+        assert_eq!(StartupSentinel::verify_hardware_root(), StartupTrustState::Trusted);
+    }
+    // With the tpm feature this path is exercised by the live swtpm test below.
+    #[cfg(feature = "tpm")]
+    { let _ = (); }
+}
+
 #[cfg(feature = "tpm")]
 #[test]
-fn test_startup_sentinel_returns_entropy_from_swtpm() {
-    use crate::startup_sentinel::StartupSentinel;
-    // Requires swtpm running: TPM2TOOLS_TCTI=swtpm:path=/tmp/swtpm.sock
-    let tcti = std::env::var("TSS2_TCTI")
-        .or_else(|_| std::env::var("TPM2TOOLS_TCTI"))
-        .unwrap_or_else(|_| "swtpm:host=127.0.0.1,port=2321".to_string());
-    let sentinel = StartupSentinel::new(&tcti)
-        .expect("failed to parse TCTI");
-    let entropy = sentinel.attest_startup()
-        .expect("StartupSentinel: TPM attest_startup failed — is swtpm running?");
-    assert_eq!(entropy.len(), 8, "expected 8 bytes of TPM entropy");
-    // Entropy must not be all-zero (vanishingly unlikely from a real TPM)
-    assert_ne!(entropy, [0u8; 8], "TPM returned all-zero entropy");
+fn test_startup_sentinel_trusted_with_live_swtpm() {
+    // Requires: TSS2_TCTI=swtpm:host=127.0.0.1,port=2321
+    use crate::startup_sentinel::{StartupSentinel, StartupTrustState};
+    let state = StartupSentinel::verify_hardware_root();
+    assert_eq!(state, StartupTrustState::Trusted,
+        "expected Trusted from swtpm — is TSS2_TCTI set and swtpm running? got: {:?}", state);
 }

@@ -17,6 +17,8 @@ pub mod gateway;
 pub mod robotics_alignment;
 pub mod dds_bridge;
 pub mod ffi;
+#[cfg(feature = "tpm")]
+pub mod tpm;
 pub mod startup_sentinel;
 
 #[cfg(test)]
