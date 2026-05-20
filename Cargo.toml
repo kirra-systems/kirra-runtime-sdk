@@ -1,6 +1,6 @@
 [package]
 name = "aegis-runtime-sdk"
-version = "1.0.0-rc15"
+version = "1.0.0-rc17"
 edition = "2021"
 
 [dependencies]

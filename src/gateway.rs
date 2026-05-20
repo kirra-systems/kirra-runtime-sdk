@@ -14,9 +14,19 @@ use crate::modbus_adapter::ModbusTcpAdapter;
 use crate::metrics::LockFreeMetricsAggregator;
 use crate::output::{save_brute_force_counter, load_brute_force_counter, save_replay_json, save_summary_json, ExecutiveSummary};
 
-struct ThreadPoolGuard { counter: Arc<std::sync::atomic::AtomicU32> }
-impl ThreadPoolGuard { fn new(counter: Arc<std::sync::atomic::AtomicU32>) -> Self { Self { counter } } }
-impl Drop for ThreadPoolGuard { fn drop(&mut self) { self.counter.fetch_sub(1, Ordering::SeqCst); } }
+struct ThreadPoolGuard { counter: Arc<std::sync::atomic::AtomicU32>, aggregator: Arc<LockFreeMetricsAggregator> }
+impl ThreadPoolGuard {
+    fn new(counter: Arc<std::sync::atomic::AtomicU32>, aggregator: Arc<LockFreeMetricsAggregator>) -> Self {
+        aggregator.active_worker_threads.fetch_add(1, Ordering::SeqCst);
+        Self { counter, aggregator }
+    }
+}
+impl Drop for ThreadPoolGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+        self.aggregator.active_worker_threads.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub struct AegisLiveGateway {
     pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16, pub metrics_port: u16,
@@ -65,6 +75,7 @@ impl AegisLiveGateway {
         let auth_key = self.system_auth_key.clone();
         let log_dir = self.log_directory.clone();
         let io_lock_admin = Arc::clone(&self.io_writer_lock);
+        let metrics_admin_clone = Arc::clone(&metrics);
 
         thread::spawn(move || {
             for stream in admin_listener.incoming() {
@@ -85,6 +96,7 @@ impl AegisLiveGateway {
                                 gov.trust_engine.failed_reset_attempts = tracking_attempts;
                                 auth_res = gov.trust_engine.authenticated_manual_reset(token, &auth_key, now);
                                 captured_attempts_count = gov.trust_engine.failed_reset_attempts;
+                                metrics_admin_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
                             }
                         }
 
@@ -95,6 +107,7 @@ impl AegisLiveGateway {
                                 let _ = socket.write_all(b"RESET_SUCCESS\n");
                             }
                             Err(msg) => {
+                                metrics_admin_clone.authentication_failures.fetch_add(1, Ordering::Relaxed);
                                 {
                                     let _io_guard = io_lock_admin.lock().unwrap();
                                     let _ = save_brute_force_counter(captured_attempts_count, &log_dir);
@@ -107,47 +120,56 @@ impl AegisLiveGateway {
             }
         });
 
+        let metrics_http_clone = Arc::clone(&metrics);
+        let gov_http_clone = Arc::clone(&shared_governor);
+        let workers_http_clone = Arc::clone(&active_workers);
+        let max_workers_allowed = self.max_allowed_workers;
         let metrics_bind_port = self.metrics_port;
-        let metrics_clone_http = Arc::clone(&metrics);
-        let gov_health_clone = Arc::clone(&shared_governor);
+
         thread::spawn(move || {
-            let http_listener = match TcpListener::bind(format!("127.0.0.1:{}", metrics_bind_port)) {
-                Ok(l) => l,
-                Err(_) => return,
-            };
+            let http_listener = TcpListener::bind(format!("127.0.0.1:{}", metrics_bind_port)).expect("FAIL_HTTP_BIND");
+            let mut request_buffer = [0u8; 1024];
             for stream in http_listener.incoming() {
                 if let Ok(mut socket) = stream {
                     let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
-                    let mut request_buffer = [0u8; 512];
-                    let bytes_read = match socket.read(&mut request_buffer) {
-                        Ok(n) if n > 0 => n,
-                        _ => continue,
-                    };
-                    let request_str = std::str::from_utf8(&request_buffer[..bytes_read]).unwrap_or("");
-                    let first_line = request_str.lines().next().unwrap_or("");
+                    if let Ok(bytes_read) = socket.read(&mut request_buffer) {
+                        if bytes_read == 0 { continue; }
 
-                    let (status, body) = if first_line.starts_with("GET /metrics") {
-                        let body = metrics_clone_http.format_prometheus_metrics("aegis-gateway");
-                        ("200 OK", body)
-                    } else if first_line.starts_with("GET /health/live") {
-                        ("200 OK", "{\"alive\":true}".to_string())
-                    } else if first_line.starts_with("GET /health/ready") {
-                        let trust = {
-                            let gov = gov_health_clone.lock().unwrap_or_else(|e| e.into_inner());
-                            gov.trust_mode()
-                        };
-                        let ready = trust != crate::TrustMode::LockedOut;
-                        let body = format!("{{\"ready\":{}}}", ready);
-                        ("200 OK", body)
-                    } else {
-                        ("404 Not Found", "Not Found".to_string())
-                    };
+                        let req_str = String::from_utf8_lossy(&request_buffer[..bytes_read]);
+                        let first_line = req_str.lines().next().unwrap_or("");
 
-                    let response = format!(
-                        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
-                        status, body.len(), body
-                    );
-                    let _ = socket.write_all(response.as_bytes());
+                        if first_line.starts_with("GET /metrics") {
+                            let payload = metrics_http_clone.format_prometheus_metrics("aegis-core-active");
+                            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload);
+                            let _ = socket.write_all(response.as_bytes());
+                        } else if first_line.starts_with("GET /health/live") {
+                            let body = r#"{"status":"UP"}"#;
+                            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                            let _ = socket.write_all(response.as_bytes());
+                        } else if first_line.starts_with("GET /health/ready") {
+                            let mut is_ready = false;
+                            if let Ok(gov) = gov_http_clone.lock() {
+                                if gov.trust_mode() != TrustMode::LockedOut {
+                                    let active_conns = workers_http_clone.load(Ordering::SeqCst);
+                                    if active_conns < max_workers_allowed {
+                                        is_ready = true;
+                                    }
+                                }
+                            }
+                            if is_ready {
+                                let body = r#"{"status":"READY"}"#;
+                                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                                let _ = socket.write_all(response.as_bytes());
+                            } else {
+                                let body = r#"{"status":"NOT_READY","reason":"TRUST_LOCKOUT_OR_POOL_SATURATED"}"#;
+                                let response = format!("HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                                let _ = socket.write_all(response.as_bytes());
+                            }
+                        } else {
+                            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = socket.write_all(response.as_bytes());
+                        }
+                    }
                 }
             }
         });
@@ -175,7 +197,7 @@ impl AegisLiveGateway {
                 let local_log_dir = self.log_directory.clone();
 
                 thread::spawn(move || {
-                    let _guard = ThreadPoolGuard::new(workers_counter);
+                    let _guard = ThreadPoolGuard::new(workers_counter, Arc::clone(&metrics_clone));
                     let mut plc_socket = match TcpStream::connect(plc_addr) { Ok(s) => s, Err(_) => return };
                     let mut buf = [0u8; 512];
                     let mut plc_buf = [0u8; 512];
@@ -193,6 +215,7 @@ impl AegisLiveGateway {
                                 let mut gov = gov_worker_clone.lock().unwrap();
                                 let intercept = gov.evaluate(demand, 0.050);
                                 let processed = metrics_clone.total_processed_frames.fetch_add(1, Ordering::Relaxed) + 1;
+                                metrics_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
 
                                 if intercept.was_unsafe_attempt {
                                     metrics_clone.envelope_clamping_events.fetch_add(1, Ordering::Relaxed);
@@ -227,7 +250,6 @@ impl AegisLiveGateway {
                             }
                         };
 
-                        // RC13-M1: flush happens after all locks released — no gov lock held during disk I/O
                         if let Some(records_data) = flush_payload {
                             let _io_guard = io_lock_worker.lock().unwrap();
                             let _ = save_replay_json(&records_data, &local_log_dir, "aegis_replay.json");
@@ -240,28 +262,29 @@ impl AegisLiveGateway {
                         if mut_client.write_all(&plc_buf[0..6+p_len]).is_err() { break; }
                     }
 
-                    // RC13-M1: snapshot needed values from gov, drop the lock, then take io_lock for disk write
-                    let (final_trust, last_val) = {
-                        let gov = gov_worker_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        (gov.trust_mode(), gov.last_output())
+                    let summary_payload = {
+                        if let Ok(gov) = gov_worker_clone.lock() {
+                            let total_traffic = metrics_clone.total_processed_frames.load(Ordering::Relaxed) as u32;
+                            let clamp_events = metrics_clone.envelope_clamping_events.load(Ordering::Relaxed) as u32;
+                            let rate_events = metrics_clone.rate_limiting_events.load(Ordering::Relaxed) as u32;
+                            Some(ExecutiveSummary {
+                                processed_traffic_count: total_traffic,
+                                attempted_unsafe_actions: clamp_events,
+                                policy_enforced_actions: clamp_events + rate_events,
+                                rate_limited_actions: rate_events,
+                                final_trust_mode: gov.trust_mode(),
+                                asset_in_safe_control_state: gov.trust_mode() == TrustMode::FullAutonomy,
+                                final_process_value_counts: gov.last_output(),
+                            })
+                        } else {
+                            None
+                        }
                     };
 
-                    let total_traffic = metrics_clone.total_processed_frames.load(Ordering::Relaxed) as u32;
-                    // RC13-M2: policy_enforced_actions = envelope clamps + rate limits (all frames where governor changed output)
-                    let envelope_events = metrics_clone.envelope_clamping_events.load(Ordering::Relaxed) as u32;
-                    let rate_events = metrics_clone.rate_limiting_events.load(Ordering::Relaxed) as u32;
-                    let summary = ExecutiveSummary {
-                        processed_traffic_count: total_traffic,
-                        attempted_unsafe_actions: envelope_events,
-                        policy_enforced_actions: envelope_events + rate_events,
-                        rate_limited_actions: rate_events,
-                        final_trust_mode: final_trust,
-                        asset_in_safe_control_state: final_trust == TrustMode::FullAutonomy,
-                        final_process_value_counts: last_val,
-                    };
-
-                    let _io_guard = io_lock_worker.lock().unwrap();
-                    let _ = save_summary_json(&summary, &local_log_dir, "aegis_summary.json");
+                    if let Some(summary) = summary_payload {
+                        let _io_guard = io_lock_worker.lock().unwrap();
+                        let _ = save_summary_json(&summary, &local_log_dir, "aegis_summary.json");
+                    }
                 });
             }
         }
