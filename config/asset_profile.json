@@ -1,0 +1,21 @@
+{
+  "network": {
+    "proxy_listen_port": 5502,
+    "plc_target_port": 5503,
+    "admin_reset_port": 5504,
+    "max_concurrent_connections": 8
+  },
+  "telemetry": {
+    "log_directory": "./data/outputs"
+  },
+  "contract": {
+    "asset_identifier": 10,
+    "min_permissible_ceiling": 1000.0,
+    "max_permissible_ceiling": 3000.0,
+    "max_rate_of_change_dt": 100.0,
+    "fallback_safe_setpoint": 1200.0,
+    "constraint_cap_min": 1100.0,
+    "constraint_cap_max": 2000.0,
+    "engineering_scale_factor": 10.0
+  }
+}
