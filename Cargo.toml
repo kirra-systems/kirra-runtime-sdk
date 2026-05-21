@@ -17,6 +17,9 @@ serde_json = "1.0"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+dashmap = "6"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
 tss-esapi = { version = "7", optional = true }
 
 [[bin]]
@@ -35,4 +38,8 @@ path = "src/bin/aegis_ros2_demo_node.rs"
 name = "aegis_ros2_publisher"
 path = "src/bin/aegis_ros2_publisher.rs"
 required-features = ["ros2"]
+
+[[bin]]
+name = "aegis_verifier_service"
+path = "src/bin/aegis_verifier_service.rs"
 

@@ -20,6 +20,8 @@ pub mod ffi;
 #[cfg(feature = "tpm")]
 pub mod tpm;
 pub mod startup_sentinel;
+pub mod verifier;
+pub mod posture_cache;
 
 #[cfg(test)]
 mod tests;

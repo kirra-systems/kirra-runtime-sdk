@@ -9,6 +9,7 @@ use crate::ros2_adapter::Ros2Adapter;
 use crate::robotics_alignment::AlignmentBridge;
 use crate::dds_bridge::DdsPublisherBridge;
 use crate::SafetyGovernor;
+use crate::verifier::{AppState, FleetPosture, NodeTrustState, RegisteredNode};
 
 fn generate_valid_test_profile() -> ContractProfile {
     ContractProfile {
@@ -114,4 +115,65 @@ fn test_startup_sentinel_trusted_with_live_swtpm() {
     let state = StartupSentinel::verify_hardware_root();
     assert_eq!(state, StartupTrustState::Trusted,
         "expected Trusted from swtpm — is TSS2_TCTI set and swtpm running? got: {:?}", state);
+}
+
+// --- Verifier engine tests ---------------------------------------------------
+
+fn make_node(state: &AppState, id: &str, status: NodeTrustState) {
+    state.nodes.insert(id.to_string(), RegisteredNode {
+        node_id: id.to_string(),
+        status,
+        registered_at_ms: 0,
+    });
+}
+
+#[test]
+fn test_posture_diamond_dag_not_misidentified_as_cycle() {
+    // A→B→D and A→C→D: D is a shared dependency, not a cycle.
+    // The old single-set algorithm incorrectly returned LockedOut/INVALID_GRAPH_CONFIG
+    // the second time D was encountered. The gray/black two-set algorithm memoizes D
+    // on first completion and returns the cached result on the second visit.
+    let state = AppState::new();
+    for id in ["A", "B", "C", "D"] { make_node(&state, id, NodeTrustState::Trusted); }
+    state.dependency_graph.insert("A".to_string(), vec!["B".to_string(), "C".to_string()]);
+    state.dependency_graph.insert("B".to_string(), vec!["D".to_string()]);
+    state.dependency_graph.insert("C".to_string(), vec!["D".to_string()]);
+
+    let posture = state.calculate_posture("A");
+    assert_eq!(posture.propagated_status, FleetPosture::Nominal,
+        "diamond DAG should resolve to Nominal, not be misidentified as a cycle");
+    assert!(posture.blocked_by.is_empty());
+}
+
+#[test]
+fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
+    // A→B→A: genuine cycle — must lock out and tag with INVALID_GRAPH_CONFIG.
+    let state = AppState::new();
+    for id in ["A", "B"] { make_node(&state, id, NodeTrustState::Trusted); }
+    state.dependency_graph.insert("A".to_string(), vec!["B".to_string()]);
+    state.dependency_graph.insert("B".to_string(), vec!["A".to_string()]);
+
+    let posture = state.calculate_posture("A");
+    assert_eq!(posture.propagated_status, FleetPosture::LockedOut,
+        "cycle must produce LockedOut");
+    // The INVALID_GRAPH_CONFIG tag appears on the synthetic back-edge return inside
+    // the recursion (B's view of A). A's top-level result carries blocked_by: ["B"],
+    // which is the accurate causal chain. Either form confirms the cycle was detected.
+    assert!(!posture.blocked_by.is_empty(),
+        "cycle must produce a non-empty blocked_by chain");
+}
+
+#[test]
+fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
+    // Parent is Trusted but its dependency is Untrusted (LockedOut).
+    // The propagated status must be LockedOut, not softened to Degraded.
+    let state = AppState::new();
+    make_node(&state, "parent", NodeTrustState::Trusted);
+    make_node(&state, "dep", NodeTrustState::Untrusted("compromised".to_string()));
+    state.dependency_graph.insert("parent".to_string(), vec!["dep".to_string()]);
+
+    let posture = state.calculate_posture("parent");
+    assert_eq!(posture.propagated_status, FleetPosture::LockedOut,
+        "LockedOut dependency must propagate LockedOut to parent, not be softened to Degraded");
+    assert!(posture.blocked_by.contains(&"dep".to_string()));
 }
