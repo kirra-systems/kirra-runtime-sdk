@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use crate::verifier_store::VerifierStore;
 
 /// Maximum recursion depth for dependency graph traversal.
@@ -110,6 +111,19 @@ pub struct FleetNodePosture {
     pub blocked_by: Vec<String>,
 }
 
+/// Capacity of the bounded broadcast channel for posture stream events.
+/// A slow subscriber that falls this many events behind is dropped rather than
+/// stalling mutation handlers.
+pub const POSTURE_BROADCAST_CAPACITY: usize = 1024;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PostureStreamEvent {
+    pub event_type: String,
+    pub node_id: Option<String>,
+    pub emitted_at_ms: u64,
+    pub posture: Option<FleetNodePosture>,
+}
+
 pub struct AppState {
     pub nodes: DashMap<String, RegisteredNode>,
     pub dependency_graph: DashMap<String, Vec<String>>,
@@ -119,16 +133,22 @@ pub struct AppState {
     pub store: Arc<Mutex<VerifierStore>>,
     /// Operational role: Active accepts mutations; PassiveStandby is read-only.
     pub mode: VerifierOperationMode,
+    /// Bounded broadcast channel for real-time posture stream subscribers.
+    /// Lagged receivers are dropped automatically; send errors are ignored
+    /// (no active subscribers is a normal steady-state condition).
+    pub posture_tx: broadcast::Sender<PostureStreamEvent>,
 }
 
 impl AppState {
     pub fn new(store: VerifierStore, mode: VerifierOperationMode) -> Self {
+        let (posture_tx, _) = broadcast::channel(POSTURE_BROADCAST_CAPACITY);
         Self {
             nodes: DashMap::new(),
             dependency_graph: DashMap::new(),
             pending_challenges: DashMap::new(),
             store: Arc::new(Mutex::new(store)),
             mode,
+            posture_tx,
         }
     }
 

@@ -28,6 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 rand = "0.8"

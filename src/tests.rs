@@ -560,3 +560,28 @@ fn test_wrong_key_ed25519_verification_fails() {
 
     assert!(!verify_federated_report_signature(&report, &wrong_public_key_b64));
 }
+
+#[tokio::test]
+async fn test_slow_subscriber_drops_on_buffer_saturation_without_blocking() {
+    use crate::verifier::PostureStreamEvent;
+    use tokio::sync::broadcast;
+
+    let (tx, mut rx_slow) = broadcast::channel::<PostureStreamEvent>(4);
+
+    // Flood the channel well past its capacity — senders must never block.
+    for i in 0..10u64 {
+        let _ = tx.send(PostureStreamEvent {
+            event_type: "NODE_STATUS_CHANGED".to_string(),
+            node_id: Some(format!("node-{i}")),
+            emitted_at_ms: i * 100,
+            posture: None,
+        });
+    }
+
+    // A slow receiver that missed the window gets RecvError::Lagged, not a deadlock.
+    let result = rx_slow.recv().await;
+    assert!(
+        matches!(result, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))),
+        "expected Lagged error from saturated broadcast channel"
+    );
+}

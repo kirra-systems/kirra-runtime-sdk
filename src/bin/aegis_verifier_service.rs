@@ -5,18 +5,21 @@ use axum::{
     extract::{Path, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 
 use aegis_runtime_sdk::verifier::{
     AppState, BackupExport, FlapStatus, FleetNodePosture, HealthResponse,
-    NodeTrustState, RegisteredNode, VerifierOperationMode,
+    NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use aegis_runtime_sdk::verifier_store::VerifierStore;
 use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, SharedPostureCache};
@@ -64,6 +67,41 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
 struct ServiceState {
     app: Arc<AppState>,
     posture_cache: SharedPostureCache,
+}
+
+// --- Real-time posture stream -----------------------------------------------
+
+/// Non-blocking broadcast: fires after any successful state mutation.
+/// Discards send errors — zero active subscribers is normal steady state.
+fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String>) {
+    let posture = node_id.as_ref().map(|id| state.calculate_posture(id));
+    let _ = state.posture_tx.send(PostureStreamEvent {
+        event_type: event_type.to_string(),
+        node_id,
+        emitted_at_ms: now_ms(),
+        posture,
+    });
+}
+
+/// Server-Sent Events stream of posture change notifications.
+/// Lagged slow consumers are silently dropped — the channel is bounded
+/// (POSTURE_BROADCAST_CAPACITY) to prevent memory growth from stalled clients.
+async fn system_posture_stream(
+    State(svc): State<Arc<ServiceState>>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = svc.app.posture_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| {
+        match msg {
+            Ok(event) => serde_json::to_string(&event).ok().map(|data| {
+                Ok(Event::default().data(data))
+            }),
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!(skipped = n, "posture stream subscriber lagged; frames dropped");
+                None
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 // --- Request / response types -----------------------------------------------
@@ -265,6 +303,7 @@ async fn verify_attestation(
             );
         }
     }
+    emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.node_id.clone()));
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "attested": true }))).into_response()
 }
@@ -335,6 +374,7 @@ async fn register_dependencies(
             );
         }
     }
+    emit_posture_event(&svc.app, "DEPENDENCY_GRAPH_MUTATED", Some(req.node_id.clone()));
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "dependencies_registered": true }))).into_response()
 }
@@ -625,6 +665,7 @@ async fn main() {
         .route("/industrial/evaluate", post(evaluate_industrial_adapter))
         .route("/federation/reports/submit", post(submit_federated_report))
         .route("/federation/controllers/register", post(register_federation_controller))
+        .route("/system/posture/stream", get(system_posture_stream))
         .layer(middleware::from_fn(require_admin_token));
 
     // Challenge and verify are unauthenticated — the challenge-response protocol
