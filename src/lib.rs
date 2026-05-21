@@ -21,6 +21,7 @@ pub mod ffi;
 pub mod tpm;
 pub mod startup_sentinel;
 pub mod verifier;
+pub mod verifier_store;
 pub mod posture_cache;
 
 #[cfg(test)]

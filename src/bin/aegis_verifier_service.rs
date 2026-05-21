@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aegis_runtime_sdk::verifier::{AppState, FleetNodePosture, NodeTrustState, RegisteredNode};
+use aegis_runtime_sdk::verifier_store::VerifierStore;
 use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, SharedPostureCache};
 use aegis_runtime_sdk::security::constant_time_compare;
 
@@ -58,6 +59,10 @@ struct ServiceState {
 #[derive(Deserialize)]
 struct RegisterNodeRequest {
     node_id: String,
+    #[serde(default)]
+    ak_public_pem: Option<String>,
+    #[serde(default)]
+    expected_pcr16_digest_hex: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,12 +94,22 @@ async fn register_node(
     Json(req): Json<RegisterNodeRequest>,
 ) -> impl IntoResponse {
     let now = now_ms();
-    svc.app.nodes.insert(req.node_id.clone(), RegisteredNode {
+    let node = RegisteredNode {
         node_id: req.node_id.clone(),
         status: NodeTrustState::Unknown,
         registered_at_ms: now,
-    });
-    (StatusCode::CREATED, Json(json!({ "node_id": req.node_id, "status": "registered" })))
+        last_trust_update_ms: 0,
+        ak_public_pem: req.ak_public_pem,
+        expected_pcr16_digest_hex: req.expected_pcr16_digest_hex,
+    };
+
+    // Fail-closed: disk must accept the write before memory is updated.
+    if svc.app.persist_and_insert_node(node).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist node" }))).into_response();
+    }
+
+    (StatusCode::CREATED, Json(json!({ "node_id": req.node_id, "status": "registered" }))).into_response()
 }
 
 async fn issue_challenge(
@@ -144,12 +159,23 @@ async fn verify_attestation(
                 Json(json!({ "error": "nonce absent, expired, or already consumed" }))).into_response();
     }
 
-    // Promote node to Trusted.
-    if let Some(mut entry) = svc.app.nodes.get_mut(&req.node_id) {
-        entry.status = NodeTrustState::Trusted;
-    } else {
-        return (StatusCode::NOT_FOUND,
-                Json(json!({ "error": "node not registered" }))).into_response();
+    // Promote node to Trusted, persist before updating memory.
+    let updated = match svc.app.nodes.get(&req.node_id) {
+        Some(existing) => RegisteredNode {
+            node_id: existing.node_id.clone(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: existing.registered_at_ms,
+            last_trust_update_ms: now,
+            ak_public_pem: existing.ak_public_pem.clone(),
+            expected_pcr16_digest_hex: existing.expected_pcr16_digest_hex.clone(),
+        },
+        None => return (StatusCode::NOT_FOUND,
+                        Json(json!({ "error": "node not registered" }))).into_response(),
+    };
+
+    if svc.app.persist_and_insert_node(updated).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist trust state" }))).into_response();
     }
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "attested": true }))).into_response()
@@ -202,20 +228,46 @@ async fn register_dependencies(
     State(svc): State<Arc<ServiceState>>,
     Json(req): Json<RegisterDependenciesRequest>,
 ) -> impl IntoResponse {
-    svc.app.dependency_graph.insert(req.node_id.clone(), req.depends_on);
-    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "dependencies_registered": true })))
+    if svc.app.persist_and_insert_deps(&req.node_id, req.depends_on).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist dependencies" }))).into_response();
+    }
+    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "dependencies_registered": true }))).into_response()
 }
 
 // --- Entry point ------------------------------------------------------------
 
 #[tokio::main]
 async fn main() {
+    let db_path = std::env::var("AEGIS_DB_PATH")
+        .unwrap_or_else(|_| "aegis_verifier.sqlite".to_string());
     let listen_addr = std::env::var("AEGIS_VERIFIER_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8090".to_string());
 
-    let state = Arc::new(ServiceState {
-        app: Arc::new(AppState::new()),
-        posture_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+    let store = VerifierStore::new(&db_path)
+        .expect("failed to initialize verifier store");
+
+    let app_state = Arc::new(AppState::new(store));
+
+    // Boot hydration — load persisted nodes and dependency graph into memory.
+    // Mutex is released before the server starts; the lock window is startup-only.
+    {
+        let guard = app_state.store.lock()
+            .expect("verifier store lock poisoned during boot hydration");
+
+        for node in guard.load_nodes().expect("failed to load persisted nodes") {
+            app_state.nodes.insert(node.node_id.clone(), node);
+        }
+        for (node_id, deps) in guard.load_dependencies()
+            .expect("failed to load persisted dependencies")
+        {
+            app_state.dependency_graph.insert(node_id, deps);
+        }
+    }
+
+    let svc_state = Arc::new(ServiceState {
+        app: app_state,
+        posture_cache: Arc::new(std::sync::RwLock::new(None)),
     });
 
     // Mutation routes require Bearer token auth (AEGIS_ADMIN_TOKEN env var).
@@ -240,9 +292,9 @@ async fn main() {
         .merge(admin_routes)
         .merge(attestation_routes)
         .merge(read_routes)
-        .with_state(state);
+        .with_state(svc_state);
 
-    println!("Aegis Verifier Service listening on {}", listen_addr);
+    println!("Aegis Verifier Service listening on {listen_addr} (db: {db_path})");
     let listener = tokio::net::TcpListener::bind(&listen_addr).await
         .expect("failed to bind listener");
     axum::serve(listener, app).await

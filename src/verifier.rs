@@ -1,8 +1,10 @@
 // src/verifier.rs
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use crate::verifier_store::VerifierStore;
 
 /// Maximum recursion depth for dependency graph traversal.
 /// Prevents stack overflow on pathologically deep (but acyclic) graphs.
@@ -31,6 +33,13 @@ pub struct RegisteredNode {
     pub node_id: String,
     pub status: NodeTrustState,
     pub registered_at_ms: u64,
+    /// Timestamp of the most recent trust-state change (0 if never attested).
+    pub last_trust_update_ms: u64,
+    /// AK public key in PEM format. Populated on registration when provided;
+    /// reserved for future TPM quote verification.
+    pub ak_public_pem: Option<String>,
+    /// Expected SHA-256 hex digest of PCR16 at attestation time.
+    pub expected_pcr16_digest_hex: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,16 +59,40 @@ pub struct FleetNodePosture {
 pub struct AppState {
     pub nodes: DashMap<String, RegisteredNode>,
     pub dependency_graph: DashMap<String, Vec<String>>,
+    /// Volatile in-memory challenge map — nonces are never persisted to SQLite.
     pub pending_challenges: DashMap<String, ChallengeEntry>,
+    /// Durable store for nodes and dependency graph (write-through, read on boot).
+    pub store: Arc<Mutex<VerifierStore>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(store: VerifierStore) -> Self {
         Self {
             nodes: DashMap::new(),
             dependency_graph: DashMap::new(),
             pending_challenges: DashMap::new(),
+            store: Arc::new(Mutex::new(store)),
         }
+    }
+
+    /// Persist node to SQLite then update in-memory map (fail-closed: disk before memory).
+    pub fn persist_and_insert_node(&self, node: RegisteredNode) -> Result<(), ()> {
+        self.store.lock()
+            .map_err(|_| ())?
+            .save_node(&node)
+            .map_err(|_| ())?;
+        self.nodes.insert(node.node_id.clone(), node);
+        Ok(())
+    }
+
+    /// Persist dependency list to SQLite then update in-memory graph (fail-closed).
+    pub fn persist_and_insert_deps(&self, node_id: &str, deps: Vec<String>) -> Result<(), ()> {
+        self.store.lock()
+            .map_err(|_| ())?
+            .save_dependencies(node_id, &deps)
+            .map_err(|_| ())?;
+        self.dependency_graph.insert(node_id.to_string(), deps);
+        Ok(())
     }
 
     pub fn calculate_posture(&self, node_id: &str) -> FleetNodePosture {

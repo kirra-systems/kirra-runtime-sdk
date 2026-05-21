@@ -124,6 +124,9 @@ fn make_node(state: &AppState, id: &str, status: NodeTrustState) {
         node_id: id.to_string(),
         status,
         registered_at_ms: 0,
+        last_trust_update_ms: 0,
+        ak_public_pem: None,
+        expected_pcr16_digest_hex: None,
     });
 }
 
@@ -133,7 +136,7 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
     // The old single-set algorithm incorrectly returned LockedOut/INVALID_GRAPH_CONFIG
     // the second time D was encountered. The gray/black two-set algorithm memoizes D
     // on first completion and returns the cached result on the second visit.
-    let state = AppState::new();
+    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap());
     for id in ["A", "B", "C", "D"] { make_node(&state, id, NodeTrustState::Trusted); }
     state.dependency_graph.insert("A".to_string(), vec!["B".to_string(), "C".to_string()]);
     state.dependency_graph.insert("B".to_string(), vec!["D".to_string()]);
@@ -148,7 +151,7 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
 #[test]
 fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
     // A→B→A: genuine cycle — must lock out and tag with INVALID_GRAPH_CONFIG.
-    let state = AppState::new();
+    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap());
     for id in ["A", "B"] { make_node(&state, id, NodeTrustState::Trusted); }
     state.dependency_graph.insert("A".to_string(), vec!["B".to_string()]);
     state.dependency_graph.insert("B".to_string(), vec!["A".to_string()]);
@@ -167,7 +170,7 @@ fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
 fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
     // Parent is Trusted but its dependency is Untrusted (LockedOut).
     // The propagated status must be LockedOut, not softened to Degraded.
-    let state = AppState::new();
+    let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap());
     make_node(&state, "parent", NodeTrustState::Trusted);
     make_node(&state, "dep", NodeTrustState::Untrusted("compromised".to_string()));
     state.dependency_graph.insert("parent".to_string(), vec!["dep".to_string()]);
