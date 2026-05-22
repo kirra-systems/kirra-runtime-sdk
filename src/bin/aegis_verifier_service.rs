@@ -22,7 +22,7 @@ use aegis_runtime_sdk::verifier::{
     HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use aegis_runtime_sdk::verifier_store::VerifierStore;
-use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, SharedPostureCache};
+use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use aegis_runtime_sdk::security::constant_time_compare;
 use aegis_runtime_sdk::action_filter::{evaluate_action_claim, ActionClaim};
 use aegis_runtime_sdk::protocol_adapter::{evaluate_industrial_event, IndustrialEvent};
@@ -36,10 +36,6 @@ use aegis_runtime_sdk::federation::{
 
 // --- Auth middleware ---------------------------------------------------------
 
-/// Reads the expected admin token from AEGIS_ADMIN_TOKEN.
-/// Fail-closed: if the env var is absent or empty, ALL mutation requests are denied
-/// (503 Service Unavailable — the service is misconfigured, not the caller).
-/// Timing-safe comparison via constant_time_compare prevents oracle attacks on the token.
 async fn require_admin_token(request: Request, next: Next) -> Result<Response, StatusCode> {
     let expected = std::env::var("AEGIS_ADMIN_TOKEN")
         .unwrap_or_default();
@@ -62,9 +58,6 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
     Ok(next.run(request).await)
 }
 
-/// Delegates to the pure `validate_client_identity_headers` function.
-/// Fail-closed: denies unless `AEGIS_TRUSTED_INGRESS_MODE=true` AND the
-/// configured client-id header is present and non-blank.
 async fn require_client_identity(
     State(svc): State<Arc<ServiceState>>,
     request: Request,
@@ -81,17 +74,8 @@ async fn require_client_identity(
     Ok(next.run(request).await)
 }
 
-// --- Shared service state ---------------------------------------------------
-
-struct ServiceState {
-    app: Arc<AppState>,
-    posture_cache: SharedPostureCache,
-}
-
 // --- Real-time posture stream -----------------------------------------------
 
-/// Non-blocking broadcast: fires after any successful state mutation.
-/// Discards send errors — zero active subscribers is normal steady state.
 fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String>) {
     let posture = node_id.as_ref().map(|id| state.calculate_posture(id));
     let _ = state.posture_tx.send(PostureStreamEvent {
@@ -102,9 +86,6 @@ fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String
     });
 }
 
-/// Server-Sent Events stream of posture change notifications.
-/// Lagged slow consumers are silently dropped — the channel is bounded
-/// (POSTURE_BROADCAST_CAPACITY) to prevent memory growth from stalled clients.
 async fn system_posture_stream(
     State(svc): State<Arc<ServiceState>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
@@ -144,8 +125,6 @@ struct RegisterDependenciesRequest {
 struct VerifyAttestationRequest {
     node_id: String,
     nonce: u64,
-    /// HMAC-SHA256(AEGIS_ADMIN_TOKEN, nonce_as_le_bytes) encoded as hex.
-    /// In a full PKI deployment replace with a node-specific certificate signature.
     proof_hex: String,
 }
 
@@ -158,12 +137,10 @@ struct AttestationStatusResponse {
 
 // --- Handlers ----------------------------------------------------------------
 
-/// Unconditional liveness probe — returns 200 immediately with no I/O.
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok".to_string() })
 }
 
-/// Readiness probe — verifies the SQLite connection is alive before returning 200.
 async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     match svc.app.store.lock() {
         Ok(store) => match store.health_check() {
@@ -179,8 +156,6 @@ async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     }
 }
 
-/// Full state snapshot — nodes, dependency graph, and posture event log.
-/// Protected by require_admin_token; must never be exposed unauthenticated.
 async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     match svc.app.store.lock() {
         Ok(store) => {
@@ -229,7 +204,6 @@ async fn register_node(
         expected_pcr16_digest_hex: req.expected_pcr16_digest_hex,
     };
 
-    // Fail-closed: disk must accept the write before memory is updated.
     if svc.app.persist_and_insert_node(node).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to persist node" }))).into_response();
@@ -268,7 +242,6 @@ async fn verify_attestation(
     }
     let now = now_ms();
 
-    // Verify the proof: HMAC-SHA256(admin_token, nonce_le_bytes) == proof_hex.
     let admin_token = match std::env::var("AEGIS_ADMIN_TOKEN").ok().filter(|s| !s.is_empty()) {
         Some(t) => t,
         None => return (StatusCode::SERVICE_UNAVAILABLE,
@@ -287,13 +260,11 @@ async fn verify_attestation(
                 Json(json!({ "error": "attestation proof invalid" }))).into_response();
     }
 
-    // Consume the nonce (replay protection — second use is rejected).
     if !svc.app.consume_challenge(&req.node_id, req.nonce, now) {
         return (StatusCode::CONFLICT,
                 Json(json!({ "error": "nonce absent, expired, or already consumed" }))).into_response();
     }
 
-    // Promote node to Trusted, persist before updating memory.
     let updated = match svc.app.nodes.get(&req.node_id) {
         Some(existing) => RegisteredNode {
             node_id: existing.node_id.clone(),
@@ -312,8 +283,6 @@ async fn verify_attestation(
                 Json(json!({ "error": "failed to persist trust state" }))).into_response();
     }
 
-    // Emit posture event after successful attestation (best-effort; does not
-    // roll back the trust promotion if the log write fails).
     let posture = svc.app.calculate_posture(&req.node_id);
     if let Ok(posture_json) = serde_json::to_string(&posture) {
         if let Ok(store) = svc.app.store.lock() {
@@ -363,7 +332,6 @@ async fn get_node_posture(
     let posture = svc.app.calculate_posture(&node_id);
     let now = now_ms();
     let cached = CachedFleetPosture::from_posture(&posture, now);
-    // Refresh the cache on read so the gateway interceptor has a fresh entry.
     if let Ok(mut guard) = svc.posture_cache.write() {
         *guard = Some(cached);
     }
@@ -383,7 +351,6 @@ async fn register_dependencies(
                 Json(json!({ "error": "failed to persist dependencies" }))).into_response();
     }
 
-    // Snapshot posture after topology change (best-effort event log).
     let posture = svc.app.calculate_posture(&req.node_id);
     let now = now_ms();
     if let Ok(posture_json) = serde_json::to_string(&posture) {
@@ -435,8 +402,6 @@ async fn get_node_flap_status(
                    Json(json!({ "error": "store lock poisoned" }))).into_response(),
     }
 }
-
-// --- v1.1 handlers ----------------------------------------------------------
 
 async fn verify_audit_chain(
     State(svc): State<Arc<ServiceState>>,
@@ -540,8 +505,6 @@ async fn register_federation_controller(
     }
 }
 
-// --- Patch 1: attestation identity registry --------------------------------
-
 #[derive(Deserialize)]
 struct RegisterIdentityRequest {
     node_id: String,
@@ -580,7 +543,6 @@ async fn submit_federated_report(
 ) -> impl IntoResponse {
     let received_at_ms = now_ms();
 
-    // 1. Structural and freshness check (future timestamp, replay window, expiry).
     let evaluation = evaluate_federated_report(&report, received_at_ms);
     if !evaluation.accepted {
         return Json(evaluation).into_response();
@@ -592,7 +554,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "store lock poisoned" }))).into_response(),
     };
 
-    // 2. Identity verification: reject claims from unregistered controllers.
     let pk_b64 = match store.load_trusted_federation_controller_key(&report.source_controller_id) {
         Ok(Some(key)) => key,
         Ok(None) => {
@@ -611,7 +572,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "controller lookup failed" }))).into_response(),
     };
 
-    // 3. Cryptographic signature validation.
     if !verify_federated_report_signature(&report, &pk_b64) {
         let event = json!({ "source_controller_id": report.source_controller_id,
                             "reason": "INVALID_FEDERATION_SIGNATURE" });
@@ -625,7 +585,6 @@ async fn submit_federated_report(
         }).into_response();
     }
 
-    // 4. Nonce replay prevention.
     match store.has_seen_federation_nonce(&report.nonce_hex) {
         Ok(true) => {
             let event = json!({ "source_controller_id": report.source_controller_id,
@@ -645,7 +604,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "nonce lookup failed" }))).into_response(),
     }
 
-    // 5. Atomic commit: report + nonce burn + audit chain.
     match store.save_federated_report_chained(&report, received_at_ms) {
         Ok(()) => Json(evaluation).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
@@ -685,8 +643,6 @@ async fn main() {
 
     let app_state = Arc::new(AppState::new(store, mode));
 
-    // Boot hydration — load persisted nodes and dependency graph into memory.
-    // Mutex is released before the server starts; the lock window is startup-only.
     {
         let guard = app_state.store.lock()
             .expect("verifier store lock poisoned during boot hydration");
@@ -706,11 +662,6 @@ async fn main() {
         posture_cache: Arc::new(std::sync::RwLock::new(None)),
     });
 
-    // Tier 1 — Identity-gated routes: require admin token AND a valid client-id header.
-    // These routes stream sensitive state or forward commands into physical systems;
-    // the additional header check enforces that requests arrive through an authorized
-    // mesh sidecar or proxy, not a raw unauthenticated caller who obtained the token.
-    // Layer ordering: require_admin_token runs first (outermost), then require_client_identity.
     let identity_gated_routes = Router::new()
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
@@ -719,8 +670,6 @@ async fn main() {
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
         .layer(middleware::from_fn(require_admin_token));
 
-    // Tier 2 — Admin-only routes: require admin token; no additional identity header.
-    // Management and registration operations that originate from operators directly.
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
         .route("/fleet/dependencies", post(register_dependencies))
@@ -730,18 +679,14 @@ async fn main() {
         .route("/attestation/identity/register", post(register_node_identity))
         .layer(middleware::from_fn(require_admin_token));
 
-    // Challenge and verify are unauthenticated — the challenge-response protocol
-    // itself provides the attestation guarantee.
     let attestation_routes = Router::new()
         .route("/attestation/challenge/:node_id", post(issue_challenge))
         .route("/attestation/verify", post(verify_attestation));
 
-    // Liveness/readiness probes — always public, no auth, minimal I/O.
     let probe_routes = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready));
 
-    // Read-only routes need no auth.
     let read_routes = Router::new()
         .route("/attestation/status/:node_id", get(get_node_status))
         .route("/fleet/posture", get(get_fleet_posture))

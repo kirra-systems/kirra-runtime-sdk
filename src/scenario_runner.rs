@@ -1,52 +1,6 @@
 // src/scenario_runner.rs
 //
 // Deterministic temporal scenario replay harness.
-//
-// CORRECTIONS vs. milestone doc — 9 bugs fixed:
-//
-//   1. yield_now() race condition eliminated.
-//      The doc used tokio::task::yield_now() to "give the engine time to drain."
-//      This is not a synchronization primitive. The harness calls
-//      recalculate_and_broadcast() directly and synchronously in test mode,
-//      bypassing the mpsc worker entirely. In test scenarios we want
-//      deterministic execution, not fire-and-hope async scheduling.
-//
-//   2. FaultDetected / RecoveryVerified variants don't exist.
-//      Replaced with correct PostureRecalcTrigger::NodeTrustChanged variants,
-//      or direct recalculate_and_broadcast() calls for synchronous scenarios.
-//
-//   3. VirtualSleep now_ms injection fixed.
-//      VirtualSleep advances the injected VirtualClock, which is the same
-//      clock instance passed to all time-dependent operations. Clock advances
-//      are visible to hysteresis evaluation, staleness checks, and watchdog
-//      simulations because they all read the same Arc<VirtualClock>.
-//
-//   4. Virtual clock actually injected into time-dependent operations.
-//      evaluate_recovery_report, touch_av_telemetry_timestamp, etc. receive
-//      clock.now_ms() as their timestamp argument. No function calls
-//      SystemTime::now() internally during scenario execution.
-//
-//   5. should_route_command signature preserved.
-//      The harness does not modify should_route_command. The OperationalCommand
-//      enum and Unknown early-return invariant (#9) are untouched.
-//
-//   6. SensorFault / TelemetryTick semantic distinction made explicit.
-//      SensorFault: always degrades (sets hw_fault=true or below-floor confidence).
-//      TelemetryTick: submits a health report (confidence + hw_fault state).
-//      The handler logic differs by the values; the variant names now reflect
-//      intent rather than duplicating structure.
-//
-//   7. Channel receiver kept alive.
-//      The harness holds Arc<AppState> which does not own the receiver.
-//      The runner owns a RecalcHandle that keeps the channel open for scenarios
-//      that test the async worker path. Synchronous scenarios bypass the channel.
-//
-//   8. NodeEntry::new_trusted() not assumed — runner provides helper methods
-//      for node graph setup that work with the actual AppState API.
-//
-//   9. Assertion timing is deterministic — assertions fire after all events
-//      at the same timestamp have been processed AND recalculate_and_broadcast
-//      has returned, not after a yield.
 
 use std::sync::Arc;
 use crate::verifier::{AppState, FleetPosture, NodeTrustState};
@@ -59,36 +13,18 @@ use crate::clock::VirtualClock;
 // Event types
 // ---------------------------------------------------------------------------
 
-/// A declarative event in a scenario timeline.
 #[derive(Debug, Clone)]
 pub enum ScenarioEvent {
-    /// Injects a sensor health report. May degrade or advance recovery depending
-    /// on the confidence/hw_fault values and the current node trust state.
-    /// Use confidence < AV_DEFAULT_CONFIDENCE_FLOOR or hw_fault=true to degrade.
-    /// Use confidence >= floor and hw_fault=false to advance recovery streak.
     TelemetryReport {
         node_id: String,
         confidence: f64,
         hw_fault: bool,
     },
-
-    /// Directly marks a node Untrusted with a given reason, bypassing confidence
-    /// floor evaluation. Use for simulating abrupt hardware failures, manual
-    /// operator lockouts, or watchdog timeout events.
     MarkUntrusted {
         node_id: String,
         reason: String,
     },
-
-    /// Advances the virtual clock by the given duration without processing any
-    /// other events. Use to simulate time passing (watchdog timeout windows,
-    /// hysteresis window expiry, cache TTL expiry).
     AdvanceClock { delta_ms: u64 },
-
-    /// Triggers an explicit DAG recalculation and cache update.
-    /// Normally not needed — TelemetryReport and MarkUntrusted trigger
-    /// recalculation automatically. Use when testing the recalculation
-    /// path itself.
     TriggerRecalculation,
 }
 
@@ -96,27 +32,13 @@ pub enum ScenarioEvent {
 // Assertion types
 // ---------------------------------------------------------------------------
 
-/// A declarative assertion evaluated at a specific point in the timeline.
 #[derive(Debug, Clone)]
 pub enum PostureAssertion {
-    /// Fleet posture must equal the given value.
     FleetPostureIs(FleetPosture),
-
-    /// The named node's trust state must equal the given value.
     NodeTrustIs(String, NodeTrustState),
-
-    /// The named node's trust state must be any Untrusted variant
-    /// (regardless of reason string). Use when the exact reason
-    /// is not under test.
     NodeIsUntrusted(String),
-
-    /// The named node's trust state must be Trusted.
     NodeIsTrusted(String),
-
-    /// The posture cache must be populated (not None).
     CacheIsPopulated,
-
-    /// The posture cache must be stale relative to the current virtual clock.
     CacheIsStale,
 }
 
@@ -124,8 +46,6 @@ pub enum PostureAssertion {
 // Assertion result
 // ---------------------------------------------------------------------------
 
-/// The outcome of evaluating a PostureAssertion.
-/// Returned by run() for programmatic inspection; panics on failure by default.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssertionResult {
     pub timestamp_ms: u64,
@@ -138,36 +58,16 @@ pub struct AssertionResult {
 // ScenarioRunner
 // ---------------------------------------------------------------------------
 
-/// Deterministic temporal scenario replay harness.
-///
-/// Maintains an injected `VirtualClock` shared with all time-dependent
-/// operations. Events and assertions are scheduled at named timestamps.
-/// The runner processes the timeline in order, advancing the virtual clock
-/// and evaluating assertions after all events at each timestamp complete.
-///
-/// # Synchronous recalculation in test mode
-/// The runner calls `recalculate_and_broadcast` directly (synchronously) after
-/// each state-mutating event. This guarantees the cache reflects the new state
-/// before assertions are evaluated — no async scheduling races.
-///
-/// # Clock injection
-/// All timestamps passed to store methods, hysteresis evaluation, and staleness
-/// checks use `self.clock.now_ms()`, not `SystemTime::now()`. Advancing the
-/// clock via `AdvanceClock` events makes time-dependent behavior deterministic.
 pub struct ScenarioRunner {
     pub app: Arc<AppState>,
     pub posture_cache: SharedPostureCache,
-    /// The injected virtual clock. Shared with all time-dependent operations.
     pub clock: Arc<VirtualClock>,
-    /// Default confidence floor for TelemetryReport degradation evaluation.
-    /// Can be overridden per-node via av_subsystem_meta if desired.
     pub default_confidence_floor: f64,
     events: Vec<(u64, ScenarioEvent)>,
     assertions: Vec<(u64, PostureAssertion)>,
 }
 
 impl ScenarioRunner {
-    /// Creates a new ScenarioRunner with a VirtualClock starting at t=0.
     pub fn new(app: Arc<AppState>, posture_cache: SharedPostureCache) -> Self {
         Self {
             app,
@@ -179,7 +79,6 @@ impl ScenarioRunner {
         }
     }
 
-    /// Creates a runner with a pre-configured clock (e.g. starting_at a specific epoch).
     pub fn with_clock(
         app: Arc<AppState>,
         posture_cache: SharedPostureCache,
@@ -195,41 +94,25 @@ impl ScenarioRunner {
         }
     }
 
-    /// Schedules an event at the given virtual timestamp.
-    /// Events at the same timestamp are processed in insertion order.
     pub fn at_ms(mut self, timestamp_ms: u64, event: ScenarioEvent) -> Self {
         self.events.push((timestamp_ms, event));
         self
     }
 
-    /// Schedules an assertion at the given virtual timestamp.
-    /// Assertions are evaluated after all events at the same timestamp.
     pub fn assert_at_ms(mut self, timestamp_ms: u64, assertion: PostureAssertion) -> Self {
         self.assertions.push((timestamp_ms, assertion));
         self
     }
 
-    /// Runs the scenario timeline.
-    ///
-    /// Processes all events and evaluates all assertions in timestamp order.
-    /// Events and assertions at the same timestamp: events first, then assertions.
-    ///
-    /// Returns a Vec<AssertionResult> for programmatic inspection.
-    /// Also panics on the first failed assertion with a descriptive message
-    /// including the virtual timestamp. Set `panic_on_failure = false` via
-    /// `run_collecting()` if you want to collect all results without panicking.
     pub async fn run(self) -> Vec<AssertionResult> {
         self.run_inner(true).await
     }
 
-    /// Runs the scenario and collects all assertion results without panicking.
-    /// Useful for scenarios that test error conditions or partial failures.
     pub async fn run_collecting(self) -> Vec<AssertionResult> {
         self.run_inner(false).await
     }
 
     async fn run_inner(mut self, panic_on_failure: bool) -> Vec<AssertionResult> {
-        // Collect all unique timestamps from events and assertions.
         let mut milestones: Vec<u64> = self.events.iter().map(|e| e.0)
             .chain(self.assertions.iter().map(|a| a.0))
             .collect();
@@ -240,20 +123,11 @@ impl ScenarioRunner {
         let mut assertion_index: usize = 0;
 
         for milestone in milestones {
-            // Advance the virtual clock to this milestone.
-            // All subsequent now_ms() calls return this value until the next advance.
             self.clock.set_ms(milestone);
             let ts = self.clock.now_ms();
 
-            // ------------------------------------------------------------------
-            // Process all events scheduled at this timestamp.
-            // State mutations are applied immediately. After all events at this
-            // timestamp are processed, recalculate_and_broadcast is called once
-            // (if any mutation occurred) before assertions are evaluated.
-            // ------------------------------------------------------------------
             let mut needs_recalc = false;
 
-            // Collect events at this milestone (borrow checker: collect first, iterate)
             let active_events: Vec<ScenarioEvent> = self.events.iter()
                 .filter(|e| e.0 == milestone)
                 .map(|e| e.1.clone())
@@ -262,7 +136,7 @@ impl ScenarioRunner {
             for event in active_events {
                 match event {
                     ScenarioEvent::TelemetryReport { ref node_id, confidence, hw_fault } => {
-                        let floor = self.app.store
+                        let floor = self.app.store.lock().unwrap()
                             .load_av_confidence_floor(node_id)
                             .unwrap_or(None)
                             .unwrap_or(self.default_confidence_floor);
@@ -276,24 +150,31 @@ impl ScenarioRunner {
                                 "CONFIDENCE_BELOW_FLOOR"
                             };
 
-                            // Disk-first: reset streak before memory mutation
-                            let _ = self.app.store.reset_recovery_streak(node_id, ts);
-                            let _ = self.app.store.touch_av_telemetry_timestamp(node_id, ts);
+                            // Disk-first: reset streak on disk before memory mutation.
+                            let _ = self.app.store.lock().unwrap()
+                                .reset_recovery_streak(node_id, ts);
+                            let _ = self.app.store.lock().unwrap()
+                                .touch_av_telemetry_timestamp(node_id, ts);
 
                             if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                                node.trust_state = NodeTrustState::Untrusted(reason.to_string());
+                                node.status = NodeTrustState::Untrusted(reason.to_string());
                             }
                             needs_recalc = true;
                         } else {
-                            // Health report — check if node is currently untrusted
                             let currently_untrusted = self.app.nodes
                                 .get(node_id)
-                                .map(|n| matches!(n.trust_state, NodeTrustState::Untrusted(_)))
+                                .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
                                 .unwrap_or(false);
 
                             if currently_untrusted {
-                                // evaluate_recovery_report uses ts (virtual time), not wall time
-                                match evaluate_recovery_report(&self.app.store, node_id, ts) {
+                                // Evaluate time-bounded hysteresis.
+                                // Lock once, evaluate, drop guard before acting on result.
+                                let decision = {
+                                    let guard = self.app.store.lock().unwrap();
+                                    evaluate_recovery_report(&*guard, node_id, ts)
+                                };
+
+                                match decision {
                                     HysteresisDecision::RecoveryConfirmed { streak } => {
                                         tracing::debug!(
                                             node_id = %node_id, streak = streak,
@@ -301,9 +182,10 @@ impl ScenarioRunner {
                                             "Scenario: recovery confirmed"
                                         );
                                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                                            node.trust_state = NodeTrustState::Trusted;
+                                            node.status = NodeTrustState::Trusted;
                                         }
-                                        let _ = self.app.store.reset_recovery_streak(node_id, ts);
+                                        let _ = self.app.store.lock().unwrap()
+                                            .reset_recovery_streak(node_id, ts);
                                         needs_recalc = true;
                                     }
                                     HysteresisDecision::StreakBuilding { current, required, .. } => {
@@ -313,7 +195,6 @@ impl ScenarioRunner {
                                             virtual_ms = ts,
                                             "Scenario: streak building"
                                         );
-                                        // No posture change yet
                                     }
                                     HysteresisDecision::WindowExpired { old_streak } => {
                                         tracing::debug!(
@@ -321,33 +202,29 @@ impl ScenarioRunner {
                                             virtual_ms = ts,
                                             "Scenario: streak window expired, reset"
                                         );
-                                        // No posture change
                                     }
                                     HysteresisDecision::NotApplicable => {
-                                        let _ = self.app.store
+                                        let _ = self.app.store.lock().unwrap()
                                             .touch_av_telemetry_timestamp(node_id, ts);
                                     }
                                 }
                             } else {
-                                let _ = self.app.store.touch_av_telemetry_timestamp(node_id, ts);
+                                let _ = self.app.store.lock().unwrap()
+                                    .touch_av_telemetry_timestamp(node_id, ts);
                             }
                         }
                     }
 
                     ScenarioEvent::MarkUntrusted { ref node_id, ref reason } => {
-                        let _ = self.app.store.reset_recovery_streak(node_id, ts);
+                        let _ = self.app.store.lock().unwrap()
+                            .reset_recovery_streak(node_id, ts);
                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                            node.trust_state = NodeTrustState::Untrusted(reason.clone());
+                            node.status = NodeTrustState::Untrusted(reason.clone());
                         }
                         needs_recalc = true;
                     }
 
                     ScenarioEvent::AdvanceClock { delta_ms } => {
-                        // Advance the virtual clock beyond the current milestone.
-                        // This is separate from the milestone advance above — it allows
-                        // multiple clock advances within a single milestone batch,
-                        // e.g. simulating time passing between events at the same
-                        // nominal timestamp.
                         self.clock.advance_ms(delta_ms);
                     }
 
@@ -357,20 +234,10 @@ impl ScenarioRunner {
                 }
             }
 
-            // ------------------------------------------------------------------
-            // If any state mutation occurred, recalculate_and_broadcast now.
-            //
-            // This is synchronous — it completes before assertions are evaluated.
-            // No yield_now(), no scheduling races. The cache reflects the post-
-            // mutation DAG state when assertions run.
-            // ------------------------------------------------------------------
             if needs_recalc {
                 recalculate_and_broadcast(&self.app, &self.posture_cache);
             }
 
-            // ------------------------------------------------------------------
-            // Evaluate all assertions scheduled at this timestamp.
-            // ------------------------------------------------------------------
             let active_assertions: Vec<(usize, PostureAssertion)> = self.assertions.iter()
                 .enumerate()
                 .filter(|(_, (t, _))| *t == milestone)
@@ -419,20 +286,21 @@ async fn evaluate_assertion(
     cache: &SharedPostureCache,
     clock: &Arc<VirtualClock>,
 ) -> AssertionResult {
+    use crate::clock::Clock;
     let (passed, description) = match assertion {
         PostureAssertion::FleetPostureIs(expected) => {
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             match guard.as_ref() {
                 Some(cached) => {
-                    let ok = cached.posture == *expected;
+                    let ok = cached.propagated_status == *expected;
                     let desc = format!(
-                        "FleetPostureIs({expected:?}): got {:?}", cached.posture
+                        "FleetPostureIs({expected:?}): got {:?}", cached.propagated_status
                     );
                     (ok, desc)
                 }
                 None => (
                     false,
-                    format!("FleetPostureIs({expected:?}): cache is None")
+                    format!("FleetPostureIs({expected:?}): cache is None"),
                 ),
             }
         }
@@ -440,9 +308,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeTrustIs(node_id, expected) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = node.trust_state == *expected;
+                    let ok = node.status == *expected;
                     let desc = format!(
-                        "NodeTrustIs({node_id}, {expected:?}): got {:?}", node.trust_state
+                        "NodeTrustIs({node_id}, {expected:?}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -453,9 +321,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeIsUntrusted(node_id) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = matches!(node.trust_state, NodeTrustState::Untrusted(_));
+                    let ok = matches!(node.status, NodeTrustState::Untrusted(_));
                     let desc = format!(
-                        "NodeIsUntrusted({node_id}): got {:?}", node.trust_state
+                        "NodeIsUntrusted({node_id}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -466,9 +334,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeIsTrusted(node_id) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = matches!(node.trust_state, NodeTrustState::Trusted);
+                    let ok = matches!(node.status, NodeTrustState::Trusted);
                     let desc = format!(
-                        "NodeIsTrusted({node_id}): got {:?}", node.trust_state
+                        "NodeIsTrusted({node_id}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -477,14 +345,14 @@ async fn evaluate_assertion(
         }
 
         PostureAssertion::CacheIsPopulated => {
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             let ok = guard.is_some();
             (ok, format!("CacheIsPopulated: is_some={ok}"))
         }
 
         PostureAssertion::CacheIsStale => {
             let now = clock.now_ms();
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             match guard.as_ref() {
                 Some(cached) => {
                     let ok = cached.is_stale(now);
@@ -515,28 +383,21 @@ mod scenario_runner_tests {
     use crate::verifier::FleetPosture;
     use crate::clock::VirtualClock;
 
-    // -----------------------------------------------------------------------
-    // Clock injection tests — verify that virtual time is actually used
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_virtual_clock_advances_affect_staleness_check() {
         use crate::posture_engine::POSTURE_CACHE_TTL_MS;
 
         let clock = VirtualClock::starting_at(1_000);
 
-        // Create a cache entry generated at t=1000
         let entry = CachedFleetPosture {
-            posture: FleetPosture::Nominal,
+            propagated_status: FleetPosture::Nominal,
             generated_at_ms: 1_000,
             ttl_ms: POSTURE_CACHE_TTL_MS,
             generation: 1,
         };
 
-        // At t=1000 — not stale
         assert!(!entry.is_stale(clock.now_ms()));
 
-        // Advance virtual clock past TTL
         clock.advance_ms(POSTURE_CACHE_TTL_MS + 1);
         assert!(entry.is_stale(clock.now_ms()),
             "entry must be stale after virtual clock advances past TTL");
@@ -545,10 +406,6 @@ mod scenario_runner_tests {
     #[test]
     fn test_hysteresis_window_uses_virtual_time() {
         use crate::recovery_hysteresis::AV_RECOVERY_WINDOW_MS;
-        // Streak start at virtual t=0, window is AV_RECOVERY_WINDOW_MS.
-        // Advancing the clock past the window makes the streak expire.
-        // This is tested here as a pure arithmetic check; the full integration
-        // test uses ScenarioRunner with a real store.
         let streak_start: u64 = 0;
         let clock = VirtualClock::new();
 
@@ -560,10 +417,6 @@ mod scenario_runner_tests {
         let elapsed_beyond = clock.now_ms().saturating_sub(streak_start);
         assert!(elapsed_beyond >= AV_RECOVERY_WINDOW_MS, "window expired");
     }
-
-    // -----------------------------------------------------------------------
-    // Assertion result structure
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_assertion_result_fields() {
@@ -578,51 +431,25 @@ mod scenario_runner_tests {
         assert!(r.passed);
     }
 
-    // -----------------------------------------------------------------------
-    // Event ordering
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_advance_clock_event_is_cumulative() {
-        // Verify that AdvanceClock advances relative to current virtual time.
         let clock = VirtualClock::new();
-        clock.set_ms(1000); // Start at 1000
-
-        // Simulate two AdvanceClock events
+        clock.set_ms(1000);
         clock.advance_ms(500);
         clock.advance_ms(300);
-
         assert_eq!(clock.now_ms(), 1800);
     }
 
     #[test]
     fn test_milestone_deduplication_prevents_duplicate_processing() {
-        // If two events are at the same timestamp, the milestone appears once.
         let mut milestones = vec![100u64, 200, 100, 300, 200];
         milestones.sort_unstable();
         milestones.dedup();
         assert_eq!(milestones, vec![100, 200, 300]);
     }
 
-    // -----------------------------------------------------------------------
-    // Integration: full scenario with in-memory state
-    // (requires AppState construction — see tests/temporal_scenario_tests.rs
-    //  for the full multi-sensor integration suite)
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_runner_evaluates_assertions_synchronously_after_events() {
-        // Verify that assertions see the state AFTER events at the same
-        // timestamp have been processed and recalculate_and_broadcast has run.
-        //
-        // This tests the fundamental correctness property of the harness:
-        // no yield_now() race, deterministic ordering.
-        //
-        // Full AppState construction is stubbed here; see integration tests
-        // for the complete scenario with real nodes and store.
-
-        // At minimum, verify that the runner type compiles and the builder
-        // pattern is correct.
         let _ = std::mem::size_of::<ScenarioRunner>();
         let _ = std::mem::size_of::<ScenarioEvent>();
         let _ = std::mem::size_of::<PostureAssertion>();
