@@ -29,9 +29,11 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 [dev-dependencies]
 rand = "0.8"
+proptest = "1"
 
 [[bin]]
 name = "ai_robot_demo"
@@ -54,3 +56,6 @@ required-features = ["ros2"]
 name = "aegis_verifier_service"
 path = "src/bin/aegis_verifier_service.rs"
 
+[[bin]]
+name = "aegis_carla_client"
+path = "src/bin/aegis_carla_client.rs"

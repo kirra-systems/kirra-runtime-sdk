@@ -1,0 +1,152 @@
+# .github/workflows/release.yml
+#
+# Automated release builds for Aegis Safety Kernel.
+# Triggers on git tag push matching v* (e.g. v1.0.0, v1.2.3-rc1).
+#
+# Usage:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# This workflow:
+#   1. Builds binaries for x86_64, aarch64, and armv7 (Linux, musl static)
+#   2. Packages each as a .tar.gz with install.sh and INSTALL.md
+#   3. Generates SHA256 checksums
+#   4. Creates a GitHub Release with all artifacts attached
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # Required to create GitHub releases
+
+jobs:
+  build:
+    name: Build ${{ matrix.target_name }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            target_name: x86_64-linux
+            cross: false
+
+          - target: aarch64-unknown-linux-musl
+            target_name: aarch64-linux
+            cross: true
+
+          - target: armv7-unknown-linux-musleabihf
+            target_name: armv7-linux
+            cross: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for ARM targets)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build aegis_verifier_service
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin aegis_verifier_service
+          else
+            # x86_64 musl needs musl-tools
+            sudo apt-get install -y musl-tools
+            cargo build --release --target ${{ matrix.target }} --bin aegis_verifier_service
+          fi
+
+      - name: Build aegis_carla_client
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin aegis_carla_client
+          else
+            cargo build --release --target ${{ matrix.target }} --bin aegis_carla_client
+          fi
+
+      - name: Package release
+        run: |
+          VERSION="${{ github.ref_name }}"
+          TARGET_NAME="${{ matrix.target_name }}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE_NAME="aegis-${VERSION}-${TARGET_NAME}.tar.gz"
+
+          # Create staging layout
+          mkdir -p staging/aegis staging/systemd
+
+          # Binaries
+          cp "target/${TARGET}/release/aegis_verifier_service" staging/aegis/
+          cp "target/${TARGET}/release/aegis_carla_client"     staging/aegis/
+          chmod 755 staging/aegis/*
+
+          # Supporting files
+          cp install.sh     staging/
+          cp INSTALL.md     staging/
+          cp README.md      staging/ 2>/dev/null || true
+          cp LICENSE        staging/ 2>/dev/null || true
+          cp scripts/aegis-verifier.service staging/systemd/
+          echo "${VERSION}" > staging/VERSION
+
+          # Create archive
+          tar -czf "${ARCHIVE_NAME}" -C staging .
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "${GITHUB_ENV}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-${{ matrix.target_name }}
+          path: aegis-*.tar.gz
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # Extract the relevant section from CHANGELOG.md if it exists
+          if [ -f CHANGELOG.md ]; then
+            awk "/^## \[?${VERSION}\]?/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md \
+                > release_notes.md
+          fi
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${VERSION}" > release_notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Aegis ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}

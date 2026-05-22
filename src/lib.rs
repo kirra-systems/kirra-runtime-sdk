@@ -23,9 +23,18 @@ pub mod startup_sentinel;
 pub mod verifier;
 pub mod verifier_store;
 pub mod posture_cache;
+pub mod posture_engine;
+pub mod posture_engine_v2;
+pub mod recovery_hysteresis;
+pub mod telemetry_watchdog;
+pub mod clock;
+pub mod scenario_runner;
 pub mod audit_chain;
 pub mod federation;
+pub mod federation_reconciliation;
 pub mod protocol_adapter;
+pub mod standby_monitor;
+pub mod kinematics_sim;
 
 #[cfg(test)]
 mod tests;

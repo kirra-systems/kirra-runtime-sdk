@@ -36,7 +36,6 @@ impl VerifierStore {
             [],
         )?;
 
-        // v0.9.7: time-series posture event log for observability and flap detection.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS posture_events (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +44,29 @@ impl VerifierStore {
                 posture_json   TEXT    NOT NULL,
                 reason         TEXT,
                 created_at_ms  INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        // AV subsystem metadata: confidence floors, telemetry timestamps, recovery streak.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS av_subsystem_meta (
+                node_id                  TEXT    PRIMARY KEY,
+                subsystem_type           TEXT    NOT NULL,
+                hardware_id              TEXT    NOT NULL,
+                confidence_floor         REAL    NOT NULL DEFAULT 0.70,
+                last_telemetry_ms        INTEGER NOT NULL DEFAULT 0,
+                recovery_streak_count    INTEGER NOT NULL DEFAULT 0,
+                recovery_streak_start_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
+        // Posture engine persistent state (generation counter, heartbeat, etc.).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS posture_engine_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )",
             [],
         )?;
@@ -95,7 +117,6 @@ impl VerifierStore {
                 last_trust_update_ms: row.get::<_, i64>(3)? as u64,
                 ak_public_pem: row.get(4)?,
                 expected_pcr16_digest_hex: row.get(5)?,
-                // Nonces are purposely ephemeral — not persisted, reset to None on boot.
             })
         })?;
 
@@ -134,9 +155,8 @@ impl VerifierStore {
         Ok(map)
     }
 
-    // --- v0.9.7 posture event log -------------------------------------------------
+    // --- v0.9.7 posture event log -------------------------------------------
 
-    /// Append a single posture event to the time-series log.
     pub fn save_posture_event(
         &self,
         node_id: &str,
@@ -154,7 +174,6 @@ impl VerifierStore {
         Ok(())
     }
 
-    /// Return the full event history for a node, newest first.
     pub fn load_node_history(&self, node_id: &str) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT event_type, posture_json, reason, created_at_ms
@@ -183,8 +202,6 @@ impl VerifierStore {
         rows.collect()
     }
 
-    /// Count events for a node with `created_at_ms >= since_ms`.
-    /// Used by the flap-detection analytic.
     pub fn count_recent_posture_events(&self, node_id: &str, since_ms: u64) -> Result<u64> {
         self.conn.query_row(
             "SELECT COUNT(*) FROM posture_events
@@ -196,12 +213,10 @@ impl VerifierStore {
 
     // --- v0.9.8 HA probes & backup export ---
 
-    /// Lightweight liveness check: proves the SQLite connection is alive.
     pub fn health_check(&self) -> Result<()> {
         self.conn.query_row("SELECT 1", [], |_| Ok(()))
     }
 
-    /// Return every posture event in ascending timestamp order (full backup scan).
     pub fn load_all_posture_events(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, event_type, posture_json, reason, created_at_ms
@@ -231,7 +246,7 @@ impl VerifierStore {
         rows.collect()
     }
 
-    // --- v1.1 tamper-evident audit chain -------------------------------------
+    // --- v1.1 tamper-evident audit chain ------------------------------------
 
     fn init_audit_chain_schema(conn: &Connection) -> Result<()> {
         conn.execute(
@@ -306,8 +321,6 @@ impl VerifierStore {
         tx.commit()
     }
 
-    /// Atomically commits a verified federated report: persists the report,
-    /// burns the nonce, and chains the event into the tamper-evident audit ledger.
     pub fn save_federated_report_chained(
         &mut self,
         report: &FederatedTrustReport,
@@ -328,7 +341,6 @@ impl VerifierStore {
             ],
         )?;
 
-        // Consume the nonce atomically with the report commit.
         tx.execute(
             "INSERT INTO federation_report_nonces (nonce_hex, source_controller_id, seen_at_ms)
              VALUES (?1, ?2, ?3)",
@@ -354,7 +366,7 @@ impl VerifierStore {
         tx.commit()
     }
 
-    // --- v1.1 trusted federation controller registry -------------------------
+    // --- v1.1 trusted federation controller registry ------------------------
 
     pub fn save_trusted_federation_controller(
         &self,
@@ -455,10 +467,8 @@ impl VerifierStore {
         Ok(true)
     }
 
-    // --- Patch 1: attestation identity registry ---------------------------------
+    // --- Patch 1: attestation identity registry ----------------------------
 
-    /// Registers a node's hardware identity fingerprint and chains the event into
-    /// the tamper-evident audit ledger atomically.
     pub fn register_attestation_identity(
         &mut self,
         node_id: &str,
@@ -491,8 +501,6 @@ impl VerifierStore {
         tx.commit()
     }
 
-    /// Look up the stored fingerprint for a node. Returns `None` if the node
-    /// has no registered hardware identity.
     pub fn load_registered_fingerprint(&self, node_id: &str) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT ak_public_fingerprint_hex FROM attestation_identity_registry
@@ -503,6 +511,152 @@ impl VerifierStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    // --- AV subsystem metadata ---------------------------------------------
+
+    pub fn register_av_subsystem_meta(
+        &self,
+        node_id: &str,
+        subsystem_type: &str,
+        hardware_id: &str,
+        confidence_floor: f64,
+        initial_telemetry_ms: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO av_subsystem_meta
+             (node_id, subsystem_type, hardware_id, confidence_floor, last_telemetry_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![node_id, subsystem_type, hardware_id, confidence_floor, initial_telemetry_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_av_confidence_floor(&self, node_id: &str) -> Result<Option<f64>> {
+        match self.conn.query_row(
+            "SELECT confidence_floor FROM av_subsystem_meta WHERE node_id = ?1",
+            params![node_id],
+            |row| row.get::<_, f64>(0),
+        ) {
+            Ok(f) => Ok(Some(f)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn touch_av_telemetry_timestamp(&self, node_id: &str, now_ms: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE av_subsystem_meta SET last_telemetry_ms = ?1 WHERE node_id = ?2",
+            params![now_ms as i64, node_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_last_telemetry_timestamp(&self, node_id: &str) -> Result<u64> {
+        match self.conn.query_row(
+            "SELECT last_telemetry_ms FROM av_subsystem_meta WHERE node_id = ?1",
+            params![node_id],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(ts) => Ok(ts as u64),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn load_all_registered_av_node_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT node_id FROM av_subsystem_meta")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    pub fn load_recovery_streak(&self, node_id: &str) -> Result<(u32, u64)> {
+        match self.conn.query_row(
+            "SELECT recovery_streak_count, recovery_streak_start_ms
+             FROM av_subsystem_meta WHERE node_id = ?1",
+            params![node_id],
+            |row| Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u64)),
+        ) {
+            Ok(data) => Ok(data),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((0, 0)),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn reset_recovery_streak(&self, node_id: &str, now_ms: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE av_subsystem_meta
+             SET recovery_streak_count = 0, recovery_streak_start_ms = 0,
+                 last_telemetry_ms = ?1
+             WHERE node_id = ?2",
+            params![now_ms as i64, node_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> Result<u32> {
+        self.conn.execute(
+            "UPDATE av_subsystem_meta
+             SET recovery_streak_count = recovery_streak_count + 1,
+                 recovery_streak_start_ms = CASE
+                     WHEN recovery_streak_count = 0 THEN ?1
+                     ELSE recovery_streak_start_ms
+                 END,
+                 last_telemetry_ms = ?1
+             WHERE node_id = ?2",
+            params![now_ms as i64, node_id],
+        )?;
+        self.conn.query_row(
+            "SELECT recovery_streak_count FROM av_subsystem_meta WHERE node_id = ?1",
+            params![node_id],
+            |row| row.get::<_, i64>(0).map(|v| v as u32),
+        )
+    }
+
+    // --- Posture engine persistent state -----------------------------------
+
+    pub fn load_last_generation(&self) -> Result<u64> {
+        match self.conn.query_row(
+            "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s)  => Ok(s.parse::<u64>().unwrap_or(0)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn save_last_generation(&self, generation: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO posture_engine_state (key, value)
+             VALUES ('last_generation', ?1)",
+            params![generation.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Reads an arbitrary key from the posture_engine_state key-value store.
+    /// Returns None if the key doesn't exist.
+    pub fn load_engine_state(&self, key: &str) -> Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT value FROM posture_engine_state WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(v)  => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Writes an arbitrary key to the posture_engine_state key-value store (upsert).
+    pub fn save_engine_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO posture_engine_state (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
     }
 }
 
@@ -543,8 +697,87 @@ mod attestation_registry_tests {
         let fp2 = "bbbb";
         store.register_attestation_identity("node-03", fp1, "admin", 1_000).unwrap();
         store.register_attestation_identity("node-03", fp2, "admin", 2_000).unwrap();
-        // Second registration rotates the key; latest fingerprint wins.
         assert_eq!(store.load_registered_fingerprint("node-03").unwrap(), Some(fp2.to_string()));
         assert!(store.verify_audit_chain_integrity().unwrap());
+    }
+
+    #[test]
+    fn test_av_subsystem_meta_round_trip() {
+        let store = in_memory();
+        store.register_av_subsystem_meta("lidar_front", "Perception", "LIDAR-001", 0.70, 0).unwrap();
+        let floor = store.load_av_confidence_floor("lidar_front").unwrap();
+        assert_eq!(floor, Some(0.70));
+    }
+
+    #[test]
+    fn test_recovery_streak_increments_and_resets() {
+        let store = in_memory();
+        store.register_av_subsystem_meta("cam", "Perception", "CAM-001", 0.70, 0).unwrap();
+        let n1 = store.increment_recovery_streak("cam", 1000).unwrap();
+        let n2 = store.increment_recovery_streak("cam", 1100).unwrap();
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 2);
+        store.reset_recovery_streak("cam", 1200).unwrap();
+        let (count, start) = store.load_recovery_streak("cam").unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn test_generation_persistence() {
+        let store = in_memory();
+        assert_eq!(store.load_last_generation().unwrap(), 0);
+        store.save_last_generation(42).unwrap();
+        assert_eq!(store.load_last_generation().unwrap(), 42);
+    }
+}
+
+#[cfg(test)]
+mod standby_store_tests {
+    use super::*;
+
+    fn in_memory() -> VerifierStore {
+        VerifierStore::new(":memory:").unwrap()
+    }
+
+    #[test]
+    fn test_load_engine_state_absent_key_returns_none() {
+        let store = in_memory();
+        assert_eq!(store.load_engine_state("nonexistent_key").unwrap(), None);
+    }
+
+    #[test]
+    fn test_save_and_load_engine_state_round_trip() {
+        let store = in_memory();
+        store.save_engine_state("primary_heartbeat_ms", "12345").unwrap();
+        let val = store.load_engine_state("primary_heartbeat_ms").unwrap();
+        assert_eq!(val, Some("12345".to_string()));
+    }
+
+    #[test]
+    fn test_save_engine_state_is_idempotent_upsert() {
+        let store = in_memory();
+        store.save_engine_state("key", "first").unwrap();
+        store.save_engine_state("key", "second").unwrap();
+        assert_eq!(store.load_engine_state("key").unwrap(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn test_multiple_keys_are_independent() {
+        let store = in_memory();
+        store.save_engine_state("key_a", "value_a").unwrap();
+        store.save_engine_state("key_b", "value_b").unwrap();
+        assert_eq!(store.load_engine_state("key_a").unwrap(), Some("value_a".to_string()));
+        assert_eq!(store.load_engine_state("key_b").unwrap(), Some("value_b".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_age_parse_from_stored_string() {
+        let store = in_memory();
+        let ts: u64 = 1_700_000_000_000;
+        store.save_engine_state("primary_heartbeat_ms", &ts.to_string()).unwrap();
+        let loaded = store.load_engine_state("primary_heartbeat_ms").unwrap().unwrap();
+        let parsed: u64 = loaded.parse().expect("must parse as u64");
+        assert_eq!(parsed, ts);
     }
 }

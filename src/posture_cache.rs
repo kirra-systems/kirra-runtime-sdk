@@ -99,6 +99,7 @@ impl CachedFleetPosture {
         }
     }
 
+
     /// Returns true if this entry has exceeded its TTL relative to `now_ms`.
     pub fn is_stale(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.generated_at_ms) >= self.ttl_ms

@@ -22,7 +22,7 @@ use aegis_runtime_sdk::verifier::{
     HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use aegis_runtime_sdk::verifier_store::VerifierStore;
-use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, SharedPostureCache};
+use aegis_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
 use aegis_runtime_sdk::security::constant_time_compare;
 use aegis_runtime_sdk::action_filter::{evaluate_action_claim, ActionClaim};
 use aegis_runtime_sdk::protocol_adapter::{evaluate_industrial_event, IndustrialEvent};
@@ -33,13 +33,13 @@ use aegis_runtime_sdk::federation::{
     RegisterFederationControllerRequest,
     ReportEvaluation,
 };
+use aegis_runtime_sdk::standby_monitor::{spawn_heartbeat_writer, spawn_promotion_monitor};
+use aegis_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
+use aegis_runtime_sdk::gateway::policy_layer::enforce_actuator_safety_envelope;
+use aegis_runtime_sdk::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
 
 // --- Auth middleware ---------------------------------------------------------
 
-/// Reads the expected admin token from AEGIS_ADMIN_TOKEN.
-/// Fail-closed: if the env var is absent or empty, ALL mutation requests are denied
-/// (503 Service Unavailable — the service is misconfigured, not the caller).
-/// Timing-safe comparison via constant_time_compare prevents oracle attacks on the token.
 async fn require_admin_token(request: Request, next: Next) -> Result<Response, StatusCode> {
     let expected = std::env::var("AEGIS_ADMIN_TOKEN")
         .unwrap_or_default();
@@ -62,9 +62,6 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
     Ok(next.run(request).await)
 }
 
-/// Delegates to the pure `validate_client_identity_headers` function.
-/// Fail-closed: denies unless `AEGIS_TRUSTED_INGRESS_MODE=true` AND the
-/// configured client-id header is present and non-blank.
 async fn require_client_identity(
     State(svc): State<Arc<ServiceState>>,
     request: Request,
@@ -81,17 +78,8 @@ async fn require_client_identity(
     Ok(next.run(request).await)
 }
 
-// --- Shared service state ---------------------------------------------------
-
-struct ServiceState {
-    app: Arc<AppState>,
-    posture_cache: SharedPostureCache,
-}
-
 // --- Real-time posture stream -----------------------------------------------
 
-/// Non-blocking broadcast: fires after any successful state mutation.
-/// Discards send errors — zero active subscribers is normal steady state.
 fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String>) {
     let posture = node_id.as_ref().map(|id| state.calculate_posture(id));
     let _ = state.posture_tx.send(PostureStreamEvent {
@@ -102,9 +90,6 @@ fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String
     });
 }
 
-/// Server-Sent Events stream of posture change notifications.
-/// Lagged slow consumers are silently dropped — the channel is bounded
-/// (POSTURE_BROADCAST_CAPACITY) to prevent memory growth from stalled clients.
 async fn system_posture_stream(
     State(svc): State<Arc<ServiceState>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
@@ -144,8 +129,6 @@ struct RegisterDependenciesRequest {
 struct VerifyAttestationRequest {
     node_id: String,
     nonce: u64,
-    /// HMAC-SHA256(AEGIS_ADMIN_TOKEN, nonce_as_le_bytes) encoded as hex.
-    /// In a full PKI deployment replace with a node-specific certificate signature.
     proof_hex: String,
 }
 
@@ -156,14 +139,28 @@ struct AttestationStatusResponse {
     registered_at_ms: u64,
 }
 
+#[derive(Deserialize)]
+struct SensorFaultReportRequest {
+    source_node_id: String,
+    confidence_score: f64,
+    hardware_fault_detected: bool,
+}
+
+#[derive(Deserialize)]
+struct RegisterAvAssetRequest {
+    node_id: String,
+    subsystem_type: String,
+    hardware_id: String,
+    #[serde(default)]
+    confidence_floor: Option<f64>,
+}
+
 // --- Handlers ----------------------------------------------------------------
 
-/// Unconditional liveness probe — returns 200 immediately with no I/O.
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok".to_string() })
 }
 
-/// Readiness probe — verifies the SQLite connection is alive before returning 200.
 async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     match svc.app.store.lock() {
         Ok(store) => match store.health_check() {
@@ -179,8 +176,6 @@ async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     }
 }
 
-/// Full state snapshot — nodes, dependency graph, and posture event log.
-/// Protected by require_admin_token; must never be exposed unauthenticated.
 async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     match svc.app.store.lock() {
         Ok(store) => {
@@ -215,7 +210,7 @@ async fn register_node(
     State(svc): State<Arc<ServiceState>>,
     Json(req): Json<RegisterNodeRequest>,
 ) -> impl IntoResponse {
-    if !svc.app.mode.allows_mutation() {
+    if !svc.app.is_active() {
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
@@ -229,7 +224,6 @@ async fn register_node(
         expected_pcr16_digest_hex: req.expected_pcr16_digest_hex,
     };
 
-    // Fail-closed: disk must accept the write before memory is updated.
     if svc.app.persist_and_insert_node(node).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to persist node" }))).into_response();
@@ -242,7 +236,7 @@ async fn issue_challenge(
     State(svc): State<Arc<ServiceState>>,
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
-    if !svc.app.mode.allows_mutation() {
+    if !svc.app.is_active() {
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
@@ -262,13 +256,12 @@ async fn verify_attestation(
     State(svc): State<Arc<ServiceState>>,
     Json(req): Json<VerifyAttestationRequest>,
 ) -> impl IntoResponse {
-    if !svc.app.mode.allows_mutation() {
+    if !svc.app.is_active() {
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
     let now = now_ms();
 
-    // Verify the proof: HMAC-SHA256(admin_token, nonce_le_bytes) == proof_hex.
     let admin_token = match std::env::var("AEGIS_ADMIN_TOKEN").ok().filter(|s| !s.is_empty()) {
         Some(t) => t,
         None => return (StatusCode::SERVICE_UNAVAILABLE,
@@ -287,13 +280,11 @@ async fn verify_attestation(
                 Json(json!({ "error": "attestation proof invalid" }))).into_response();
     }
 
-    // Consume the nonce (replay protection — second use is rejected).
     if !svc.app.consume_challenge(&req.node_id, req.nonce, now) {
         return (StatusCode::CONFLICT,
                 Json(json!({ "error": "nonce absent, expired, or already consumed" }))).into_response();
     }
 
-    // Promote node to Trusted, persist before updating memory.
     let updated = match svc.app.nodes.get(&req.node_id) {
         Some(existing) => RegisteredNode {
             node_id: existing.node_id.clone(),
@@ -312,8 +303,6 @@ async fn verify_attestation(
                 Json(json!({ "error": "failed to persist trust state" }))).into_response();
     }
 
-    // Emit posture event after successful attestation (best-effort; does not
-    // roll back the trust promotion if the log write fails).
     let posture = svc.app.calculate_posture(&req.node_id);
     if let Ok(posture_json) = serde_json::to_string(&posture) {
         if let Ok(store) = svc.app.store.lock() {
@@ -363,7 +352,6 @@ async fn get_node_posture(
     let posture = svc.app.calculate_posture(&node_id);
     let now = now_ms();
     let cached = CachedFleetPosture::from_posture(&posture, now);
-    // Refresh the cache on read so the gateway interceptor has a fresh entry.
     if let Ok(mut guard) = svc.posture_cache.write() {
         *guard = Some(cached);
     }
@@ -374,7 +362,7 @@ async fn register_dependencies(
     State(svc): State<Arc<ServiceState>>,
     Json(req): Json<RegisterDependenciesRequest>,
 ) -> impl IntoResponse {
-    if !svc.app.mode.allows_mutation() {
+    if !svc.app.is_active() {
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
@@ -383,7 +371,6 @@ async fn register_dependencies(
                 Json(json!({ "error": "failed to persist dependencies" }))).into_response();
     }
 
-    // Snapshot posture after topology change (best-effort event log).
     let posture = svc.app.calculate_posture(&req.node_id);
     let now = now_ms();
     if let Ok(posture_json) = serde_json::to_string(&posture) {
@@ -436,8 +423,6 @@ async fn get_node_flap_status(
     }
 }
 
-// --- v1.1 handlers ----------------------------------------------------------
-
 async fn verify_audit_chain(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
@@ -459,7 +444,7 @@ async fn evaluate_action_filter(
     let posture = svc.posture_cache
         .read()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| c.propagated_status.clone()))
+        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
         .unwrap_or(aegis_runtime_sdk::verifier::FleetPosture::LockedOut);
 
     let decision = evaluate_action_claim(claim.clone(), posture);
@@ -488,7 +473,7 @@ async fn evaluate_industrial_adapter(
     let posture = svc.posture_cache
         .read()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| c.propagated_status.clone()))
+        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
         .unwrap_or(aegis_runtime_sdk::verifier::FleetPosture::LockedOut);
 
     let asset_id = event.asset_id.clone();
@@ -540,8 +525,6 @@ async fn register_federation_controller(
     }
 }
 
-// --- Patch 1: attestation identity registry --------------------------------
-
 #[derive(Deserialize)]
 struct RegisterIdentityRequest {
     node_id: String,
@@ -580,7 +563,6 @@ async fn submit_federated_report(
 ) -> impl IntoResponse {
     let received_at_ms = now_ms();
 
-    // 1. Structural and freshness check (future timestamp, replay window, expiry).
     let evaluation = evaluate_federated_report(&report, received_at_ms);
     if !evaluation.accepted {
         return Json(evaluation).into_response();
@@ -592,7 +574,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "store lock poisoned" }))).into_response(),
     };
 
-    // 2. Identity verification: reject claims from unregistered controllers.
     let pk_b64 = match store.load_trusted_federation_controller_key(&report.source_controller_id) {
         Ok(Some(key)) => key,
         Ok(None) => {
@@ -611,7 +592,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "controller lookup failed" }))).into_response(),
     };
 
-    // 3. Cryptographic signature validation.
     if !verify_federated_report_signature(&report, &pk_b64) {
         let event = json!({ "source_controller_id": report.source_controller_id,
                             "reason": "INVALID_FEDERATION_SIGNATURE" });
@@ -625,7 +605,6 @@ async fn submit_federated_report(
         }).into_response();
     }
 
-    // 4. Nonce replay prevention.
     match store.has_seen_federation_nonce(&report.nonce_hex) {
         Ok(true) => {
             let event = json!({ "source_controller_id": report.source_controller_id,
@@ -645,7 +624,6 @@ async fn submit_federated_report(
                           Json(json!({ "error": "nonce lookup failed" }))).into_response(),
     }
 
-    // 5. Atomic commit: report + nonce burn + audit chain.
     match store.save_federated_report_chained(&report, received_at_ms) {
         Ok(()) => Json(evaluation).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
@@ -668,6 +646,231 @@ async fn get_federated_reports(
     }
 }
 
+/// Receives a proposed vehicle motion command from the autonomous planner.
+/// The enforce_actuator_safety_envelope middleware runs before this handler.
+async fn handle_actuator_motion_command(
+    State(svc): State<Arc<ServiceState>>,
+    Json(cmd): Json<ProposedVehicleCommand>,
+) -> impl IntoResponse {
+    let now = now_ms();
+
+    tracing::info!(
+        linear_velocity_mps = %cmd.linear_velocity_mps,
+        steering_angle_deg  = %cmd.steering_angle_deg,
+        delta_time_s        = %cmd.delta_time_s,
+        "Actuator motion command admitted through safety envelope"
+    );
+
+    let audit = serde_json::json!({
+        "linear_velocity_mps":        cmd.linear_velocity_mps,
+        "steering_angle_deg":         cmd.steering_angle_deg,
+        "current_velocity_mps":       cmd.current_velocity_mps,
+        "current_steering_angle_deg": cmd.current_steering_angle_deg,
+        "delta_time_s":               cmd.delta_time_s,
+        "admitted_at_ms":             now,
+    });
+    if let Ok(store) = svc.app.store.lock() {
+        let _ = store.save_posture_event(
+            "actuator_motion", "MOTION_COMMAND_ADMITTED",
+            &audit.to_string(), None, now,
+        );
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "linear_velocity_mps": cmd.linear_velocity_mps,
+        "steering_angle_deg":  cmd.steering_angle_deg,
+        "enforcement_action":  "Allow",
+    }))).into_response()
+}
+
+/// Accepts a sensor health report and updates the node's trust state.
+async fn handle_sensor_fault_report(
+    State(svc): State<Arc<ServiceState>>,
+    Json(req): Json<SensorFaultReportRequest>,
+) -> impl IntoResponse {
+    if req.source_node_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "source_node_id is required" }))).into_response();
+    }
+    if !svc.app.nodes.contains_key(&req.source_node_id) {
+        return (StatusCode::NOT_FOUND,
+                Json(json!({ "error": "node not registered" }))).into_response();
+    }
+
+    let now = now_ms();
+
+    let confidence_floor = match svc.app.store.lock() {
+        Ok(store) => store.load_av_confidence_floor(&req.source_node_id)
+            .unwrap_or(None)
+            .unwrap_or(0.70),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    };
+
+    let is_degraded = req.hardware_fault_detected || req.confidence_score < confidence_floor;
+
+    if is_degraded {
+        let reason = if req.hardware_fault_detected { "hardware_fault" } else { "low_confidence" };
+
+        if let Ok(store) = svc.app.store.lock() {
+            let _ = store.reset_recovery_streak(&req.source_node_id, now);
+        }
+
+        let updated = match svc.app.nodes.get(&req.source_node_id) {
+            Some(n) => RegisteredNode {
+                node_id:              n.node_id.clone(),
+                status:               NodeTrustState::Untrusted(reason.to_string()),
+                registered_at_ms:     n.registered_at_ms,
+                last_trust_update_ms: now,
+                ak_public_pem:        n.ak_public_pem.clone(),
+                expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
+            },
+            None => return (StatusCode::NOT_FOUND,
+                            Json(json!({ "error": "node not found" }))).into_response(),
+        };
+
+        if svc.app.persist_and_insert_node(updated).is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to persist node state" }))).into_response();
+        }
+
+        let event = json!({
+            "source_node_id":          req.source_node_id,
+            "confidence_score":        req.confidence_score,
+            "hardware_fault_detected": req.hardware_fault_detected,
+            "reason":                  reason,
+        });
+        if let Ok(store) = svc.app.store.lock() {
+            let _ = store.save_posture_event(
+                &req.source_node_id, "SENSOR_HEALTH_REPORT_FAULT",
+                &event.to_string(), None, now,
+            );
+        }
+
+        emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
+
+        return (StatusCode::OK, Json(json!({
+            "source_node_id": req.source_node_id,
+            "accepted": true,
+            "fault_recorded": true,
+        }))).into_response();
+    }
+
+    let currently_untrusted = svc.app.nodes.get(&req.source_node_id)
+        .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
+        .unwrap_or(false);
+
+    if !currently_untrusted {
+        if let Ok(store) = svc.app.store.lock() {
+            let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
+        }
+        return (StatusCode::OK, Json(json!({
+            "source_node_id": req.source_node_id,
+            "accepted": true,
+            "fault_recorded": false,
+        }))).into_response();
+    }
+
+    let decision = match svc.app.store.lock() {
+        Ok(store) => evaluate_recovery_report(&store, &req.source_node_id, now),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    };
+
+    match &decision {
+        HysteresisDecision::RecoveryConfirmed { streak } => {
+            let updated = match svc.app.nodes.get(&req.source_node_id) {
+                Some(n) => RegisteredNode {
+                    node_id:              n.node_id.clone(),
+                    status:               NodeTrustState::Trusted,
+                    registered_at_ms:     n.registered_at_ms,
+                    last_trust_update_ms: now,
+                    ak_public_pem:        n.ak_public_pem.clone(),
+                    expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
+                },
+                None => return (StatusCode::NOT_FOUND,
+                                Json(json!({ "error": "node not found" }))).into_response(),
+            };
+
+            if svc.app.persist_and_insert_node(updated).is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "failed to persist node state" }))).into_response();
+            }
+
+            if let Ok(store) = svc.app.store.lock() {
+                let _ = store.reset_recovery_streak(&req.source_node_id, now);
+                let event = json!({
+                    "source_node_id": req.source_node_id,
+                    "streak":         streak,
+                });
+                let _ = store.save_posture_event(
+                    &req.source_node_id, "SENSOR_RECOVERY_CONFIRMED",
+                    &event.to_string(), None, now,
+                );
+            }
+
+            emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
+        }
+        HysteresisDecision::StreakBuilding { .. } | HysteresisDecision::WindowExpired { .. } => {}
+        HysteresisDecision::NotApplicable => {
+            if let Ok(store) = svc.app.store.lock() {
+                let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({
+        "source_node_id":      req.source_node_id,
+        "accepted":            true,
+        "fault_recorded":      false,
+        "hysteresis_decision": format!("{:?}", decision),
+    }))).into_response()
+}
+
+/// Registers AV subsystem metadata for an existing fleet node.
+async fn handle_register_av_asset(
+    State(svc): State<Arc<ServiceState>>,
+    Json(req): Json<RegisterAvAssetRequest>,
+) -> impl IntoResponse {
+    if req.node_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "node_id is required" }))).into_response();
+    }
+    if !svc.app.nodes.contains_key(&req.node_id) {
+        return (StatusCode::NOT_FOUND,
+                Json(json!({ "error": "node not registered" }))).into_response();
+    }
+
+    let now = now_ms();
+    let floor = req.confidence_floor.unwrap_or(0.70);
+
+    match svc.app.store.lock() {
+        Ok(store) => {
+            if let Err(e) = store.register_av_subsystem_meta(
+                &req.node_id, &req.subsystem_type, &req.hardware_id, floor, now,
+            ) {
+                tracing::warn!(
+                    error   = %e,
+                    node_id = %req.node_id,
+                    "Failed to register av_subsystem_meta"
+                );
+            }
+            let meta = json!({
+                "subsystem_type":   req.subsystem_type,
+                "hardware_id":      req.hardware_id,
+                "confidence_floor": floor,
+            });
+            let _ = store.save_posture_event(
+                &req.node_id, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
+            );
+        }
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    }
+
+    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
+}
+
 // --- Entry point ------------------------------------------------------------
 
 #[tokio::main]
@@ -685,8 +888,6 @@ async fn main() {
 
     let app_state = Arc::new(AppState::new(store, mode));
 
-    // Boot hydration — load persisted nodes and dependency graph into memory.
-    // Mutex is released before the server starts; the lock window is startup-only.
     {
         let guard = app_state.store.lock()
             .expect("verifier store lock poisoned during boot hydration");
@@ -706,11 +907,20 @@ async fn main() {
         posture_cache: Arc::new(std::sync::RwLock::new(None)),
     });
 
-    // Tier 1 — Identity-gated routes: require admin token AND a valid client-id header.
-    // These routes stream sensitive state or forward commands into physical systems;
-    // the additional header check enforces that requests arrive through an authorized
-    // mesh sidecar or proxy, not a raw unauthenticated caller who obtained the token.
-    // Layer ordering: require_admin_token runs first (outermost), then require_client_identity.
+    match mode {
+        VerifierOperationMode::Active => {
+            spawn_heartbeat_writer(Arc::clone(&svc_state.app));
+            tracing::info!("Heartbeat writer started (Active mode)");
+        }
+        VerifierOperationMode::PassiveStandby => {
+            spawn_promotion_monitor(
+                Arc::clone(&svc_state.app),
+                Arc::clone(&svc_state.posture_cache),
+            );
+            tracing::info!("Promotion monitor started (PassiveStandby mode)");
+        }
+    }
+
     let identity_gated_routes = Router::new()
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
@@ -719,29 +929,33 @@ async fn main() {
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
         .layer(middleware::from_fn(require_admin_token));
 
-    // Tier 2 — Admin-only routes: require admin token; no additional identity header.
-    // Management and registration operations that originate from operators directly.
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
         .route("/fleet/dependencies", post(register_dependencies))
+        .route("/fleet/diagnostics/report", post(handle_sensor_fault_report))
+        .route("/fleet/assets/register", post(handle_register_av_asset))
         .route("/system/backup/export", post(export_backup))
         .route("/system/audit/verify", get(verify_audit_chain))
         .route("/federation/controllers/register", post(register_federation_controller))
         .route("/attestation/identity/register", post(register_node_identity))
         .layer(middleware::from_fn(require_admin_token));
 
-    // Challenge and verify are unauthenticated — the challenge-response protocol
-    // itself provides the attestation guarantee.
+    let actuator_routes = Router::new()
+        .route("/actuator/motion/command", post(handle_actuator_motion_command))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&svc_state),
+            enforce_actuator_safety_envelope,
+        ))
+        .layer(middleware::from_fn(require_admin_token));
+
     let attestation_routes = Router::new()
         .route("/attestation/challenge/:node_id", post(issue_challenge))
         .route("/attestation/verify", post(verify_attestation));
 
-    // Liveness/readiness probes — always public, no auth, minimal I/O.
     let probe_routes = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready));
 
-    // Read-only routes need no auth.
     let read_routes = Router::new()
         .route("/attestation/status/:node_id", get(get_node_status))
         .route("/fleet/posture", get(get_fleet_posture))
@@ -754,6 +968,7 @@ async fn main() {
         .merge(probe_routes)
         .merge(identity_gated_routes)
         .merge(admin_routes)
+        .merge(actuator_routes)
         .merge(attestation_routes)
         .merge(read_routes)
         .with_state(svc_state);

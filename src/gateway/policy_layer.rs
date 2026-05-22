@@ -1,20 +1,6 @@
 // src/gateway/policy_layer.rs
 //
 // Actuator safety envelope middleware for Aegis AV flight envelope protection.
-//
-// This Tower/axum middleware layer sits on actuator write routes and enforces the
-// VehicleKinematicsContract before any command reaches the physical actuator network.
-// It selects the appropriate kinematic profile based on the live fleet posture from
-// SharedPostureCache, then passes the proposed command through validate_vehicle_command.
-//
-// Security invariants respected:
-//   - Uses State<Arc<ServiceState>>, NOT State<Arc<AppState>> (invariant #11)
-//   - FleetPosture imported from crate::verifier, NOT crate::gateway::posture_cache
-//   - SharedPostureCache accessed via svc.posture_cache (lives on ServiceState)
-//   - LockedOut → 403 FORBIDDEN, fail-closed, no further processing
-//   - DenyBreach violations logged to audit chain via store methods (no Mutex assumption)
-//   - No hardcoded tokens, no env::set_var, no TransientLocal DDS
-//   - now_ms() defined locally; no external time dependency
 
 use axum::{
     body::Body,
@@ -29,18 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::gateway::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
-// Correct import paths per architecture invariants:
-//   FleetPosture lives in crate::verifier, not crate::gateway::posture_cache
 use crate::verifier::FleetPosture;
-// ServiceState is the axum router state — wraps Arc<AppState> + SharedPostureCache
-// All handlers must use State<Arc<ServiceState>>, never State<Arc<AppState>>
-use crate::bin::aegis_verifier_service::ServiceState;
+// ServiceState is defined in posture_cache — all handlers use State<Arc<ServiceState>>
+use crate::posture_cache::ServiceState;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Returns the current time as milliseconds since UNIX epoch.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,26 +28,22 @@ fn now_ms() -> u64 {
 
 /// Resolves the current FleetPosture from the SharedPostureCache.
 ///
-/// `None` (cold start or expired cache) and a poisoned RwLock both map to
+/// None (cold start or expired cache) and a poisoned RwLock both map to
 /// LockedOut — fail-closed in all ambiguous cases.
 fn resolve_posture(svc: &ServiceState) -> FleetPosture {
     match svc.posture_cache.read() {
         Ok(guard) => match guard.as_ref() {
-            Some(cached) => cached.posture.clone(),
+            Some(cached) => cached.propagated_status.clone(),
             None => FleetPosture::LockedOut,
         },
         Err(_) => FleetPosture::LockedOut,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Middleware
-// ---------------------------------------------------------------------------
-
 /// Actuator command safety envelope middleware.
 ///
 /// Intercepts inbound actuator motion commands, resolves the active fleet posture,
-/// selects the appropriate `VehicleKinematicsContract`, and enforces all physical
+/// selects the appropriate VehicleKinematicsContract, and enforces all physical
 /// invariants before the request reaches any downstream handler.
 ///
 /// Posture → Contract mapping:
@@ -77,31 +51,18 @@ fn resolve_posture(svc: &ServiceState) -> FleetPosture {
 ///   Degraded  → mrc_fallback_profile()      — MRC crawl-speed envelope
 ///   LockedOut → immediate 403 FORBIDDEN     — fail-closed, no physics evaluation
 ///
-/// On ClampLinear / ClampSteering the mutated payload is forwarded to the
-/// downstream handler. On DenyBreach the command is dropped (400) and the
-/// violation is written to the tamper-evident audit chain.
-///
 /// # Invariants
-/// - Uses `State<Arc<ServiceState>>` (invariant #11)
-/// - `FleetPosture` from `crate::verifier`
-/// - `SharedPostureCache` accessed via `svc.posture_cache`
+/// - Uses State<Arc<ServiceState>> (invariant #11)
+/// - FleetPosture from crate::verifier
+/// - SharedPostureCache accessed via svc.posture_cache
 /// - LockedOut is always fail-closed
 pub async fn enforce_actuator_safety_envelope(
     State(svc): State<Arc<ServiceState>>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // ------------------------------------------------------------------
-    // Step 1: Resolve active fleet posture from SharedPostureCache.
-    // SharedPostureCache = Arc<RwLock<Option<CachedFleetPosture>>>.
-    // Lives on ServiceState.posture_cache, NOT on AppState.
-    // ------------------------------------------------------------------
     let posture = resolve_posture(&svc);
 
-    // ------------------------------------------------------------------
-    // Step 2: Select the kinematic contract profile.
-    // LockedOut → immediate 403; no command parsing, no physics.
-    // ------------------------------------------------------------------
     let contract: VehicleKinematicsContract = match posture {
         FleetPosture::Nominal => VehicleKinematicsContract::nominal_reference_profile(),
         FleetPosture::Degraded => VehicleKinematicsContract::mrc_fallback_profile(),
@@ -114,11 +75,6 @@ pub async fn enforce_actuator_safety_envelope(
         }
     };
 
-    // ------------------------------------------------------------------
-    // Step 3: Consume and parse the request body.
-    // Body is a one-shot stream; we buffer it so we can re-assemble the
-    // request for the Allow and Clamp paths.
-    // ------------------------------------------------------------------
     let (parts, body) = req.into_parts();
 
     let bytes = axum::body::to_bytes(body, usize::MAX)
@@ -128,9 +84,6 @@ pub async fn enforce_actuator_safety_envelope(
     let proposed_cmd: ProposedVehicleCommand =
         serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // ------------------------------------------------------------------
-    // Step 4: Run the deterministic kinematics validation pipeline.
-    // ------------------------------------------------------------------
     match validate_vehicle_command(&proposed_cmd, &contract) {
         EnforceAction::Allow => {
             let rebuilt = Request::from_parts(parts, Body::from(bytes));
@@ -174,9 +127,6 @@ pub async fn enforce_actuator_safety_envelope(
                 "Inadmissible actuator command rejected at kinematic safety perimeter"
             );
 
-            // Write to the tamper-evident audit chain.
-            // VerifierStore is accessed directly — no Mutex wrapper (invariant).
-            // Log failure must not convert a 400 into a 500.
             let log_payload = serde_json::json!({
                 "violation": reason,
                 "proposed_command": {
@@ -189,32 +139,28 @@ pub async fn enforce_actuator_safety_envelope(
                 "posture_at_rejection": format!("{posture:?}"),
             });
 
-            // save_posture_event_chained: disk before memory (invariant #12).
-            let _ = svc.app.store.save_posture_event_chained(
-                "actuator_safety_envelope",
-                "KINEMATIC_CONTRACT_VIOLATION",
-                &log_payload.to_string(),
-                Some("Proposed vehicle command violates non-physical invariants"),
-                now_ms(),
-            );
+            // Disk-first (invariant #12): store write before memory update.
+            // save_posture_event_chained takes &mut self — must lock the Mutex.
+            if let Ok(mut store) = svc.app.store.lock() {
+                let _ = store.save_posture_event_chained(
+                    "actuator_safety_envelope",
+                    "KINEMATIC_CONTRACT_VIOLATION",
+                    &log_payload.to_string(),
+                    Some("Proposed vehicle command violates non-physical invariants"),
+                    now_ms(),
+                );
+            }
 
             Err(StatusCode::BAD_REQUEST)
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unit Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod actuator_middleware_tests {
     use super::*;
     use crate::gateway::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
     use crate::verifier::FleetPosture;
-
-    // Contract selection logic — no ServiceState needed.
-    // Full axum integration tests are in tests/actuator_middleware_integration.rs.
 
     #[test]
     fn test_nominal_posture_selects_nominal_contract() {
@@ -295,12 +241,10 @@ mod actuator_middleware_tests {
             current_steering_angle_deg: 0.0,
         };
 
-        // Nominal: bicycle model fires → ClampSteering
         match validate_vehicle_command(&cmd, &nominal) {
             EnforceAction::ClampSteering(a) => assert!(a < 20.0 && a > 0.0),
             other => panic!("nominal: expected ClampSteering, got {other:?}"),
         }
-        // MRC: speed ceiling fires first (30 > 5) → ClampLinear
         match validate_vehicle_command(&cmd, &mrc) {
             EnforceAction::ClampLinear(v) => assert_eq!(v, 5.0),
             other => panic!("mrc: expected ClampLinear, got {other:?}"),

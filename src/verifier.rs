@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -172,11 +173,11 @@ pub struct AppState {
     pub pending_challenges: DashMap<String, ChallengeEntry>,
     /// Durable store for nodes and dependency graph (write-through, read on boot).
     pub store: Arc<Mutex<VerifierStore>>,
-    /// Operational role: Active accepts mutations; PassiveStandby is read-only.
-    pub mode: VerifierOperationMode,
+    /// Runtime-mutable operational mode.
+    /// true = Active (accepts mutations); false = PassiveStandby (read-only).
+    /// Promotion from PassiveStandby → Active uses compare_exchange on this atomic.
+    pub mode_active: Arc<AtomicBool>,
     /// Bounded broadcast channel for real-time posture stream subscribers.
-    /// Lagged receivers are dropped automatically; send errors are ignored
-    /// (no active subscribers is a normal steady-state condition).
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
     pub transport_identity: TransportIdentityConfig,
@@ -190,9 +191,25 @@ impl AppState {
             dependency_graph: DashMap::new(),
             pending_challenges: DashMap::new(),
             store: Arc::new(Mutex::new(store)),
-            mode,
+            mode_active: Arc::new(AtomicBool::new(mode == VerifierOperationMode::Active)),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
+        }
+    }
+
+    /// Returns true if this instance is currently Active (accepting mutations).
+    /// Reads the atomic — reflects runtime promotion that occurred after startup.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.mode_active.load(Ordering::SeqCst)
+    }
+
+    /// Returns the current VerifierOperationMode derived from the atomic.
+    pub fn current_mode(&self) -> VerifierOperationMode {
+        if self.is_active() {
+            VerifierOperationMode::Active
+        } else {
+            VerifierOperationMode::PassiveStandby
         }
     }
 
@@ -230,16 +247,12 @@ impl AppState {
         depth: usize,
     ) -> FleetNodePosture {
         // Black: node already fully evaluated in this pass — reuse without re-traversal.
-        // This handles diamond DAGs: if A→B→D and A→C→D, D is computed once and
-        // memoized; the second visit through C returns the cached result rather than
-        // triggering a false cycle alarm.
         if let Some(cached) = black.get(node_id) {
             return cached.clone();
         }
 
-        // Gray: node is currently on the active call stack — this is a real back-edge
-        // (cycle). Depth limit guards against stack overflow on very deep acyclic graphs.
-        // Both cases fail closed: LockedOut with a diagnostic tag.
+        // Gray: node is currently on the active call stack — back-edge (cycle).
+        // Depth limit guards against stack overflow on very deep acyclic graphs.
         if gray.contains(node_id) || depth >= MAX_DEPENDENCY_DEPTH {
             return FleetNodePosture {
                 node_id: node_id.to_string(),
@@ -278,12 +291,6 @@ impl AppState {
             }
         }
 
-        // Severity propagation rules (in priority order):
-        //   1. Local Untrusted               → LockedOut  (own node is compromised)
-        //   2. Any dependency is LockedOut   → LockedOut  (do not soften to Degraded)
-        //   3. Any dependency is Degraded    → Degraded
-        //   4. Local Unknown                 → Degraded   (unverified = not Nominal)
-        //   5. Local Trusted, all deps Nominal → Nominal
         let propagated_status = match &local_status {
             NodeTrustState::Untrusted(_) => FleetPosture::LockedOut,
             _ if has_locked_out_dep => FleetPosture::LockedOut,
@@ -299,8 +306,6 @@ impl AppState {
             blocked_by,
         };
 
-        // Backtrack: remove from gray (no longer on call stack).
-        // Memoize in black: future visits to this node return this result directly.
         gray.remove(node_id);
         black.insert(node_id.to_string(), posture.clone());
 
@@ -366,4 +371,3 @@ mod transport_identity_tests {
         assert!(!validate_client_identity_headers(true, "x-aegis-client-id", &headers));
     }
 }
-

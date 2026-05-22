@@ -1,10 +1,45 @@
 // src/gateway/policy.rs
-//
-// Re-exports the canonical OperationalCommand type and classify_http_command
-// from posture_cache. All classification logic lives there; this module is
-// the gateway-facing import surface.
 
-pub use crate::posture_cache::{classify_http_command, OperationalCommand};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationalCommand {
+    /// Safe reads: telemetry, metrics, health probes. Allowed in all postures.
+    ReadTelemetry,
+    /// Actuator writes and velocity commands. Denied when LockedOut.
+    WriteState,
+    /// Firmware, reboot, config mutations. Denied unless Nominal.
+    SystemMutation,
+    /// Unrecognised HTTP method. Denied in ALL postures (fail-closed).
+    Unknown,
+}
+
+/// Classifies an HTTP request into an OperationalCommand based solely on method
+/// and path prefix. No state access — pure function, always total.
+pub fn classify_http_command(method: &str, path: &str) -> OperationalCommand {
+    match method {
+        "GET" | "HEAD" => OperationalCommand::ReadTelemetry,
+
+        "DELETE" => OperationalCommand::SystemMutation,
+
+        "POST" | "PUT" => {
+            if path.starts_with("/actuator") || path == "/cmd_vel" || path.starts_with("/cmd_vel/") {
+                OperationalCommand::WriteState
+            } else if path.starts_with("/firmware")
+                || path == "/reboot"
+                || path.starts_with("/reboot/")
+                || path.starts_with("/config")
+            {
+                OperationalCommand::SystemMutation
+            } else {
+                // All other POST/PUT: treat as WriteState (state mutation, not
+                // infrastructure mutation). Attestation, federation, action-filter
+                // endpoints all fall here and are further gated by auth middleware.
+                OperationalCommand::WriteState
+            }
+        }
+
+        _ => OperationalCommand::Unknown,
+    }
+}
 
 #[cfg(test)]
 mod tests {
