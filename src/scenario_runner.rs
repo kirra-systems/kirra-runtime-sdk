@@ -53,7 +53,7 @@ use crate::verifier::{AppState, FleetPosture, NodeTrustState};
 use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use crate::posture_engine::recalculate_and_broadcast;
 use crate::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
-use crate::clock::VirtualClock;
+use crate::clock::{Clock, VirtualClock};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -262,7 +262,7 @@ impl ScenarioRunner {
             for event in active_events {
                 match event {
                     ScenarioEvent::TelemetryReport { ref node_id, confidence, hw_fault } => {
-                        let floor = self.app.store
+                        let floor = self.app.store.lock().unwrap()
                             .load_av_confidence_floor(node_id)
                             .unwrap_or(None)
                             .unwrap_or(self.default_confidence_floor);
@@ -277,23 +277,27 @@ impl ScenarioRunner {
                             };
 
                             // Disk-first: reset streak before memory mutation
-                            let _ = self.app.store.reset_recovery_streak(node_id, ts);
-                            let _ = self.app.store.touch_av_telemetry_timestamp(node_id, ts);
+                            let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
+                            let _ = self.app.store.lock().unwrap().touch_av_telemetry_timestamp(node_id, ts);
 
                             if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                                node.trust_state = NodeTrustState::Untrusted(reason.to_string());
+                                node.status = NodeTrustState::Untrusted(reason.to_string());
                             }
                             needs_recalc = true;
                         } else {
                             // Health report — check if node is currently untrusted
                             let currently_untrusted = self.app.nodes
                                 .get(node_id)
-                                .map(|n| matches!(n.trust_state, NodeTrustState::Untrusted(_)))
+                                .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
                                 .unwrap_or(false);
 
                             if currently_untrusted {
                                 // evaluate_recovery_report uses ts (virtual time), not wall time
-                                match evaluate_recovery_report(&self.app.store, node_id, ts) {
+                                let decision = {
+                                    let guard = self.app.store.lock().unwrap();
+                                    evaluate_recovery_report(&*guard, node_id, ts)
+                                };
+                                match decision {
                                     HysteresisDecision::RecoveryConfirmed { streak } => {
                                         tracing::debug!(
                                             node_id = %node_id, streak = streak,
@@ -301,9 +305,9 @@ impl ScenarioRunner {
                                             "Scenario: recovery confirmed"
                                         );
                                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                                            node.trust_state = NodeTrustState::Trusted;
+                                            node.status = NodeTrustState::Trusted;
                                         }
-                                        let _ = self.app.store.reset_recovery_streak(node_id, ts);
+                                        let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
                                         needs_recalc = true;
                                     }
                                     HysteresisDecision::StreakBuilding { current, required, .. } => {
@@ -324,20 +328,20 @@ impl ScenarioRunner {
                                         // No posture change
                                     }
                                     HysteresisDecision::NotApplicable => {
-                                        let _ = self.app.store
+                                        let _ = self.app.store.lock().unwrap()
                                             .touch_av_telemetry_timestamp(node_id, ts);
                                     }
                                 }
                             } else {
-                                let _ = self.app.store.touch_av_telemetry_timestamp(node_id, ts);
+                                let _ = self.app.store.lock().unwrap().touch_av_telemetry_timestamp(node_id, ts);
                             }
                         }
                     }
 
                     ScenarioEvent::MarkUntrusted { ref node_id, ref reason } => {
-                        let _ = self.app.store.reset_recovery_streak(node_id, ts);
+                        let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
-                            node.trust_state = NodeTrustState::Untrusted(reason.clone());
+                            node.status = NodeTrustState::Untrusted(reason.clone());
                         }
                         needs_recalc = true;
                     }
@@ -421,7 +425,7 @@ async fn evaluate_assertion(
 ) -> AssertionResult {
     let (passed, description) = match assertion {
         PostureAssertion::FleetPostureIs(expected) => {
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             match guard.as_ref() {
                 Some(cached) => {
                     let ok = cached.posture == *expected;
@@ -440,9 +444,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeTrustIs(node_id, expected) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = node.trust_state == *expected;
+                    let ok = node.status == *expected;
                     let desc = format!(
-                        "NodeTrustIs({node_id}, {expected:?}): got {:?}", node.trust_state
+                        "NodeTrustIs({node_id}, {expected:?}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -453,9 +457,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeIsUntrusted(node_id) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = matches!(node.trust_state, NodeTrustState::Untrusted(_));
+                    let ok = matches!(node.status, NodeTrustState::Untrusted(_));
                     let desc = format!(
-                        "NodeIsUntrusted({node_id}): got {:?}", node.trust_state
+                        "NodeIsUntrusted({node_id}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -466,9 +470,9 @@ async fn evaluate_assertion(
         PostureAssertion::NodeIsTrusted(node_id) => {
             match app.nodes.get(node_id) {
                 Some(node) => {
-                    let ok = matches!(node.trust_state, NodeTrustState::Trusted);
+                    let ok = matches!(node.status, NodeTrustState::Trusted);
                     let desc = format!(
-                        "NodeIsTrusted({node_id}): got {:?}", node.trust_state
+                        "NodeIsTrusted({node_id}): got {:?}", node.status
                     );
                     (ok, desc)
                 }
@@ -477,14 +481,14 @@ async fn evaluate_assertion(
         }
 
         PostureAssertion::CacheIsPopulated => {
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             let ok = guard.is_some();
             (ok, format!("CacheIsPopulated: is_some={ok}"))
         }
 
         PostureAssertion::CacheIsStale => {
             let now = clock.now_ms();
-            let guard = cache.read().await;
+            let guard = cache.read().unwrap();
             match guard.as_ref() {
                 Some(cached) => {
                     let ok = cached.is_stale(now);

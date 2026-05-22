@@ -140,14 +140,14 @@ pub fn spawn_telemetry_watchdog(
             if now.saturating_sub(last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
                 || last_node_refresh_ms == 0
             {
-                match app.store.load_all_registered_av_node_ids() {
+                match app.store.lock().unwrap().load_all_registered_av_node_ids() {
                     Ok(node_ids) => {
                         for node_id in node_ids {
                             // Insert new nodes; don't overwrite existing entries
                             // (that would reset their last_seen_ms).
                             node_health.entry(node_id.clone()).or_insert_with(|| {
                                 // Load initial last_seen from persistent store.
-                                let last_seen = app.store
+                                let last_seen = app.store.lock().unwrap()
                                     .get_last_telemetry_timestamp(&node_id)
                                     .unwrap_or(0);
                                 WatchdogNodeEntry {
@@ -186,7 +186,7 @@ pub fn spawn_telemetry_watchdog(
                 // of last_telemetry_ms updated by the fault handler on each report,
                 // then read that map here instead of the store. This avoids all SQLite
                 // contact in the sweep hot path.
-                if let Ok(ts) = app.store.get_last_telemetry_timestamp(&entry.node_id) {
+                if let Ok(ts) = app.store.lock().unwrap().get_last_telemetry_timestamp(&entry.node_id) {
                     if ts > entry.last_seen_ms {
                         // Fresh telemetry received since last sweep — reset warn flag.
                         entry.last_seen_ms = ts;
@@ -209,7 +209,7 @@ pub fn spawn_telemetry_watchdog(
                     let already_timed_out = app.nodes
                         .get(&entry.node_id)
                         .map(|n| {
-                            n.trust_state
+                            n.status
                                 == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string())
                         })
                         .unwrap_or(false);
@@ -229,7 +229,7 @@ pub fn spawn_telemetry_watchdog(
                         // because the watchdog is not responsible for audit entries —
                         // the engine is.
                         if let Some(mut node) = app.nodes.get_mut(&entry.node_id) {
-                            node.trust_state =
+                            node.status =
                                 NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
                         }
 

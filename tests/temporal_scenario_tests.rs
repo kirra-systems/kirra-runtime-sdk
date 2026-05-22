@@ -26,9 +26,8 @@
 // should_route_command is implemented in src/posture_cache.rs.
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-use aegis_runtime_sdk::verifier::{AppState, FleetPosture, NodeTrustState};
+use aegis_runtime_sdk::verifier::{AppState, FleetPosture, NodeTrustState, VerifierOperationMode};
 use aegis_runtime_sdk::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use aegis_runtime_sdk::scenario_runner::{
     PostureAssertion, ScenarioEvent, ScenarioRunner,
@@ -58,34 +57,33 @@ async fn build_av_test_infrastructure() -> (
     use aegis_runtime_sdk::verifier_store::VerifierStore;
 
     let store = VerifierStore::new(":memory:").expect("in-memory store");
-    let (posture_tx, _) = tokio::sync::broadcast::channel(1024);
-    let app = Arc::new(AppState::new(store, posture_tx));
+    let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
 
     // Register AV metadata (in production this comes through HTTP endpoints)
-    let _ = app.store.register_av_subsystem_meta(
+    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
         "lidar_front", "Perception", "LIDAR-001", 0.70, 0,
     );
-    let _ = app.store.register_av_subsystem_meta(
+    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
         "camera_front", "Perception", "CAM-001", 0.70, 0,
     );
-    let _ = app.store.register_av_subsystem_meta(
+    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
         "gps_primary", "Positioning", "GPS-001", 0.70, 0,
     );
-    let _ = app.store.register_av_subsystem_meta(
+    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
         "perception_fusion", "Planning", "FUSION-001", 0.70, 0,
     );
-    let _ = app.store.register_av_subsystem_meta(
+    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
         "trajectory_planner", "Planning", "PLAN-001", 0.70, 0,
     );
 
     // Set up dependency graph edges (mirrors POST /fleet/dependencies)
     // perception_fusion depends on lidar_front and camera_front
-    app.deps.insert(
+    app.dependency_graph.insert(
         "perception_fusion".to_string(),
         vec!["lidar_front".to_string(), "camera_front".to_string()],
     );
     // trajectory_planner depends on perception_fusion
-    app.deps.insert(
+    app.dependency_graph.insert(
         "trajectory_planner".to_string(),
         vec!["perception_fusion".to_string()],
     );
@@ -93,13 +91,18 @@ async fn build_av_test_infrastructure() -> (
     // Initialize all nodes as Trusted in the DashMap
     for node_id in &["lidar_front", "camera_front", "gps_primary",
                      "perception_fusion", "trajectory_planner"] {
-        app.nodes.insert(node_id.to_string(), aegis_runtime_sdk::verifier::NodeEntry {
-            trust_state: NodeTrustState::Trusted,
+        app.nodes.insert(node_id.to_string(), aegis_runtime_sdk::verifier::RegisteredNode {
+            node_id: node_id.to_string(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: 0,
+            last_trust_update_ms: 0,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
         });
     }
 
     let clock = VirtualClock::new();
-    let posture_cache: SharedPostureCache = Arc::new(RwLock::new(Some(
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
         CachedFleetPosture::new(FleetPosture::Nominal),
     )));
 
@@ -248,7 +251,7 @@ async fn test_stale_cache_fails_closed_after_virtual_clock_advance() {
 
     // At this virtual time, is_stale() must return true
     let ts = clock.now_ms();
-    let guard = cache.read().await;
+    let guard = cache.read().unwrap();
     let is_stale = guard.as_ref().map(|c| c.is_stale(ts)).unwrap_or(true);
     assert!(is_stale, "cache must be stale after virtual clock advances past TTL");
 }

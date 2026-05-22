@@ -88,7 +88,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let previous_posture: Option<FleetPosture> = cache
         .read()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| c.propagated_status.clone()));
+        .and_then(|g| g.as_ref().map(|c| c.posture.clone()));
 
     let is_transition = previous_posture
         .as_ref()
@@ -294,7 +294,7 @@ mod posture_engine_tests {
         let guard = cache.read().unwrap();
         assert!(guard.is_some(), "cache must be populated after recalculate");
         let entry = guard.as_ref().unwrap();
-        assert_eq!(entry.propagated_status, FleetPosture::Nominal);
+        assert_eq!(entry.posture, FleetPosture::Nominal);
         assert!(entry.generation > 0);
     }
 }

@@ -375,9 +375,8 @@ mod posture_engine_v2_tests {
     #[test]
     fn test_empty_cache_returns_locked_out_with_empty_reason() {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
 
-        let cache: SharedPostureCache = Arc::new(RwLock::new(None));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
         assert_eq!(posture, FleetPosture::LockedOut);
         assert_eq!(reason, Some(LockoutReason::PostureCacheEmpty));
@@ -386,7 +385,6 @@ mod posture_engine_v2_tests {
     #[test]
     fn test_fresh_nominal_cache_returns_nominal_with_no_reason() {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
         use crate::posture_cache::CachedFleetPosture;
 
         let cached = CachedFleetPosture {
@@ -395,7 +393,7 @@ mod posture_engine_v2_tests {
             ttl_ms: 10_000,
             generation: 1,
         };
-        let cache: SharedPostureCache = Arc::new(RwLock::new(Some(cached)));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
         assert_eq!(posture, FleetPosture::Nominal);
         assert_eq!(reason, None, "fresh cache must not produce a lockout reason");
@@ -404,7 +402,6 @@ mod posture_engine_v2_tests {
     #[test]
     fn test_stale_cache_returns_locked_out_with_stale_reason() {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
         use crate::posture_cache::CachedFleetPosture;
 
         let stale_ts = now_ms_engine().saturating_sub(20_000);
@@ -414,7 +411,7 @@ mod posture_engine_v2_tests {
             ttl_ms: 10_000,
             generation: 5,
         };
-        let cache: SharedPostureCache = Arc::new(RwLock::new(Some(cached)));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
         assert_eq!(posture, FleetPosture::LockedOut);
         assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
@@ -425,7 +422,8 @@ mod posture_engine_v2_tests {
         ttl_ms: u64,
     ) -> (FleetPosture, Option<LockoutReason>) {
         let ts = now_ms_engine();
-        match cache.blocking_read().as_ref() {
+        let guard = cache.read().unwrap();
+        match guard.as_ref() {
             Some(cached) => {
                 let age = ts.saturating_sub(cached.generated_at_ms);
                 if age >= ttl_ms {

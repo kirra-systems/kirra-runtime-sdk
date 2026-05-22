@@ -33,7 +33,7 @@ fn now_ms() -> u64 {
 fn resolve_posture(svc: &ServiceState) -> FleetPosture {
     match svc.posture_cache.read() {
         Ok(guard) => match guard.as_ref() {
-            Some(cached) => cached.propagated_status.clone(),
+            Some(cached) => cached.posture.clone(),
             None => FleetPosture::LockedOut,
         },
         Err(_) => FleetPosture::LockedOut,

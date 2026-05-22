@@ -350,11 +350,6 @@ async fn get_node_posture(
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
     let posture = svc.app.calculate_posture(&node_id);
-    let now = now_ms();
-    let cached = CachedFleetPosture::from_posture(&posture, now);
-    if let Ok(mut guard) = svc.posture_cache.write() {
-        *guard = Some(cached);
-    }
     Json(posture)
 }
 

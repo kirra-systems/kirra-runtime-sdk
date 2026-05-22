@@ -26,8 +26,15 @@
 // This file is the single definition of CachedFleetPosture.
 // SharedPostureCache = Arc<RwLock<Option<CachedFleetPosture>>> (unchanged).
 
-use crate::verifier::{FleetPosture, OperationalCommand};
-use crate::posture_engine::POSTURE_CACHE_TTL_MS;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use crate::verifier::{FleetPosture, AppState};
+use crate::gateway::policy::OperationalCommand;
+
+/// Staleness TTL for the posture cache (milliseconds).
+/// After `generated_at_ms + POSTURE_CACHE_TTL_MS < now`, the cache entry is
+/// considered stale and resolve_posture fails closed.
+pub const POSTURE_CACHE_TTL_MS: u64 = 5_000;
 
 // ---------------------------------------------------------------------------
 // CachedFleetPosture
@@ -113,7 +120,21 @@ impl CachedFleetPosture {
 ///   - `RwLock` — concurrent reads, exclusive writes
 ///   - `Option` — `None` = cold start / cache cleared (fail-closed in middleware)
 ///   - `CachedFleetPosture` — complete atomic snapshot (never partially updated)
-pub type SharedPostureCache = std::sync::Arc<tokio::sync::RwLock<Option<CachedFleetPosture>>>;
+pub type SharedPostureCache = std::sync::Arc<std::sync::RwLock<Option<CachedFleetPosture>>>;
+
+/// Shared service state threaded through all axum handlers.
+pub struct ServiceState {
+    pub app: Arc<AppState>,
+    pub posture_cache: SharedPostureCache,
+}
+
+/// Returns current time as milliseconds since UNIX epoch.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 // ---------------------------------------------------------------------------
 // Command routing gate
