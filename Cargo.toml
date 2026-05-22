@@ -32,6 +32,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 rand = "0.8"
+proptest = "1"
 
 [[bin]]
 name = "ai_robot_demo"
@@ -53,4 +54,3 @@ required-features = ["ros2"]
 [[bin]]
 name = "aegis_verifier_service"
 path = "src/bin/aegis_verifier_service.rs"
-
