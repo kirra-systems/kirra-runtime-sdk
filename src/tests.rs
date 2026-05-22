@@ -183,22 +183,19 @@ fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
 
 // --- HTTP command classification tests ---------------------------------------
 
-use crate::posture_cache::{
-    classify_http_command, should_route_command,
-    CachedFleetPosture, OperationalCommand, CACHE_TTL_MS,
-};
+use crate::gateway::policy::{classify_http_command, OperationalCommand};
+use crate::posture_cache::{should_route_command, CachedFleetPosture, POSTURE_CACHE_TTL_MS};
 
-fn make_cache(status: FleetPosture, age_ms: u64) -> (CachedFleetPosture, u64) {
+fn make_cache(status: FleetPosture, age_ms: u64) -> (Option<CachedFleetPosture>, u64) {
     let updated_at = 100_000u64;
     let now = updated_at + age_ms;
     let cache = CachedFleetPosture {
-        node_id: "test".to_string(),
-        local_status: NodeTrustState::Trusted,
-        propagated_status: status,
-        blocked_by: vec![],
-        updated_at_epoch_ms: updated_at,
+        posture: status,
+        generated_at_ms: updated_at,
+        ttl_ms: POSTURE_CACHE_TTL_MS,
+        generation: 1,
     };
-    (cache, now)
+    (Some(cache), now)
 }
 
 #[test]
@@ -235,10 +232,10 @@ fn test_classify_strips_query_string_before_matching() {
 }
 
 #[test]
-fn test_classify_method_comparison_is_case_insensitive() {
-    assert_eq!(classify_http_command("get",    "/metrics"), OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("post",   "/cmd_vel"), OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("delete", "/x"),       OperationalCommand::SystemMutation);
+fn test_classify_method_comparison_uppercase() {
+    assert_eq!(classify_http_command("GET",    "/metrics"), OperationalCommand::ReadTelemetry);
+    assert_eq!(classify_http_command("POST",   "/cmd_vel"), OperationalCommand::WriteState);
+    assert_eq!(classify_http_command("DELETE", "/x"),       OperationalCommand::SystemMutation);
 }
 
 #[test]
@@ -286,7 +283,7 @@ fn test_routing_locked_out_blocks_all_including_reads() {
 #[test]
 fn test_routing_stale_cache_blocks_all_regardless_of_posture() {
     // Even a Nominal posture entry must be blocked once the TTL expires.
-    let stale_age = CACHE_TTL_MS + 1;
+    let stale_age = POSTURE_CACHE_TTL_MS + 1;
     let (cache, now) = make_cache(FleetPosture::Nominal, stale_age);
     assert!(!should_route_command(&cache, now, OperationalCommand::ReadTelemetry));
     assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
@@ -294,15 +291,15 @@ fn test_routing_stale_cache_blocks_all_regardless_of_posture() {
 }
 
 #[test]
-fn test_routing_exactly_at_ttl_boundary_is_allowed() {
-    // Age == CACHE_TTL_MS is still within window (> not >=).
-    let (cache, now) = make_cache(FleetPosture::Nominal, CACHE_TTL_MS);
-    assert!(should_route_command(&cache, now, OperationalCommand::WriteState));
+fn test_routing_exactly_at_ttl_boundary_is_blocked() {
+    // Age == POSTURE_CACHE_TTL_MS is stale (>= semantics in is_stale).
+    let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS);
+    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
 }
 
 #[test]
 fn test_routing_one_ms_past_ttl_is_blocked() {
-    let (cache, now) = make_cache(FleetPosture::Nominal, CACHE_TTL_MS + 1);
+    let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS + 1);
     assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
 }
 

@@ -206,7 +206,7 @@ mod clock_tests {
 
     #[test]
     fn test_virtual_clock_used_as_shared_clock_trait_object() {
-        let clock: SharedClock = Arc::new(VirtualClock::starting_at(999));
+        let clock: SharedClock = VirtualClock::starting_at(999);
         assert_eq!(clock.now_ms(), 999);
     }
 }

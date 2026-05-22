@@ -352,7 +352,7 @@ proptest! {
             EnforceAction::ClampLinear(clamped) => {
                 prop_assert_eq!(
                     clamped.signum(), v.signum(),
-                    "ClampLinear must preserve direction: v={v}, clamped={clamped}"
+                    "ClampLinear must preserve direction: v={}, clamped={}", v, clamped
                 );
                 prop_assert_eq!(
                     clamped.abs(), contract.max_speed_mps,
