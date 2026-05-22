@@ -6,7 +6,7 @@
 - **Edition**: 2021
 - **Primary binary**: `aegis_verifier_service` (`src/bin/aegis_verifier_service.rs`)
 - **Test suite**: `cargo test` — currently **66 passing, 0 failing**
-- **Branch**: `master` (remote: `justinlooney/singnet`)
+- **Branch**: `master` (remote: `justinlooney/aegis`)
 
 ---
 
