@@ -49,6 +49,12 @@ use aegis_runtime_sdk::posture_engine::POSTURE_CACHE_TTL_MS;
 ///   gps_primary   (independent)
 ///
 /// All nodes start Trusted. The posture cache starts at Nominal.
+/// Returns (app, cache, clock) ready for ScenarioRunner construction.
+async fn build_av_test_infrastructure() -> (
+    Arc<AppState>,
+    SharedPostureCache,
+    Arc<VirtualClock>,
+) {
     use aegis_runtime_sdk::verifier_store::VerifierStore;
 
     let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -109,6 +115,12 @@ async fn test_lidar_fault_degrades_fleet_through_dag() {
     let (app, cache, clock) = build_av_test_infrastructure().await;
 
     ScenarioRunner::with_clock(app, cache, clock)
+        // t=0: LiDAR hardware fault
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(),
+            confidence: 0.0,
+            hw_fault: true,
+        })
         // t=0 assertions: lidar_front Untrusted, fleet Degraded (via DAG)
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
         .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
@@ -125,6 +137,13 @@ async fn test_partial_recovery_does_not_restore_trust() {
     let (app, cache, clock) = build_av_test_infrastructure().await;
 
     let mut runner = ScenarioRunner::with_clock(Arc::clone(&app), Arc::clone(&cache), Arc::clone(&clock))
+        // t=0: fault
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(),
+            confidence: 0.0,
+            hw_fault: true,
+        });
+
     // Send exactly (threshold - 1) healthy reports — should not recover
     for i in 0..(AV_RECOVERY_STREAK_THRESHOLD - 1) {
         runner = runner.at_ms(100 + i as u64 * 100, ScenarioEvent::TelemetryReport {
@@ -137,6 +156,28 @@ async fn test_partial_recovery_does_not_restore_trust() {
     let last_report_t = 100 + (AV_RECOVERY_STREAK_THRESHOLD as u64 - 1) * 100;
 
     runner
+        // Assert still Untrusted after (threshold - 1) healthy reports
+        .assert_at_ms(last_report_t, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
+        .assert_at_ms(last_report_t, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .run()
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: Full recovery restores trust after exactly threshold reports
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_recovery_restores_trust_at_threshold() {
+    let (app, cache, clock) = build_av_test_infrastructure().await;
+
+    let mut runner = ScenarioRunner::with_clock(app, cache, clock)
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(),
+            confidence: 0.0,
+            hw_fault: true,
+        });
+
     // Send exactly threshold healthy reports
     for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
         runner = runner.at_ms(100 + i as u64 * 100, ScenarioEvent::TelemetryReport {
@@ -164,6 +205,12 @@ async fn test_fault_during_recovery_resets_streak() {
     let (app, cache, clock) = build_av_test_infrastructure().await;
 
     ScenarioRunner::with_clock(app, cache, clock)
+        // t=0: initial fault
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(),
+            confidence: 0.0,
+            hw_fault: true,
+        })
         // t=100,200,300: three healthy reports (streak=3, threshold=5)
         .at_ms(100, ScenarioEvent::TelemetryReport {
             node_id: "lidar_front".to_string(), confidence: 0.95, hw_fault: false,
@@ -215,6 +262,13 @@ async fn test_two_independent_sensor_faults_produce_degraded() {
     let (app, cache, clock) = build_av_test_infrastructure().await;
 
     ScenarioRunner::with_clock(app, cache, clock)
+        // Both independent sensors fault simultaneously
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(), confidence: 0.0, hw_fault: true,
+        })
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "gps_primary".to_string(), confidence: 0.3, hw_fault: false,
+        })
         // Two Untrusted nodes — but no DAG cycle — should be Degraded
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("gps_primary".to_string()))
@@ -235,6 +289,12 @@ async fn test_multisensor_scenario_from_assessment() {
     let (app, cache, clock) = build_av_test_infrastructure().await;
 
     ScenarioRunner::with_clock(app, cache, clock)
+        // t=0: LiDAR hardware fault
+        .at_ms(0, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(), confidence: 0.0, hw_fault: true,
+        })
+        .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
+
         // t=3000: GPS confidence drops
         .at_ms(3000, ScenarioEvent::TelemetryReport {
             node_id: "gps_primary".to_string(), confidence: 0.45, hw_fault: false,
@@ -242,6 +302,16 @@ async fn test_multisensor_scenario_from_assessment() {
         .assert_at_ms(3000, PostureAssertion::NodeIsUntrusted("gps_primary".to_string()))
         .assert_at_ms(3000, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
 
+        // t=5000, 5500, 6000: LiDAR sends 3 healthy reports (streak=3, threshold=5)
+        .at_ms(5000, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(), confidence: 0.95, hw_fault: false,
+        })
+        .at_ms(5500, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(), confidence: 0.95, hw_fault: false,
+        })
+        .at_ms(6000, ScenarioEvent::TelemetryReport {
+            node_id: "lidar_front".to_string(), confidence: 0.95, hw_fault: false,
+        })
         // Still Untrusted — 3 < 5 threshold
         .assert_at_ms(6000, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
         .assert_at_ms(6000, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
