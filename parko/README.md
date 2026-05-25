@@ -10,7 +10,7 @@ Parko combines three things that existing runtimes typically handle separately:
 
 - **ML inference** — running ONNX (and eventually other) models against tensor inputs
 - **Real-time control loops** — fixed-frequency tick scheduling, drop-frame detection, jitter measurement, and degraded-mode behavior
-- **Safety governance integration** — designed to delegate command validation to the Aegis safety kernel (integration is roadmap, not present)
+- **Safety governance integration** — pluggable safety governors via the `SafetyGovernor` trait, with a working adapter to the Aegis kinematics contract via the `parko-aegis` crate. Posture-driven contract selection (Nominal → nominal_reference_profile, Degraded → mrc_fallback_profile) is verified end-to-end by integration tests. Linear velocity dimension only; see limitations.
 
 The intended use case is robotics and edge systems where ML perception drives actuator commands and runtime safety matters. The intended hardware targets include Linux servers (today), Jetson edge devices, and eventually edge NPUs (Qualcomm QNN, NXP eIQ, TI TIDL).
 
@@ -33,6 +33,7 @@ The workspace contains three crates:
 - `InferenceLoop` with one-tick-delayed actuator publication, degraded-mode detection, and optional `SafetyGovernor`
 - `ControlLoop` with a clock-driven state machine
 - `SafetyGovernor` trait for pluggable command envelope enforcement
+- 33 unit and integration tests
 
 **`parko-onnx`** — ONNX Runtime backend, using the `ort` crate.
 - One backend implementation: `OrtBackend` (CPU only)
@@ -41,6 +42,7 @@ The workspace contains three crates:
 **`parko-aegis`** — Aegis safety kernel adapter.
 - Implements `SafetyGovernor` via the Aegis kinematics contract
 - Enforces linear velocity bounds; selects nominal or MRC fallback profile by `FleetPosture`
+- 3 integration tests against real Aegis contract profiles. Posture-driven divergence (Nominal clamps to 35.0 m/s, Degraded MRC clamps to 5.0 m/s) is verified by parko-core's test_posture_divergence integration tests.
 
 ## Building
 
@@ -104,7 +106,7 @@ If a `SafetyGovernor` is attached via `InferenceLoop::with_governor()`, it runs 
 
 - Pipelining of inference and command publication is not implemented; `InferenceLoop` is one-tick-delayed publication, not pipelined inference.
 - Thermal monitoring reads `/sys/class/thermal/thermal_zone0/temp` and returns `None` on platforms without that path. Non-Linux platforms have no thermal awareness today.
-- The built-in degraded-mode policy clamps linear velocity to a hardcoded ceiling (1.5 m/s). This is a fallback for callers without a `SafetyGovernor`. Real safety enforcement should use the governor pattern.
+- The built-in degraded-mode policy clamps linear velocity to a hardcoded ceiling (1.5 m/s) when no `SafetyGovernor` is attached. When a governor is attached via `with_governor()`, the built-in clamp is suppressed and the governor has full authority over command modification.
 - The `Mutex<Session>` serialization means parko-onnx is single-inference-at-a-time per backend instance. Multiple models or concurrent inference would require multiple backend instances.
 - ONNX Runtime via `ort 2.0.0-rc.12` has a re-entrant Once-lock deadlock in its error handling path when `ORT_API_VERSION` mismatch occurs. Pinning to the matching runtime version (v1.24.x) avoids triggering it, but the bug exists.
 - parko-aegis bridges only the linear velocity dimension to the Aegis kinematics contract. Angular velocity is not currently enforced. See `crates/parko-aegis/README.md` for details.
