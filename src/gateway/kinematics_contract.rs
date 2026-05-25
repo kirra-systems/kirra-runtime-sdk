@@ -215,7 +215,7 @@ pub fn validate_vehicle_command(
     let implied_accel =
         (cmd.linear_velocity_mps - cmd.current_velocity_mps) / cmd.delta_time_s;
 
-    if implied_accel > 0.0 && implied_accel > contract.max_accel_mps2 {
+    if implied_accel > 0.0 && implied_accel > contract.max_accel_mps2 + 1e-9 {
         v = (cmd.current_velocity_mps + contract.max_accel_mps2 * cmd.delta_time_s)
             .clamp(-contract.max_speed_mps, contract.max_speed_mps);
         v_clamped = true;
@@ -223,7 +223,7 @@ pub fn validate_vehicle_command(
 
     // Priority 4: Implied deceleration ceiling
     // Asymmetric from acceleration: braking limit is typically higher.
-    if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 {
+    if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 + 1e-9 {
         v = (cmd.current_velocity_mps - contract.max_brake_mps2 * cmd.delta_time_s)
             .clamp(-contract.max_speed_mps, contract.max_speed_mps);
         v_clamped = true;
