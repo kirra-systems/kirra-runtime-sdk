@@ -1,0 +1,30 @@
+cmd_vel_interceptor:
+  ros__parameters:
+    kirra_url: "http://localhost:8090"
+    kirra_token: ""              # Set via environment variable KIRRA_ADMIN_TOKEN or launch arg
+    kirra_client_id: "ros2-interceptor-01"
+    wheelbase_m: 0.2             # Hiwonder ROSOrin wheelbase (meters)
+    max_speed_mps: 1.8           # ROSOrin spec max speed (m/s)
+    input_topic: "/cmd_vel"
+    output_topic: "/cmd_vel_safe"
+    enforcement_topic: "/kirra/enforcement_action"
+    posture_topic: "/kirra/fleet_posture"
+    timeout_ms: 50               # Kirra API timeout (ms) -- fail-closed on timeout
+    fallback_on_timeout: "stop"  # "stop" (fail-closed) or "passthrough" (degraded mode)
+
+sensor_monitor:
+  ros__parameters:
+    kirra_url: "http://localhost:8090"
+    kirra_token: ""
+    kirra_client_id: "ros2-sensor-monitor-01"
+    report_interval_ms: 200      # How often to post health reports (ms)
+    lidar_min_hz: 5.0            # Minimum acceptable LiDAR rate (Hz)
+    imu_covariance_threshold: 0.1
+    odometry_stale_ms: 500       # Odometry stale threshold (ms)
+
+posture_subscriber:
+  ros__parameters:
+    kirra_url: "http://localhost:8090"
+    kirra_token: ""
+    kirra_client_id: "ros2-posture-bridge-01"
+    cmd_vel_safe_topic: "/cmd_vel_safe"

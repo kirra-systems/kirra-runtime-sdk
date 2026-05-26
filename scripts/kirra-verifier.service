@@ -1,0 +1,51 @@
+# scripts/kirra-verifier.service
+# systemd unit file for the Kirra Safety Kernel Verifier Service
+#
+# Installed to: /etc/systemd/system/kirra-verifier.service
+# Managed with: systemctl {start|stop|restart|status|enable} kirra-verifier
+
+[Unit]
+Description=Kirra Safety Kernel Verifier Service
+Documentation=https://github.com/justinlooney/kirra-runtime-sdk
+After=network.target
+Wants=network.target
+
+[Service]
+# Run as dedicated system user (created by installer)
+User=kirra
+Group=kirra
+
+# Binary and working directory
+ExecStart=/usr/local/bin/kirra_verifier_service
+WorkingDirectory=/var/lib/kirra
+
+# Environment — loaded from config file written by installer
+EnvironmentFile=/etc/kirra/kirra.env
+
+# Restart policy — restart on failure with backoff
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kirra /var/log/kirra
+
+# Allow binding to low ports if needed (remove if port >= 1024)
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Logging — output goes to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kirra-verifier
+
+# Resource limits — prevents runaway memory use
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
