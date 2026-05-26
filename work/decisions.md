@@ -31,9 +31,14 @@ authority over every command on the hot path. The authority model is:
   (`previous = None`), the nominal rate constraint produces a more conservative
   output than the fallback's looser rate limit. The governor's output is bounded
   by both the speed cap and the single-tick rate budget.
-- **Governor unreachable (timeout / partition):** `ControlLoop` drops posture to
-  Degraded, applies the built-in conservative fallback envelope, and logs a
-  `governor_unreachable` safety event before the next tick.
+- **Governor unreachable (timeout / partition):** Treat as Degraded. Apply the
+  MRC cap locally. Log a `governor_unreachable` safety event. Do NOT treat as
+  LockedOut — unreachability is a recoverable transient fault, not a structural
+  safety failure.
+- **RSS unsafe (sensor gap, safety distance violation):** Treat as Degraded.
+  Apply the MRC cap. Log an RSS violation event. Do NOT treat as LockedOut — an
+  RSS gap violation is recoverable once the sensor stream and clearance are
+  restored.
 
 The synchronous call path is: `planned_cmd → governor → final_cmd`. There is no
 concurrent or asynchronous governor path in the control loop.
@@ -73,6 +78,15 @@ unguarded even if the governor crate is temporarily unavailable.
   proptest (`governor_locked_out_always_returns_zero`, 10 000 cases).
 - `KirraGovernor::evaluate()` must keep LockedOut and Degraded as separate
   match arms that never share a contract instance or code path.
+
+### Note: PARK-003 bug history
+
+PARK-003 (commit `47550ce`) wrote proptest assertions for the governor and found
+that LockedOut and Degraded produced identical outputs. At that time ADL-001 was
+incorrectly updated to accept this as correct behavior ("both postures share one
+contract instance"). This was a documentation error, not a design insight.
+Commits `9943aa9` and `e1ba1a2` corrected the governor and proptest respectively.
+LockedOut is and always was a hard stop. The PARK-003 finding was a bug report.
 
 ---
 
@@ -204,10 +218,10 @@ supervisor reset key; no automatic hysteresis).
 `PostureState` in `parko-core` mirrors this three-variant structure for use in
 governor and control-loop logic.
 
-KirraGovernor authority maps onto this state machine (corrected 2026-05-26:
-original entry incorrectly stated a hard-veto for Degraded/LockedOut; second
-correction 2026-05-26: LockedOut is a hard stop (0.0 m/s), not the MRC fallback
-profile — LockedOut and Degraded must never share a code path):
+KirraGovernor authority maps onto this state machine (twice corrected 2026-05-26:
+first correction removed the incorrect hard-veto description; second correction
+established the definitive model: LockedOut is a hard stop at 0.0 m/s and must
+never share a code path with Degraded):
 - `Nominal`   → KirraGovernor applies nominal reference profile (35.0 m/s
                 ceiling + strict rate-of-change limit).
 - `Degraded`  → KirraGovernor applies MRC fallback profile (5.0 m/s ceiling).
@@ -217,6 +231,10 @@ profile — LockedOut and Degraded must never share a code path):
                 supervisor reset required to exit this state. LockedOut and
                 Degraded are distinct postures with distinct enforcement and
                 must never share a code path or contract instance.
+- **Governor unreachable** → Degraded semantics. MRC cap applied locally.
+  Not LockedOut — recoverable transient.
+- **RSS unsafe** → Degraded semantics. MRC cap applied. Not LockedOut —
+  recoverable once sensor stream and clearance are restored.
 
 IEEE 2846 behavioral safety integration is planned but not yet implemented. When
 implemented (PARK-015), RSS violations must reset the recovery streak to 0 on
