@@ -307,3 +307,95 @@ a new error variant or changing the error path semantics.
   timing control and must never call `std::thread::sleep` or `tokio::time::sleep`.
 - Documentation and prompts must use the correct names: `WallClock` (Clock trait impl),
   `RuntimeClock` (tick-rate driver), `MockClock` (test double).
+
+---
+
+## Crate and Struct Name Audit (2026-05-26)
+
+> Read-only audit of the `parko/` workspace. Source: PARK-007.
+> No files were modified. Commands run verbatim against the live tree.
+
+### Workspace members (`parko/Cargo.toml`)
+
+```
+members = ["crates/parko-core", "crates/parko-onnx", "crates/parko-kirra"]
+```
+
+Three crates:
+
+| Crate name    | Path                          | Role |
+|---------------|-------------------------------|------|
+| `parko-core`  | `crates/parko-core/`          | Core traits, ControlLoop, InferenceLoop, Clock types |
+| `parko-onnx`  | `crates/parko-onnx/`          | CPU ONNX backend (InferenceBackend impl) |
+| `parko-kirra` | `crates/parko-kirra/`         | KirraGovernor — SafetyGovernor impl for parko-core |
+
+### Governor struct
+
+The production governor is **`KirraGovernor`** (already Kirra-named; no rename needed):
+
+- **Defined in:** `parko/crates/parko-kirra/src/lib.rs` — line 42 (`pub struct KirraGovernor`)
+- **SafetyGovernor impl:** same file, line 96 (`impl SafetyGovernor for KirraGovernor`)
+- **Constructors:** `KirraGovernor::new()`, `KirraGovernor::nominal()`, `KirraGovernor::mrc_fallback()`
+- **Exported constant:** `MRC_VELOCITY_CEILING_MPS: f64 = 5.0` (pub const in `parko-kirra/src/lib.rs`)
+- **No `AegisGovernor` anywhere in the workspace.**
+
+### `SafetyGovernor` trait
+
+- **Defined in:** `parko/crates/parko-core/src/safety.rs` line 43
+  ```rust
+  pub trait SafetyGovernor: Send + Sync { ... }
+  ```
+- **Re-exported from:** `parko-core/src/lib.rs` line 37
+  ```rust
+  pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
+  ```
+- **Production impl:** `KirraGovernor` in `parko-kirra/src/lib.rs`
+- **Test doubles (not production):**
+  - `AllowAllGovernor`, `ClampToOneGovernor` — `parko-core/src/safety.rs`
+  - `ClampToTwoGovernor`, `ZeroGovernor`, `RecordingGovernor` — `parko-core/src/scheduler.rs`
+
+### Clock types (PARK-005 additions)
+
+| Type | File | Purpose |
+|------|------|---------|
+| `Clock` (trait) | `parko-core/src/clock.rs:8` | `fn now_ms(&self) -> u64; Send + Sync` |
+| `WallClock` | `parko-core/src/clock.rs:13` | Production impl — `SystemTime` / UNIX epoch |
+| `MockClock` | `parko-core/src/clock.rs:30` | Test double — `Arc<AtomicU64>` + `advance(ms)`, `Clone` |
+| `RuntimeClock` | `parko-core/src/runtime.rs:39` | Sleep-based tick-rate driver — **not** a `Clock` trait impl |
+
+`WallClock` and `MockClock` are re-exported from `parko-core/src/lib.rs`:
+```rust
+pub use clock::{Clock, MockClock, WallClock};
+```
+`RuntimeClock` is also re-exported but from `runtime`:
+```rust
+pub use runtime::{RuntimeClock, RuntimeState, TickStatus};
+```
+
+### `ControlLoop::tick()` actual signature
+
+```rust
+// parko-core/src/control_loop.rs line 108
+pub async fn tick(&mut self) -> Result<Option<PostureSnapshot>, String>
+```
+
+- `Ok(None)` — tick interval not yet elapsed
+- `Ok(Some(snapshot))` — interval elapsed, inference ran
+- `Err(msg)` — sensor stream exhausted or inference/governor error
+
+### Files referencing `KirraGovernor` by name
+
+The governor struct is already named `KirraGovernor`. For reference, every file
+that would require editing if `KirraGovernor` were ever renamed:
+
+| File | Nature of reference |
+|------|---------------------|
+| `parko-kirra/src/lib.rs` | Struct definition + all constructors + SafetyGovernor impl |
+| `parko-kirra/tests/test_kirra_governor.rs` | Integration tests (instantiates governor) |
+| `parko-core/tests/test_posture_divergence.rs` | Uses `KirraGovernor::new()` via `parko_kirra::KirraGovernor` |
+| `parko-core/tests/posture_divergence_proptest.rs` | Uses `KirraGovernor` + `MRC_VELOCITY_CEILING_MPS` |
+| `parko-core/src/scheduler.rs` | Doc comment reference only (line 39) |
+| `parko-core/src/control_loop.rs` | Doc comment reference only (line 91) |
+
+No rename is required. The struct, crate, and all call sites are already
+using Kirra naming (`KirraGovernor`, `parko-kirra`).
