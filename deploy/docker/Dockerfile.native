@@ -10,13 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/aegis
+WORKDIR /opt/kirra
 
-COPY --from=builder /build/target/release/aegis-runtime-sdk /opt/aegis/
-COPY --from=builder /build/config /opt/aegis/config
+COPY --from=builder /build/target/release/kirra_verifier_service /opt/kirra/
+COPY --from=builder /build/config /opt/kirra/config
 
-ENV AEGIS_SUPERVISOR_RESET_KEY=""
+ENV KIRRA_SUPERVISOR_RESET_KEY=""
 
 EXPOSE 5502 5503 5504 8080
 
-CMD ["/opt/aegis/aegis-runtime-sdk"]
+CMD ["/opt/kirra/kirra_verifier_service"]

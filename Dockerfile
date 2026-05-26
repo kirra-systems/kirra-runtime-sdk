@@ -6,29 +6,29 @@ RUN apk add --no-cache musl-dev gcc
 WORKDIR /build
 COPY . .
 
-RUN cargo build --release --bin aegis_verifier_service
+RUN cargo build --release --bin kirra_verifier_service
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM alpine:3
 
 RUN apk add --no-cache curl && \
-    addgroup -S -g 1000 aegis && \
-    adduser  -S -u 1000 -G aegis -h /var/lib/aegis -s /sbin/nologin aegis && \
-    mkdir -p /var/lib/aegis && \
-    chown aegis:aegis /var/lib/aegis
+    addgroup -S -g 1000 kirra && \
+    adduser  -S -u 1000 -G kirra -h /var/lib/kirra -s /sbin/nologin kirra && \
+    mkdir -p /var/lib/kirra && \
+    chown kirra:kirra /var/lib/kirra
 
-COPY --from=builder /build/target/release/aegis_verifier_service /usr/local/bin/aegis_verifier_service
+COPY --from=builder /build/target/release/kirra_verifier_service /usr/local/bin/kirra_verifier_service
 
-USER aegis
-WORKDIR /var/lib/aegis
+USER kirra
+WORKDIR /var/lib/kirra
 
-ENV AEGIS_VERIFIER_ADDR=0.0.0.0:8090
-ENV AEGIS_DB_PATH=/var/lib/aegis/aegis.db
+ENV KIRRA_VERIFIER_ADDR=0.0.0.0:8090
+ENV KIRRA_DB_PATH=/var/lib/kirra/kirra.db
 
-VOLUME ["/var/lib/aegis"]
+VOLUME ["/var/lib/kirra"]
 EXPOSE 8090
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -fsSL http://localhost:8090/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/aegis_verifier_service"]
+ENTRYPOINT ["/usr/local/bin/kirra_verifier_service"]
