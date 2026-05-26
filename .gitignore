@@ -1,3 +1,7 @@
 target/
 Cargo.lock
 data/outputs/
+node_modules/
+dashboard/dist/
+__pycache__/
+*.pyc
