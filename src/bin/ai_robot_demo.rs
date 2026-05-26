@@ -1,9 +1,9 @@
 // src/bin/ai_robot_demo.rs
-// Demonstrates the Aegis AI robot safety pipeline with CDR-framed DDS output.
+// Demonstrates the Kirra AI robot safety pipeline with CDR-framed DDS output.
 
-use aegis_runtime_sdk::kinematics_contract::KinematicContract;
-use aegis_runtime_sdk::robotics_alignment::AlignmentBridge;
-use aegis_runtime_sdk::dds_bridge::DdsPublisherBridge;
+use kirra_runtime_sdk::kinematics_contract::KinematicContract;
+use kirra_runtime_sdk::robotics_alignment::AlignmentBridge;
+use kirra_runtime_sdk::dds_bridge::DdsPublisherBridge;
 
 fn main() {
     let contract = KinematicContract {

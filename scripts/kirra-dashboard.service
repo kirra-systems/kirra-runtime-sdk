@@ -1,0 +1,24 @@
+[Unit]
+Description=Kirra Safety Kernel Web Dashboard
+Documentation=https://github.com/justinlooney/kirra-runtime-sdk
+After=network.target kirra-verifier.service
+Wants=kirra-verifier.service
+
+[Service]
+User=kirra
+Group=kirra
+ExecStart=/usr/bin/python3 -m http.server 8091 --directory /usr/local/share/kirra/dashboard
+WorkingDirectory=/usr/local/share/kirra/dashboard
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/usr/local/share/kirra/dashboard
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kirra-dashboard
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 // src/gateway/policy_layer.rs
 //
-// Actuator safety envelope middleware for Aegis AV flight envelope protection.
+// Actuator safety envelope middleware for Kirra AV flight envelope protection.
 
 use axum::{
     body::Body,

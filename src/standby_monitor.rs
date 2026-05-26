@@ -1,10 +1,10 @@
 // src/standby_monitor.rs
 //
-// PassiveStandby promotion path for Aegis HA deployments.
+// PassiveStandby promotion path for Kirra HA deployments.
 //
 // ARCHITECTURE
 // ============
-// Two Aegis instances share the same SQLite database (or the standby
+// Two Kirra instances share the same SQLite database (or the standby
 // replicates via WAL shipping). The primary is Active; the standby is
 // PassiveStandby. If the primary crashes or loses its DB connection,
 // the standby detects the stale heartbeat and promotes itself.
@@ -45,9 +45,9 @@
 //   This is the only write to app.mode_active outside of startup.
 //
 // ENV VARS
-//   AEGIS_INSTANCE_ID        — unique identifier for this instance (default: hostname)
-//   AEGIS_HEARTBEAT_INTERVAL — override HEARTBEAT_INTERVAL_MS (ms, default: 2000)
-//   AEGIS_PROMOTION_TIMEOUT  — override PROMOTION_TIMEOUT_MS (ms, default: 10000)
+//   KIRRA_INSTANCE_ID        — unique identifier for this instance (default: hostname)
+//   KIRRA_HEARTBEAT_INTERVAL — override HEARTBEAT_INTERVAL_MS (ms, default: 2000)
+//   KIRRA_PROMOTION_TIMEOUT  — override PROMOTION_TIMEOUT_MS (ms, default: 10000)
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -87,11 +87,11 @@ const PROMOTION_RECORD_KEY: &str = "last_promotion_instance_id";
 // Instance identity
 // ---------------------------------------------------------------------------
 
-/// Returns a unique identifier for this Aegis instance.
-/// Reads AEGIS_INSTANCE_ID env var; falls back to hostname; falls back to
+/// Returns a unique identifier for this Kirra instance.
+/// Reads KIRRA_INSTANCE_ID env var; falls back to hostname; falls back to
 /// a process-lifetime stable ID derived from startup time.
 pub fn instance_id() -> String {
-    if let Ok(id) = std::env::var("AEGIS_INSTANCE_ID") {
+    if let Ok(id) = std::env::var("KIRRA_INSTANCE_ID") {
         if !id.trim().is_empty() {
             return id.trim().to_string();
         }
@@ -103,7 +103,7 @@ pub fn instance_id() -> String {
     }
     static FALLBACK_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FALLBACK_ID.get_or_init(|| {
-        format!("aegis-{}", now_ms())
+        format!("kirra-{}", now_ms())
     }).clone()
 }
 
@@ -129,7 +129,7 @@ pub fn instance_id() -> String {
 pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
     let id = instance_id();
     tokio::spawn(async move {
-        let interval_ms = std::env::var("AEGIS_HEARTBEAT_INTERVAL")
+        let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(HEARTBEAT_INTERVAL_MS);
@@ -201,29 +201,29 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
 /// gone stale. This prevents both instances from starting as Active if SQLite
 /// is freshly initialized.
 ///
-/// Exception: if AEGIS_FORCE_PROMOTE=1 is set, promotes immediately regardless
+/// Exception: if KIRRA_FORCE_PROMOTE=1 is set, promotes immediately regardless
 /// of heartbeat state. Use for manual failover or testing.
 pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
     let id = instance_id();
     tokio::spawn(async move {
-        let poll_ms = std::env::var("AEGIS_PROMOTION_POLL")
+        let poll_ms = std::env::var("KIRRA_PROMOTION_POLL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(PROMOTION_POLL_MS);
 
-        let timeout_ms = std::env::var("AEGIS_PROMOTION_TIMEOUT")
+        let timeout_ms = std::env::var("KIRRA_PROMOTION_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(PROMOTION_TIMEOUT_MS);
 
-        let force_promote = std::env::var("AEGIS_FORCE_PROMOTE")
+        let force_promote = std::env::var("KIRRA_FORCE_PROMOTE")
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
         if force_promote {
             tracing::warn!(
                 instance_id = %id,
-                "AEGIS_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
+                "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
             );
             perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await;
             return;

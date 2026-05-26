@@ -1,6 +1,6 @@
 // src/output.rs
 
-use crate::aegis_core::CausalFlightRecorder;
+use crate::kirra_core::CausalFlightRecorder;
 use crate::TrustMode;
 use std::fs::File;
 use std::io::Write;
@@ -34,14 +34,14 @@ pub fn save_summary_json(summary: &ExecutiveSummary, base_dir: &str, filename: &
 }
 
 pub fn save_brute_force_counter(count: u32, base_dir: &str) -> std::io::Result<()> {
-    let target_path = Path::new(base_dir).join("aegis_brute_force.dat");
+    let target_path = Path::new(base_dir).join("kirra_brute_force.dat");
     if let Some(parent) = target_path.parent() { std::fs::create_dir_all(parent)?; }
     let mut file = File::create(target_path)?;
     file.write_all(count.to_string().as_bytes())
 }
 
 pub fn load_brute_force_counter(base_dir: &str) -> u32 {
-    let target_path = Path::new(base_dir).join("aegis_brute_force.dat");
+    let target_path = Path::new(base_dir).join("kirra_brute_force.dat");
     if let Ok(mut file) = File::open(target_path) {
         let mut contents = String::new();
         if std::io::Read::read_to_string(&mut file, &mut contents).is_ok() {

@@ -1,6 +1,6 @@
 # .github/workflows/release.yml
 #
-# Automated release builds for Aegis Safety Kernel.
+# Automated release builds for Kirra Safety Kernel.
 # Triggers on git tag push matching v* (e.g. v1.0.0, v1.2.3-rc1).
 #
 # Usage:
@@ -8,10 +8,11 @@
 #   git push origin v1.0.0
 #
 # This workflow:
-#   1. Builds binaries for x86_64, aarch64, and armv7 (Linux, musl static)
-#   2. Packages each as a .tar.gz with install.sh and INSTALL.md
-#   3. Generates SHA256 checksums
-#   4. Creates a GitHub Release with all artifacts attached
+#   1. Builds the React dashboard (once, shared across all platform builds)
+#   2. Builds binaries for x86_64, aarch64, and armv7 (Linux, musl static)
+#   3. Packages each as a .tar.gz with dashboard, install.sh and INSTALL.md
+#   4. Generates SHA256 checksums
+#   5. Creates a GitHub Release with all artifacts attached
 
 name: Release
 
@@ -24,8 +25,31 @@ permissions:
   contents: write  # Required to create GitHub releases
 
 jobs:
+  build-dashboard:
+    name: Build dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build dashboard
+        run: cd dashboard && npm install && npm run build
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kirra-dashboard-dist
+          path: dashboard/dist/
+          retention-days: 1
+
   build:
     name: Build ${{ matrix.target_name }}
+    needs: build-dashboard
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -55,45 +79,55 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build aegis_verifier_service
+      - name: Build kirra_verifier_service
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin aegis_verifier_service
+            cross build --release --target ${{ matrix.target }} --bin kirra_verifier_service
           else
             # x86_64 musl needs musl-tools
             sudo apt-get install -y musl-tools
-            cargo build --release --target ${{ matrix.target }} --bin aegis_verifier_service
+            cargo build --release --target ${{ matrix.target }} --bin kirra_verifier_service
           fi
 
-      - name: Build aegis_carla_client
+      - name: Build kirra_carla_client
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin aegis_carla_client
+            cross build --release --target ${{ matrix.target }} --bin kirra_carla_client
           else
-            cargo build --release --target ${{ matrix.target }} --bin aegis_carla_client
+            cargo build --release --target ${{ matrix.target }} --bin kirra_carla_client
           fi
+
+      - name: Download dashboard
+        uses: actions/download-artifact@v4
+        with:
+          name: kirra-dashboard-dist
+          path: dashboard-dist/
 
       - name: Package release
         run: |
           VERSION="${{ github.ref_name }}"
           TARGET_NAME="${{ matrix.target_name }}"
           TARGET="${{ matrix.target }}"
-          ARCHIVE_NAME="aegis-${VERSION}-${TARGET_NAME}.tar.gz"
+          ARCHIVE_NAME="kirra-${VERSION}-${TARGET_NAME}.tar.gz"
 
           # Create staging layout
-          mkdir -p staging/aegis staging/systemd
+          mkdir -p staging/kirra staging/systemd staging/dashboard
 
           # Binaries
-          cp "target/${TARGET}/release/aegis_verifier_service" staging/aegis/
-          cp "target/${TARGET}/release/aegis_carla_client"     staging/aegis/
-          chmod 755 staging/aegis/*
+          cp "target/${TARGET}/release/kirra_verifier_service" staging/kirra/
+          cp "target/${TARGET}/release/kirra_carla_client"     staging/kirra/
+          chmod 755 staging/kirra/*
+
+          # Dashboard
+          cp -r dashboard-dist/. staging/dashboard/
 
           # Supporting files
           cp install.sh     staging/
           cp INSTALL.md     staging/
           cp README.md      staging/ 2>/dev/null || true
           cp LICENSE        staging/ 2>/dev/null || true
-          cp scripts/aegis-verifier.service staging/systemd/
+          cp scripts/kirra-verifier.service   staging/systemd/
+          cp scripts/kirra-dashboard.service  staging/systemd/
           echo "${VERSION}" > staging/VERSION
 
           # Create archive
@@ -103,8 +137,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aegis-${{ matrix.target_name }}
-          path: aegis-*.tar.gz
+          name: kirra-${{ matrix.target_name }}
+          path: kirra-*.tar.gz
           retention-days: 1
 
   release:
@@ -143,7 +177,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Aegis ${{ github.ref_name }}
+          name: Kirra ${{ github.ref_name }}
           body_path: release_notes.md
           files: |
             dist/*.tar.gz

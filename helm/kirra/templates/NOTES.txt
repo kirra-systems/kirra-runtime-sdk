@@ -1,0 +1,27 @@
+Kirra Safety Kernel deployed successfully.
+
+Verifier API:
+{{- if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get svc {{ include "kirra.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")
+  export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "http://$NODE_IP:$NODE_PORT"
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  kubectl get svc {{ include "kirra.fullname" . }} -n {{ .Release.Namespace }} --watch
+{{- else }}
+  kubectl port-forward svc/{{ include "kirra.fullname" . }} 8090:8090 -n {{ .Release.Namespace }}
+  curl http://localhost:8090/health
+{{- end }}
+
+Fleet posture:
+  curl -H "Authorization: Bearer $KIRRA_ADMIN_TOKEN" http://localhost:8090/fleet/posture
+
+{{- if .Values.dashboard.enabled }}
+
+Dashboard:
+  kubectl port-forward svc/{{ include "kirra.fullname" . }} 8091:8091 -n {{ .Release.Namespace }}
+  Open: http://localhost:8091
+{{- end }}
+
+Admin token is stored in secret: {{ include "kirra.secretName" . }}
+  kubectl get secret {{ include "kirra.secretName" . }} -n {{ .Release.Namespace }} -o jsonpath="{.data.admin-token}" | base64 -d

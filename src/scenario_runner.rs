@@ -50,7 +50,7 @@
 
 use std::sync::Arc;
 use crate::verifier::{AppState, FleetPosture, NodeTrustState};
-use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
+use crate::posture_cache::SharedPostureCache;
 use crate::posture_engine::recalculate_and_broadcast;
 use crate::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
 use crate::clock::{Clock, VirtualClock};
@@ -228,7 +228,7 @@ impl ScenarioRunner {
         self.run_inner(false).await
     }
 
-    async fn run_inner(mut self, panic_on_failure: bool) -> Vec<AssertionResult> {
+    async fn run_inner(self, panic_on_failure: bool) -> Vec<AssertionResult> {
         // Collect all unique timestamps from events and assertions.
         let mut milestones: Vec<u64> = self.events.iter().map(|e| e.0)
             .chain(self.assertions.iter().map(|a| a.0))
@@ -347,11 +347,6 @@ impl ScenarioRunner {
                     }
 
                     ScenarioEvent::AdvanceClock { delta_ms } => {
-                        // Advance the virtual clock beyond the current milestone.
-                        // This is separate from the milestone advance above — it allows
-                        // multiple clock advances within a single milestone batch,
-                        // e.g. simulating time passing between events at the same
-                        // nominal timestamp.
                         self.clock.advance_ms(delta_ms);
                     }
 
@@ -361,13 +356,6 @@ impl ScenarioRunner {
                 }
             }
 
-            // ------------------------------------------------------------------
-            // If any state mutation occurred, recalculate_and_broadcast now.
-            //
-            // This is synchronous — it completes before assertions are evaluated.
-            // No yield_now(), no scheduling races. The cache reflects the post-
-            // mutation DAG state when assertions run.
-            // ------------------------------------------------------------------
             if needs_recalc {
                 recalculate_and_broadcast(&self.app, &self.posture_cache);
             }
@@ -549,10 +537,6 @@ mod scenario_runner_tests {
     #[test]
     fn test_hysteresis_window_uses_virtual_time() {
         use crate::recovery_hysteresis::AV_RECOVERY_WINDOW_MS;
-        // Streak start at virtual t=0, window is AV_RECOVERY_WINDOW_MS.
-        // Advancing the clock past the window makes the streak expire.
-        // This is tested here as a pure arithmetic check; the full integration
-        // test uses ScenarioRunner with a real store.
         let streak_start: u64 = 0;
         let clock = VirtualClock::new();
 
@@ -588,20 +572,15 @@ mod scenario_runner_tests {
 
     #[test]
     fn test_advance_clock_event_is_cumulative() {
-        // Verify that AdvanceClock advances relative to current virtual time.
         let clock = VirtualClock::new();
-        clock.set_ms(1000); // Start at 1000
-
-        // Simulate two AdvanceClock events
+        clock.set_ms(1000);
         clock.advance_ms(500);
         clock.advance_ms(300);
-
         assert_eq!(clock.now_ms(), 1800);
     }
 
     #[test]
     fn test_milestone_deduplication_prevents_duplicate_processing() {
-        // If two events are at the same timestamp, the milestone appears once.
         let mut milestones = vec![100u64, 200, 100, 300, 200];
         milestones.sort_unstable();
         milestones.dedup();
@@ -610,23 +589,10 @@ mod scenario_runner_tests {
 
     // -----------------------------------------------------------------------
     // Integration: full scenario with in-memory state
-    // (requires AppState construction — see tests/temporal_scenario_tests.rs
-    //  for the full multi-sensor integration suite)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_runner_evaluates_assertions_synchronously_after_events() {
-        // Verify that assertions see the state AFTER events at the same
-        // timestamp have been processed and recalculate_and_broadcast has run.
-        //
-        // This tests the fundamental correctness property of the harness:
-        // no yield_now() race, deterministic ordering.
-        //
-        // Full AppState construction is stubbed here; see integration tests
-        // for the complete scenario with real nodes and store.
-
-        // At minimum, verify that the runner type compiles and the builder
-        // pattern is correct.
         let _ = std::mem::size_of::<ScenarioRunner>();
         let _ = std::mem::size_of::<ScenarioEvent>();
         let _ = std::mem::size_of::<PostureAssertion>();

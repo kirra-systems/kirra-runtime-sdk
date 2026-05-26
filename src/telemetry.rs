@@ -28,7 +28,7 @@ impl EnterpriseTelemetryGateway {
     #[inline]
     pub fn generate_correlation_id(&self, tx_id: u16) -> String {
         let seq = CORRELATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        format!("AEGIS-NODE-{}-{:04X}-SEQ-{}", self.node_identifier, tx_id, seq)
+        format!("KIRRA-NODE-{}-{:04X}-SEQ-{}", self.node_identifier, tx_id, seq)
     }
 
     pub fn emit_structured_event(&self, severity: &str, tx_id: u16, offset: u16, raw: f64, sanitized: f64, score: u32, mode: &str, narrative: &str) -> String {

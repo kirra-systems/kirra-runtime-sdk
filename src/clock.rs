@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `VirtualClock`.
 ///
 /// All timestamps are milliseconds since the UNIX epoch (u64), consistent
-/// with the rest of the Aegis codebase.
+/// with the rest of the Kirra codebase.
 pub trait Clock: Send + Sync {
     fn now_ms(&self) -> u64;
 }
@@ -206,7 +206,7 @@ mod clock_tests {
 
     #[test]
     fn test_virtual_clock_used_as_shared_clock_trait_object() {
-        let clock: SharedClock = Arc::new(VirtualClock::starting_at(999));
+        let clock: SharedClock = VirtualClock::starting_at(999);
         assert_eq!(clock.now_ms(), 999);
     }
 }

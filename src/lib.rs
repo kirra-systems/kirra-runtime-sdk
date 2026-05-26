@@ -1,6 +1,6 @@
 // src/lib.rs
 
-pub mod aegis_core;
+pub mod kirra_core;
 pub mod modbus_adapter;
 pub mod config;
 pub mod kinematics_contract;
@@ -33,6 +33,8 @@ pub mod audit_chain;
 pub mod federation;
 pub mod federation_reconciliation;
 pub mod protocol_adapter;
+pub mod adapters;
+pub mod fabric;
 pub mod standby_monitor;
 pub mod kinematics_sim;
 

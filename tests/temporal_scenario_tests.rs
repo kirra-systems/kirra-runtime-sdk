@@ -27,14 +27,14 @@
 
 use std::sync::Arc;
 
-use aegis_runtime_sdk::verifier::{AppState, FleetPosture, NodeTrustState, VerifierOperationMode};
-use aegis_runtime_sdk::posture_cache::{CachedFleetPosture, SharedPostureCache};
-use aegis_runtime_sdk::scenario_runner::{
+use kirra_runtime_sdk::verifier::{AppState, FleetPosture, NodeTrustState, VerifierOperationMode};
+use kirra_runtime_sdk::posture_cache::{CachedFleetPosture, SharedPostureCache};
+use kirra_runtime_sdk::scenario_runner::{
     PostureAssertion, ScenarioEvent, ScenarioRunner,
 };
-use aegis_runtime_sdk::clock::VirtualClock;
-use aegis_runtime_sdk::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
-use aegis_runtime_sdk::posture_engine::POSTURE_CACHE_TTL_MS;
+use kirra_runtime_sdk::clock::{Clock, VirtualClock};
+use kirra_runtime_sdk::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
+use kirra_runtime_sdk::posture_engine::POSTURE_CACHE_TTL_MS;
 
 // ---------------------------------------------------------------------------
 // Test infrastructure helpers
@@ -54,7 +54,7 @@ async fn build_av_test_infrastructure() -> (
     SharedPostureCache,
     Arc<VirtualClock>,
 ) {
-    use aegis_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_runtime_sdk::verifier_store::VerifierStore;
 
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -91,7 +91,7 @@ async fn build_av_test_infrastructure() -> (
     // Initialize all nodes as Trusted in the DashMap
     for node_id in &["lidar_front", "camera_front", "gps_primary",
                      "perception_fusion", "trajectory_planner"] {
-        app.nodes.insert(node_id.to_string(), aegis_runtime_sdk::verifier::RegisteredNode {
+        app.nodes.insert(node_id.to_string(), kirra_runtime_sdk::verifier::RegisteredNode {
             node_id: node_id.to_string(),
             status: NodeTrustState::Trusted,
             registered_at_ms: 0,
@@ -124,9 +124,9 @@ async fn test_lidar_fault_degrades_fleet_through_dag() {
             confidence: 0.0,
             hw_fault: true,
         })
-        // t=0 assertions: lidar_front Untrusted, fleet Degraded (via DAG)
+        // t=0 assertions: lidar_front Untrusted, fleet LockedOut (via DAG — Untrusted propagates LockedOut)
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
-        .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
 }
@@ -161,7 +161,7 @@ async fn test_partial_recovery_does_not_restore_trust() {
     runner
         // Assert still Untrusted after (threshold - 1) healthy reports
         .assert_at_ms(last_report_t, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
-        .assert_at_ms(last_report_t, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(last_report_t, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
 }
@@ -230,7 +230,7 @@ async fn test_fault_during_recovery_resets_streak() {
         })
         // Assert still Untrusted (streak reset means needs full 5 again)
         .assert_at_ms(350, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
-        .assert_at_ms(350, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(350, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
 }
@@ -241,12 +241,18 @@ async fn test_fault_during_recovery_resets_streak() {
 
 #[tokio::test]
 async fn test_stale_cache_fails_closed_after_virtual_clock_advance() {
-    let (app, cache, clock) = build_av_test_infrastructure().await;
+    let (_app, cache, clock) = build_av_test_infrastructure().await;
 
-    // Populate the cache with a fresh Nominal entry
-    aegis_runtime_sdk::posture_engine::recalculate_and_broadcast(&app, &cache);
+    // Populate the cache with an entry generated at virtual t=0
+    let entry_at_t0 = CachedFleetPosture {
+        posture: FleetPosture::Nominal,
+        generated_at_ms: 0,
+        ttl_ms: POSTURE_CACHE_TTL_MS,
+        generation: 1,
+    };
+    *cache.write().unwrap() = Some(entry_at_t0);
 
-    // Advance virtual clock past TTL — the cache entry should now be stale
+    // Advance virtual clock past TTL
     clock.advance_ms(POSTURE_CACHE_TTL_MS + 1);
 
     // At this virtual time, is_stale() must return true
@@ -272,10 +278,10 @@ async fn test_two_independent_sensor_faults_produce_degraded() {
         .at_ms(0, ScenarioEvent::TelemetryReport {
             node_id: "gps_primary".to_string(), confidence: 0.3, hw_fault: false,
         })
-        // Two Untrusted nodes — but no DAG cycle — should be Degraded
+        // Two Untrusted nodes — Untrusted propagates LockedOut in the DAG
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
         .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("gps_primary".to_string()))
-        .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
 }
@@ -303,7 +309,7 @@ async fn test_multisensor_scenario_from_assessment() {
             node_id: "gps_primary".to_string(), confidence: 0.45, hw_fault: false,
         })
         .assert_at_ms(3000, PostureAssertion::NodeIsUntrusted("gps_primary".to_string()))
-        .assert_at_ms(3000, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(3000, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
 
         // t=5000, 5500, 6000: LiDAR sends 3 healthy reports (streak=3, threshold=5)
         .at_ms(5000, ScenarioEvent::TelemetryReport {
@@ -315,19 +321,19 @@ async fn test_multisensor_scenario_from_assessment() {
         .at_ms(6000, ScenarioEvent::TelemetryReport {
             node_id: "lidar_front".to_string(), confidence: 0.95, hw_fault: false,
         })
-        // Still Untrusted — 3 < 5 threshold
+        // Still Untrusted — 3 < 5 threshold, fleet still LockedOut
         .assert_at_ms(6000, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
-        .assert_at_ms(6000, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(6000, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
 
         // t=8000: LiDAR silent again — simulated via MarkUntrusted (watchdog fires)
         .at_ms(8000, ScenarioEvent::MarkUntrusted {
             node_id: "lidar_front".to_string(),
             reason: "TELEMETRY_TIMEOUT".to_string(),
         })
-        // Streak reset, both sensors Untrusted, fleet remains Degraded
+        // Streak reset, both sensors Untrusted, fleet LockedOut
         .assert_at_ms(8000, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
         .assert_at_ms(8000, PostureAssertion::NodeIsUntrusted("gps_primary".to_string()))
-        .assert_at_ms(8000, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
+        .assert_at_ms(8000, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
 }

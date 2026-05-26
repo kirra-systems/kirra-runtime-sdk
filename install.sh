@@ -227,12 +227,10 @@ if [ -f "${INSTALL_DIR}/${BINARY_NAME}" ] && [ "${FORCE_REINSTALL}" = false ]; t
     exit 0
 fi
 
-# Required tools
-for tool in curl sha256sum; do
-    if ! command -v "${tool}" &>/dev/null; then
-        fatal "${tool} is required but not installed. Run: sudo apt-get install -y curl coreutils"
-    fi
-done
+# Required tools (sha256sum always needed; curl only if we have to download)
+if ! command -v sha256sum &>/dev/null; then
+    fatal "sha256sum is required but not installed. Run: sudo apt-get install -y coreutils"
+fi
 success "Required tools available"
 
 # ---------------------------------------------------------------------------
@@ -250,6 +248,10 @@ if [ -f "${BUNDLED_BINARY}" ]; then
     BINARY_PATH="${BUNDLED_BINARY}"
 else
     info "Downloading from GitHub releases..."
+
+    if ! command -v curl &>/dev/null; then
+        fatal "curl is required to download Aegis. Run: sudo apt-get install -y curl"
+    fi
 
     # Get latest release URL
     RELEASE_JSON=$(curl -fsSL "${GITHUB_API}" 2>/dev/null) || \
@@ -315,7 +317,11 @@ else
     fi
 fi
 
-# Install binary
+# Install binary — stop the service first if it's running to avoid "text file busy"
+if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    info "Stopping running service before updating binary..."
+    systemctl stop "${SERVICE_NAME}"
+fi
 chmod 755 "${BINARY_PATH}"
 cp "${BINARY_PATH}" "${INSTALL_DIR}/${BINARY_NAME}"
 success "Binary installed to ${INSTALL_DIR}/${BINARY_NAME}"
@@ -479,7 +485,7 @@ DEFAULT_MODE="active"
 if [ "${NON_INTERACTIVE}" = true ]; then
     VERIFIER_MODE="${AEGIS_VERIFIER_MODE:-${DEFAULT_MODE}}"
 else
-    echo -n "  Mode [${DEFAULT_MODE}]: "
+    echo -n "  Mode - active or passive_standby [${DEFAULT_MODE}]: "
     read -r VERIFIER_MODE
     VERIFIER_MODE="${VERIFIER_MODE:-${DEFAULT_MODE}}"
 fi
@@ -517,6 +523,10 @@ cat > "${ENV_FILE}" << EOF
 # Keep this secret. Rotate by editing this file and restarting the service.
 # API usage: Authorization: Bearer <value>
 AEGIS_ADMIN_TOKEN=${ADMIN_TOKEN}
+
+# Log signing key — Ed25519 private key (base64). Leave blank to disable signing.
+# Generate: openssl genpkey -algorithm ed25519 2>/dev/null | openssl pkey -outform DER 2>/dev/null | tail -c 32 | base64
+# AEGIS_LOG_SIGNING_KEY=
 
 # ── Network ───────────────────────────────────────────────────────────────
 # Address and port to listen on.
@@ -657,6 +667,77 @@ if [ "${SKIP_SERVICE_START}" = false ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Dashboard (optional)
+# ---------------------------------------------------------------------------
+
+BUNDLED_DASHBOARD="${SCRIPT_DIR}/dashboard"
+DASHBOARD_INSTALLED=false
+DASHBOARD_PORT=8091
+
+if [ -d "${BUNDLED_DASHBOARD}" ]; then
+    section "Web Dashboard"
+    echo ""
+    echo "  A web dashboard is included for monitoring the Aegis fleet."
+    echo "  It will be served on port ${DASHBOARD_PORT} using Python's built-in HTTP server."
+    echo ""
+
+    if [ "${NON_INTERACTIVE}" = true ]; then
+        _install_dash="${AEGIS_INSTALL_DASHBOARD:-Y}"
+    else
+        echo -n "  Install web dashboard? [Y/n]: "
+        read -r _install_dash
+    fi
+
+    if [[ "${_install_dash:-Y}" =~ ^[Yy]$ ]]; then
+        DASHBOARD_SHARE_DIR="/usr/local/share/aegis/dashboard"
+        mkdir -p "${DASHBOARD_SHARE_DIR}"
+        cp -r "${BUNDLED_DASHBOARD}/." "${DASHBOARD_SHARE_DIR}/"
+        chown -R root:${AEGIS_GROUP} "${DASHBOARD_SHARE_DIR}"
+        chmod -R 755 "${DASHBOARD_SHARE_DIR}"
+
+        DASHBOARD_SERVICE_FILE="/etc/systemd/system/aegis-dashboard.service"
+        BUNDLED_DASH_SVC="${SCRIPT_DIR}/systemd/aegis-dashboard.service"
+
+        if [ -f "${BUNDLED_DASH_SVC}" ]; then
+            cp "${BUNDLED_DASH_SVC}" "${DASHBOARD_SERVICE_FILE}"
+        else
+            cat > "${DASHBOARD_SERVICE_FILE}" << EOF
+[Unit]
+Description=Aegis Safety Kernel Web Dashboard
+After=network.target aegis-verifier.service
+Wants=aegis-verifier.service
+
+[Service]
+User=${AEGIS_USER}
+Group=${AEGIS_GROUP}
+ExecStart=/usr/bin/python3 -m http.server ${DASHBOARD_PORT} --directory ${DASHBOARD_SHARE_DIR}
+WorkingDirectory=${DASHBOARD_SHARE_DIR}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        fi
+
+        chmod 644 "${DASHBOARD_SERVICE_FILE}"
+        systemctl daemon-reload
+        systemctl enable aegis-dashboard
+
+        if [ "${SKIP_SERVICE_START}" = false ]; then
+            systemctl start aegis-dashboard
+            success "Dashboard installed and running on port ${DASHBOARD_PORT}"
+        else
+            success "Dashboard installed (not started)"
+        fi
+
+        DASHBOARD_INSTALLED=true
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Post-install summary
 # ---------------------------------------------------------------------------
 
@@ -675,6 +756,12 @@ bold "API Endpoint:"
 echo "  Health:   http://$(hostname -I | awk '{print $1}'):${PORT}/health"
 echo "  Posture:  http://$(hostname -I | awk '{print $1}'):${PORT}/fleet/posture"
 echo ""
+if [ "${DASHBOARD_INSTALLED}" = true ]; then
+    bold "Web Dashboard:"
+    echo "  http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}"
+    echo "  (enter the API URL and your admin token to connect)"
+    echo ""
+fi
 bold "Configuration:"
 echo "  File:     ${ENV_FILE}"
 echo "  Database: ${DB_PATH}"

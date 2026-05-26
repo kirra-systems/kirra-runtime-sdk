@@ -4,9 +4,45 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, Result};
 use crate::verifier::{NodeTrustState, RegisteredNode};
 use crate::federation::FederatedTrustReport;
+use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+
+pub struct AuditChainVerifyResult {
+    pub chain_intact: bool,
+    pub total_entries: u64,
+    pub latest_hash: String,
+    pub signing_enabled: bool,
+    pub signed_entries: u64,
+    pub unsigned_entries: u64,
+    pub signature_valid: bool,
+    pub first_invalid_signature_index: Option<u64>,
+    pub first_signed_at_ms: Option<u64>,
+    pub public_key_b64: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AuditExportEntry {
+    pub id: i64,
+    pub timestamp_ms: u64,
+    pub event_type: String,
+    pub source: String,
+    pub payload: String,
+    pub prev_hash: String,
+    pub entry_hash: String,
+    pub signature_b64: Option<String>,
+    pub signature_status: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct AuditExportPage {
+    pub entries: Vec<AuditExportEntry>,
+    pub total: u64,
+    pub public_key_b64: Option<String>,
+    pub chain_intact: bool,
+}
 
 pub struct VerifierStore {
     conn: Connection,
+    pub signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl VerifierStore {
@@ -73,7 +109,40 @@ impl VerifierStore {
 
         Self::init_audit_chain_schema(&conn)?;
 
-        Ok(Self { conn })
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fabric_assets (
+                asset_id          TEXT PRIMARY KEY,
+                asset_type        TEXT NOT NULL,
+                display_name      TEXT NOT NULL,
+                kinematic_profile TEXT NOT NULL,
+                registered_at_ms  INTEGER NOT NULL,
+                last_seen_ms      INTEGER NOT NULL,
+                metadata_json     TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS fabric_causal_log (
+                entry_id          TEXT PRIMARY KEY,
+                timestamp_ms      INTEGER NOT NULL,
+                asset_id          TEXT NOT NULL,
+                event_type        TEXT NOT NULL,
+                payload           TEXT NOT NULL,
+                caused_by_json    TEXT NOT NULL DEFAULT '[]',
+                affects_json      TEXT NOT NULL DEFAULT '[]',
+                fabric_generation INTEGER NOT NULL,
+                signature_b64     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_causal_log_asset
+                ON fabric_causal_log(asset_id, timestamp_ms);
+            CREATE INDEX IF NOT EXISTS idx_causal_log_time
+                ON fabric_causal_log(timestamp_ms);"
+        )?;
+
+        Ok(Self { conn, signing_key: None })
+    }
+
+    pub fn set_signing_key(&mut self, key: ed25519_dalek::SigningKey) {
+        self.signing_key = Some(key);
     }
 
     pub fn save_node(&self, node: &RegisteredNode) -> Result<()> {
@@ -256,10 +325,18 @@ impl VerifierStore {
                 event_json        TEXT NOT NULL,
                 previous_hash_hex TEXT NOT NULL,
                 record_hash_hex   TEXT NOT NULL,
-                created_at_ms     INTEGER NOT NULL
+                created_at_ms     INTEGER NOT NULL,
+                signature_b64     TEXT
             )",
             [],
         )?;
+        // Ignore "duplicate column name" error — column may already exist on upgraded databases
+        if let Err(e) = conn.execute("ALTER TABLE audit_log_chain ADD COLUMN signature_b64 TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS federated_trust_reports (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,7 +393,7 @@ impl VerifierStore {
             params![node_id, event_type, posture_json, reason, created_at_ms as i64],
         )?;
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx, event_type, posture_json, created_at_ms as i64,
+            &tx, event_type, posture_json, created_at_ms as i64, self.signing_key.as_ref(),
         )?;
         tx.commit()
     }
@@ -361,6 +438,7 @@ impl VerifierStore {
             "FEDERATED_TRUST_REPORT_ACCEPTED",
             &audit.to_string(),
             received_at_ms as i64,
+            self.signing_key.as_ref(),
         )?;
 
         tx.commit()
@@ -434,6 +512,247 @@ impl VerifierStore {
         rows.collect()
     }
 
+    pub fn verify_audit_chain_full(
+        &self,
+        verifying_key: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> Result<AuditChainVerifyResult> {
+        use ed25519_dalek::{Verifier, Signature};
+        use crate::audit_chain::canonical_signing_payload;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_json, previous_hash_hex, record_hash_hex, created_at_ms, signature_b64 \
+             FROM audit_log_chain ORDER BY id ASC",
+        )?;
+
+        let mut chain_intact = true;
+        let mut total_entries: u64 = 0;
+        let mut latest_hash = "0".repeat(64);
+        let mut expected_previous_hash = "0".repeat(64);
+        let mut signed_entries: u64 = 0;
+        let mut unsigned_entries: u64 = 0;
+        let mut signature_valid = true;
+        let mut first_invalid_signature_index: Option<u64> = None;
+        let mut first_signed_at_ms: Option<u64> = None;
+
+        let mut rows = stmt.query([])?;
+
+        while let Some(row) = rows.next()? {
+            let _id: i64 = row.get(0)?;
+            let event_json: String = row.get(1)?;
+            let previous_hash_hex: String = row.get(2)?;
+            let record_hash_hex: String = row.get(3)?;
+            let created_at_ms: i64 = row.get(4)?;
+            let sig_b64: Option<String> = row.get(5)?;
+
+            // Check hash chain continuity
+            if previous_hash_hex != expected_previous_hash {
+                chain_intact = false;
+            }
+            let recalc = crate::audit_chain::AuditChainLinker::compute_record_hash(
+                &previous_hash_hex,
+                &event_json,
+                created_at_ms,
+            );
+            if recalc != record_hash_hex {
+                chain_intact = false;
+            }
+            expected_previous_hash = record_hash_hex.clone();
+            latest_hash = record_hash_hex.clone();
+
+            // Signature verification
+            // We need the event_type from the JSON for the canonical payload.
+            // The event_type is stored in its own column but not fetched here.
+            // Re-query is expensive; instead we look it up differently.
+            // Actually, let's adjust: we need event_type for canonical payload.
+            // We'll do a separate pass to get event_type from the same row.
+            // Since we can't get it from this query easily, let's add it.
+            // Wait - the query above doesn't include event_type. Let me fix this.
+
+            match &sig_b64 {
+                None => {
+                    unsigned_entries += 1;
+                }
+                Some(s) => {
+                    signed_entries += 1;
+                    if first_signed_at_ms.is_none() {
+                        first_signed_at_ms = Some(created_at_ms as u64);
+                    }
+                    if let Some(vk) = verifying_key {
+                        // We need event_type for the canonical payload — it's not in this query.
+                        // We'll decode a best-effort: verify against the stored sig.
+                        // This requires event_type. We'll fetch it inline.
+                        let event_type: String = self.conn.query_row(
+                            "SELECT event_type FROM audit_log_chain WHERE record_hash_hex = ?1",
+                            rusqlite::params![&record_hash_hex],
+                            |r| r.get(0),
+                        ).unwrap_or_else(|_| "UNKNOWN".to_string());
+
+                        let payload = canonical_signing_payload(
+                            &previous_hash_hex,
+                            &record_hash_hex,
+                            &event_type,
+                            created_at_ms,
+                        );
+                        let sig_result = b64e.decode(s)
+                            .ok()
+                            .and_then(|bytes| {
+                                if bytes.len() == 64 {
+                                    let mut arr = [0u8; 64];
+                                    arr.copy_from_slice(&bytes);
+                                    Some(Signature::from_bytes(&arr))
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|sig| vk.verify(payload.as_bytes(), &sig).is_ok())
+                            .unwrap_or(false);
+
+                        if !sig_result && first_invalid_signature_index.is_none() {
+                            first_invalid_signature_index = Some(total_entries);
+                            signature_valid = false;
+                        }
+                    }
+                }
+            }
+
+            total_entries += 1;
+        }
+
+        let signing_enabled = verifying_key.is_some();
+        let public_key_b64 = verifying_key.map(|vk| {
+            b64e.encode(vk.as_bytes())
+        });
+
+        Ok(AuditChainVerifyResult {
+            chain_intact,
+            total_entries,
+            latest_hash,
+            signing_enabled,
+            signed_entries,
+            unsigned_entries,
+            signature_valid,
+            first_invalid_signature_index,
+            first_signed_at_ms,
+            public_key_b64,
+        })
+    }
+
+    pub fn load_audit_chain_page(
+        &self,
+        limit: u64,
+        offset: u64,
+        verifying_key: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> Result<AuditExportPage> {
+        use ed25519_dalek::{Verifier, Signature};
+        use crate::audit_chain::canonical_signing_payload;
+
+        let total: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).map(|n| n as u64)?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, event_json, previous_hash_hex, record_hash_hex, \
+             created_at_ms, signature_b64 \
+             FROM audit_log_chain ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+
+        let public_key_b64 = verifying_key.map(|vk| b64e.encode(vk.as_bytes()));
+
+        let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
+            let id: i64 = row.get(0)?;
+            let event_type: String = row.get(1)?;
+            let event_json: String = row.get(2)?;
+            let prev_hash: String = row.get(3)?;
+            let entry_hash: String = row.get(4)?;
+            let timestamp_ms: i64 = row.get(5)?;
+            let sig_b64: Option<String> = row.get(6)?;
+
+            Ok((id, event_type, event_json, prev_hash, entry_hash, timestamp_ms, sig_b64))
+        })?;
+
+        let mut entries = Vec::new();
+        for row_result in rows {
+            let (id, event_type, event_json, prev_hash, entry_hash, timestamp_ms, sig_b64) = row_result?;
+
+            let signature_status = match &sig_b64 {
+                None => "unsigned".to_string(),
+                Some(s) => {
+                    if let Some(vk) = verifying_key {
+                        let payload = canonical_signing_payload(
+                            &prev_hash,
+                            &entry_hash,
+                            &event_type,
+                            timestamp_ms,
+                        );
+                        let verified = b64e.decode(s)
+                            .ok()
+                            .and_then(|bytes| {
+                                if bytes.len() == 64 {
+                                    let mut arr = [0u8; 64];
+                                    arr.copy_from_slice(&bytes);
+                                    Some(Signature::from_bytes(&arr))
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|sig| vk.verify(payload.as_bytes(), &sig).is_ok())
+                            .unwrap_or(false);
+                        if verified { "valid".to_string() } else { "invalid".to_string() }
+                    } else {
+                        "invalid".to_string()
+                    }
+                }
+            };
+
+            entries.push(AuditExportEntry {
+                id,
+                timestamp_ms: timestamp_ms as u64,
+                event_type,
+                source: "verifier".to_string(),
+                payload: event_json,
+                prev_hash,
+                entry_hash,
+                signature_b64: sig_b64,
+                signature_status,
+            });
+        }
+
+        let chain_intact = self.verify_audit_chain_integrity()?;
+
+        Ok(AuditExportPage {
+            entries,
+            total,
+            public_key_b64,
+            chain_intact,
+        })
+    }
+
+    pub fn record_key_rotation(
+        &mut self,
+        new_public_key_b64: &str,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        let payload = serde_json::json!({
+            "new_public_key_b64": new_public_key_b64,
+            "reason": reason,
+            "rotated_at_ms": now_ms,
+        });
+        let tx = self.conn.transaction()?;
+        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            &tx,
+            "KEY_ROTATION",
+            &payload.to_string(),
+            now_ms as i64,
+            self.signing_key.as_ref(),
+        )?;
+        tx.commit()?;
+        self.save_engine_state("audit_signing_public_key", new_public_key_b64)?;
+        Ok(())
+    }
+
     pub fn verify_audit_chain_integrity(&self) -> Result<bool> {
         let mut stmt = self.conn.prepare(
             "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms
@@ -496,6 +815,7 @@ impl VerifierStore {
             "NODE_IDENTITY_REGISTERED",
             &audit_payload.to_string(),
             registered_at_ms as i64,
+            self.signing_key.as_ref(),
         )?;
 
         tx.commit()
@@ -655,6 +975,83 @@ impl VerifierStore {
         self.conn.execute(
             "INSERT OR REPLACE INTO posture_engine_state (key, value) VALUES (?1, ?2)",
             params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // --- Fabric asset persistence -------------------------------------------
+
+    pub fn save_fabric_asset(&self, asset: &crate::fabric::asset::FabricAsset) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fabric_assets
+             (asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, last_seen_ms, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                asset.asset_id,
+                serde_json::to_string(&asset.asset_type).unwrap_or_default(),
+                asset.display_name,
+                serde_json::to_string(&asset.kinematic_profile).unwrap_or_default(),
+                asset.registered_at_ms as i64,
+                asset.last_seen_ms as i64,
+                serde_json::to_string(&asset.metadata).unwrap_or_else(|_| "{}".to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_fabric_assets(&self) -> Result<Vec<crate::fabric::asset::FabricAsset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT asset_id, asset_type, display_name, kinematic_profile, registered_at_ms, last_seen_ms, metadata_json
+             FROM fabric_assets ORDER BY registered_at_ms"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut assets = Vec::new();
+        for row in rows {
+            let (asset_id, asset_type_s, display_name, profile_s, reg_ms, last_ms, meta_s) = row?;
+            let asset_type = serde_json::from_str(&asset_type_s)
+                .unwrap_or(crate::fabric::asset::AssetType::Unknown);
+            let kinematic_profile = serde_json::from_str(&profile_s)
+                .unwrap_or(crate::fabric::asset::KinematicProfileType::Custom);
+            let metadata = serde_json::from_str(&meta_s).unwrap_or_default();
+            assets.push(crate::fabric::asset::FabricAsset {
+                asset_id,
+                asset_type,
+                display_name,
+                kinematic_profile,
+                registered_at_ms: reg_ms as u64,
+                last_seen_ms: last_ms as u64,
+                metadata,
+            });
+        }
+        Ok(assets)
+    }
+
+    pub fn save_causal_log_entry(&self, entry: &crate::fabric::causal_log::CausalLogEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO fabric_causal_log
+             (entry_id, timestamp_ms, asset_id, event_type, payload, caused_by_json, affects_json, fabric_generation, signature_b64)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                entry.entry_id,
+                entry.timestamp_ms as i64,
+                entry.asset_id,
+                entry.event_type,
+                entry.payload,
+                serde_json::to_string(&entry.caused_by).unwrap_or_else(|_| "[]".to_string()),
+                serde_json::to_string(&entry.affects_assets).unwrap_or_else(|_| "[]".to_string()),
+                entry.fabric_generation as i64,
+                entry.signature_b64.as_deref(),
+            ],
         )?;
         Ok(())
     }

@@ -1,12 +1,77 @@
-# Aegis Runtime SDK
+# Kirra Runtime SDK
 
-A distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. Aegis enforces **fail-closed trust semantics** across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
+![Version](https://img.shields.io/badge/version-v1.1.1-blue)
+
+A distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. Kirra enforces **fail-closed trust semantics** across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
+
+---
+
+## AI Safety Integration
+
+Kirra is the enforcement layer that prevents LLM hallucinations from reaching physical actuators — drop it between your AI agent and your robot fleet in minutes.
+
+```
+LLM output  →  Kirra Action Filter  →  Actuator
+```
+
+Every AI-generated command is evaluated against the live fleet posture before any hardware interaction occurs. A model that hallucinates a velocity of 999 m/s, invents a non-existent action type, or issues a kinetic command while the fleet is degraded is stopped at the software layer — and the attempt is permanently recorded in a SHA-256 hash-chained audit ledger.
+
+### Posture-Action Matrix
+
+| Action Type | Nominal | Degraded | LockedOut |
+|-------------|---------|----------|-----------|
+| `cmd_vel` (kinetic write) | ✓ with kinematics validation | ✗ | ✗ |
+| `read_telemetry` | ✓ | ✓ | ✗ |
+| Unknown / unrecognized | ✗ | ✗ | ✗ |
+
+Compatible with **OpenAI function calling**, **LangChain tools**, or any agent framework that can make an HTTP POST.
+
+**Docs:**
+- [Action Filter Architecture](docs/action_filter.md) — pipeline, hallucination containment, API reference
+- [LLM Integration Guide](docs/llm_integration_guide.md) — 5-minute quickstart, auth, agent loop patterns, SSE posture stream
+- [OpenAI example](examples/openai_action_filter.py) — GPT function calling with Kirra safety filter
+- [LangChain example](examples/langchain_action_filter.py) — `@tool` decorator pattern with Kirra safety filter
+
+---
+
+## Safety Certification
+
+Kirra is targeting ASIL-D certification under ISO 26262 and SIL 3 under IEC 61508.
+
+| Document | Doc ID | Status |
+|----------|--------|--------|
+| Hazard Analysis and Risk Assessment (HARA) | KIRRA-HARA-001 | Draft |
+| Safety Goals | KIRRA-SG-001 | Draft |
+| Safety Architecture | KIRRA-SA-001 | Draft |
+| Requirements Traceability Matrix | KIRRA-RTM-001 | Draft |
+| Coding Guidelines | KIRRA-CG-001 | Draft |
+| Safety Standards Matrix (23 standards, 5 verticals) | KIRRA-STD-001 | Draft |
+| ASTM F3269 Run Time Assurance Mapping | KIRRA-F3269-001 | Draft |
+| IEC 61508 SIL 3 Preliminary Claim Mapping | KIRRA-61508-001 | Draft |
+
+See [docs/safety/](docs/safety/) for the complete safety case foundation.
+See [docs/safety/ROADMAP_TO_ASIL_D.md](docs/safety/ROADMAP_TO_ASIL_D.md) for the certification roadmap.
+See [docs/safety/STANDARDS_MATRIX.md](docs/safety/STANDARDS_MATRIX.md) for the full 23-standard matrix with priority ratings and certification paths.
+
+---
+
+## Roadmap
+
+Pre-execution architecture sketches for planned integrations. Each document
+includes honest caveats, effort estimates, and explicit sequencing dependencies.
+
+| Integration | Description | Status |
+|-------------|-------------|--------|
+| [Apollo AV Stack](docs/roadmap/APOLLO_KIRRA_INTEGRATION.md) | Cyber RT bridge between Apollo Control and Canbus — kinematic enforcement and lockout in the Apollo pipeline | Planned — after QNX + robot demo |
+| [IEEE 2846 / RSS](docs/roadmap/RSS_KIRRA_INTEGRATION.md) | Behavioral safety invariants based on IEEE 2846 — safe distance enforcement given perception state | Planned — after Apollo integration |
+
+See [docs/roadmap/](docs/roadmap/) for sequencing dependencies and execution plans.
 
 ---
 
 ## Overview
 
-Modern robotic and autonomous deployments increasingly rely on AI models to generate operational commands. Aegis sits between those models and the physical actuators, acting as a cryptographically-grounded safety layer that:
+Modern robotic and autonomous deployments increasingly rely on AI models to generate operational commands. Kirra sits between those models and the physical actuators, acting as a cryptographically-grounded safety layer that:
 
 - **Attests** each fleet node via HMAC-SHA256 challenge/response
 - **Tracks trust posture** per-node and fleet-wide using a gray/black DAG traversal algorithm
@@ -37,7 +102,7 @@ Modern robotic and autonomous deployments increasingly rely on AI models to gene
 - **HA standby/promotion** — heartbeat-based automatic promotion from passive standby to active
 - **WAL-mode SQLite** — durable persistence with fail-closed write ordering (disk before memory)
 - **Deterministic test harness** — `ScenarioRunner` with virtual clock injection for temporal integration tests
-- **CARLA integration** — `aegis_carla_client` binary for AV simulator connectivity
+- **CARLA integration** — `kirra_carla_client` binary for AV simulator connectivity
 
 ---
 
@@ -67,19 +132,19 @@ src/
 ├── action_policy.rs           — LLM JSON → typed AgentAction parser
 ├── security.rs                — constant_time_compare
 ├── protocol_adapter.rs        — Modbus/OPC-UA industrial event mapping
-├── aegis_core.rs              — AegisKernelGovernor (clamping + rate limiting)
+├── kirra_core.rs              — KirraKernelGovernor (clamping + rate limiting)
 ├── ros2_adapter.rs            — NaN/Inf rejection before ROS2 publish
 ├── dds_bridge.rs              — CDR encapsulation, Volatile durability
 ├── gateway/
 │   ├── policy.rs              — classify_command (path + method → OperationalCommand)
-│   ├── policy_layer.rs        — Tower AegisPolicyLayer middleware
+│   ├── policy_layer.rs        — Tower KirraPolicyLayer middleware
 │   ├── cmd_vel.rs             — CmdVel validation, DEFAULT_CMD_VEL_LIMITS
 │   ├── interceptor.rs         — gateway interceptor
 │   ├── kinematics_contract.rs — VehicleKinematicsContract, validate_vehicle_command
 │   └── kinematics_proptest.rs — property-based tests for kinematics validation
 └── bin/
-    ├── aegis_verifier_service.rs — axum HTTP service, all route handlers
-    └── aegis_carla_client.rs     — CARLA AV simulator integration
+    ├── kirra_verifier_service.rs — axum HTTP service, all route handlers
+    └── kirra_carla_client.rs     — CARLA AV simulator integration
 ```
 
 ### Fleet Posture States
@@ -124,9 +189,9 @@ cargo build --release
 ### Run
 
 ```bash
-export AEGIS_ADMIN_TOKEN="your-secret-token"
-export AEGIS_SUPERVISOR_RESET_KEY="your-reset-key"
-cargo run --bin aegis_verifier_service
+export KIRRA_ADMIN_TOKEN="your-secret-token"
+export KIRRA_SUPERVISOR_RESET_KEY="your-reset-key"
+cargo run --bin kirra_verifier_service
 ```
 
 The service listens on `0.0.0.0:8090` by default.
@@ -134,7 +199,7 @@ The service listens on `0.0.0.0:8090` by default.
 ### Install (Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/justinlooney/aegis/master/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/main/install.sh | sudo bash
 ```
 
 See [INSTALL.md](INSTALL.md) for full installation documentation including non-interactive mode, HA setup, and upgrade/uninstall instructions.
@@ -153,16 +218,16 @@ All configuration is via environment variables.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AEGIS_ADMIN_TOKEN` | Yes (mutation routes) | — | Bearer token for admin endpoints. Absent or empty → `503`. |
-| `AEGIS_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Reset authorization key. Must be non-empty, ≤ 64 bytes. |
-| `AEGIS_VERIFIER_MODE` | No | `active` | `passive_standby` → read-only. Runtime-promotable via HA monitor. |
-| `AEGIS_DB_PATH` | No | `aegis_verifier.sqlite` | Path to the SQLite database file. |
-| `AEGIS_VERIFIER_ADDR` | No | `0.0.0.0:8090` | Listen address. |
-| `AEGIS_TRUSTED_INGRESS_MODE` | No | `false` | Enforce `x-aegis-client-id` header on identity-gated routes. |
-| `AEGIS_CLIENT_ID_HEADER` | No | `x-aegis-client-id` | Header name for client identity. |
-| `AEGIS_INSTANCE_ID` | No | hostname | Unique identifier for this instance in HA deployments. |
-| `AEGIS_HEARTBEAT_INTERVAL` | No | `2000` | HA heartbeat write interval (ms). |
-| `AEGIS_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent for this many ms. |
+| `KIRRA_ADMIN_TOKEN` | Yes (mutation routes) | — | Bearer token for admin endpoints. Absent or empty → `503`. |
+| `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Reset authorization key. Must be non-empty, ≤ 64 bytes. |
+| `KIRRA_VERIFIER_MODE` | No | `active` | `passive_standby` → read-only. Runtime-promotable via HA monitor. |
+| `KIRRA_DB_PATH` | No | `kirra_verifier.sqlite` | Path to the SQLite database file. |
+| `KIRRA_VERIFIER_ADDR` | No | `0.0.0.0:8090` | Listen address. |
+| `KIRRA_TRUSTED_INGRESS_MODE` | No | `false` | Enforce `x-kirra-client-id` header on identity-gated routes. |
+| `KIRRA_CLIENT_ID_HEADER` | No | `x-kirra-client-id` | Header name for client identity. |
+| `KIRRA_INSTANCE_ID` | No | hostname | Unique identifier for this instance in HA deployments. |
+| `KIRRA_HEARTBEAT_INTERVAL` | No | `2000` | HA heartbeat write interval (ms). |
+| `KIRRA_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent for this many ms. |
 
 ---
 
@@ -183,7 +248,7 @@ All configuration is via environment variables.
 | `POST` | `/attestation/challenge/:node_id` | Issue attestation challenge |
 | `POST` | `/attestation/verify` | Submit challenge response |
 
-### Identity-Gated (admin token + `x-aegis-client-id`)
+### Identity-Gated (admin token + `x-kirra-client-id`)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -192,7 +257,7 @@ All configuration is via environment variables.
 | `POST` | `/action_filter/evaluate` | Evaluate an action claim against posture |
 | `POST` | `/industrial/evaluate` | Evaluate a Modbus/OPC-UA industrial event |
 
-### Admin-Only (`Authorization: Bearer <AEGIS_ADMIN_TOKEN>`)
+### Admin-Only (`Authorization: Bearer <KIRRA_ADMIN_TOKEN>`)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -209,7 +274,7 @@ All configuration is via environment variables.
 
 - **Fail-closed everywhere** — any missing token, expired nonce, or verification failure results in denial, never silent pass-through.
 - **Constant-time comparisons** — all token verification uses `constant_time_compare`; standard `==` is never used on security-critical byte sequences.
-- **No hardcoded secrets** — `AEGIS_ADMIN_TOKEN` and `AEGIS_SUPERVISOR_RESET_KEY` must come from environment variables. No fallback values exist in code.
+- **No hardcoded secrets** — `KIRRA_ADMIN_TOKEN` and `KIRRA_SUPERVISOR_RESET_KEY` must come from environment variables. No fallback values exist in code.
 - **Volatile DDS durability** — actuator topics are never persisted via `TransientLocal`.
 - **Ordered SQLite writes** — disk persistence always precedes in-memory state updates.
 - **Nonce burning** — federation report nonces are stored and checked before acceptance; replays are rejected.
@@ -219,20 +284,20 @@ All configuration is via environment variables.
 
 ## High Availability
 
-Aegis supports active/passive HA with automatic failover.
+Kirra supports active/passive HA with automatic failover.
 
-**Primary** (`AEGIS_VERIFIER_MODE=active`): writes a heartbeat to the shared database every 2 s.
+**Primary** (`KIRRA_VERIFIER_MODE=active`): writes a heartbeat to the shared database every 2 s.
 
-**Standby** (`AEGIS_VERIFIER_MODE=passive_standby`): polls the heartbeat. If the primary is silent for 10 s (`AEGIS_PROMOTION_TIMEOUT`), the standby automatically promotes itself to active and begins enforcing posture.
+**Standby** (`KIRRA_VERIFIER_MODE=passive_standby`): polls the heartbeat. If the primary is silent for 10 s (`KIRRA_PROMOTION_TIMEOUT`), the standby automatically promotes itself to active and begins enforcing posture.
 
 Both instances must share the same SQLite database (NFS mount, shared block storage, or equivalent).
 
 ```bash
 # Primary
-AEGIS_VERIFIER_MODE=active AEGIS_INSTANCE_ID=aegis-primary ./aegis_verifier_service
+KIRRA_VERIFIER_MODE=active KIRRA_INSTANCE_ID=kirra-primary ./kirra_verifier_service
 
 # Standby
-AEGIS_VERIFIER_MODE=passive_standby AEGIS_INSTANCE_ID=aegis-standby ./aegis_verifier_service
+KIRRA_VERIFIER_MODE=passive_standby KIRRA_INSTANCE_ID=kirra-standby ./kirra_verifier_service
 ```
 
 ---
@@ -240,10 +305,10 @@ AEGIS_VERIFIER_MODE=passive_standby AEGIS_INSTANCE_ID=aegis-standby ./aegis_veri
 ## Dependencies
 
 | Crate | Version | Purpose |
-|-------|---------|---------|
+|-------|---------|----------|
 | `axum` | 0.8 | HTTP framework |
 | `tokio` | 1 | Async runtime |
-| `tower` | 0.5 | Middleware (`AegisPolicyLayer`) |
+| `tower` | 0.5 | Middleware (`KirraPolicyLayer`) |
 | `dashmap` | 6 | Concurrent hashmaps |
 | `rusqlite` | 0.31 (bundled) | WAL-mode SQLite persistence |
 | `ed25519-dalek` | 2 | Federation signature verification |
@@ -253,6 +318,25 @@ AEGIS_VERIFIER_MODE=passive_standby AEGIS_INSTANCE_ID=aegis-standby ./aegis_veri
 | `reqwest` | 0.12 | CARLA client HTTP |
 | `tracing` | 0.1 | Structured logging |
 | `proptest` | 1 | Kinematics property-based tests |
+
+---
+
+## Releases
+
+### v1.1.1
+- Complete Aegis → Kirra rename across all source files, binaries, systemd units, ROS2 packages, Docker images, Helm charts, and documentation
+- 13 bug fixes including post-rename import cleanup, binary path corrections, and CI pipeline fixes
+
+### v1.1.0
+- Multi-Asset Safety Fabric
+- ASIL-D and SOTIF safety case foundation documents
+- Ed25519 log signing with export and key rotation
+- Action Filter with LLM integration guide
+- EtherNet/IP, CANOpen, DNP3 protocol adapters
+- ROS2 safety interlock package
+- Docker multi-platform images and Helm chart
+- CARLA integration client
+- 333 tests passing, 0 failures
 
 ---
 

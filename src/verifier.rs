@@ -64,7 +64,7 @@ pub struct FlapStatus {
 /// Active     — normal operation; all mutation routes are open (subject to auth).
 /// PassiveStandby — HA hot-spare; mutation routes return 503 to prevent split-brain.
 ///
-/// Configured via AEGIS_VERIFIER_MODE env var.  Anything other than
+/// Configured via KIRRA_VERIFIER_MODE env var.  Anything other than
 /// "passive", "passive_standby", or "standby" (case-insensitive) → Active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VerifierOperationMode {
@@ -74,7 +74,7 @@ pub enum VerifierOperationMode {
 
 impl VerifierOperationMode {
     pub fn from_env() -> Self {
-        match std::env::var("AEGIS_VERIFIER_MODE")
+        match std::env::var("KIRRA_VERIFIER_MODE")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -126,7 +126,7 @@ pub struct PostureStreamEvent {
 }
 
 /// Controls whether the `require_client_identity` middleware enforces the
-/// `x-aegis-client-id` header (or a configured alternative).
+/// `x-kirra-client-id` header (or a configured alternative).
 /// Fail-closed: if `trusted_ingress_mode` is false, the check always denies.
 #[derive(Debug, Clone)]
 pub struct TransportIdentityConfig {
@@ -137,11 +137,11 @@ pub struct TransportIdentityConfig {
 impl TransportIdentityConfig {
     pub fn from_env() -> Self {
         Self {
-            trusted_ingress_mode: std::env::var("AEGIS_TRUSTED_INGRESS_MODE")
+            trusted_ingress_mode: std::env::var("KIRRA_TRUSTED_INGRESS_MODE")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            client_id_header: std::env::var("AEGIS_CLIENT_ID_HEADER")
-                .unwrap_or_else(|_| "x-aegis-client-id".to_string()),
+            client_id_header: std::env::var("KIRRA_CLIENT_ID_HEADER")
+                .unwrap_or_else(|_| "x-kirra-client-id".to_string()),
         }
     }
 }
@@ -339,28 +339,28 @@ mod transport_identity_tests {
     #[test]
     fn test_disabled_ingress_rejects_even_with_valid_header() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-aegis-client-id", HeaderValue::from_static("edge-gateway-01"));
-        assert!(!validate_client_identity_headers(false, "x-aegis-client-id", &headers));
+        headers.insert("x-kirra-client-id", HeaderValue::from_static("edge-gateway-01"));
+        assert!(!validate_client_identity_headers(false, "x-kirra-client-id", &headers));
     }
 
     #[test]
     fn test_enabled_ingress_missing_header_rejects() {
         let headers = HeaderMap::new();
-        assert!(!validate_client_identity_headers(true, "x-aegis-client-id", &headers));
+        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
     }
 
     #[test]
     fn test_enabled_ingress_blank_header_rejects() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-aegis-client-id", HeaderValue::from_static("     "));
-        assert!(!validate_client_identity_headers(true, "x-aegis-client-id", &headers));
+        headers.insert("x-kirra-client-id", HeaderValue::from_static("     "));
+        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
     }
 
     #[test]
     fn test_enabled_ingress_valid_header_accepts() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-aegis-client-id", HeaderValue::from_static("trusted-mesh-sidecar"));
-        assert!(validate_client_identity_headers(true, "x-aegis-client-id", &headers));
+        headers.insert("x-kirra-client-id", HeaderValue::from_static("trusted-mesh-sidecar"));
+        assert!(validate_client_identity_headers(true, "x-kirra-client-id", &headers));
     }
 
     #[test]
@@ -368,6 +368,6 @@ mod transport_identity_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-custom-identity", HeaderValue::from_static("fleet-controller"));
         assert!(validate_client_identity_headers(true, "x-custom-identity", &headers));
-        assert!(!validate_client_identity_headers(true, "x-aegis-client-id", &headers));
+        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
     }
 }

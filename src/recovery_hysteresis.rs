@@ -25,8 +25,6 @@
 //      The handler calls evaluate_recovery_report(). This keeps the handler
 //      readable and the hysteresis logic independently testable.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-use crate::verifier::NodeTrustState;
 use crate::verifier_store::VerifierStore;
 
 // ---------------------------------------------------------------------------
@@ -145,7 +143,6 @@ pub fn evaluate_recovery_report(
     };
 
     if new_streak >= AV_RECOVERY_STREAK_THRESHOLD {
-        // Threshold reached. The caller will re-trust the node and reset the streak.
         tracing::info!(
             node_id  = %node_id,
             streak   = new_streak,
@@ -168,13 +165,6 @@ pub fn evaluate_recovery_report(
             window_remaining_ms: window_remaining,
         }
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +239,7 @@ pub fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite:
 // Updated handle_sensor_fault_report using hysteresis module
 // ---------------------------------------------------------------------------
 //
-// Apply this to src/bin/aegis_verifier_service.rs, replacing the existing
+// Apply this to src/bin/kirra_verifier_service.rs, replacing the existing
 // handle_sensor_fault_report implementation.
 //
 // Key changes from the milestone doc version:
@@ -305,8 +295,6 @@ pub async fn handle_sensor_fault_report(
             .unwrap_or(false);
 
         if currently_untrusted {
-            // Evaluate time-bounded hysteresis.
-            // evaluate_recovery_report handles all disk writes (streak increment/reset).
             match evaluate_recovery_report(&svc.app.store, &report.source_node_id, ts) {
                 HysteresisDecision::RecoveryConfirmed { streak } => {
                     tracing::info!(
@@ -314,13 +302,10 @@ pub async fn handle_sensor_fault_report(
                         streak   = streak,
                         "Hysteresis satisfied — re-trusting node"
                     );
-                    // Memory mutation after disk confirmation.
                     if let Some(mut node) = svc.app.nodes.get_mut(&report.source_node_id) {
                         node.trust_state = NodeTrustState::Trusted;
                     }
-                    // Reset streak on disk after re-trust.
                     let _ = svc.app.store.reset_recovery_streak(&report.source_node_id, ts);
-                    // Route recalculation through serialized worker.
                     let _ = svc.posture_engine_tx.send(
                         PostureRecalcTrigger::NodeTrustChanged {
                             node_id: report.source_node_id.clone(),
@@ -335,7 +320,6 @@ pub async fn handle_sensor_fault_report(
                         required = required,
                         "Recovery streak building — node remains Untrusted"
                     );
-                    // No posture change — no recalculation needed.
                 }
                 HysteresisDecision::WindowExpired { old_streak } => {
                     tracing::info!(
@@ -343,17 +327,14 @@ pub async fn handle_sensor_fault_report(
                         old_streak = old_streak,
                         "Recovery window expired — streak reset, starting fresh"
                     );
-                    // No posture change — node remains Untrusted, streak reset.
                 }
                 HysteresisDecision::NotApplicable => {
-                    // Node is healthy and was already trusted — just touch telemetry ts.
                     let _ = svc.app.store.touch_av_telemetry_timestamp(
                         &report.source_node_id, ts
                     );
                 }
             }
         } else {
-            // Already trusted — just update telemetry timestamp.
             let _ = svc.app.store.touch_av_telemetry_timestamp(&report.source_node_id, ts);
         }
     }
@@ -370,24 +351,15 @@ pub async fn handle_sensor_fault_report(
 mod hysteresis_tests {
     use super::*;
 
-    // Pure logic tests — no AppState construction needed.
-    // evaluate_recovery_report takes a VerifierStore, so full tests
-    // are in integration tests. These tests cover the decision logic
-    // using computed inputs.
-
     #[test]
     fn test_recovery_constants_are_coherent() {
-        // Streak threshold must be > 1 to provide any filtering benefit.
         assert!(AV_RECOVERY_STREAK_THRESHOLD > 1,
             "streak threshold of 1 provides no flapping protection");
 
-        // Window must be large enough for the threshold count at a typical
-        // 100ms sensor reporting rate.
         let min_window = (AV_RECOVERY_STREAK_THRESHOLD as u64) * 100;
         assert!(AV_RECOVERY_WINDOW_MS >= min_window,
             "window too small for threshold at 100ms reporting rate");
 
-        // Window must be finite (not absurdly large — that would defeat hysteresis).
         assert!(AV_RECOVERY_WINDOW_MS <= 60_000,
             "window larger than 60s defeats the purpose of hysteresis");
     }
@@ -412,19 +384,15 @@ mod hysteresis_tests {
     #[test]
     fn test_window_expiry_detection_uses_saturating_arithmetic() {
         let streak_start: u64 = 1_000;
-        let now: u64 = 500; // Clock skew — now < streak_start
+        let now: u64 = 500;
         let elapsed = now.saturating_sub(streak_start);
-        // Must not panic or overflow — must produce 0
         assert_eq!(elapsed, 0, "saturating_sub must handle clock skew safely");
-        // And must NOT trigger window expiry
         assert!(elapsed < AV_RECOVERY_WINDOW_MS,
             "clock skew must not falsely trigger window expiry");
     }
 
     #[test]
     fn test_streak_threshold_boundary_exactly_at_threshold_confirms() {
-        // Streak count == threshold must produce RecoveryConfirmed, not StreakBuilding.
-        // This is a >= check, not >.
         let streak = AV_RECOVERY_STREAK_THRESHOLD;
         let confirmed = streak >= AV_RECOVERY_STREAK_THRESHOLD;
         assert!(confirmed, "streak exactly at threshold must confirm recovery");
@@ -440,7 +408,6 @@ mod hysteresis_tests {
     #[test]
     fn test_window_remaining_calculation_cannot_underflow() {
         let window = AV_RECOVERY_WINDOW_MS;
-        // Simulate window already elapsed (elapsed > window)
         let elapsed: u64 = window + 5_000;
         let remaining = window.saturating_sub(elapsed);
         assert_eq!(remaining, 0, "window remaining must saturate at 0, not underflow");

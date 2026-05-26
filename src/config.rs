@@ -1,6 +1,6 @@
 // src/config.rs
 
-use crate::aegis_core::ContractProfile;
+use crate::kirra_core::ContractProfile;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
@@ -21,13 +21,13 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AegisRuntimeConfig {
+pub struct KirraRuntimeConfig {
     pub network: NetworkConfig,
     pub telemetry: TelemetryConfig,
     pub contract: ContractProfile,
 }
 
-impl AegisRuntimeConfig {
+impl KirraRuntimeConfig {
     pub fn validate_safety_invariants(&self) -> Result<(), &'static str> {
         let n = &self.network;
         let c = &self.contract;

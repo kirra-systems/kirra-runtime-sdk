@@ -1,6 +1,6 @@
 // src/tests.rs
 
-use crate::aegis_core::{AegisKernelGovernor, ContractProfile};
+use crate::kirra_core::{KirraKernelGovernor, ContractProfile};
 use crate::kinematics_contract::KinematicContract;
 use crate::{AgentAction, ActionResolution};
 use crate::action_filter::ActionFilter;
@@ -28,7 +28,7 @@ fn generate_valid_test_profile() -> ContractProfile {
 #[test]
 fn test_unrestricted_autonomy_envelope_limit_clamping() {
     let profile = generate_valid_test_profile();
-    let mut gov = AegisKernelGovernor::new(profile, 1500.0, 1100.0, 2000.0);
+    let mut gov = KirraKernelGovernor::new(profile, 1500.0, 1100.0, 2000.0);
     let res = gov.evaluate(4500.0, 1.0);
     assert_eq!(res.sanitized_scalar, 3000.0);
     assert!(res.was_unsafe_attempt);
@@ -54,7 +54,7 @@ fn test_action_filter_leverages_dynamic_contract_angular_bounds() {
         max_linear_acceleration: 0.1,
         fallback_linear_speed: 0.0,
     };
-    let mut gov = AegisKernelGovernor::new(contract, 0.0, -0.5, 0.5);
+    let mut gov = KirraKernelGovernor::new(contract, 0.0, -0.5, 0.5);
     let filter = ActionFilter::new(contract);
 
     let over_rotation = AgentAction::Rotate { angular_velocity: 0.8 };
@@ -183,22 +183,19 @@ fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
 
 // --- HTTP command classification tests ---------------------------------------
 
-use crate::posture_cache::{
-    classify_http_command, should_route_command,
-    CachedFleetPosture, OperationalCommand, CACHE_TTL_MS,
-};
+use crate::gateway::policy::{classify_http_command, OperationalCommand};
+use crate::posture_cache::{should_route_command, CachedFleetPosture, POSTURE_CACHE_TTL_MS};
 
-fn make_cache(status: FleetPosture, age_ms: u64) -> (CachedFleetPosture, u64) {
+fn make_cache(status: FleetPosture, age_ms: u64) -> (Option<CachedFleetPosture>, u64) {
     let updated_at = 100_000u64;
     let now = updated_at + age_ms;
     let cache = CachedFleetPosture {
-        node_id: "test".to_string(),
-        local_status: NodeTrustState::Trusted,
-        propagated_status: status,
-        blocked_by: vec![],
-        updated_at_epoch_ms: updated_at,
+        posture: status,
+        generated_at_ms: updated_at,
+        ttl_ms: POSTURE_CACHE_TTL_MS,
+        generation: 1,
     };
-    (cache, now)
+    (Some(cache), now)
 }
 
 #[test]
@@ -235,10 +232,10 @@ fn test_classify_strips_query_string_before_matching() {
 }
 
 #[test]
-fn test_classify_method_comparison_is_case_insensitive() {
-    assert_eq!(classify_http_command("get",    "/metrics"), OperationalCommand::ReadTelemetry);
-    assert_eq!(classify_http_command("post",   "/cmd_vel"), OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("delete", "/x"),       OperationalCommand::SystemMutation);
+fn test_classify_method_comparison_uppercase() {
+    assert_eq!(classify_http_command("GET",    "/metrics"), OperationalCommand::ReadTelemetry);
+    assert_eq!(classify_http_command("POST",   "/cmd_vel"), OperationalCommand::WriteState);
+    assert_eq!(classify_http_command("DELETE", "/x"),       OperationalCommand::SystemMutation);
 }
 
 #[test]
@@ -286,7 +283,7 @@ fn test_routing_locked_out_blocks_all_including_reads() {
 #[test]
 fn test_routing_stale_cache_blocks_all_regardless_of_posture() {
     // Even a Nominal posture entry must be blocked once the TTL expires.
-    let stale_age = CACHE_TTL_MS + 1;
+    let stale_age = POSTURE_CACHE_TTL_MS + 1;
     let (cache, now) = make_cache(FleetPosture::Nominal, stale_age);
     assert!(!should_route_command(&cache, now, OperationalCommand::ReadTelemetry));
     assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
@@ -294,15 +291,15 @@ fn test_routing_stale_cache_blocks_all_regardless_of_posture() {
 }
 
 #[test]
-fn test_routing_exactly_at_ttl_boundary_is_allowed() {
-    // Age == CACHE_TTL_MS is still within window (> not >=).
-    let (cache, now) = make_cache(FleetPosture::Nominal, CACHE_TTL_MS);
-    assert!(should_route_command(&cache, now, OperationalCommand::WriteState));
+fn test_routing_exactly_at_ttl_boundary_is_blocked() {
+    // Age == POSTURE_CACHE_TTL_MS is stale (>= semantics in is_stale).
+    let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS);
+    assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
 }
 
 #[test]
 fn test_routing_one_ms_past_ttl_is_blocked() {
-    let (cache, now) = make_cache(FleetPosture::Nominal, CACHE_TTL_MS + 1);
+    let (cache, now) = make_cache(FleetPosture::Nominal, POSTURE_CACHE_TTL_MS + 1);
     assert!(!should_route_command(&cache, now, OperationalCommand::WriteState));
 }
 
@@ -410,7 +407,7 @@ use crate::verifier::VerifierOperationMode;
 
 #[test]
 fn test_verifier_mode_active_by_default() {
-    // Without AEGIS_VERIFIER_MODE set, mode must be Active.
+    // Without KIRRA_VERIFIER_MODE set, mode must be Active.
     // We can't unset env vars safely in parallel tests, so test the parser directly.
     let mode = match "".to_ascii_lowercase().as_str() {
         "passive" | "passive_standby" | "standby" => VerifierOperationMode::PassiveStandby,

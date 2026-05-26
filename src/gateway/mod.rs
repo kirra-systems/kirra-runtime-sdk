@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::Ordering;
 
 use crate::{ProtocolAdapter, SafetyGovernor, TrustMode};
-use crate::aegis_core::{AegisKernelGovernor, ContractProfile, CausalFlightRecorder, GlobalSystemState};
+use crate::kirra_core::{KirraKernelGovernor, ContractProfile, CausalFlightRecorder, GlobalSystemState};
 use crate::modbus_adapter::ModbusTcpAdapter;
 use crate::metrics::LockFreeMetricsAggregator;
 use crate::output::{save_brute_force_counter, load_brute_force_counter, save_replay_json, save_summary_json, ExecutiveSummary};
@@ -37,13 +37,13 @@ impl Drop for ThreadPoolGuard {
     }
 }
 
-pub struct AegisLiveGateway {
+pub struct KirraLiveGateway {
     pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16, pub metrics_port: u16,
     pub runtime_config: ContractProfile, pub system_auth_key: Vec<u8>,
     pub max_allowed_workers: u32, pub log_directory: String, pub io_writer_lock: Arc<Mutex<()>>,
 }
 
-impl AegisLiveGateway {
+impl KirraLiveGateway {
     pub fn new(proxy_port: u16, plc_target_port: u16, admin_port: u16, metrics_port: u16, config: ContractProfile, auth_key: Vec<u8>, max_threads: u32, log_dir: String) -> Self {
         Self { proxy_port, plc_target_port, admin_reset_port: admin_port, metrics_port, runtime_config: config, system_auth_key: auth_key, max_allowed_workers: max_threads.max(1), log_directory: log_dir, io_writer_lock: Arc::new(Mutex::new(())) }
     }
@@ -67,7 +67,7 @@ impl AegisLiveGateway {
 
     pub fn start_active_proxy_gateway(&self) {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", self.proxy_port)).expect("FAIL_BIND");
-        let initial_gov = AegisKernelGovernor::new(
+        let initial_gov = KirraKernelGovernor::new(
             self.runtime_config,
             self.runtime_config.fallback_safe_setpoint,
             self.runtime_config.constraint_cap_min,
@@ -148,7 +148,7 @@ impl AegisLiveGateway {
                         let first_line = req_str.lines().next().unwrap_or("");
 
                         if first_line.starts_with("GET /metrics") {
-                            let payload = metrics_http_clone.format_prometheus_metrics("aegis-core-active");
+                            let payload = metrics_http_clone.format_prometheus_metrics("kirra-core-active");
                             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload);
                             let _ = socket.write_all(response.as_bytes());
                         } else if first_line.starts_with("GET /health/live") {
@@ -261,7 +261,7 @@ impl AegisLiveGateway {
 
                         if let Some(records_data) = flush_payload {
                             let _io_guard = io_lock_worker.lock().unwrap();
-                            let _ = save_replay_json(&records_data, &local_log_dir, "aegis_replay.json");
+                            let _ = save_replay_json(&records_data, &local_log_dir, "kirra_replay.json");
                         }
 
                         if plc_socket.write_all(&out_bytes).is_err() { break; }
@@ -292,7 +292,7 @@ impl AegisLiveGateway {
 
                     if let Some(summary) = summary_payload {
                         let _io_guard = io_lock_worker.lock().unwrap();
-                        let _ = save_summary_json(&summary, &local_log_dir, "aegis_summary.json");
+                        let _ = save_summary_json(&summary, &local_log_dir, "kirra_summary.json");
                     }
                 });
             }

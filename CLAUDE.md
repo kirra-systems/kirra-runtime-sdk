@@ -1,19 +1,19 @@
-# Aegis — Claude Code Context
+# Kirra — Claude Code Context
 
 ## Project Identity
 
-- **Crate**: `aegis-runtime-sdk` (lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`)
+- **Crate**: `kirra-runtime-sdk` (lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`)
 - **Edition**: 2021
-- **Primary binary**: `aegis_verifier_service` (`src/bin/aegis_verifier_service.rs`)
-- **Secondary binary**: `aegis_carla_client` (`src/bin/aegis_carla_client.rs`)
+- **Primary binary**: `kirra_verifier_service` (`src/bin/kirra_verifier_service.rs`)
+- **Secondary binary**: `kirra_carla_client` (`src/bin/kirra_carla_client.rs`)
 - **Test suite**: `cargo test`
-- **Remote**: `justinlooney/aegis`
+- **Remote**: `justinlooney/kirra-runtime-sdk`
 
 ---
 
 ## What This System Is
 
-Aegis is a distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. It enforces fail-closed trust semantics across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
+Kirra is a distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. It enforces fail-closed trust semantics across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
 
 ---
 
@@ -21,7 +21,7 @@ Aegis is a distributed runtime legitimacy engine and safety governor for AI-driv
 
 These have been blocked or reverted multiple times. Any submission that violates them must be rejected outright.
 
-1. **`require_admin_token` must never be commented out, bypassed, or removed** from any mutation route. It reads `AEGIS_ADMIN_TOKEN` from env; if absent or empty it returns 503 (fail-closed), never fail-open.
+1. **`require_admin_token` must never be commented out, bypassed, or removed** from any mutation route. It reads `KIRRA_ADMIN_TOKEN` from env; if absent or empty it returns 503 (fail-closed), never fail-open.
 
 2. **`constant_time_compare` must be used** for all token comparisons. Standard `==` is forbidden on security-critical byte sequences.
 
@@ -31,9 +31,9 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 5. **`pending_challenges: DashMap<String, ChallengeEntry>` must never be removed**. Nonces are volatile, never persisted, and expire after `CHALLENGE_TTL_MS = 30_000` ms.
 
-6. **`AEGIS_ADMIN_TOKEN` must come from env var only**. No hardcoded fallbacks. Absent or empty → 503.
+6. **`KIRRA_ADMIN_TOKEN` must come from env var only**. No hardcoded fallbacks. Absent or empty → 503.
 
-7. **`AEGIS_SUPERVISOR_RESET_KEY` must come from env var, no hardcoded fallbacks**. Must be present, non-empty, and ≤ 64 bytes.
+7. **`KIRRA_SUPERVISOR_RESET_KEY` must come from env var, no hardcoded fallbacks**. Must be present, non-empty, and ≤ 64 bytes.
 
 8. **The governor must clamp to the absolute hard boundary first**, then apply rate-of-change limits. Envelope cap always wins over rate priority.
 
@@ -74,7 +74,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `LockoutReason` | `src/posture_engine_v2.rs` | Structured fail-closed reason codes (`DagLockedOut`, `PostureCacheStale`, etc.) |
 | `PostureRecalcTrigger` | `src/posture_engine_v2.rs` | Typed trigger for posture engine worker channel |
 | `PostureEngineSender` | `src/posture_engine_v2.rs` | `mpsc::Sender<PostureRecalcTrigger>` — add to ServiceState |
-| `AegisPolicyLayer` | `src/gateway/policy_layer.rs` | Tower middleware; gates commands by posture |
+| `KirraPolicyLayer` | `src/gateway/policy_layer.rs` | Tower middleware; gates commands by posture |
 | `VehicleKinematicsContract` | `src/gateway/kinematics_contract.rs` | Hard envelope limits for vehicle commands |
 | `VirtualClock` / `SystemClock` | `src/clock.rs` | Clock abstraction for deterministic testing |
 | `ScenarioRunner` | `src/scenario_runner.rs` | Deterministic temporal test harness |
@@ -110,7 +110,7 @@ src/
 ├── action_policy.rs          — UnstructuredTextParser (LLM JSON → typed AgentAction)
 ├── security.rs               — constant_time_compare
 ├── protocol_adapter.rs       — Modbus/OPC-UA industrial event mapping
-├── aegis_core.rs             — AegisKernelGovernor (scalar clamping, rate limiting)
+├── kirra_core.rs             — KirraKernelGovernor (scalar clamping, rate limiting)
 ├── ros2_adapter.rs           — NaN/Inf rejection before ROS2 publish
 ├── dds_bridge.rs             — CDR encapsulation, Volatile durability
 ├── standby_monitor.rs        — HA heartbeat writer and promotion monitor
@@ -124,14 +124,14 @@ src/
 ├── gateway/
 │   ├── mod.rs
 │   ├── policy.rs             — classify_command (path+method → OperationalCommand)
-│   ├── policy_layer.rs       — Tower AegisPolicyLayer/AegisPolicyService
+│   ├── policy_layer.rs       — Tower KirraPolicyLayer/KirraPolicyService
 │   ├── cmd_vel.rs            — CmdVel validation, DEFAULT_CMD_VEL_LIMITS
 │   ├── interceptor.rs        — gateway interceptor
 │   ├── kinematics_contract.rs — VehicleKinematicsContract, validate_vehicle_command
 │   └── kinematics_proptest.rs — property-based tests for validate_vehicle_command
 └── bin/
-    ├── aegis_verifier_service.rs  — axum HTTP service, all route handlers
-    └── aegis_carla_client.rs      — CARLA simulator integration client
+    ├── kirra_verifier_service.rs  — axum HTTP service, all route handlers
+    └── kirra_carla_client.rs      — CARLA simulator integration client
 ```
 
 ### SQLite Tables
@@ -153,13 +153,13 @@ src/
 
 ## Route Authorization Matrix
 
-### Tier 1 — Identity-gated (admin token + `x-aegis-client-id` header)
+### Tier 1 — Identity-gated (admin token + `x-kirra-client-id` header)
 - `GET  /system/posture/stream` — SSE broadcast of posture events
 - `POST /federation/reports/submit` — Submit signed federated trust report
 - `POST /action_filter/evaluate` — Evaluate action claim against posture
 - `POST /industrial/evaluate` — Evaluate Modbus/OPC-UA industrial event
 
-### Tier 2 — Admin-only (Bearer `AEGIS_ADMIN_TOKEN`)
+### Tier 2 — Admin-only (Bearer `KIRRA_ADMIN_TOKEN`)
 - `POST /attestation/register` — Register a node
 - `POST /fleet/dependencies` — Register dependency graph edges
 - `POST /system/backup/export` — Full state dump
@@ -284,16 +284,16 @@ proptest = "1"  # dev-dependency
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `AEGIS_ADMIN_TOKEN` | Yes (mutation routes) | — | Bearer token; absent/empty → 503 |
-| `AEGIS_VERIFIER_MODE` | No | `active` | `passive_standby` → read-only; runtime-mutable via `mode_active` AtomicBool |
-| `AEGIS_DB_PATH` | No | `aegis_verifier.sqlite` | SQLite file path |
-| `AEGIS_VERIFIER_ADDR` | No | `0.0.0.0:8090` | Listen address |
-| `AEGIS_TRUSTED_INGRESS_MODE` | No | `false` | Enable client-id header enforcement |
-| `AEGIS_CLIENT_ID_HEADER` | No | `x-aegis-client-id` | Header name for identity-gated routes |
-| `AEGIS_INSTANCE_ID` | No | hostname | Unique ID for HA deployments (heartbeat key) |
-| `AEGIS_HEARTBEAT_INTERVAL` | No | `2000` | HA heartbeat write interval (ms) |
-| `AEGIS_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent this long (ms) |
-| `AEGIS_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
+| `KIRRA_ADMIN_TOKEN` | Yes (mutation routes) | — | Bearer token; absent/empty → 503 |
+| `KIRRA_VERIFIER_MODE` | No | `active` | `passive_standby` → read-only; runtime-mutable via `mode_active` AtomicBool |
+| `KIRRA_DB_PATH` | No | `kirra_verifier.sqlite` | SQLite file path |
+| `KIRRA_VERIFIER_ADDR` | No | `0.0.0.0:8090` | Listen address |
+| `KIRRA_TRUSTED_INGRESS_MODE` | No | `false` | Enable client-id header enforcement |
+| `KIRRA_CLIENT_ID_HEADER` | No | `x-kirra-client-id` | Header name for identity-gated routes |
+| `KIRRA_INSTANCE_ID` | No | hostname | Unique ID for HA deployments (heartbeat key) |
+| `KIRRA_HEARTBEAT_INTERVAL` | No | `2000` | HA heartbeat write interval (ms) |
+| `KIRRA_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent this long (ms) |
+| `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 
 ---
 

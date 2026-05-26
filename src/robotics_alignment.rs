@@ -4,7 +4,7 @@ use crate::{AgentAction, SafetyContract};
 use crate::action_policy::UnstructuredTextParser;
 use crate::action_filter::{ActionFilter, FilterOutput};
 use crate::ros2_adapter::{Ros2Adapter, Ros2TwistMessage, Vector3D};
-use crate::aegis_core::AegisKernelGovernor;
+use crate::kirra_core::KirraKernelGovernor;
 
 pub struct AlignmentBridge<C: SafetyContract + Copy> {
     parser: UnstructuredTextParser,
@@ -27,7 +27,7 @@ impl<C: SafetyContract + Copy> AlignmentBridge<C> {
     pub fn align_and_serialize_intent(&self, raw_json: &str) -> Result<(FilterOutput, Vec<u8>), &'static str> {
         let action = self.parser.parse_llm_json_intent(raw_json)?;
         let contract = self.filter.contract;
-        let mut gov = AegisKernelGovernor::new(contract, 0.0, contract.min_bound(), contract.max_bound());
+        let mut gov = KirraKernelGovernor::new(contract, 0.0, contract.min_bound(), contract.max_bound());
         let output = self.filter.process_agent_intent(&mut gov, action, 1.0);
 
         let (linear_x, angular_z) = match &output.sanitized_action {

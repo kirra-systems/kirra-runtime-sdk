@@ -1,50 +1,60 @@
-version: '3.8'
-
 services:
-  aegis-primary:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: aegis-primary
+  aegis-verifier:
+    build: .
+    container_name: aegis-verifier
     ports:
-      - "8088:8088"
+      - "${AEGIS_PORT:-8090}:8090"
+    env_file:
+      - .env
     environment:
-      - AEGIS_VERIFIER_MODE=active
-      - AEGIS_ADMIN_TOKEN=primary-super-secret-admin-token
-      - AEGIS_DB_PATH=/data/primary_verifier.sqlite
-      - RUST_LOG=info
+      AEGIS_VERIFIER_ADDR: "0.0.0.0:8090"
+      AEGIS_DB_PATH: "/var/lib/aegis/aegis.db"
+      AEGIS_VERIFIER_MODE: "${AEGIS_VERIFIER_MODE:-active}"
     volumes:
-      - aegis-data-primary:/data
+      - aegis-data:/var/lib/aegis
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/ready"]
+      test: ["CMD", "curl", "-fsSL", "http://localhost:8090/health"]
       interval: 10s
       timeout: 5s
+      start_period: 5s
       retries: 3
-    restart: unless-stopped
 
-  aegis-standby:
+  aegis-dashboard:
     build:
-      context: .
+      context: dashboard
       dockerfile: Dockerfile
+    container_name: aegis-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8091}:80"
+    restart: unless-stopped
+    depends_on:
+      aegis-verifier:
+        condition: service_healthy
+
+  # Optional HA standby — enable with: docker compose --profile ha up
+  aegis-standby:
+    profiles: [ha]
+    build: .
     container_name: aegis-standby
     ports:
-      - "8089:8088"
+      - "${AEGIS_STANDBY_PORT:-8092}:8090"
+    env_file:
+      - .env
     environment:
-      - AEGIS_VERIFIER_MODE=passive_standby
-      - AEGIS_ADMIN_TOKEN=standby-super-secret-admin-token
-      - AEGIS_DB_PATH=/data/standby_verifier.sqlite
-      - RUST_LOG=info
+      AEGIS_VERIFIER_ADDR: "0.0.0.0:8090"
+      AEGIS_DB_PATH: "/var/lib/aegis/aegis.db"
+      AEGIS_VERIFIER_MODE: "passive_standby"
     volumes:
-      - aegis-data-standby:/data
+      - aegis-data-standby:/var/lib/aegis
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/ready"]
+      test: ["CMD", "curl", "-fsSL", "http://localhost:8090/health"]
       interval: 10s
       timeout: 5s
+      start_period: 5s
       retries: 3
-    restart: unless-stopped
 
 volumes:
-  aegis-data-primary:
-    driver: local
+  aegis-data:
   aegis-data-standby:
-    driver: local

@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kirra.fullname" . }}
+  labels:
+    {{- include "kirra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kirra.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kirra.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "kirra.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: verifier
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          env:
+            - name: KIRRA_VERIFIER_ADDR
+              value: "0.0.0.0:8090"
+            - name: KIRRA_DB_PATH
+              value: "/var/lib/kirra/kirra.db"
+            - name: KIRRA_VERIFIER_MODE
+              value: {{ .Values.kirra.verifierMode | quote }}
+            - name: KIRRA_TRUSTED_INGRESS_MODE
+              value: {{ .Values.kirra.trustedIngressMode | quote }}
+            - name: KIRRA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kirra.secretName" . }}
+                  key: admin-token
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kirra
+
+        {{- if .Values.dashboard.enabled }}
+        - name: dashboard
+          image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
+          ports:
+            - name: dashboard
+              containerPort: 80
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.dashboard.resources | nindent 12 }}
+        {{- end }}
+
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "kirra.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

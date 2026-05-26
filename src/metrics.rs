@@ -28,9 +28,9 @@ impl LockFreeMetricsAggregator {
     pub fn format_prometheus_metrics(&self, node_id: &str) -> String {
         let mut out = String::new();
         let write_metric = |buffer: &mut String, name: &str, mtype: &str, desc: &str, val: u64| {
-            buffer.push_str(&format!("# HELP aegis_{} {}\n", name, desc));
-            buffer.push_str(&format!("# TYPE aegis_{} {}\n", name, mtype));
-            buffer.push_str(&format!("aegis_{}{{node_id=\"{}\"}} {}\n", name, node_id, val));
+            buffer.push_str(&format!("# HELP kirra_{} {}\n", name, desc));
+            buffer.push_str(&format!("# TYPE kirra_{} {}\n", name, mtype));
+            buffer.push_str(&format!("kirra_{}{{node_id=\"{}\"}} {}\n", name, node_id, val));
         };
 
         write_metric(&mut out, "processed_frames_total", "counter", "Total Modbus TCP write frames evaluated", self.total_processed_frames.load(Ordering::Relaxed));

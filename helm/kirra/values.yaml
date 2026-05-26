@@ -1,0 +1,76 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/justinlooney/kirra-runtime-sdk
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to Chart.appVersion
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8090
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+kirra:
+  # Required: set via --set kirra.adminToken=<value> or provide existingSecret
+  adminToken: ""
+  # Use an existing secret instead of creating one from adminToken above
+  # Secret must have key: admin-token
+  existingSecret: ""
+
+  verifierMode: active        # active | passive_standby
+  trustedIngressMode: false   # require x-kirra-client-id header on identity-gated routes
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8090
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8090
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Dashboard sidecar — serves the React UI on port 8091
+dashboard:
+  enabled: true
+  image:
+    repository: ghcr.io/justinlooney/kirra-dashboard
+    pullPolicy: IfNotPresent
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 8091
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 16Mi

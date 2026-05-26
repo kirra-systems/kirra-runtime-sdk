@@ -12,25 +12,11 @@
 
 // ============================================================================
 // SECTION 1: LockoutReason — structured stale/failure reason codes
-//
-// Apply to: src/posture_engine.rs (and export from src/lib.rs)
-//
-// WHY: Currently every fail-closed path returns FleetPosture::LockedOut with
-// no machine-readable reason. Operationally this collapses four distinct
-// failure modes into identical telemetry, making triage painful.
-//
-// These codes are used in structured tracing fields, audit chain payloads,
-// and (eventually) SSE PostureStreamEvents so operators and downstream
-// consumers can distinguish root causes without log-diving.
 // ============================================================================
 
 use std::fmt;
 
 /// Structured reason code for any fail-closed LockedOut condition.
-///
-/// Adding a new reason: add the variant here, add a constant string in
-/// Display below, update resolve_posture and any other fail-closed path.
-/// Display strings must never change once in production audit logs.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LockoutReason {
     /// Gray/black DAG traversal produced LockedOut (cycle or depth exceeded).
@@ -64,12 +50,8 @@ impl fmt::Display for LockoutReason {
     }
 }
 
-// Updated resolve_posture — replaces the version in policy_layer.rs.
-// Returns (FleetPosture, Option<LockoutReason>).
-// Callers that only need FleetPosture use .0; callers needing the reason use .1.
-
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
+use crate::posture_cache::SharedPostureCache;
 use crate::verifier::FleetPosture;
 
 pub fn now_ms_engine() -> u64 {
@@ -123,35 +105,9 @@ pub fn resolve_posture_with_reason(
 
 // ============================================================================
 // SECTION 2: Generation persistence across restarts
-//
-// Apply to: src/verifier_store.rs (new methods) + src/posture_engine.rs (init)
-//
-// WHY: The current AtomicU64 generation counter resets to 1 on every process
-// restart. Any downstream consumer comparing generation IDs across a restart
-// boundary would see a time reversal: generation 412 → generation 1.
-//
-// Correct behavior: on boot, load the last persisted generation from SQLite
-// and initialize the atomic from that value. Strictly monotonic IDs across
-// restart boundaries. Federation peers can detect stale cross-controller reports.
 // ============================================================================
 
-// -- verifier_store.rs additions ---------------------------------------------
-//
-// Add to schema initialization transaction:
-//
-//   tx.execute(
-//       "CREATE TABLE IF NOT EXISTS posture_engine_state (
-//           key   TEXT PRIMARY KEY,
-//           value TEXT NOT NULL
-//       );",
-//       [],
-//   )?;
-//
-// Add these methods to impl VerifierStore:
-
 /*
-/// Loads the last persisted posture generation counter.
-/// Returns 0 if no generation has been persisted yet (first boot).
 pub fn load_last_generation(&self) -> rusqlite::Result<u64> {
     let result = self.conn.query_row(
         "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
@@ -165,8 +121,6 @@ pub fn load_last_generation(&self) -> rusqlite::Result<u64> {
     }
 }
 
-/// Persists the current posture generation counter.
-/// Called by recalculate_and_broadcast as part of each audit chain write.
 pub fn save_last_generation(&self, generation: u64) -> rusqlite::Result<()> {
     self.conn.execute(
         "INSERT OR REPLACE INTO posture_engine_state (key, value)
@@ -177,38 +131,8 @@ pub fn save_last_generation(&self, generation: u64) -> rusqlite::Result<()> {
 }
 */
 
-// -- posture_engine.rs changes -----------------------------------------------
-//
-// In AppState::new() or service startup, after creating the store:
-//   let last_generation = store.load_last_generation().unwrap_or(0);
-//   POSTURE_GENERATION.store(last_generation, Ordering::SeqCst);
-//
-// In recalculate_and_broadcast(), after the audit chain write:
-//   let _ = app.store.save_last_generation(generation);
-
 // ============================================================================
 // SECTION 3: PostureEngineTask — serialized recalculation with coalescing
-//
-// Apply to: new file src/posture_worker.rs, wired into service startup
-//
-// WHY: Multiple concurrent sensor faults can each call recalculate_and_broadcast()
-// simultaneously, causing:
-//   - Redundant DAG traversals (expensive)
-//   - Generation counter churn (confusing ordering)
-//   - Duplicate audit chain entries for the same logical event
-//   - Potential broadcast storms under sensor flapping
-//
-// Fix: replace direct recalculate_and_broadcast() calls with sends to an
-// mpsc channel. A single background task drains the channel and coalesces
-// multiple pending triggers into one recalculation.
-//
-// Callers go from:
-//   recalculate_and_broadcast(&svc.app, &svc.posture_cache);
-// To:
-//   let _ = svc.posture_engine_tx.send(PostureRecalcTrigger::NodeTrustChanged {
-//       node_id: report.source_node_id.clone(),
-//       reason: "SENSOR_FAULT".to_string(),
-//   });
 // ============================================================================
 
 use tokio::sync::mpsc;
@@ -216,8 +140,6 @@ use std::sync::Arc;
 use crate::verifier::AppState;
 
 /// Trigger reason sent to the posture engine worker.
-/// Carries enough context for structured audit logging without requiring
-/// the worker to re-derive the cause from the DAG state.
 #[derive(Debug, Clone)]
 pub enum PostureRecalcTrigger {
     /// A node's trust state was changed (fault or recovery).
@@ -246,25 +168,9 @@ impl fmt::Display for PostureRecalcTrigger {
 }
 
 /// Channel sender for posture recalculation triggers.
-/// Cloneable — one per handler/task that needs to request recalculation.
-/// Add to ServiceState as `posture_engine_tx: PostureEngineSender`.
 pub type PostureEngineSender = mpsc::Sender<PostureRecalcTrigger>;
 
 /// Starts the posture engine worker task.
-///
-/// Returns the sender half of the trigger channel. Store in ServiceState
-/// so handlers can send triggers without calling recalculate_and_broadcast.
-///
-/// The worker:
-///   1. Waits for the first trigger
-///   2. Drains all additional pending triggers (coalescing via try_recv)
-///   3. Calls recalculate_and_broadcast once for the entire batch
-///   4. Logs all trigger reasons as a single structured event
-///   5. Loops back to wait for the next trigger
-///
-/// Coalescing window: all triggers already in the channel buffer at wake time.
-/// No artificial delay — low latency for single faults, collapsed bursts.
-/// Channel capacity: 128 triggers. Full channel returns Err to sender.
 pub fn start_posture_engine_worker(
     app: Arc<AppState>,
     cache: SharedPostureCache,
@@ -281,7 +187,6 @@ pub fn start_posture_engine_worker(
                 }
             };
 
-            // Drain all additional triggers already buffered.
             let mut batch: Vec<PostureRecalcTrigger> = vec![first];
             while let Ok(trigger) = rx.try_recv() {
                 batch.push(trigger);
@@ -305,8 +210,6 @@ pub fn start_posture_engine_worker(
     tx
 }
 
-/// Thin wrapper over recalculate_and_broadcast() that injects coalesced
-/// trigger context into the audit chain payload.
 fn recalculate_and_broadcast_with_context(
     app: &Arc<AppState>,
     cache: &SharedPostureCache,
@@ -317,39 +220,12 @@ fn recalculate_and_broadcast_with_context(
 }
 
 // ============================================================================
-// INTEGRATION — ServiceState additions
-//
-//   pub struct ServiceState {
-//       pub app:               Arc<AppState>,
-//       pub posture_cache:     SharedPostureCache,
-//       pub posture_engine_tx: PostureEngineSender,   // ← ADD
-//   }
-//
-// In main():
-//   let posture_engine_tx = start_posture_engine_worker(
-//       Arc::clone(&app),
-//       Arc::clone(&posture_cache),
-//   );
-//   let svc = Arc::new(ServiceState { app, posture_cache, posture_engine_tx });
-//
-// In handle_sensor_fault_report, replace:
-//   svc.app.recalculate_and_broadcast();
-// With:
-//   let _ = svc.posture_engine_tx.send(PostureRecalcTrigger::NodeTrustChanged {
-//       node_id: report.source_node_id.clone(),
-//       reason: reason.to_string(),
-//   }).await;
-// ============================================================================
-
-// ============================================================================
 // TESTS
 // ============================================================================
 
 #[cfg(test)]
 mod posture_engine_v2_tests {
     use super::*;
-
-    // --- LockoutReason display strings are stable ---------------------------
 
     #[test]
     fn test_lockout_reason_display_strings_are_stable() {
@@ -369,8 +245,6 @@ mod posture_engine_v2_tests {
         let roundtrip: LockoutReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(reason, roundtrip);
     }
-
-    // --- resolve_posture_with_reason ----------------------------------------
 
     #[test]
     fn test_empty_cache_returns_locked_out_with_empty_reason() {
@@ -436,8 +310,6 @@ mod posture_engine_v2_tests {
         }
     }
 
-    // --- PostureRecalcTrigger display ----------------------------------------
-
     #[test]
     fn test_trigger_display_includes_node_id() {
         let t = PostureRecalcTrigger::NodeTrustChanged {
@@ -459,8 +331,6 @@ mod posture_engine_v2_tests {
         assert!(s.contains("gps_primary"));
         assert!(s.contains("5000"));
     }
-
-    // --- Channel mechanics --------------------------------------------------
 
     #[tokio::test]
     async fn test_worker_channel_accepts_multiple_triggers() {

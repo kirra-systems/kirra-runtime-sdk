@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/parko-core", "crates/parko-onnx", "crates/parko-kirra"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,7 +1,11 @@
 target/
+dashboard/node_modules/
+dashboard/dist/
+helm/
 .git/
-.gitignore
-docs/
+.github/
+*.md
 *.sqlite
 *.sqlite-journal
 *.patch
+data/

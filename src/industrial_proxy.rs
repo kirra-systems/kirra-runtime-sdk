@@ -1,5 +1,5 @@
 // src/industrial_proxy.rs
-use crate::aegis_core::{AegisUnifiedGovernor, CausalFlightRecorder, GlobalSystemState, SafetyContractProfile};
+use crate::kirra_core::{KirraUnifiedGovernor, CausalFlightRecorder, GlobalSystemState, SafetyContractProfile};
 use serde::{Deserialize, Serialize};
 
 #[allow(dead_code)]
@@ -75,7 +75,7 @@ pub struct RealTimeTimingAnalytics {
 }
 
 pub struct LiveProtocolSimulator {
-    pub unified_governor: AegisUnifiedGovernor,
+    pub unified_governor: KirraUnifiedGovernor,
     pub recorder: CausalFlightRecorder,
 }
 
@@ -88,7 +88,7 @@ pub struct ProxyResolutionSummary {
 }
 
 impl LiveProtocolSimulator {
-    pub fn new(governor: AegisUnifiedGovernor) -> Self {
+    pub fn new(governor: KirraUnifiedGovernor) -> Self {
         Self {
             unified_governor: governor,
             recorder: CausalFlightRecorder::new(),
@@ -120,9 +120,9 @@ impl LiveProtocolSimulator {
 
         let active_trust = self.unified_governor.trust_evaluator.mode;
         let system_state = match active_trust {
-            crate::aegis_core::TrustMode::FullAutonomy => GlobalSystemState::Normal,
-            crate::aegis_core::TrustMode::ConstrainedAdvisory | crate::aegis_core::TrustMode::ShadowMode => GlobalSystemState::Degraded,
-            crate::aegis_core::TrustMode::LockedOut => GlobalSystemState::Failsafe,
+            crate::kirra_core::TrustMode::FullAutonomy => GlobalSystemState::Normal,
+            crate::kirra_core::TrustMode::ConstrainedAdvisory | crate::kirra_core::TrustMode::ShadowMode => GlobalSystemState::Degraded,
+            crate::kirra_core::TrustMode::LockedOut => GlobalSystemState::Failsafe,
         };
 
         self.recorder.log(

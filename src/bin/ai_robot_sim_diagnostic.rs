@@ -1,13 +1,13 @@
 // src/bin/ai_robot_sim_diagnostic.rs
-// Simulation diagnostic tool for Aegis safety governor validation.
+// Simulation diagnostic tool for Kirra safety governor validation.
 
-use aegis_runtime_sdk::aegis_core::AegisKernelGovernor;
-use aegis_runtime_sdk::kinematics_contract::KinematicContract;
-use aegis_runtime_sdk::action_filter::ActionFilter;
-use aegis_runtime_sdk::action_policy::UnstructuredTextParser;
+use kirra_runtime_sdk::kirra_core::KirraKernelGovernor;
+use kirra_runtime_sdk::kinematics_contract::KinematicContract;
+use kirra_runtime_sdk::action_filter::ActionFilter;
+use kirra_runtime_sdk::action_policy::UnstructuredTextParser;
 
 fn main() {
-    println!("=== Aegis Sim Diagnostic v1.0-rc20 ===\n");
+    println!("=== Kirra Sim Diagnostic v1.0-rc20 ===\n");
 
     let contract = KinematicContract {
         max_linear_velocity: 2.0,
@@ -16,7 +16,7 @@ fn main() {
         fallback_linear_speed: 0.0,
     };
 
-    let mut governor = AegisKernelGovernor::new(contract, 0.0, -2.0, 2.0);
+    let mut governor = KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0);
     let filter = ActionFilter::new(contract);
     let parser = UnstructuredTextParser;
 

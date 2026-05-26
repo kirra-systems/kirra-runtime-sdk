@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2a21dcd84ff1b24f6425f15ae7dc49c60dcbaa5e4e20af5425df6029f6fee297 # shrinks to cmd = ProposedVehicleCommand { linear_velocity_mps: 0.0, current_velocity_mps: -77.0004433861882, delta_time_s: 0.001, steering_angle_deg: 0.0, current_steering_angle_deg: 0.0 }
+cc 0e6aa3c7354c3930ee151479022bc5dd827b5e66f1bae2d7b89d1a9d03b15228 # shrinks to cmd = ProposedVehicleCommand { linear_velocity_mps: -5.0, current_velocity_mps: -5.0, delta_time_s: 0.001, steering_angle_deg: 0.0, current_steering_angle_deg: 35.0 }
+cc 2c9e4748e745386e2145c1849c86d53c3f70ac48d2a5779f009d896befe3c1b6 # shrinks to cmd = ProposedVehicleCommand { linear_velocity_mps: 0.0, current_velocity_mps: 0.0, delta_time_s: 0.001, steering_angle_deg: -86.06839353549424, current_steering_angle_deg: -35.0 }
+cc 9e88b441f05a6356a1ee1b08cfb7759ed53b375e26d9037b0eac74a808c989a7 # shrinks to cmd = ProposedVehicleCommand { linear_velocity_mps: 0.0, current_velocity_mps: 0.0, delta_time_s: 0.6379952780342332, steering_angle_deg: 56.624610615947425, current_steering_angle_deg: 35.0 }

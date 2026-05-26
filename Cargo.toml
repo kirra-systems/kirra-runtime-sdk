@@ -1,10 +1,10 @@
 [package]
-name = "aegis-runtime-sdk"
-version = "0.9.5"
+name = "kirra-runtime-sdk"
+version = "1.5.0"
 edition = "2021"
 
 [lib]
-name = "aegis_runtime_sdk"
+name = "kirra_runtime_sdk"
 crate-type = ["rlib", "cdylib"]
 
 [features]
@@ -23,13 +23,14 @@ tokio = { version = "1", features = ["full"] }
 tss-esapi = { version = "7", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
 http = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["sync"] }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
 rand = "0.8"
@@ -44,18 +45,18 @@ name = "ai_robot_sim_diagnostic"
 path = "src/bin/ai_robot_sim_diagnostic.rs"
 
 [[bin]]
-name = "aegis_ros2_demo_node"
-path = "src/bin/aegis_ros2_demo_node.rs"
+name = "kirra_ros2_demo_node"
+path = "src/bin/kirra_ros2_demo_node.rs"
 
 [[bin]]
-name = "aegis_ros2_publisher"
-path = "src/bin/aegis_ros2_publisher.rs"
+name = "kirra_ros2_publisher"
+path = "src/bin/kirra_ros2_publisher.rs"
 required-features = ["ros2"]
 
 [[bin]]
-name = "aegis_verifier_service"
-path = "src/bin/aegis_verifier_service.rs"
+name = "kirra_verifier_service"
+path = "src/bin/kirra_verifier_service.rs"
 
 [[bin]]
-name = "aegis_carla_client"
-path = "src/bin/aegis_carla_client.rs"
+name = "kirra_carla_client"
+path = "src/bin/kirra_carla_client.rs"

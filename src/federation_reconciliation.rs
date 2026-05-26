@@ -1,10 +1,10 @@
 // src/federation_reconciliation.rs
 //
-// Generation-ordered federation reconciliation for Aegis multi-controller deployments.
+// Generation-ordered federation reconciliation for Kirra multi-controller deployments.
 //
 // WHAT THIS SOLVES
 // ================
-// Two Aegis controllers (A and B) independently observe the same asset fleet.
+// Two Kirra controllers (A and B) independently observe the same asset fleet.
 // Both receive sensor faults, run DAG traversals, and produce posture views.
 // Under network partition or clock skew their views can diverge:
 //
@@ -50,32 +50,12 @@
 
 use serde::{Deserialize, Serialize};
 use crate::verifier::FleetPosture;
-use crate::federation::{
-    FederatedTrustReport, ReportEvaluation, FEDERATION_REPLAY_WINDOW_MS,
-    canonical_federation_payload, verify_federated_report_signature,
-};
+use crate::federation::{FederatedTrustReport, ReportEvaluation};
 
 // ---------------------------------------------------------------------------
 // Extended report type with generation field
 // ---------------------------------------------------------------------------
 
-/// A federated trust report that carries the source controller's posture
-/// generation counter inside the signed payload.
-///
-/// This is a superset of `FederatedTrustReport`. When a controller produces
-/// a report, it includes its current `next_generation()` value here. The
-/// recipient uses this for conflict resolution when two controllers disagree
-/// on the same asset's posture.
-///
-/// The `source_generation` field MUST be included in the canonical signed
-/// payload (see `canonical_federation_payload_v2`). A report that carries
-/// a generation counter outside the signature is forgeable and must be
-/// rejected.
-///
-/// # Wire format
-/// Serializes identically to `FederatedTrustReport` when `source_generation`
-/// is None, enabling backward compatibility with controllers running the
-/// original protocol version.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct FederatedTrustReportV2 {
     pub source_controller_id: String,
@@ -85,16 +65,11 @@ pub struct FederatedTrustReportV2 {
     pub expires_at_ms: u64,
     pub nonce_hex: String,
     pub signature_b64: String,
-    /// The source controller's posture generation at the time this report
-    /// was issued. Included in the signed payload when present.
-    /// None = report produced by a controller running the v1 protocol.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_generation: Option<u64>,
 }
 
 impl FederatedTrustReportV2 {
-    /// Downgrades to a v1 FederatedTrustReport for use with existing
-    /// store methods and the original acceptance pipeline.
     pub fn as_v1(&self) -> FederatedTrustReport {
         FederatedTrustReport {
             source_controller_id: self.source_controller_id.clone(),
@@ -108,12 +83,6 @@ impl FederatedTrustReportV2 {
     }
 }
 
-/// Builds the canonical signed payload for a v2 report.
-///
-/// When `source_generation` is present it is included in the payload,
-/// binding the generation counter to the signature. When absent, the
-/// payload is identical to the v1 canonical form — allowing v1 verifiers
-/// to validate v2 reports that happen not to carry a generation.
 pub fn canonical_federation_payload_v2(report: &FederatedTrustReportV2) -> String {
     match report.source_generation {
         Some(gen) => serde_json::json!({
@@ -136,9 +105,6 @@ pub fn canonical_federation_payload_v2(report: &FederatedTrustReportV2) -> Strin
     }
 }
 
-/// Verifies the Ed25519 signature on a v2 report.
-/// Uses `canonical_federation_payload_v2` so the generation counter
-/// (when present) is part of the verified payload.
 pub fn verify_federated_report_signature_v2(
     report: &FederatedTrustReportV2,
     public_key_b64: &str,
@@ -162,22 +128,14 @@ pub fn verify_federated_report_signature_v2(
 // Conflict resolution
 // ---------------------------------------------------------------------------
 
-/// The outcome of reconciling two conflicting federation reports for the
-/// same asset from different controllers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReconciliationOutcome {
-    /// The first report is authoritative.
     PreferFirst,
-    /// The second report is authoritative.
     PreferSecond,
-    /// Reports are equivalent — either can be used.
     Equivalent,
-    /// Reports cannot be reconciled safely — use fail-closed posture.
     FailClosed,
 }
 
-/// Posture severity ordering for fail-closed tie-breaking.
-/// Higher value = more severe = preferred under uncertainty.
 fn posture_severity(p: &FleetPosture) -> u8 {
     match p {
         FleetPosture::Nominal   => 0,
@@ -186,52 +144,28 @@ fn posture_severity(p: &FleetPosture) -> u8 {
     }
 }
 
-/// Reconciles two federation reports for the same asset.
-///
-/// Resolution priority:
-///   1. Generation ordering (higher generation = more recent DAG state)
-///   2. Timestamp ordering (issued_at_ms, when generations are absent/equal)
-///   3. Posture severity (fail-closed: prefer more restrictive when timestamps tie)
-///
-/// This function is pure — no I/O, no side effects.
-/// Called by the store layer after both reports have passed the full acceptance
-/// pipeline (signature verify, nonce check, structural validation).
 pub fn reconcile_reports(
     first: &FederatedTrustReportV2,
     second: &FederatedTrustReportV2,
 ) -> ReconciliationOutcome {
-    // Sanity check: only reconcile reports for the same asset
     if first.asset_id != second.asset_id {
-        // Different assets — not a conflict, caller error
         return ReconciliationOutcome::FailClosed;
     }
 
-    // If postures are identical, reports are equivalent regardless of ordering
     if first.posture == second.posture {
         return ReconciliationOutcome::Equivalent;
     }
 
-    // Step 1: Generation ordering
     match (first.source_generation, second.source_generation) {
         (Some(g1), Some(g2)) => {
             if g1 > g2 { return ReconciliationOutcome::PreferFirst; }
             if g2 > g1 { return ReconciliationOutcome::PreferSecond; }
-            // Equal generations from different controllers — fall through to timestamp
         }
-        (Some(_), None) => {
-            // First carries generation, second doesn't — first is newer protocol,
-            // prefer it as more informative
-            return ReconciliationOutcome::PreferFirst;
-        }
-        (None, Some(_)) => {
-            return ReconciliationOutcome::PreferSecond;
-        }
-        (None, None) => {
-            // Neither carries generation — fall through to timestamp
-        }
+        (Some(_), None) => return ReconciliationOutcome::PreferFirst,
+        (None, Some(_)) => return ReconciliationOutcome::PreferSecond,
+        (None, None) => {}
     }
 
-    // Step 2: Timestamp ordering
     if first.issued_at_ms > second.issued_at_ms {
         return ReconciliationOutcome::PreferFirst;
     }
@@ -239,29 +173,15 @@ pub fn reconcile_reports(
         return ReconciliationOutcome::PreferSecond;
     }
 
-    // Step 3: Fail-closed tie-breaking — prefer more restrictive posture
     let s1 = posture_severity(&first.posture);
     let s2 = posture_severity(&second.posture);
 
     if s1 > s2 { return ReconciliationOutcome::PreferFirst; }
     if s2 > s1 { return ReconciliationOutcome::PreferSecond; }
 
-    // Truly identical on all criteria (different postures but same severity — impossible
-    // with current 3-variant enum, but guarded for future variants)
     ReconciliationOutcome::FailClosed
 }
 
-/// Selects the authoritative posture from a set of reports for the same asset.
-///
-/// Takes an iterator of accepted, signature-verified reports and returns the
-/// posture that should be applied to the local fleet view.
-///
-/// Algorithm:
-///   - Fold all reports using `reconcile_reports` pairwise
-///   - The "winner" after all comparisons is the authoritative posture
-///   - On `FailClosed` at any step, uses the more restrictive of the two
-///
-/// Returns None if the input is empty.
 pub fn authoritative_posture<'a>(
     reports: impl IntoIterator<Item = &'a FederatedTrustReportV2>,
 ) -> Option<FleetPosture> {
@@ -271,11 +191,10 @@ pub fn authoritative_posture<'a>(
 
     for next in iter {
         match reconcile_reports(current, next) {
-            ReconciliationOutcome::PreferFirst  => { /* current stays */ }
+            ReconciliationOutcome::PreferFirst  => {}
             ReconciliationOutcome::PreferSecond => { current = next; }
-            ReconciliationOutcome::Equivalent   => { /* either is fine, keep current */ }
+            ReconciliationOutcome::Equivalent   => {}
             ReconciliationOutcome::FailClosed   => {
-                // Use the more restrictive posture of the two
                 if posture_severity(&next.posture) > posture_severity(&current.posture) {
                     current = next;
                 }
@@ -286,21 +205,10 @@ pub fn authoritative_posture<'a>(
     Some(current.posture.clone())
 }
 
-// ---------------------------------------------------------------------------
-// Evaluate v2 report — structural + freshness + replay window
-// (wraps existing evaluate_federated_report for v2 reports)
-// ---------------------------------------------------------------------------
-
-/// Evaluates a v2 report for structural completeness, freshness, and replay window.
-/// Delegates to the existing `evaluate_federated_report` via downgrade.
-///
-/// Additional v2 check: if `source_generation` is present, it must be > 0.
-/// A generation of 0 indicates an uninitialized counter and is rejected.
 pub fn evaluate_federated_report_v2(
     report: &FederatedTrustReportV2,
     current_time_ms: u64,
 ) -> ReportEvaluation {
-    // v2-specific: reject zero generation (uninitialized counter)
     if let Some(0) = report.source_generation {
         return ReportEvaluation {
             accepted: false,
@@ -308,7 +216,6 @@ pub fn evaluate_federated_report_v2(
         };
     }
 
-    // Delegate structural/freshness checks to the existing v1 pipeline
     crate::federation::evaluate_federated_report(&report.as_v1(), current_time_ms)
 }
 
@@ -320,10 +227,6 @@ pub fn evaluate_federated_report_v2(
 mod federation_reconciliation_tests {
     use super::*;
     use crate::verifier::FleetPosture;
-
-    // -----------------------------------------------------------------------
-    // Test fixtures
-    // -----------------------------------------------------------------------
 
     fn report(
         controller: &str,
@@ -339,7 +242,7 @@ mod federation_reconciliation_tests {
             issued_at_ms,
             expires_at_ms: issued_at_ms + 30_000,
             nonce_hex: format!("{controller}_{issued_at_ms}"),
-            signature_b64: "test_sig".to_string(), // Not verified in unit tests
+            signature_b64: "test_sig".to_string(),
             source_generation: generation,
         }
     }
@@ -356,87 +259,67 @@ mod federation_reconciliation_tests {
         report(controller, "lidar_front", FleetPosture::LockedOut, t, gen)
     }
 
-    // -----------------------------------------------------------------------
-    // Generation ordering
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_higher_generation_wins_over_lower() {
         let r1 = degraded("ctrl-a", 1000, Some(412));
-        let r2 = nominal("ctrl-b", 1000, Some(398)); // Same time, lower generation
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst,
-            "higher generation must win over lower at same timestamp");
+        let r2 = nominal("ctrl-b", 1000, Some(398));
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
     }
 
     #[test]
     fn test_lower_generation_loses_even_if_more_restrictive() {
-        // ctrl-b sees LockedOut but has a lower generation — ctrl-a's Nominal wins
-        // because generation ordering is authoritative over posture severity
         let r1 = nominal("ctrl-a", 1000, Some(500));
         let r2 = locked("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst,
-            "higher generation wins even when lower-gen report is more restrictive");
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
     }
 
     #[test]
     fn test_report_with_generation_preferred_over_report_without() {
-        let r1 = degraded("ctrl-a", 1000, Some(412)); // Has generation
-        let r2 = nominal("ctrl-b", 1000, None);        // No generation (v1 protocol)
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst,
-            "v2 report with generation must be preferred over v1 report without");
+        let r1 = degraded("ctrl-a", 1000, Some(412));
+        let r2 = nominal("ctrl-b", 1000, None);
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
     }
 
     #[test]
     fn test_report_without_generation_loses_to_report_with_generation() {
-        let r1 = nominal("ctrl-a", 1000, None);         // No generation
-        let r2 = degraded("ctrl-b", 1000, Some(412));   // Has generation
+        let r1 = nominal("ctrl-a", 1000, None);
+        let r2 = degraded("ctrl-b", 1000, Some(412));
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
     }
 
-    // -----------------------------------------------------------------------
-    // Timestamp ordering (when generations are absent or equal)
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_newer_timestamp_wins_when_no_generation() {
-        let r1 = degraded("ctrl-a", 2000, None); // Newer
-        let r2 = nominal("ctrl-b", 1000, None);  // Older
+        let r1 = degraded("ctrl-a", 2000, None);
+        let r2 = nominal("ctrl-b", 1000, None);
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
     }
 
     #[test]
     fn test_newer_timestamp_wins_when_equal_generation() {
-        let r1 = degraded("ctrl-a", 2000, Some(100)); // Same gen, newer time
-        let r2 = nominal("ctrl-b", 1000, Some(100));  // Same gen, older time
+        let r1 = degraded("ctrl-a", 2000, Some(100));
+        let r2 = nominal("ctrl-b", 1000, Some(100));
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferFirst);
     }
 
     #[test]
     fn test_older_timestamp_loses_when_no_generation() {
-        let r1 = nominal("ctrl-a", 1000, None);  // Older
-        let r2 = degraded("ctrl-b", 2000, None); // Newer
+        let r1 = nominal("ctrl-a", 1000, None);
+        let r2 = degraded("ctrl-b", 2000, None);
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
     }
 
-    // -----------------------------------------------------------------------
-    // Fail-closed tie-breaking (same generation, same timestamp)
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_fail_closed_prefers_degraded_over_nominal() {
-        // Same generation, same timestamp — posture severity breaks tie
         let r1 = nominal("ctrl-a", 1000, Some(100));
         let r2 = degraded("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond,
-            "Degraded must win over Nominal on tie");
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
     }
 
     #[test]
     fn test_fail_closed_prefers_locked_out_over_degraded() {
         let r1 = degraded("ctrl-a", 1000, Some(100));
         let r2 = locked("ctrl-b", 1000, Some(100));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond,
-            "LockedOut must win over Degraded on tie");
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
     }
 
     #[test]
@@ -446,14 +329,10 @@ mod federation_reconciliation_tests {
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::PreferSecond);
     }
 
-    // -----------------------------------------------------------------------
-    // Equivalent reports
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_identical_postures_are_equivalent() {
         let r1 = degraded("ctrl-a", 1000, Some(412));
-        let r2 = degraded("ctrl-b", 999, Some(1)); // Different everything except posture
+        let r2 = degraded("ctrl-b", 999, Some(1));
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::Equivalent);
     }
 
@@ -464,21 +343,12 @@ mod federation_reconciliation_tests {
         assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::Equivalent);
     }
 
-    // -----------------------------------------------------------------------
-    // Different asset IDs
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_different_asset_ids_fail_closed() {
         let r1 = report("ctrl-a", "lidar_front", FleetPosture::Nominal, 1000, Some(100));
         let r2 = report("ctrl-b", "camera_front", FleetPosture::Degraded, 1000, Some(200));
-        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::FailClosed,
-            "reports for different assets must not be reconciled");
+        assert_eq!(reconcile_reports(&r1, &r2), ReconciliationOutcome::FailClosed);
     }
-
-    // -----------------------------------------------------------------------
-    // authoritative_posture
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_single_report_returns_its_posture() {
@@ -496,46 +366,30 @@ mod federation_reconciliation_tests {
     fn test_highest_generation_wins_across_three_controllers() {
         let reports = vec![
             nominal("ctrl-a", 1000, Some(100)),
-            degraded("ctrl-b", 1000, Some(412)),  // Highest generation
+            degraded("ctrl-b", 1000, Some(412)),
             nominal("ctrl-c", 1000, Some(200)),
         ];
-        assert_eq!(
-            authoritative_posture(&reports),
-            Some(FleetPosture::Degraded),
-            "ctrl-b with generation 412 must win"
-        );
+        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::Degraded));
     }
 
     #[test]
     fn test_fail_closed_wins_when_all_same_generation_and_timestamp() {
         let reports = vec![
             nominal("ctrl-a", 1000, Some(100)),
-            locked("ctrl-b", 1000, Some(100)),   // Same gen/time, most restrictive
+            locked("ctrl-b", 1000, Some(100)),
             degraded("ctrl-c", 1000, Some(100)),
         ];
-        assert_eq!(
-            authoritative_posture(&reports),
-            Some(FleetPosture::LockedOut),
-            "fail-closed: LockedOut must win when all other criteria tie"
-        );
+        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::LockedOut));
     }
 
     #[test]
     fn test_mixed_v1_and_v2_reports_v2_wins() {
         let reports = vec![
-            nominal("ctrl-a", 2000, None),        // v1: newer timestamp
-            degraded("ctrl-b", 1000, Some(412)),  // v2: older timestamp but has generation
+            nominal("ctrl-a", 2000, None),
+            degraded("ctrl-b", 1000, Some(412)),
         ];
-        assert_eq!(
-            authoritative_posture(&reports),
-            Some(FleetPosture::Degraded),
-            "v2 report with generation must beat v1 report even with older timestamp"
-        );
+        assert_eq!(authoritative_posture(&reports), Some(FleetPosture::Degraded));
     }
-
-    // -----------------------------------------------------------------------
-    // canonical_federation_payload_v2
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_payload_without_generation_matches_v1_field_set() {
@@ -543,31 +397,23 @@ mod federation_reconciliation_tests {
         let v2_payload = canonical_federation_payload_v2(&r);
         let v1_report = r.as_v1();
         let v1_payload = crate::federation::canonical_federation_payload(&v1_report);
-        assert_eq!(v2_payload, v1_payload,
-            "v2 payload without generation must be identical to v1 payload");
+        assert_eq!(v2_payload, v1_payload);
     }
 
     #[test]
     fn test_payload_with_generation_includes_generation_field() {
         let r = degraded("ctrl-a", 1000, Some(412));
         let payload = canonical_federation_payload_v2(&r);
-        assert!(payload.contains("source_generation"),
-            "payload must include source_generation field when present");
-        assert!(payload.contains("412"),
-            "payload must include the generation value");
+        assert!(payload.contains("source_generation"));
+        assert!(payload.contains("412"));
     }
 
     #[test]
     fn test_payload_without_generation_excludes_generation_field() {
         let r = nominal("ctrl-a", 1000, None);
         let payload = canonical_federation_payload_v2(&r);
-        assert!(!payload.contains("source_generation"),
-            "payload must not include source_generation field when absent");
+        assert!(!payload.contains("source_generation"));
     }
-
-    // -----------------------------------------------------------------------
-    // evaluate_federated_report_v2
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_zero_generation_is_rejected() {
@@ -610,10 +456,6 @@ mod federation_reconciliation_tests {
         let result = evaluate_federated_report_v2(&r, now + 100);
         assert!(result.accepted, "v1-compat report must be accepted: {}", result.reason);
     }
-
-    // -----------------------------------------------------------------------
-    // posture_severity ordering
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_posture_severity_ordering_is_correct() {

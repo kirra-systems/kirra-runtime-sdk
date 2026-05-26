@@ -1,6 +1,6 @@
 // src/gateway/kinematics_contract.rs
 //
-// Deterministic vehicle kinematics safety contract for Aegis AV flight envelope protection.
+// Deterministic vehicle kinematics safety contract for Kirra AV flight envelope protection.
 //
 // This module answers exactly one question: "Is this proposed vehicle command physically
 // safe to execute on this platform, given the current kinematic state?"
@@ -9,7 +9,7 @@
 // returns immediately. See docs/kinematics_envelope_protection.md for the full spec.
 //
 // Security invariants respected:
-//   - No interaction with AEGIS_ADMIN_TOKEN or any auth primitives (wrong layer)
+//   - No interaction with KIRRA_ADMIN_TOKEN or any auth primitives (wrong layer)
 //   - No DDS/ROS2 publishing (ros2_adapter.rs owns NaN/Inf rejection for that path)
 //   - LockedOut handling belongs to the calling policy layer
 //   - All arithmetic is deterministic; no RNG, no I/O, no async
@@ -186,69 +186,91 @@ pub fn validate_vehicle_command(
     }
 
     // ------------------------------------------------------------------
-    // Priority 3: Implied acceleration ceiling
+    // Priorities 3–6: apply corrections progressively; evaluate P6 last.
+    //
+    // The pipeline accumulates corrections into `v` and `delta` rather
+    // than returning at the first triggered check. This ensures:
+    //
+    //   - A P3/P4 velocity clamp does not suppress a P6 lateral-accel
+    //     violation that would appear in the resulting state (Bug G).
+    //   - A P5a/P5b steering clamp does not suppress a P6 lateral-accel
+    //     violation in the rate-limited result (Bug C).
+    //
+    // P6 uses cmd.linear_velocity_mps (original commanded speed): when
+    // ClampSteering is returned the caller applies the clamped steering
+    // with the original velocity, so the safe angle is back-solved for
+    // that speed. This also satisfies the proptest invariant which checks
+    // lateral accel using the original commanded velocity.
+    //
+    // Return priority: steering corrections take precedence because a
+    // lateral-accel violation is the most acute physical safety concern.
+    // When only velocity needs correction, ClampLinear is returned.
     // ------------------------------------------------------------------
+    let mut v = cmd.linear_velocity_mps;
+    let mut v_clamped = false;
+    let mut delta = cmd.steering_angle_deg;
+    let mut delta_clamped = false;
+
+    // Priority 3: Implied acceleration ceiling
     let implied_accel =
         (cmd.linear_velocity_mps - cmd.current_velocity_mps) / cmd.delta_time_s;
 
-    if implied_accel > 0.0 && implied_accel > contract.max_accel_mps2 {
-        let safe_speed =
-            cmd.current_velocity_mps + (contract.max_accel_mps2 * cmd.delta_time_s);
-        return EnforceAction::ClampLinear(safe_speed);
+    if implied_accel > 0.0 && implied_accel > contract.max_accel_mps2 + 1e-9 {
+        v = (cmd.current_velocity_mps + contract.max_accel_mps2 * cmd.delta_time_s)
+            .clamp(-contract.max_speed_mps, contract.max_speed_mps);
+        v_clamped = true;
     }
 
-    // ------------------------------------------------------------------
     // Priority 4: Implied deceleration ceiling
     // Asymmetric from acceleration: braking limit is typically higher.
-    // ------------------------------------------------------------------
-    if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 {
-        let safe_speed =
-            cmd.current_velocity_mps - (contract.max_brake_mps2 * cmd.delta_time_s);
-        return EnforceAction::ClampLinear(safe_speed);
+    if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 + 1e-9 {
+        v = (cmd.current_velocity_mps - contract.max_brake_mps2 * cmd.delta_time_s)
+            .clamp(-contract.max_speed_mps, contract.max_speed_mps);
+        v_clamped = true;
     }
 
-    // ------------------------------------------------------------------
-    // Priority 5: Steering rate ceiling
-    // Prevents instantaneous full-lock transitions the physical rack
-    // cannot achieve and that produce violent lateral load transfer.
-    // ------------------------------------------------------------------
-    let steering_delta = cmd.steering_angle_deg - cmd.current_steering_angle_deg;
+    // Priority 5a: Absolute steering angle hard limit
+    if delta.abs() > contract.max_steering_deg {
+        delta = contract.max_steering_deg * delta.signum();
+        delta_clamped = true;
+    }
+
+    // Priority 5b: Steering rate ceiling
+    // Rate is measured from current_steering to the (possibly P5a-clamped)
+    // delta so that a bounded target is never inflated back up by the rate.
+    let steering_delta = delta - cmd.current_steering_angle_deg;
     let implied_steering_rate = steering_delta.abs() / cmd.delta_time_s;
 
     if implied_steering_rate > contract.max_steering_rate_deg_s {
-        let max_delta = contract.max_steering_rate_deg_s * cmd.delta_time_s;
-        let safe_steering =
-            cmd.current_steering_angle_deg + (max_delta * steering_delta.signum());
-        return EnforceAction::ClampSteering(safe_steering);
+        let max_delta_deg = contract.max_steering_rate_deg_s * cmd.delta_time_s;
+        delta = (cmd.current_steering_angle_deg + max_delta_deg * steering_delta.signum())
+            .clamp(-contract.max_steering_deg, contract.max_steering_deg);
+        delta_clamped = true;
     }
 
-    // ------------------------------------------------------------------
     // Priority 6: Dynamic lateral acceleration envelope (bicycle model)
     //
     //   a_lat = (v² × |tan(δ)|) / L
     //
-    // Back-solve max safe steering angle if limit exceeded:
-    //   δ_max = atan((a_lat_max × L) / v²)
-    //
-    // Guard: skip at near-zero velocity to avoid dividing by v² ≈ 0.
-    // ------------------------------------------------------------------
+    // Guard: skip at near-zero velocity to avoid division by v² ≈ 0.
     let v2 = cmd.linear_velocity_mps.powi(2);
     if v2 > 1e-6 {
-        let steering_rad = cmd.steering_angle_deg.to_radians();
-        let implied_lat_accel =
-            (v2 * steering_rad.tan().abs()) / contract.wheelbase_m;
+        let delta_rad = delta.to_radians();
+        let implied_lat_accel = (v2 * delta_rad.tan().abs()) / contract.wheelbase_m;
 
         if implied_lat_accel > contract.max_lateral_accel_mps2 {
             let max_safe_tan =
                 (contract.max_lateral_accel_mps2 * contract.wheelbase_m) / v2;
-            let max_safe_steering_deg = max_safe_tan.atan().to_degrees();
-            let safe_steering =
-                max_safe_steering_deg * cmd.steering_angle_deg.signum();
-            return EnforceAction::ClampSteering(safe_steering);
+            delta = max_safe_tan.atan().to_degrees() * delta.signum();
+            delta_clamped = true;
         }
     }
 
-    EnforceAction::Allow
+    match (v_clamped, delta_clamped) {
+        (_, true) => EnforceAction::ClampSteering(delta),
+        (true, false) => EnforceAction::ClampLinear(v),
+        (false, false) => EnforceAction::Allow,
+    }
 }
 
 // ---------------------------------------------------------------------------
