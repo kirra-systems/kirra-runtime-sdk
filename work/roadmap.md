@@ -107,7 +107,7 @@ yet. This increment implements the RSS governor integration from scratch.
 
 | Task | What | Done When |
 |------|------|-----------|
-| PARK-013 (GitHub Issue #25) | Implement `longitudinal_safe_distance` per IEEE 2846-2022 §5.1. First implementation; no prior behavioral-safety code exists. | Unit tests match IEEE reference values; no NaN/overflow on edge cases. |
+| [x] PARK-013 (GitHub Issue #25) | Implement `longitudinal_safe_distance` per IEEE 2846-2022 §5.1. First implementation; no prior behavioral-safety code exists. | Unit tests match IEEE reference values; no NaN/overflow on edge cases. (completed — commit a40948e) |
 | PARK-014 (GitHub Issue #26) | Implement `lateral_safe_distance` per IEEE 2846-2022 §5.2. | Unit tests cover converging, diverging, and stationary cases. |
 | PARK-015 (GitHub Issue #27) | Wire `RssState { safe, longitudinal_margin, lateral_margin }` into posture engine. RSS violation → Degraded; 5-tick / 10 s hysteresis recovery. | Integration test: violation → Degraded; 5 clean ticks → Nominal. |
 | PARK-016 (GitHub Issue #28) | RSS pre-actuator gate in KirraGovernor: `rss_state.safe == false` clamps to 0.0 before any kinematic check. | Unit test: safe=false + positive velocity → 0.0; safe=true → normal kinematics. |

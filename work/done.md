@@ -40,6 +40,18 @@ Completed tasks will be appended here weekly.
 
 ---
 
+## PARK-013 — Longitudinal RSS safe-distance — first implementation
+Completed: 2026-05-27
+Commit: a40948e
+Labels: behavioral-safety
+
+Notes: IEEE 2846-2022 §5.1 formula implemented in parko-core/src/rss.rs.
+RssState struct added. Expected values computed as exact rational fractions
+(487/48, 142/3) to eliminate floating-point rounding ambiguity.
+parko-core: 49 unit tests + 4 proptests.
+
+---
+
 ## PARK-012 — Feature-gated stub backends for CI
 Completed: 2026-05-27
 Commit: f4d1803
