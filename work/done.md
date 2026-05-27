@@ -40,6 +40,18 @@ Completed tasks will be appended here weekly.
 
 ---
 
+## PARK-014 — Lateral RSS safe-distance — first implementation
+Completed: 2026-05-27
+Commit: 111e7d0
+Labels: behavioral-safety
+
+Notes: lateral_stop_distance() closure avoids duplicating the three-step
+calculation for ego and object. test_lateral_negative_velocity_matches_positive
+verifies the .abs() contract — negating both velocities must produce identical
+margin. parko-core: 54 unit tests + 4 proptests.
+
+---
+
 ## PARK-013 — Longitudinal RSS safe-distance — first implementation
 Completed: 2026-05-27
 Commit: a40948e
