@@ -59,7 +59,7 @@ kirra-runtime-sdk: 340 tests (321 unit + 19 integration).
 
 ## PARK-003 — Write posture divergence property test
 
-**Completed:** 2026-05-26 | **Commit:** TBD | **Branch:** `claude/claude-md-reference-AtTWy`
+**Completed:** 2026-05-26 | **Commit:** `e1ba1a2` (with governor fix in `9943aa9`) | **Branch:** `claude/claude-md-reference-AtTWy`
 
 - Proptest suite in `tests/posture_divergence_proptest.rs`: 4 properties × 10,000 cases each.
 - Properties verified: nominal ceiling ≤ 35.0, degraded ceiling ≤ 5.0, locked-out = fallback (5.0), locked-out ≡ degraded.
