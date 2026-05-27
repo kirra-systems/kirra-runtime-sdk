@@ -44,3 +44,8 @@ file target/aarch64-unknown-linux-gnu/debug/kirra_verifier_service
 
 Required packages: `gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu`
 Rust target: `rustup target add aarch64-unknown-linux-gnu`
+
+## ROS2
+- Distribution: Jazzy
+- Installed: 2026-05-27
+- Source: source /opt/ros/jazzy/setup.bash
