@@ -5,6 +5,35 @@ pub struct RssState {
     pub lateral_margin: f64,
 }
 
+/// Computes the lateral RSS safe-distance per IEEE 2846-2022 §5.2.
+///
+/// Returns the minimum required lateral separation (metres) between ego and
+/// an object, accounting for both actors' reaction and braking distances.
+/// Lateral velocities may be signed (positive = right, negative = left);
+/// absolute values are used so the margin is always non-negative.
+///
+/// Parameters:
+///   ego_lat_vel   — ego lateral velocity (m/s, signed)
+///   obj_lat_vel   — object lateral velocity (m/s, signed)
+///   lat_accel_max — maximum lateral acceleration / deceleration (m/s²)
+///   reaction_time — actor reaction / response time (s)
+pub fn lateral_safe_distance(
+    ego_lat_vel: f64,
+    obj_lat_vel: f64,
+    lat_accel_max: f64,
+    reaction_time: f64,
+) -> f64 {
+    let lateral_stop_distance = |lat_vel: f64| -> f64 {
+        let v = lat_vel.abs();
+        let d_reaction = v * reaction_time + 0.5 * lat_accel_max * reaction_time.powi(2);
+        let v_after = v + lat_accel_max * reaction_time;
+        let d_brake = v_after.powi(2) / (2.0 * lat_accel_max);
+        d_reaction + d_brake
+    };
+    let margin = lateral_stop_distance(ego_lat_vel) + lateral_stop_distance(obj_lat_vel);
+    margin.max(0.0)
+}
+
 /// Computes the longitudinal RSS safe-distance per IEEE 2846-2022 §5.1.
 ///
 /// Returns the minimum required gap (metres) between ego and lead vehicle.
@@ -92,6 +121,72 @@ mod tests {
     fn test_rss_result_is_finite_and_nonnegative() {
         let result = longitudinal_safe_distance(100.0, 80.0, 0.5, 5.0, 8.0, 10.0);
         assert!(result.is_finite(), "large velocities must produce finite result, got {result}");
+        assert!(result >= 0.0, "result must be non-negative, got {result}");
+    }
+
+    // ── lateral_safe_distance ────────────────────────────────────────────────
+
+    /// Converging actors at equal speed: both stopping distances sum.
+    /// Both |v|=5.0, a=4.0, t=0.5:
+    ///   d_reaction = 5*0.5 + 0.5*4*0.25 = 3.0
+    ///   v_after = 7.0 → d_brake = 49/8 = 6.125
+    ///   d_total = 9.125 each → margin = 18.25
+    #[test]
+    fn test_lateral_converging_fast() {
+        let result = lateral_safe_distance(5.0, -5.0, 4.0, 0.5);
+        let expected = 18.25_f64;
+        assert!(
+            (result - expected).abs() < EPS,
+            "converging fast: got {result}, expected {expected}"
+        );
+    }
+
+    /// Both actors stationary: only reaction-phase creep contributes.
+    /// |v|=0, a=4.0, t=0.5:
+    ///   d_reaction = 0 + 0.5*4*0.25 = 0.5
+    ///   v_after = 2.0 → d_brake = 4/8 = 0.5
+    ///   d_total = 1.0 each → margin = 2.0
+    #[test]
+    fn test_lateral_both_stationary() {
+        let result = lateral_safe_distance(0.0, 0.0, 4.0, 0.5);
+        let expected = 2.0_f64;
+        assert!(
+            (result - expected).abs() < EPS,
+            "both stationary: got {result}, expected {expected}"
+        );
+    }
+
+    /// Asymmetric speeds produce asymmetric but summed margin.
+    /// ego |v|=3.0: d_reaction=2.0, v_after=5.0, d_brake=25/8=3.125 → 5.125
+    /// obj |v|=1.0: d_reaction=1.0, v_after=3.0, d_brake=9/8=1.125  → 2.125
+    /// margin = 7.25
+    #[test]
+    fn test_lateral_asymmetric_speeds() {
+        let result = lateral_safe_distance(3.0, 1.0, 4.0, 0.5);
+        let expected = 7.25_f64;
+        assert!(
+            (result - expected).abs() < EPS,
+            "asymmetric speeds: got {result}, expected {expected}"
+        );
+    }
+
+    /// Negative ego velocity: absolute value must be used; result identical
+    /// to the positive-velocity case.
+    #[test]
+    fn test_lateral_negative_velocity_matches_positive() {
+        let pos = lateral_safe_distance(3.0, 1.0, 4.0, 0.5);
+        let neg = lateral_safe_distance(-3.0, -1.0, 4.0, 0.5);
+        assert!(
+            (pos - neg).abs() < EPS,
+            "negated velocities must yield same margin: pos={pos}, neg={neg}"
+        );
+    }
+
+    /// Large lateral velocities must not produce NaN, Inf, or negative values.
+    #[test]
+    fn test_lateral_result_is_finite_and_nonnegative() {
+        let result = lateral_safe_distance(30.0, -25.0, 6.0, 0.5);
+        assert!(result.is_finite(), "large velocities: result must be finite, got {result}");
         assert!(result >= 0.0, "result must be non-negative, got {result}");
     }
 }
