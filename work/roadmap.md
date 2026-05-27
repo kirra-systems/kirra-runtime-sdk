@@ -95,7 +95,7 @@ are Increment 4.
 | PARK-008 (GitHub Issue #20) | Finalize `InferenceBackend` trait zero-copy boundary: `run(&self, input: &[f32], output: &mut [f32]) -> Result<(), BackendError>`. All scratch memory pre-allocated at `new()`. | Trait compiles; shape mismatch returns `BackendError::ShapeMismatch`; never panics. |
 | [x] PARK-009 (GitHub Issue #21) | Validate parko-onnx CPU backend against `InferenceBackend` trait. Verify MNIST integration test is green — do not assume it passes without running it. | `cargo test -p parko-onnx` exits 0; MNIST test verified green. (completed — commit dff915c) |
 | [x] PARK-010 (GitHub Issue #22) | Add `MockBackend` to parko-core: configurable deterministic output. Eliminates ORT dependency from parko-core test binary. | parko-core tests use `MockBackend`; no ORT link in `cargo test -p parko-core`. (completed — commit 58c197b) |
-| PARK-011 (GitHub Issue #23) | Define backend capability reporting: `capabilities()` method + `BackendDescriptor` enum covering all target backends. | All stubs return valid descriptors; capability query compiles on CI. |
+| [x] PARK-011 (GitHub Issue #23) | Define backend capability reporting: `capabilities()` method + `BackendDescriptor` enum covering all target backends. | All stubs return valid descriptors; capability query compiles on CI. (completed — commit 0a50a0d) |
 | PARK-012 (GitHub Issue #24) | Feature-gated zero-output stub backends for TensorRT, QNN, TIDL, OpenVINO, AMD. CI builds and tests all stubs without hardware. | `cargo test --features backend-<name>` passes on ubuntu-latest for all stubs. |
 
 ---

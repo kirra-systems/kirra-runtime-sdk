@@ -40,6 +40,21 @@ Completed tasks will be appended here weekly.
 
 ---
 
+## PARK-011 — Define backend capability reporting
+Completed: 2026-05-27
+Commit: 0a50a0d
+Labels: backend-architecture
+
+Notes: BackendCapabilities derives Default — all 5 existing backends
+inherit capabilities() from trait default (net 9 fewer lines).
+descriptor_vendor() exhaustively matches all 6 BackendDescriptor variants
+(no wildcard — non_exhaustive doesn't require it within the defining crate).
+capabilities_precision() bridges to RuntimeTelemetry.backend_precision via
+PrecisionMode (INT8/FP16/FP32) without new struct fields.
+parko-core: 44 unit + 4 proptests. parko-onnx: 3 integration tests.
+
+---
+
 ## PARK-010 — MockBackend for parko-core unit tests
 Completed: 2026-05-27
 Commit: 58c197b
