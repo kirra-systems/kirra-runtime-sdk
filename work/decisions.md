@@ -511,3 +511,12 @@ source-level MC/DC reporting equivalent to LDRA/BullseyeCoverage for C.
 - `.github/workflows/ci.yml` — CI jobs: `test`, `coverage` (cargo-llvm-cov --mcdc), `static-analysis`
 - `coverage-report/` and `*.profraw`/`*.profdata`/`lcov.info` added to `.gitignore`
 - Codecov integration via `codecov/codecov-action@v4` (fail_ci_if_error: false)
+
+### Update — 2026-05-27
+
+- **Status:** Partial — branch coverage active, MC/DC pending
+- **Current:** `--branch` coverage via `cargo-llvm-cov` on nightly
+- **Blocked:** rustc nightly removed the `mcdc` value for `-Z coverage-options` (accepts only `block|branch|condition`); `cargo-llvm-cov` hasn't caught up
+- **Tracked:** GitHub Issue #65
+- **Target:** ≥ 90% MC/DC on safety-critical paths once the toolchain realigns
+- **Safety-critical paths:** posture engine, `KirraGovernor::evaluate()`, audit chain, RSS safe-distance, NaN/Inf guard
