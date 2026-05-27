@@ -33,6 +33,16 @@ pub use backend::{
 };
 
 pub use backends::mock::MockBackend;
+#[cfg(feature = "backend-tensorrt")]
+pub use backends::TensorRTStubBackend;
+#[cfg(feature = "backend-qnn")]
+pub use backends::QnnStubBackend;
+#[cfg(feature = "backend-tidl")]
+pub use backends::TidlStubBackend;
+#[cfg(feature = "backend-openvino")]
+pub use backends::OpenVinoStubBackend;
+#[cfg(feature = "backend-amd")]
+pub use backends::AmdStubBackend;
 pub use clock::{Clock, MockClock, WallClock};
 pub use commands::ControlCommand;
 pub use control_loop::ControlLoop;

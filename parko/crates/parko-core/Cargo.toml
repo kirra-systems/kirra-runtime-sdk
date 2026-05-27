@@ -10,6 +10,16 @@ license = "Apache-2.0"
 # Never enable in production builds. Release builds omit these symbols.
 test-helpers = []
 
+# Feature-gated zero-output stub backends for CI.
+# Enable without hardware to verify the InferenceBackend contract compiles.
+# Real implementations: PARK-021 (TensorRT), PARK-027 (QNN), PARK-028 (TIDL),
+# PARK-029 (OpenVINO), PARK-030 (AMD).
+backend-tensorrt = []
+backend-qnn      = []
+backend-tidl     = []
+backend-openvino = []
+backend-amd      = []
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
