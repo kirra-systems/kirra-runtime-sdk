@@ -12,6 +12,7 @@ ros2 = []
 tpm = ["dep:tss-esapi"]
 
 [dependencies]
+parko-core = { path = "parko/crates/parko-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hmac = "0.12"

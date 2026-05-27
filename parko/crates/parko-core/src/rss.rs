@@ -1,4 +1,5 @@
 /// Runtime safety state produced by RSS evaluation.
+#[derive(Debug, Clone)]
 pub struct RssState {
     pub safe: bool,
     pub longitudinal_margin: f64,

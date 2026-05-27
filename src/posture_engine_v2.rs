@@ -137,7 +137,10 @@ pub fn save_last_generation(&self, generation: u64) -> rusqlite::Result<()> {
 
 use tokio::sync::mpsc;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use crate::verifier::AppState;
+use parko_core::RssState;
+use crate::recovery_hysteresis::{AV_RECOVERY_STREAK_THRESHOLD, AV_RECOVERY_WINDOW_MS};
 
 /// Trigger reason sent to the posture engine worker.
 #[derive(Debug, Clone)]
@@ -150,6 +153,9 @@ pub enum PostureRecalcTrigger {
     ManualTrigger { operator_id: String },
     /// A dependency graph edge was added or removed.
     DependencyGraphChanged,
+    /// An RSS safe-distance evaluation result (violation or recovery tick).
+    /// safe==false activates the violation flag; safe==true advances recovery streak.
+    RssViolation(RssState),
 }
 
 impl fmt::Display for PostureRecalcTrigger {
@@ -163,12 +169,65 @@ impl fmt::Display for PostureRecalcTrigger {
                 write!(f, "ManualTrigger({operator_id})"),
             Self::DependencyGraphChanged =>
                 write!(f, "DependencyGraphChanged"),
+            Self::RssViolation(rss) =>
+                write!(f, "RssViolation(safe={}, lon={:.2}, lat={:.2})",
+                    rss.safe, rss.longitudinal_margin, rss.lateral_margin),
         }
     }
 }
 
 /// Channel sender for posture recalculation triggers.
 pub type PostureEngineSender = mpsc::Sender<PostureRecalcTrigger>;
+
+/// Applies an RSS state report to `AppState` violation/recovery fields.
+///
+/// Violation (safe==false): sets `rss_active_violation` and resets the streak.
+/// Safe tick (safe==true) while violation is active: advances the streak.
+/// Recovery is confirmed when the streak reaches `AV_RECOVERY_STREAK_THRESHOLD`
+/// within `AV_RECOVERY_WINDOW_MS`; the violation flag is cleared on confirmation.
+pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
+    if !rss.safe {
+        app.rss_active_violation.store(true, Ordering::SeqCst);
+        if let Ok(mut streak) = app.rss_recovery_streak.lock() {
+            streak.count = 0;
+            streak.start_ms = 0;
+        }
+        tracing::info!(
+            lon_margin = rss.longitudinal_margin,
+            lat_margin = rss.lateral_margin,
+            "RSS violation active — fleet posture will be escalated to Degraded"
+        );
+    } else if app.rss_active_violation.load(Ordering::SeqCst) {
+        if let Ok(mut streak) = app.rss_recovery_streak.lock() {
+            // Window expiry: discard streak and start fresh from this tick.
+            if streak.start_ms > 0
+                && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
+            {
+                streak.count = 0;
+                streak.start_ms = 0;
+            }
+            if streak.start_ms == 0 {
+                streak.start_ms = now_ms;
+            }
+            streak.count += 1;
+            if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
+                app.rss_active_violation.store(false, Ordering::SeqCst);
+                streak.count = 0;
+                streak.start_ms = 0;
+                tracing::info!(
+                    threshold = AV_RECOVERY_STREAK_THRESHOLD,
+                    "RSS recovery confirmed — violation cleared"
+                );
+            } else {
+                tracing::debug!(
+                    count    = streak.count,
+                    required = AV_RECOVERY_STREAK_THRESHOLD,
+                    "RSS recovery streak advancing"
+                );
+            }
+        }
+    }
+}
 
 /// Starts the posture engine worker task.
 pub fn start_posture_engine_worker(
@@ -201,6 +260,13 @@ pub fn start_posture_engine_worker(
                     triggers   = ?trigger_summary,
                     "Posture engine: coalescing {batch_size} triggers into single recalculation"
                 );
+            }
+
+            let now = now_ms_engine();
+            for trigger in &batch {
+                if let PostureRecalcTrigger::RssViolation(ref rss) = *trigger {
+                    apply_rss_state(&app, rss, now);
+                }
             }
 
             recalculate_and_broadcast_with_context(&app, &cache, &trigger_summary);

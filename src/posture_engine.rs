@@ -82,7 +82,17 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         .collect();
 
     // Step 2: Derive aggregate posture — pure function, no I/O.
-    let new_posture = derive_fleet_posture(&node_postures);
+    let dag_posture = derive_fleet_posture(&node_postures);
+
+    // RSS escalation: active violation elevates Nominal to Degraded.
+    // LockedOut (from DAG) is never downgraded by this check.
+    let new_posture = if app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
+        && dag_posture == FleetPosture::Nominal
+    {
+        FleetPosture::Degraded
+    } else {
+        dag_posture
+    };
 
     // Step 3: Read previous posture for transition deduplication.
     let previous_posture: Option<FleetPosture> = cache

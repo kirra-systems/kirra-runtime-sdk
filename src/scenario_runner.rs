@@ -52,6 +52,7 @@ use std::sync::Arc;
 use crate::verifier::{AppState, FleetPosture, NodeTrustState};
 use crate::posture_cache::SharedPostureCache;
 use crate::posture_engine::recalculate_and_broadcast;
+use crate::posture_engine_v2::apply_rss_state;
 use crate::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
 use crate::clock::{Clock, VirtualClock};
 
@@ -90,6 +91,12 @@ pub enum ScenarioEvent {
     /// recalculation automatically. Use when testing the recalculation
     /// path itself.
     TriggerRecalculation,
+
+    /// Reports an RSS safe-distance evaluation result.
+    /// safe==false activates the violation flag (posture escalates to Degraded).
+    /// safe==true advances the recovery streak; clears the violation after
+    /// AV_RECOVERY_STREAK_THRESHOLD consecutive safe ticks within AV_RECOVERY_WINDOW_MS.
+    RssReport(parko_core::RssState),
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +358,11 @@ impl ScenarioRunner {
                     }
 
                     ScenarioEvent::TriggerRecalculation => {
+                        needs_recalc = true;
+                    }
+
+                    ScenarioEvent::RssReport(ref rss_state) => {
+                        apply_rss_state(&self.app, rss_state, ts);
                         needs_recalc = true;
                     }
                 }

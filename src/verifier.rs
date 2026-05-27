@@ -166,6 +166,13 @@ pub fn validate_client_identity_headers(
     !client_id.trim().is_empty()
 }
 
+/// In-memory streak counter for RSS recovery hysteresis.
+/// Tracks consecutive safe RSS reports and the streak start timestamp.
+pub struct RssRecoveryStreak {
+    pub count: u32,
+    pub start_ms: u64,
+}
+
 pub struct AppState {
     pub nodes: DashMap<String, RegisteredNode>,
     pub dependency_graph: DashMap<String, Vec<String>>,
@@ -181,6 +188,10 @@ pub struct AppState {
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
     pub transport_identity: TransportIdentityConfig,
+    /// True while an RSS safe-distance violation is active (recalculate elevates to Degraded).
+    pub rss_active_violation: Arc<AtomicBool>,
+    /// Recovery streak for clearing an active RSS violation.
+    pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
 }
 
 impl AppState {
@@ -194,6 +205,8 @@ impl AppState {
             mode_active: Arc::new(AtomicBool::new(mode == VerifierOperationMode::Active)),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
+            rss_active_violation: Arc::new(AtomicBool::new(false)),
+            rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
         }
     }
 
