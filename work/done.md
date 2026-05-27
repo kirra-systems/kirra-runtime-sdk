@@ -4,6 +4,17 @@ Completed tasks will be appended here weekly.
 
 ---
 
+## aarch64 cross-compilation environment
+Completed: 2026-05-27
+Commit: 70e7c77
+Notes: QEMU 8.2.2 installed. aarch64-unknown-linux-gnu Rust target added.
+kirra_verifier_service confirmed ELF 64-bit ARM aarch64. .cargo/config.toml
+wired with aarch64-linux-gnu-gcc linker. QNX targets blocked until SDP
+installed — test-qnx-vm.sh ready with guard. ENVIRONMENT.md documents
+all four target triples.
+
+---
+
 ## PARK-019 — 10,000-scenario adversarial trajectory simulation
 Completed: 2026-05-26
 Commit: 9172191

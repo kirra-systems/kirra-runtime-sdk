@@ -400,7 +400,7 @@ The production governor is **`KirraGovernor`** (already Kirra-named; no rename n
 ### Clock types (PARK-005 additions)
 
 | Type | File | Purpose |
-|------|------|---------|
+|------|------|--------|
 | `Clock` (trait) | `parko-core/src/clock.rs:8` | `fn now_ms(&self) -> u64; Send + Sync` |
 | `WallClock` | `parko-core/src/clock.rs:13` | Production impl — `SystemTime` / UNIX epoch |
 | `MockClock` | `parko-core/src/clock.rs:30` | Test double — `Arc<AtomicU64>` + `advance(ms)`, `Clone` |
@@ -442,3 +442,32 @@ that would require editing if `KirraGovernor` were ever renamed:
 
 No rename is required. The struct, crate, and all call sites are already
 using Kirra naming (`KirraGovernor`, `parko-kirra`).
+
+---
+
+## ADL-008 — AMD backend target: Vitis AI over ROCm
+
+**Date:** 2026-05-27
+**Status:** Accepted
+**Deciders:** Justin Looney
+
+### Decision
+
+The AMD backend (PARK-030) will target Vitis AI on Xilinx/AMD FPGAs.
+ROCm is deferred indefinitely unless a specific customer requires it.
+Development target: AMD Kria K26 (~$200 edge AI platform).
+
+### Why
+
+ROCm targets data center discrete GPU inference — wrong deployment context
+for Kirra. Kirra deploys at the edge (vehicles, robots, drones, industrial).
+Vitis AI targets Xilinx/AMD FPGAs which are used in automotive safety systems
+specifically because of deterministic latency. FPGA inference produces
+nanosecond-predictable execution times — a genuine differentiator against
+TensorRT (JIT variance) and QNN (thermal throttling variance).
+
+### Consequences
+
+- PARK-030 implements the Vitis AI backend when hardware arrives.
+- ROCm deferred indefinitely unless a specific customer requires it.
+- The feature flag `backend-amd` (added PARK-012) maps to Vitis AI, not ROCm.
