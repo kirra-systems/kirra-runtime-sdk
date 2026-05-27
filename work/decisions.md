@@ -471,3 +471,43 @@ TensorRT (JIT variance) and QNN (thermal throttling variance).
 - PARK-030 implements the Vitis AI backend when hardware arrives.
 - ROCm deferred indefinitely unless a specific customer requires it.
 - The feature flag `backend-amd` (added PARK-012) maps to Vitis AI, not ROCm.
+
+---
+
+## ADL-009 — MC/DC Coverage Baseline
+
+**Date:** 2026-05-27
+**Status:** Established
+**Standard:** ISO 26262 Part 6 §8 (ASIL-D mandatory)
+
+### Decision
+
+MC/DC (Modified Condition/Decision Coverage) measurement added to CI via
+`cargo-llvm-cov --mcdc`. Coverage runs on every push to main and every PR.
+Reports uploaded to Codecov; HTML report generated locally via
+`scripts/coverage-mcdc.sh`.
+
+### Baseline
+
+Baseline MC/DC coverage measurement pending first CI run on GitHub Actions.
+Target for ASIL-D assessment: ≥ 90% MC/DC on safety-critical paths.
+
+Safety-critical paths (priority coverage targets):
+- `src/posture_engine.rs` — posture state machine and trigger handling
+- `parko/parko-kirra/src/lib.rs` — KirraGovernor evaluate() authority model
+- `src/audit_chain.rs` — hash-chained audit ledger
+- `parko/parko-core/src/rss.rs` — RSS safe-distance calculations (IEEE 2846-2022)
+- `parko/parko-core/src/control_loop.rs` — NaN/Inf guard and clock tick
+
+### Rationale
+
+ISO 26262 Part 6 Table 10 requires MC/DC at ASIL-D. TÜV SÜD will request
+MC/DC evidence in the first assessment conversation. Rust + llvm-cov provides
+source-level MC/DC reporting equivalent to LDRA/BullseyeCoverage for C.
+
+### Consequences
+
+- `scripts/coverage-mcdc.sh` — local measurement script (llvm-profdata + llvm-cov)
+- `.github/workflows/ci.yml` — CI jobs: `test`, `coverage` (cargo-llvm-cov --mcdc), `static-analysis`
+- `coverage-report/` and `*.profraw`/`*.profdata`/`lcov.info` added to `.gitignore`
+- Codecov integration via `codecov/codecov-action@v4` (fail_ci_if_error: false)

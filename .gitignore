@@ -6,3 +6,7 @@ dashboard/dist/
 __pycache__/
 *.pyc
 *.proptest-regressions
+*.profraw
+*.profdata
+coverage-report/
+lcov.info

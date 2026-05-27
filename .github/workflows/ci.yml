@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test --workspace
+
+  coverage:
+    name: MC/DC Coverage (ISO 26262)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - name: Run MC/DC coverage
+        run: |
+          cargo llvm-cov --workspace --mcdc \
+            --ignore-filename-regex='/.cargo/registry' \
+            --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  static-analysis:
+    name: Static Analysis (ISO 26262)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Clippy
+        run: |
+          cargo clippy --workspace -- \
+            -D warnings \
+            -W clippy::all \
+            -A clippy::module_name_repetitions \
+            -A clippy::must_use_candidate \
+            2>&1 | tee clippy-report.txt
+      - name: Dependency audit
+        run: cargo audit 2>&1 | tee audit-report.txt
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: static-analysis-reports
+          path: |
+            clippy-report.txt
+            audit-report.txt
