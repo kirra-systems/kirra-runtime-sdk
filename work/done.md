@@ -144,6 +144,22 @@ Both tests complete in < 1s (previously: hung > 60s)
 
 ---
 
+## PARK-016 — RSS pre-actuator gate in KirraGovernor
+Completed: 2026-05-27
+Commit: 470027b
+Labels: kirra-governor, behavioral-safety
+Notes: Governor method is evaluate() not enforce(). Command type is
+&ControlCommand → EnforcementAction. apply_mrc_profile() extracted
+from inline Degraded branch — single code path for Degraded and RSS
+unsafe. Three-tier priority in evaluate(): LockedOut hard stop → RSS
+gate (Degraded semantics) → kinematic envelope checks. All three
+constructors (new, nominal, mrc_fallback) initialize rss_state to
+safe=true, margins=f64::MAX. MRC_VELOCITY_CEILING_MPS is single source
+of truth — no bare 5.0 in source. Tests A-E all pass.
+parko-kirra: 10 unit + 3 integration tests pass.
+
+---
+
 ## PARK-015 — Wire RssState into posture engine
 
 **Completed:** 2026-05-27 | **Commit:** `31b8979` | **Branch:** `claude/claude-md-reference-AtTWy`
