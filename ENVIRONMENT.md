@@ -19,7 +19,7 @@ Linker config: `.cargo/config.toml` sets `aarch64-linux-gnu-gcc` for the
 
 ## QNX SDP 8.0
 - Status: License approved, download pending
-- Install path (when ready): `/opt/qnx800/sdp`
+- Install path (when ready): `/opt/qnx800/sdp2`
 - First task after install: PARK-024 (QNX deployment spike)
 - VM test script: `scripts/test-qnx-vm.sh` (guards for missing SDP)
 - Target triples:

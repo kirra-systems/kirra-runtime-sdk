@@ -1,20 +1,20 @@
 #!/bin/bash
 # Test Kirra binary on QNX x86_64 VM
-# REQUIRES: QNX SDP 8.0 installed at /opt/qnx800/sdp
+# REQUIRES: QNX SDP 8.0 installed at /opt/qnx800/sdp2
 # Install from: https://www.qnx.com/developers/sdp80/
 # License required — apply at https://www.qnx.com/developers/
 # Tracked: PARK-024
 
 set -e
 
-if [ ! -d "/opt/qnx800/sdp" ]; then
-    echo "ERROR: QNX SDP 8.0 not found at /opt/qnx800/sdp"
+if [ ! -d "/opt/qnx800/sdp2" ]; then
+    echo "ERROR: QNX SDP 8.0 not found at /opt/qnx800/sdp2"
     echo "Install QNX SDP 8.0 before running this script."
     echo "License required — apply at https://www.qnx.com/developers/"
     exit 1
 fi
 
-source /opt/qnx800/sdp/qnxsdp-env.sh
+source /opt/qnx800/sdp2/qnxsdp-env.sh
 
 BINARY=target/x86_64-pc-nto-qnx800/debug/kirra_verifier_service
 
