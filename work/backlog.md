@@ -1316,7 +1316,7 @@ coverage from proptest and unit tests.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Set up MC/DC code coverage measurement using llvm-cov and add it to CI.
 
@@ -1439,7 +1439,7 @@ not running at all.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Add automotive-grade static analysis to CI and document results.
 
@@ -1534,7 +1534,7 @@ this traceability in the first document review.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Audit the Requirements Traceability Matrix and identify gaps.
 
@@ -1604,7 +1604,7 @@ state response. TÜV will ask for fault injection evidence.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Create a fault injection test suite that verifies safe-state
 responses for each documented failure mode.
@@ -1705,7 +1705,7 @@ TÜV will ask for the coding standard and evidence of its enforcement.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Create a Rust Safety Coding Standard document for Kirra and
 audit the codebase for compliance.
@@ -1947,7 +1947,7 @@ this document before the first assessment conversation.
 
 #### Claude Code Prompt
 ```
-You are working in the kirra-runtime-sdk repository (root at /home/user/aegis).
+You are working in the kirra-runtime-sdk repository (root at ~/kirra-runtime-sdk).
 
 Task: Create the Safe State Specification document.
 This is documentation only. Do NOT modify any source files.
