@@ -584,3 +584,27 @@ The local `[patch.crates-io] socket2 = { path = "../socket2-qnx" }` in `kirra-ru
 - **CI static-analysis job:** pending CERT-002 CI addition
 - **`needless_range_loop` in `security.rs`:** intentionally suppressed via `#[allow]` — `write_volatile` required to prevent dead-code elimination of secret-zeroing loop. Auto-fix would introduce memory-residue side channel. Documented exception per CERT-005 RSR-007.
 
+---
+
+## ADL-011 — RTM Coverage Baseline (CERT-003)
+
+**Date:** 2026-05-29
+
+| Metric | Value |
+|---|---|
+| Total safety goals | 16 |
+| Tests named in RTM | 40 |
+| Tests found in code | 5 |
+| Goals with any test coverage | 5 |
+| Goals with zero coverage | 11 |
+| Goal-level coverage | **31.25%** |
+| Test-level coverage | **12.5%** |
+| Gaps identified | 11 (zero-coverage SGs) + 5 (single-coverage SGs) |
+| Code references to safety goal IDs | 0 (no back-traceability from code to safety goals) |
+
+**Gap report:** `docs/safety/RTM_GAP_REPORT.md`
+**Stub file:** `tests/cert_003_rtm_gap_stubs.rs` — 11 `#[ignore]`'d `todo!()` stubs, one per zero-coverage goal
+**RTM annotations:** `docs/safety/REQUIREMENTS_TRACEABILITY.md` — each named test now carries `✓` (exists) or `✗` (missing) status marker inline
+
+The RTM's self-reported "All 16 safety goals are covered" was aspirational and never reconciled with the codebase. Closing CERT-003 requires implementing the 11 stub bodies and the 7 single-coverage gaps (TR-001b, TR-002a, TR-002b, TR-004a, TR-004b, TR-005a, TR-011a, TR-011b) before any ASIL-D pre-assessment can be defended.
+
