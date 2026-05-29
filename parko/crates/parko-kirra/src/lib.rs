@@ -29,6 +29,9 @@ use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::RssState;
 
+pub mod comparator;
+pub use comparator::GovernorComparator;
+
 /// MRC (Minimum Risk Condition) velocity ceiling.
 /// Applied when posture is Degraded or RSS state is unsafe.
 /// NOT applied to LockedOut — LockedOut is a hard stop (0.0).
