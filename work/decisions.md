@@ -520,3 +520,28 @@ source-level MC/DC reporting equivalent to LDRA/BullseyeCoverage for C.
 - **Tracked:** GitHub Issue #65
 - **Target:** ≥ 90% MC/DC on safety-critical paths once the toolchain realigns
 - **Safety-critical paths:** posture engine, `KirraGovernor::evaluate()`, audit chain, RSS safe-distance, NaN/Inf guard
+
+---
+
+## ADL-010 — QNX Cross-Compilation Findings (PARK-024)
+
+**Date:** 2026-05-28
+**Status:** In progress — spike open
+**Target:** `x86_64-pc-nto-qnx800` via QNX SDP 8.0 at `/opt/qnx800/sdp2`
+**Toolchain:** `nightly` + `-Zbuild-std=std,panic_abort` (tier-3 target, no precompiled stdlib)
+
+### Toolchain confirmed working
+- `qnxsdp-env.sh` sources cleanly; `QNX_HOST`, `QNX_TARGET`, `QNX_CONFIGURATION`, and `PATH` set as expected
+- `qcc --version` returns `gcc 12.2.0`
+- `scripts/test-qnx-vm.sh` clears the SDP guard and sources env
+
+### POSIX-subset gaps encountered (running list)
+
+**Gap #1 — `libc::TCP_KEEPALIVE` missing for `nto` target**
+
+- Symptom: `socket2 v0.6.3` fails to compile —
+  `error[E0432]: unresolved import 'libc::TCP_KEEPALIVE'` at `socket2/src/sys/unix.rs:309`
+- Root cause: the `libc` crate does not export `TCP_KEEPALIVE` for `target_os = "nto"`. QNX's BSD-derived TCP stack does provide the option at the C header level, but the Rust bindings haven't been generated for it.
+- Spike workaround: local `[patch.crates-io]` of `socket2` that selects `SO_KEEPALIVE` under `cfg(target_os = "nto")`. This unblocks compilation but is **not semantically correct** — `SO_KEEPALIVE` is socket-level on/off, not the TCP-level idle timer the original constant configures. Acceptable for the spike whose goal is "binary running"; **not acceptable for production**.
+- Proper fix: PR to `rust-lang/libc` exposing `TCP_KEEPALIVE` for `nto-qnx` targets; revert the `socket2` patch once that lands.
+- Tracked: GitHub Issue #66
