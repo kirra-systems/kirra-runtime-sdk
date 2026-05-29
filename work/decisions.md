@@ -571,3 +571,15 @@ The local `[patch.crates-io] socket2 = { path = "../socket2-qnx" }` in `kirra-ru
 - "Binary running on QNX" remains the eventual goal but is multi-day upstream-PR work, not in scope for this spike
 - Issue #66 has been re-scoped from "libc PR" to "upstream socket2/tokio contributions"
 
+### CERT-002 baseline (2026-05-29)
+
+- **Total initial errors:** 21 (`cargo clippy --workspace -- -D warnings`)
+- **Safety fix:** `not_unsafe_ptr_arg_deref` in `src/ffi.rs::kirra_reset_state` → commit `e0b583d` (CERT-005 RSR-001)
+- **Style auto-fix:** 13 lints (`new_without_default`, `redundant_pattern_matching`, `manual_is_multiple_of`, `explicit_auto_deref`, `doc_overindented_list_items`, `len_without_is_empty`, `needless_range_loop`) → commit `349cab1`
+- **Remaining:** 6 judgment-call lints — tracked, not auto-fixed:
+  - `too_many_arguments` ×3 (fns with 8/9/10 args)
+  - `result_unit_err` ×2 (`Result<_, ()>` instead of typed error)
+  - `needless_range_loop` ×1 (one indexed-loop pattern that auto-fix couldn't rewrite)
+- **`cargo audit`:** 0 vulnerabilities across 268 dependencies (clean)
+- **CI static-analysis job:** pending CERT-002 CI addition
+
