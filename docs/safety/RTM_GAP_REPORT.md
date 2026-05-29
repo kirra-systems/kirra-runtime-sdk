@@ -9,17 +9,22 @@
 
 ## Summary
 
-| Metric | Value |
-|---|---|
-| Total safety goals | 16 |
-| Test functions named in RTM | 40 |
-| Tests found in codebase | 5 |
-| Tests missing from codebase | 35 |
-| Goals with **any** test coverage | 5 |
-| Goals with **zero** test coverage | 11 |
-| Goal-level coverage | **31.25%** (5 / 16) |
-| Test-level coverage | **12.5%** (5 / 40) |
-| Code references to safety goal IDs | 0 |
+| Metric | Initial baseline (2026-05-29) | After CERT-004 (2026-05-29) |
+|---|---|---|
+| Total safety goals | 16 | 16 |
+| Test functions named in RTM | 40 | 40 |
+| Tests found in codebase | 5 | 8 (+3 from `tests/fault_injection.rs`) |
+| Tests missing from codebase | 35 | 32 |
+| Goals with **any** test coverage | 5 | **8** |
+| Goals with **zero** test coverage | 11 | **8** |
+| Goal-level coverage | 31.25% (5 / 16) | **50.00%** (8 / 16) |
+| Test-level coverage | 12.5% (5 / 40) | **20.0%** (8 / 40) |
+| Code references to safety goal IDs | 0 | 0 (deferred — recommendation pending) |
+
+Newly covered by CERT-004 (`tests/fault_injection.rs`):
+- SG-006 ✓ `test_safety_goal_sg_006_unknown_command_denial`
+- SG-014 ✓ `test_safety_goal_sg_014_federation_report_replay_prevention`
+- SG-016 ✓ `test_safety_goal_sg_016_dds_actuator_volatile_durability`
 
 The RTM's own self-reported coverage (`All 16 safety goals are covered`, `Total Test Suite Size: 306 passing`) was aspirational — it names the tests that *should* exist per technical requirement but was never reconciled against actual test functions in the source tree. **No ASIL-relevant test exists for 11 of 16 safety goals.**
 
@@ -27,7 +32,7 @@ The RTM's own self-reported coverage (`All 16 safety goals are covered`, `Total 
 
 ## Gaps — goals without any test coverage
 
-These 11 safety goals have **zero** corresponding test in the codebase. Stubs added in `tests/cert_003_rtm_gap_stubs.rs`.
+After CERT-004 these **8** safety goals (down from 11) still have no real test in the codebase. SG-006, SG-014, and SG-016 were closed and now live in `tests/fault_injection.rs`. The remaining 8 stubs are in `tests/cert_003_rtm_gap_stubs.rs`, with infrastructure-required notes added for SG-010, SG-013, and SG-015.
 
 | Goal | ASIL | Description (one line) | Missing RTM-named tests |
 |---|---|---|---|

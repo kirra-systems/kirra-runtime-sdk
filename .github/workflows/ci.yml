@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --workspace
+      - name: Fault injection tests (ISO 26262 safe-state verification — CERT-004)
+        run: cargo test --test fault_injection
 
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)

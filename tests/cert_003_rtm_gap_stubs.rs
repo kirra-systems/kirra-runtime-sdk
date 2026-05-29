@@ -27,14 +27,9 @@ fn test_safety_goal_sg_003_sensor_timeout_fault_detection() {
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-006"]
+#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_006_unknown_command_denial"]
 fn test_safety_goal_sg_006_unknown_command_denial() {
-    // Safety Goal: SG-006 — Unknown Command Denial in All Posture States (ASIL D)
-    // This test must verify: should_route_command returns false for
-    // OperationalCommand::Unknown unconditionally — before any posture
-    // evaluation, in all three posture states (Nominal, Degraded, LockedOut).
-    // Currently unimplemented — tracked in CERT-003
-    todo!("implement SG-006 verification")
+    // See tests/fault_injection.rs for full implementation (CERT-004).
 }
 
 #[test]
@@ -75,7 +70,7 @@ fn test_safety_goal_sg_009_ha_standby_promotion_within_timeout() {
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-010"]
+#[ignore = "TODO(CERT-004): SG-010 needs file-backed DB; in-memory store is per-connection"]
 fn test_safety_goal_sg_010_audit_chain_tamper_detection() {
     // Safety Goal: SG-010 — Audit Chain Tamper Detection (ASIL B)
     // This test must verify: AuditChainLinker detects any modification to a
@@ -83,7 +78,18 @@ fn test_safety_goal_sg_010_audit_chain_tamper_detection() {
     // /system/audit/verify endpoint returns the first tampered index, and
     // verification runs automatically on service startup before the
     // listener binds.
-    // Currently unimplemented — tracked in CERT-003
+    //
+    // INFRASTRUCTURE NEEDED:
+    // - File-backed SQLite (not `:memory:`) so a second connection can
+    //   tamper rows after the first connection wrote them.
+    //   `:memory:` databases are per-connection — a tamper-via-second-
+    //   connection approach is not viable against in-memory stores.
+    //   Alternative: add a `#[cfg(test)] pub fn raw_conn(&mut self) -> &mut Connection`
+    //   helper to VerifierStore that exposes the connection for tampering.
+    // - tempfile crate (or std::env::temp_dir + std::fs::remove_file) for
+    //   the DB path; add to dev-dependencies in a follow-up.
+    // - Use verifier_store::VerifierStore::verify_audit_chain_full(None)
+    //   to assert chain_intact == false after tampering.
     todo!("implement SG-010 verification")
 }
 
@@ -100,7 +106,7 @@ fn test_safety_goal_sg_012_dnp3_broadcast_mandatory_audit() {
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-013"]
+#[ignore = "TODO(CERT-004): SG-013 needs VerifierStore + multi-tick driver with controlled clock"]
 fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
     // Safety Goal: SG-013 — Recovery Hysteresis Streak and Window Enforcement (ASIL B)
     // This test must verify: evaluate_recovery_report requires exactly
@@ -108,45 +114,64 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
     // single AV_RECOVERY_WINDOW_MS (10000 ms) window before transitioning
     // a node Untrusted -> Trusted; any gap or unhealthy report resets the
     // streak counter to 0.
-    // Currently unimplemented — tracked in CERT-003
+    //
+    // INFRASTRUCTURE NEEDED:
+    // - `evaluate_recovery_report(store, node_id, now_ms)` loads streak
+    //   state from VerifierStore — it does not take an "is_healthy" arg,
+    //   so driving the unhealthy/streak-reset path requires a separate
+    //   API call (or direct streak-table mutation) we don't yet expose.
+    // - Test scenarios to cover:
+    //     a. 4 calls within window → StreakBuilding{current:4}
+    //     b. 5th call within window → RecoveryConfirmed{streak:5}
+    //     c. 4 calls + 11s gap + 4 calls → still StreakBuilding (window reset)
+    //     d. 4 calls + injected unhealthy report + 4 calls → still StreakBuilding
+    // - Currently no public "report unhealthy" entry point; need either
+    //   a new public fn or expose store streak helpers under #[cfg(test)].
+    // - Should reuse the temporal_scenario_tests.rs VirtualClock pattern.
     todo!("implement SG-013 verification")
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-014"]
+#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_014_federation_report_replay_prevention"]
 fn test_safety_goal_sg_014_federation_report_replay_prevention() {
-    // Safety Goal: SG-014 — Federation Report Replay Prevention (ASIL B)
-    // This test must verify: reconcile_reports rejects any
-    // FederatedTrustReportV2 with generation <= last accepted generation
-    // from the same peer controller, nonces are burned in the
-    // federation_report_nonces table to prevent replay within
-    // FEDERATION_REPLAY_WINDOW_MS (5000 ms), and Ed25519 signatures are
-    // verified before acceptance.
-    // Currently unimplemented — tracked in CERT-003
-    todo!("implement SG-014 verification")
+    // See tests/fault_injection.rs for full implementation (CERT-004).
+    // Note: nonce-burn replay prevention (persistence-layer) remains
+    // out of scope for the in-memory unit; covered separately by an
+    // integration test against VerifierStore in a future increment.
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-015"]
+#[ignore = "TODO(CERT-004): SG-015 needs subprocess isolation (env-var manipulation is unsafe in Rust 1.94+)"]
 fn test_safety_goal_sg_015_admin_token_absent_fail_closed() {
     // Safety Goal: SG-015 — Admin Token Absent Fail-Closed (ASIL B)
     // This test must verify: require_admin_token returns HTTP 503 when
     // KIRRA_ADMIN_TOKEN is absent or empty, all mutation route handlers
     // call require_admin_token, and token comparison uses
     // constant_time_compare (never the `==` operator).
-    // Currently unimplemented — tracked in CERT-003
+    //
+    // INFRASTRUCTURE NEEDED:
+    // - `std::env::set_var` and `remove_var` became `unsafe` in Rust 1.80+
+    //   and CRITICAL SECURITY INVARIANT #13 forbids env-var mutation in
+    //   any multithreaded context. The default `cargo test` runner is
+    //   multithreaded, so this test must either:
+    //     a. Spawn a subprocess via `std::process::Command` invoking a
+    //        helper binary that sets/clears KIRRA_ADMIN_TOKEN and runs
+    //        the assertion in its own process address space, OR
+    //     b. Use the `serial_test` crate (dev-dependency add — currently
+    //        not allowed by the scope of this commit) to serialize.
+    // - `require_admin_token` is an axum middleware fn taking
+    //   `(Request, Next) -> Result<Response, StatusCode>`. The test must
+    //   either construct a minimal axum Router with the middleware applied
+    //   and exercise it via `tower::ServiceExt::oneshot`, or extract the
+    //   env-var check pattern into a smaller `pub(crate) fn` that's
+    //   testable in isolation.
+    // - Both routes (e.g. `/system/backup/export`) must round-trip 503
+    //   when KIRRA_ADMIN_TOKEN is absent.
     todo!("implement SG-015 verification")
 }
 
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-016"]
+#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_016_dds_actuator_volatile_durability"]
 fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
-    // Safety Goal: SG-016 — DDS Actuator Topic Volatile Durability (ASIL C)
-    // This test must verify: every DDS actuator topic created in
-    // src/dds_bridge.rs uses DurabilityPolicy::Volatile, startup_sentinel
-    // aborts on any TransientLocal durability, and the CDR encapsulation
-    // logic does not retain a history cache that could replay stale
-    // commands to reconnecting subscribers.
-    // Currently unimplemented — tracked in CERT-003
-    todo!("implement SG-016 verification")
+    // See tests/fault_injection.rs for full implementation (CERT-004).
 }

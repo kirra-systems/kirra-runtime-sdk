@@ -1,0 +1,211 @@
+// tests/fault_injection.rs
+//
+// CERT-004 — Fault injection / safe-state verification suite.
+//
+// Each test exercises a documented safety goal from
+// docs/safety/SAFETY_GOALS.md by injecting the fault condition and
+// asserting the system's safe-state response per
+// docs/safety/SAFE_STATE_SPECIFICATION.md.
+//
+// This commit lands implementations for 3 of 16 safety goals
+// (SG-006, SG-014, SG-016). The remaining 8 zero-coverage goals
+// (SG-003, 007, 008, 009, 010, 012, 013, 015) remain as
+// #[ignore]'d stubs in tests/cert_003_rtm_gap_stubs.rs with
+// detailed TODO comments documenting the test infrastructure they
+// each require.
+//
+// Tracking: CERT-004, ADL-010 / ADL-011 in work/decisions.md.
+
+use kirra_runtime_sdk::federation::{
+    evaluate_federated_report, FederatedTrustReport, FEDERATION_REPLAY_WINDOW_MS,
+};
+use kirra_runtime_sdk::gateway::policy::OperationalCommand;
+use kirra_runtime_sdk::posture_cache::{should_route_command, CachedFleetPosture};
+use kirra_runtime_sdk::verifier::FleetPosture;
+
+// ============================================================================
+// SG-006 (ASIL D) — Unknown command denial in all posture states
+//
+// Property: `should_route_command` returns false for
+// `OperationalCommand::Unknown` unconditionally — before any posture
+// evaluation, in every posture state, and even when no cache is present.
+// Safe state: SS-001 — per-request denial; posture unaffected.
+// ============================================================================
+
+#[test]
+fn test_safety_goal_sg_006_unknown_command_denial() {
+    let now_ms: u64 = 1_000_000;
+
+    for posture in [
+        FleetPosture::Nominal,
+        FleetPosture::Degraded,
+        FleetPosture::LockedOut,
+    ] {
+        // Cache generated at now_ms → not stale; isolates the Unknown
+        // early-return from the staleness fail-closed path.
+        let cache = Some(CachedFleetPosture::new_with_generation(
+            posture.clone(),
+            0,
+            now_ms,
+        ));
+
+        let routed = should_route_command(&cache, now_ms, OperationalCommand::Unknown);
+        assert!(
+            !routed,
+            "SG-006: OperationalCommand::Unknown must be denied in posture {:?}",
+            posture
+        );
+    }
+
+    // Also confirm fail-closed when no cache is present.
+    let no_cache: Option<CachedFleetPosture> = None;
+    let routed = should_route_command(&no_cache, now_ms, OperationalCommand::Unknown);
+    assert!(
+        !routed,
+        "SG-006: Unknown must be denied even when posture cache is absent"
+    );
+
+    // Cross-check the precondition that the same routing function DOES
+    // permit a known command in Nominal — confirms our setup is not
+    // accidentally fail-closing on every command.
+    let nominal_cache = Some(CachedFleetPosture::new_with_generation(
+        FleetPosture::Nominal,
+        0,
+        now_ms,
+    ));
+    assert!(
+        should_route_command(&nominal_cache, now_ms, OperationalCommand::ReadTelemetry),
+        "Sanity check: ReadTelemetry must be permitted under Nominal with fresh cache"
+    );
+}
+
+// ============================================================================
+// SG-014 (ASIL B) — Federation report replay prevention
+//
+// Property: `evaluate_federated_report` rejects reports outside the
+// replay window, future-dated reports, and expired reports. The
+// nonce-burn component of replay prevention is enforced at the
+// persistence layer (`has_seen_federation_nonce`) and is out of scope
+// for this in-memory unit test, which exercises the time-window
+// component documented in SG-014.
+// Safe state: SS-001 — per-request rejection; posture unchanged.
+// ============================================================================
+
+fn make_valid_report(now_ms: u64) -> FederatedTrustReport {
+    FederatedTrustReport {
+        source_controller_id: "ctrl-1".to_string(),
+        asset_id: "asset-1".to_string(),
+        posture: FleetPosture::Nominal,
+        issued_at_ms: now_ms - 1_000,
+        expires_at_ms: now_ms + 60_000,
+        nonce_hex: "deadbeef".to_string(),
+        signature_b64: "X".to_string(), // signature verification is a separate pipeline stage
+    }
+}
+
+#[test]
+fn test_safety_goal_sg_014_federation_report_replay_prevention() {
+    let now_ms: u64 = 1_000_000;
+
+    // Baseline: a fresh, within-window report is accepted.
+    let valid = make_valid_report(now_ms);
+    let result = evaluate_federated_report(&valid, now_ms);
+    assert!(
+        result.accepted,
+        "Fresh report within replay window must be accepted (reason: {})",
+        result.reason
+    );
+
+    // Replay attack: report issued more than FEDERATION_REPLAY_WINDOW_MS ago.
+    let replayed = FederatedTrustReport {
+        issued_at_ms: now_ms - FEDERATION_REPLAY_WINDOW_MS - 1_000,
+        ..valid.clone()
+    };
+    let result = evaluate_federated_report(&replayed, now_ms);
+    assert!(
+        !result.accepted,
+        "Report older than FEDERATION_REPLAY_WINDOW_MS ({} ms) must be rejected",
+        FEDERATION_REPLAY_WINDOW_MS
+    );
+    assert!(
+        result.reason.contains("REPLAY_WINDOW") || result.reason.contains("OUTSIDE"),
+        "Rejection should reference replay window; got {:?}",
+        result.reason
+    );
+
+    // Timeline-invalid: future-dated report.
+    let future_dated = FederatedTrustReport {
+        issued_at_ms: now_ms + 1_000,
+        ..valid.clone()
+    };
+    let result = evaluate_federated_report(&future_dated, now_ms);
+    assert!(
+        !result.accepted,
+        "Future-issued report must be rejected (clock skew / forgery defense)"
+    );
+    assert!(
+        result.reason.contains("FUTURE"),
+        "Rejection should reference timeline; got {:?}",
+        result.reason
+    );
+
+    // Expired report.
+    let expired = FederatedTrustReport {
+        issued_at_ms: now_ms - 1_000,
+        expires_at_ms: now_ms - 100,
+        ..valid
+    };
+    let result = evaluate_federated_report(&expired, now_ms);
+    assert!(
+        !result.accepted,
+        "Report whose expires_at_ms has passed must be rejected"
+    );
+    assert!(
+        result.reason.contains("STALE") || result.reason.contains("EXPIRED"),
+        "Rejection should reference expiry; got {:?}",
+        result.reason
+    );
+}
+
+// ============================================================================
+// SG-016 (ASIL C) — DDS actuator topic volatile durability
+//
+// Property: every DDS actuator topic configuration uses
+// `DdsDurability::Volatile`. The `DdsDurability` enum may define
+// `TransientLocal` as a variant, but no topic-creation call site may
+// select it. A `TransientLocal` actuator topic could replay stale
+// commands to reconnecting subscribers, violating the safety property.
+// Safe state: SS-004 — startup_sentinel aborts on TransientLocal
+// (this test catches the misconfiguration at source level).
+// ============================================================================
+
+#[test]
+fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
+    let source = std::fs::read_to_string("src/dds_bridge.rs")
+        .expect("read src/dds_bridge.rs from crate root (cwd should be the kirra-runtime-sdk crate root)");
+
+    assert!(
+        source.contains("durability: DdsDurability::Volatile"),
+        "SG-016: src/dds_bridge.rs must configure at least one topic with \
+         DdsDurability::Volatile; found none"
+    );
+
+    assert!(
+        !source.contains("durability: DdsDurability::TransientLocal"),
+        "SG-016: src/dds_bridge.rs MUST NOT configure any topic with \
+         DdsDurability::TransientLocal — that policy would allow stale \
+         actuator commands to be replayed to reconnecting subscribers."
+    );
+
+    // The enum itself may still declare TransientLocal as a variant (its
+    // presence is a separate property — startup_sentinel uses it to detect
+    // misconfiguration). Confirm the declaration is still there so a future
+    // refactor that removes the variant does not silently delete this check
+    // by side effect.
+    assert!(
+        source.contains("TransientLocal"),
+        "SG-016: DdsDurability::TransientLocal variant should still exist \
+         (used by startup_sentinel for misconfiguration detection); if it \
+         was intentionally removed, update this test."
+    );
+}
