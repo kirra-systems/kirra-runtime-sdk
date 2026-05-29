@@ -52,17 +52,35 @@
 
 ---
 
-## Execution Order
+## Current Execution Status
 
-- **Now:** [~] PARK-001 governor builder (#6), [~] PARK-002 test-state setter (#7),
-  [~] PARK-003 posture divergence proptest (#16) — all actively in progress;
-  CPU ONNX stabilization (PARK-008/009); TensorRT API spike when Jetson arrives (PARK-020);
-  QNX deployment spike — TIME-SENSITIVE, 30-day license (PARK-024)
-- **Soon:** NaN guard (PARK-004); Clock abstraction (PARK-005); Backend capability
-  reporting (PARK-011); Stub backends (PARK-012); QNN + QNX coordination (PARK-025–027)
-- **Later:** TIDL, OpenVINO, AMD — blocked on hardware/customers (PARK-028–030);
-  IEEE 2846 behavioral safety (PARK-013–019); IEC 61508 / ASTM F3269 certification
-  mappings (PARK-039–040)
+### Unblocked — Ready to run now
+- PARK-029: OpenVINO backend (x86 laptop)
+- CERT-002: Static analysis CI
+- CERT-003: RTM audit
+- CERT-004: Fault injection suite
+- CERT-005: Rust coding standard
+- CERT-006: GovernorComparator
+- CERT-007: Safe state specification
+
+### Partially complete
+- PARK-024: QNX toolchain working, binary blocked on
+  upstream Rust gaps (tokio #8178, socket2 #657)
+
+### Blocked on Jetson (in transit)
+- PARK-020, PARK-021, PARK-022, PARK-023: TensorRT backend
+
+### Blocked on robot (in transit)
+- PARK-037: ROS2 cmd_vel integration
+
+### Blocked on hardware procurement
+- PARK-030: AMD Vitis AI (order Kria K26 ~$200)
+- PARK-027: QNN (Qualcomm hardware)
+- PARK-028: TIDL (TI hardware)
+
+### Blocked on PARK-024 completion
+- PARK-025: QNN + QNX compatibility analysis
+- PARK-026: QNX-safe backend selection rules
 
 ---
 
