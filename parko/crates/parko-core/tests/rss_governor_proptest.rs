@@ -30,6 +30,7 @@ fn effective_linear_velocity(action: EnforcementAction, proposed: f64) -> f64 {
         EnforcementAction::Allow => proposed,
         EnforcementAction::ClampLinearVelocity(v) => v,
         EnforcementAction::ClampAngularVelocity(_) => proposed,
+        EnforcementAction::ClampMotion { linear, .. } => linear.unwrap_or(proposed),
         EnforcementAction::Deny { .. } => 0.0,
     }
 }

@@ -215,6 +215,15 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                     angular_velocity: v,
                     timestamp_ms: proposed_cmd.timestamp_ms,
                 },
+                // Multi-axis safe envelope. Each `Some` axis overrides the
+                // proposed value; each `None` axis is left at the proposed
+                // value (unconstrained on this tick). This is NOT a stop —
+                // a `Deny` is still required for a full hard stop.
+                EnforcementAction::ClampMotion { linear, angular } => ControlCommand {
+                    linear_velocity: linear.unwrap_or(proposed_cmd.linear_velocity),
+                    angular_velocity: angular.unwrap_or(proposed_cmd.angular_velocity),
+                    timestamp_ms: proposed_cmd.timestamp_ms,
+                },
                 EnforcementAction::Deny { reason: _ } => {
                     ControlCommand::stopped(proposed_cmd.timestamp_ms)
                 }

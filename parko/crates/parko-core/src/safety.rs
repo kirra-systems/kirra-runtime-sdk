@@ -27,6 +27,23 @@ pub enum EnforcementAction {
     /// The proposed command's angular velocity exceeds safe bounds.
     /// Use the provided value instead.
     ClampAngularVelocity(f64),
+    /// Clamp linear and/or angular velocity simultaneously. `None` on an
+    /// axis means "leave that axis unconstrained". Used when more than
+    /// one axis must be bounded in a single decision (e.g. the minimal-
+    /// risk envelope: decelerate linearly while limiting yaw). Catch-all
+    /// safe envelope that does NOT require a full stop.
+    ///
+    /// FOLLOW-UP: the single-axis `ClampLinearVelocity` and
+    /// `ClampAngularVelocity` variants can be expressed as
+    /// `ClampMotion { linear: Some, angular: None }` and
+    /// `ClampMotion { linear: None, angular: Some }`. Long-term cleanup
+    /// would collapse the three Clamp* variants into this one;
+    /// deliberately additive-only here to bound the blast radius of the
+    /// introduction.
+    ClampMotion {
+        linear: Option<f64>,
+        angular: Option<f64>,
+    },
     /// The proposed command violates a hard safety invariant and cannot be
     /// safely clamped. Stop the vehicle.
     Deny { reason: String },
@@ -128,5 +145,96 @@ mod tests {
             EnforcementAction::Allow => {}
             other => panic!("expected Allow, got {:?}", other),
         }
+    }
+
+    // ── ClampMotion multi-axis variant ──────────────────────────────────────
+    //
+    // The variant must be representable, observable in a match, and behave
+    // as documented (Some → override that axis; None → leave proposed).
+    // The actuator apply-site mapping lives in `scheduler.rs`; these tests
+    // exercise the enum-shape contract.
+
+    #[test]
+    fn test_clampmotion_applies_both_axes() {
+        // Both axes Some → both override the proposed values. This is the
+        // case the comparator will emit when reconciling on both axes.
+        let action = EnforcementAction::ClampMotion {
+            linear: Some(2.5),
+            angular: Some(0.4),
+        };
+        if let EnforcementAction::ClampMotion { linear, angular } = action {
+            assert_eq!(linear, Some(2.5));
+            assert_eq!(angular, Some(0.4));
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn test_clampmotion_partial_axis() {
+        // linear=Some, angular=None → leave angular unconstrained.
+        let only_linear = EnforcementAction::ClampMotion {
+            linear: Some(1.0),
+            angular: None,
+        };
+        if let EnforcementAction::ClampMotion { linear, angular } = only_linear {
+            assert_eq!(linear, Some(1.0));
+            assert!(angular.is_none(), "None axis means unconstrained");
+        } else {
+            unreachable!()
+        }
+
+        // linear=None, angular=Some → leave linear unconstrained.
+        let only_angular = EnforcementAction::ClampMotion {
+            linear: None,
+            angular: Some(0.2),
+        };
+        if let EnforcementAction::ClampMotion { linear, angular } = only_angular {
+            assert!(linear.is_none(), "None axis means unconstrained");
+            assert_eq!(angular, Some(0.2));
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// effective-velocity helpers across the codebase resolve ClampMotion's
+    /// linear field, falling back to the proposed value when the axis is
+    /// unconstrained. This test models the convention the helpers use.
+    #[test]
+    fn test_effective_velocity_handles_clampmotion() {
+        fn effective_linear(action: &EnforcementAction, proposed: f64) -> f64 {
+            match action {
+                EnforcementAction::Allow => proposed,
+                EnforcementAction::ClampLinearVelocity(v) => *v,
+                EnforcementAction::ClampAngularVelocity(_) => proposed,
+                EnforcementAction::ClampMotion { linear, .. } => linear.unwrap_or(proposed),
+                EnforcementAction::Deny { .. } => 0.0,
+            }
+        }
+
+        // Some linear value → that value
+        assert_eq!(
+            effective_linear(
+                &EnforcementAction::ClampMotion { linear: Some(3.0), angular: Some(0.1) },
+                10.0
+            ),
+            3.0
+        );
+        // None linear → proposed value passes through unconstrained
+        assert_eq!(
+            effective_linear(
+                &EnforcementAction::ClampMotion { linear: None, angular: Some(0.1) },
+                10.0
+            ),
+            10.0
+        );
+        // Both None → both axes pass through; effectively `Allow`-like
+        assert_eq!(
+            effective_linear(
+                &EnforcementAction::ClampMotion { linear: None, angular: None },
+                7.0
+            ),
+            7.0
+        );
     }
 }
