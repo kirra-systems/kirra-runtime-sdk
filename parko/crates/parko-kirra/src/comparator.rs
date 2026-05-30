@@ -67,7 +67,8 @@ const DIVERGENCE_LOCKOUT_MIN_DURATION_MS: u64 = 2_000;
 // Audit event API
 // ---------------------------------------------------------------------------
 
-/// One ComparatorDivergence event. Emitted on every divergent tick.
+/// One ComparatorDivergence event. Emitted on every divergent tick (on
+/// either axis).
 ///
 /// This is the per-decision reasoning trail and is the authoritative
 /// safety record (also closes part of the explainability gap). The
@@ -75,17 +76,27 @@ const DIVERGENCE_LOCKOUT_MIN_DURATION_MS: u64 = 2_000;
 /// hash-chained, Ed25519-signed audit ledger (`AuditChainLinker` in
 /// `kirra-runtime-sdk`). A dev-facing `eprintln!` in the default sink
 /// is a secondary aid only.
+///
+/// CERT-006 v3 added the four `*_ang` fields so the audit record captures
+/// angular-axis divergence (previously invisible to the comparator). The
+/// `*_lin` fields are the prior `*_vel` fields renamed for clarity.
 #[derive(Debug, Clone)]
 pub struct DivergenceEvent {
-    pub primary_vel: f64,
-    pub shadow_vel: f64,
-    pub delta: f64,
+    pub primary_lin: f64,
+    pub shadow_lin: f64,
+    pub delta_lin: f64,
+    pub primary_ang: f64,
+    pub shadow_ang: f64,
+    pub delta_ang: f64,
     pub accumulator: u32,
     /// `None` if current vehicle speed was not observable on this tick.
     pub current_speed_mps: Option<f64>,
-    /// The reconciled velocity that was commanded (when not escalating
+    /// Reconciled linear velocity that was commanded (when not escalating
     /// to LockedOut), or `0.0` when escalating.
-    pub reconciled_vel: f64,
+    pub reconciled_lin: f64,
+    /// Reconciled angular velocity that was commanded (when not escalating
+    /// to LockedOut), or `0.0` when escalating.
+    pub reconciled_ang: f64,
     /// `true` iff this tick crossed into LockedOut hard stop.
     pub escalated_to_lockout: bool,
 }
@@ -136,14 +147,20 @@ impl DivergenceEventSink for InMemoryDivergenceSink {
     fn record(&self, event: DivergenceEvent) {
         // Secondary dev aid only. Authoritative record is the audit log.
         eprintln!(
-            "[CERT-006] ComparatorDivergence: primary={primary} shadow={shadow} \
-             delta={delta} acc={acc} speed={speed:?} reconciled={recon} lockout={lockout}",
-            primary = event.primary_vel,
-            shadow = event.shadow_vel,
-            delta = event.delta,
+            "[CERT-006] ComparatorDivergence: \
+             lin(p={p_lin} s={s_lin} d={d_lin} rec={rec_lin}) \
+             ang(p={p_ang} s={s_ang} d={d_ang} rec={rec_ang}) \
+             acc={acc} speed={speed:?} lockout={lockout}",
+            p_lin = event.primary_lin,
+            s_lin = event.shadow_lin,
+            d_lin = event.delta_lin,
+            rec_lin = event.reconciled_lin,
+            p_ang = event.primary_ang,
+            s_ang = event.shadow_ang,
+            d_ang = event.delta_ang,
+            rec_ang = event.reconciled_ang,
             acc = event.accumulator,
             speed = event.current_speed_mps,
-            recon = event.reconciled_vel,
             lockout = event.escalated_to_lockout,
         );
         if let Ok(mut v) = self.events.lock() {
@@ -169,11 +186,22 @@ struct DivState {
 /// Software lockstep safety comparator.
 ///
 /// Runs two independent `KirraGovernor` instances with identical inputs.
-/// On divergence beyond `COMPARATOR_TOLERANCE`, the comparator commands a
-/// most-restrictive reconciliation of the two outputs (MRC-capped,
-/// Degraded semantics). It escalates to LockedOut **only** when the
-/// divergence is persistent **AND** the vehicle is already at a safe
-/// speed — never as a hard stop at speed.
+/// On divergence beyond `COMPARATOR_TOLERANCE` on **either** axis (linear
+/// or angular — CERT-006 v3), the comparator commands a most-restrictive
+/// reconciliation of the two outputs as an `EnforcementAction::ClampMotion`
+/// (MRC-capped on linear, pure most-restrictive on angular). It escalates
+/// to LockedOut **only** when the divergence is persistent **AND** the
+/// vehicle is already at a safe speed — never as a hard stop at speed.
+///
+/// # FOLLOW-UP (true diverse redundancy)
+///
+/// `GovernorComparator` is hard-wired to two `KirraGovernor` instances, so
+/// primary and shadow run identical code and only catch RANDOM faults.
+/// Making the comparator generic over `SafetyGovernor` would (a) allow an
+/// independent second implementation as the shadow — the implementation
+/// diversity the safety case says automotive requires — and (b) make
+/// angular-divergence reachable in integration tests via a mock governor.
+/// Tracked separately.
 ///
 /// # Redundancy Model
 ///
@@ -239,6 +267,44 @@ fn effective_linear_velocity(action: &EnforcementAction, proposed: f64) -> f64 {
     }
 }
 
+/// Mirror of `effective_linear_velocity` for the angular axis. Added in
+/// CERT-006 v3 so divergence detection covers both axes — pre-v3 only
+/// the linear axis was compared, which made angular-axis (yaw) divergence
+/// invisible to the comparator (the safety hole this rewrite closes).
+fn effective_angular_velocity(action: &EnforcementAction, proposed: f64) -> f64 {
+    match action {
+        EnforcementAction::Allow => proposed,
+        EnforcementAction::ClampLinearVelocity(_) => proposed,
+        EnforcementAction::ClampAngularVelocity(v) => *v,
+        EnforcementAction::ClampMotion { angular, .. } => angular.unwrap_or(proposed),
+        EnforcementAction::Deny { .. } => 0.0,
+    }
+}
+
+/// True iff the two governor outputs disagree on the PHYSICAL command that
+/// would reach the actuator, on either axis, beyond `tol`.
+///
+/// Compares enforced effect (linear + angular), not action variant. A pure
+/// variant difference that yields identical physical output on both axes
+/// (e.g. `Deny` vs `ClampLinearVelocity(0.0)` when proposed angular is 0)
+/// is intentionally NOT flagged — the actuator sees the same motion either
+/// way, which is the safety-relevant quantity.
+///
+/// Pure function — unit-testable without constructing diverging governors,
+/// which is how the angular-axis safety hole is verifiably closed.
+pub(crate) fn actions_diverge(
+    primary_out: &EnforcementAction,
+    shadow_out: &EnforcementAction,
+    proposed: &ControlCommand,
+    tol: f64,
+) -> bool {
+    let p_lin = effective_linear_velocity(primary_out, proposed.linear_velocity);
+    let s_lin = effective_linear_velocity(shadow_out, proposed.linear_velocity);
+    let p_ang = effective_angular_velocity(primary_out, proposed.angular_velocity);
+    let s_ang = effective_angular_velocity(shadow_out, proposed.angular_velocity);
+    (p_lin - s_lin).abs() > tol || (p_ang - s_ang).abs() > tol
+}
+
 impl GovernorComparator {
     /// Create a comparator with two independent governor instances and the
     /// default in-memory divergence sink.
@@ -283,13 +349,23 @@ impl GovernorComparator {
         let primary_out = self.primary.evaluate(proposed, previous, delta_time_s, posture);
         let shadow_out = self.shadow.evaluate(proposed, previous, delta_time_s, posture);
 
-        let primary_vel = effective_linear_velocity(&primary_out, proposed.linear_velocity);
-        let shadow_vel = effective_linear_velocity(&shadow_out, proposed.linear_velocity);
-        let delta = (primary_vel - shadow_vel).abs();
+        // Two-axis divergence detection (CERT-006 v3): pre-v3 the
+        // comparator compared only the linear axis, so yaw-axis
+        // divergence was invisible. Detection now covers both.
+        let primary_lin =
+            effective_linear_velocity(&primary_out, proposed.linear_velocity);
+        let shadow_lin =
+            effective_linear_velocity(&shadow_out, proposed.linear_velocity);
+        let primary_ang =
+            effective_angular_velocity(&primary_out, proposed.angular_velocity);
+        let shadow_ang =
+            effective_angular_velocity(&shadow_out, proposed.angular_velocity);
+        let delta_lin = (primary_lin - shadow_lin).abs();
+        let delta_ang = (primary_ang - shadow_ang).abs();
 
-        if delta <= COMPARATOR_TOLERANCE {
-            // Agreement. Decay the accumulator; clear divergence-start
-            // timestamp once accumulator drains.
+        if !actions_diverge(&primary_out, &shadow_out, proposed, COMPARATOR_TOLERANCE) {
+            // Agreement on BOTH axes. Decay the accumulator; clear
+            // divergence-start timestamp once accumulator drains.
             let mut state = self.state.lock().expect("DivState mutex poisoned");
             state.accumulator = state.accumulator.saturating_sub(DIVERGENCE_DECAY);
             if state.accumulator == 0 {
@@ -300,7 +376,15 @@ impl GovernorComparator {
 
         // ---------------- Divergence path ----------------
 
-        let reconciled = reconcile(primary_vel, shadow_vel, MRC_VELOCITY_CEILING_MPS);
+        let reconciled_lin = reconcile(primary_lin, shadow_lin, MRC_VELOCITY_CEILING_MPS);
+        // Angular cap: no `MRC_ANGULAR_CEILING_RAD_S` exists in the
+        // codebase today, so use `f64::INFINITY` — pure most-restrictive
+        // min-of-magnitudes (sign and direction-disagreement handling are
+        // identical to the linear case via `reconcile`). FOLLOW-UP:
+        // introduce a proper MRC_ANGULAR_CEILING_RAD_S in parko-kirra and
+        // pass it here instead of INFINITY.
+        let angular_cap = f64::INFINITY;
+        let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         // Best-available current-speed proxy. There is no measured-speed
         // input on `evaluate` (see STEP 0(f) of CERT-006 v2 prompt). The
@@ -347,11 +431,17 @@ impl GovernorComparator {
                 reason: format!(
                     "GovernorComparator: persistent divergence (acc={accumulator}) \
                      escalated to LockedOut (speed={current_speed_mps:?} m/s, \
-                     reconciled={reconciled} m/s)"
+                     lin={reconciled_lin} ang={reconciled_ang})"
                 ),
             }
         } else {
-            EnforcementAction::ClampLinearVelocity(reconciled)
+            // Graceful both-axis Degraded envelope — the reason
+            // ClampMotion was added: decelerate linearly AND limit yaw,
+            // no hard stop at speed.
+            EnforcementAction::ClampMotion {
+                linear: Some(reconciled_lin),
+                angular: Some(reconciled_ang),
+            }
         };
 
         // Emit a structured audit event for every divergent tick — this is
@@ -359,12 +449,16 @@ impl GovernorComparator {
         // trail. Integrators wire this sink to `AuditChainLinker` in
         // `kirra-runtime-sdk`.
         self.sink.record(DivergenceEvent {
-            primary_vel,
-            shadow_vel,
-            delta,
+            primary_lin,
+            shadow_lin,
+            delta_lin,
+            primary_ang,
+            shadow_ang,
+            delta_ang,
             accumulator,
             current_speed_mps,
-            reconciled_vel: if may_lockout { 0.0 } else { reconciled },
+            reconciled_lin: if may_lockout { 0.0 } else { reconciled_lin },
+            reconciled_ang: if may_lockout { 0.0 } else { reconciled_ang },
             escalated_to_lockout: may_lockout,
         });
 
@@ -472,8 +566,9 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Single divergence tick at speed must NOT hard stop — must reconcile
-    /// to an MRC-capped ClampLinearVelocity. (This is the property whose
-    /// absence in v1 motivated this entire rewrite.)
+    /// to an MRC-capped `ClampMotion` (CERT-006 v3: was `ClampLinearVelocity`
+    /// in v2). This is the property whose absence in v1 motivated the
+    /// entire rewrite.
     #[test]
     fn test_single_divergence_returns_mrc_reconciled() {
         let (primary, shadow) = diverging_pair();
@@ -484,13 +579,14 @@ mod tests {
         let out = comparator.evaluate(&cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
 
         assert!(
-            matches!(out, EnforcementAction::ClampLinearVelocity(_)),
-            "Single divergence MUST reconcile to MRC cap, NOT Deny. Got {out:?}"
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "Single divergence MUST reconcile to a ClampMotion (both axes), \
+             NOT Deny. Got {out:?}"
         );
         let v = effective_linear_velocity(&out, commanded);
         assert!(
             v.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
-            "Reconciled magnitude must be at or below MRC ceiling. Got {v}"
+            "Reconciled linear magnitude must be at or below MRC ceiling. Got {v}"
         );
     }
 
@@ -517,9 +613,9 @@ mod tests {
         }
 
         assert!(
-            matches!(last, EnforcementAction::ClampLinearVelocity(_)),
+            matches!(last, EnforcementAction::ClampMotion { .. }),
             "Sustained divergence at speed must NEVER hard stop — must keep \
-             returning ClampLinearVelocity(MRC). Got {last:?}"
+             returning ClampMotion(MRC-capped on linear). Got {last:?}"
         );
     }
 
@@ -658,6 +754,7 @@ mod tests {
 
     /// A ComparatorDivergence audit event is emitted on every divergent
     /// tick, with the fields a downstream audit-chain integrator needs.
+    /// CERT-006 v3: event now carries both linear and angular fields.
     #[test]
     fn test_divergence_emits_audit_event() {
         let (primary, shadow) = diverging_pair();
@@ -674,13 +771,13 @@ mod tests {
         let events = sink.events();
         assert_eq!(events.len(), 1, "Expected exactly one audit event after one divergent tick");
         let e = &events[0];
-        assert!(e.delta > COMPARATOR_TOLERANCE);
+        assert!(e.delta_lin > COMPARATOR_TOLERANCE, "linear delta should be flagged");
         assert_eq!(e.accumulator, DIVERGENCE_INC);
         assert_eq!(e.current_speed_mps, Some(10.0));
         assert!(!e.escalated_to_lockout, "Single tick at speed must not escalate");
         assert!(
-            e.reconciled_vel.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
-            "Reconciled velocity in event must respect MRC ceiling"
+            e.reconciled_lin.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
+            "Reconciled linear in event must respect MRC ceiling"
         );
 
         // Agreement ticks must NOT emit events.
@@ -690,6 +787,93 @@ mod tests {
             sink.len(),
             1,
             "Agreement tick must not emit a divergence event"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // CERT-006 v3 — pure predicate tests for two-axis divergence
+    // detection. These do NOT require constructing diverging governors —
+    // they exercise `actions_diverge` directly, which is the proof that
+    // the angular-axis blindness in v2 is closed.
+    // -----------------------------------------------------------------
+
+    /// Angular-axis divergence in isolation must be detected. Pre-v3 this
+    /// returned false (the safety hole this rewrite closes).
+    #[test]
+    fn test_actions_diverge_angular_only() {
+        let p = EnforcementAction::ClampAngularVelocity(2.0);
+        let s = EnforcementAction::ClampAngularVelocity(9.0);
+        let proposed = ControlCommand {
+            linear_velocity: 3.0,
+            angular_velocity: 5.0,
+            timestamp_ms: 0,
+        };
+        assert!(
+            actions_diverge(&p, &s, &proposed, COMPARATOR_TOLERANCE),
+            "Angular-only divergence must be detected post-CERT-006-v3"
+        );
+    }
+
+    /// `ClampMotion`'s angular field participates in detection.
+    #[test]
+    fn test_actions_diverge_clampmotion_angular() {
+        let p = EnforcementAction::ClampMotion {
+            linear: Some(3.0),
+            angular: Some(1.0),
+        };
+        let s = EnforcementAction::ClampMotion {
+            linear: Some(3.0),
+            angular: Some(4.0),
+        };
+        let proposed = ControlCommand {
+            linear_velocity: 3.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
+        assert!(
+            actions_diverge(&p, &s, &proposed, COMPARATOR_TOLERANCE),
+            "ClampMotion angular field must participate in divergence detection"
+        );
+    }
+
+    /// Agreement on both axes must NOT be flagged as divergence.
+    #[test]
+    fn test_actions_agree_both_axes() {
+        let p = EnforcementAction::Allow;
+        let s = EnforcementAction::Allow;
+        let proposed = ControlCommand {
+            linear_velocity: 3.0,
+            angular_velocity: 2.0,
+            timestamp_ms: 0,
+        };
+        assert!(
+            !actions_diverge(&p, &s, &proposed, COMPARATOR_TOLERANCE),
+            "Both axes agree (Allow vs Allow) must not be flagged"
+        );
+    }
+
+    /// Same physical effect via different variants must NOT be flagged
+    /// (compare enforced effect, not action variant). When proposed
+    /// angular is 0, `Deny` and `ClampLinearVelocity(0.0)` both yield
+    /// zero motion on every axis.
+    #[test]
+    fn test_actions_same_physical_effect_not_flagged() {
+        let p = EnforcementAction::Deny {
+            reason: "x".into(),
+        };
+        let s = EnforcementAction::ClampLinearVelocity(0.0);
+        let proposed = ControlCommand {
+            linear_velocity: 5.0,
+            angular_velocity: 0.0,
+            timestamp_ms: 0,
+        };
+        // Deny: linear=0, angular=0 (per effective_*_velocity)
+        // ClampLinearVelocity(0): linear=0, angular=proposed.angular_velocity=0
+        // Same physical effect → not divergent.
+        assert!(
+            !actions_diverge(&p, &s, &proposed, COMPARATOR_TOLERANCE),
+            "Same physical effect via different variants must not be flagged \
+             (compare effect, not variant)"
         );
     }
 }
