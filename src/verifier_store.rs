@@ -342,6 +342,27 @@ impl VerifierStore {
                 return Err(e);
             }
         }
+        // Hash-v2 migration columns (additive, defaulted, idempotent).
+        // Existing rows: hash_version=1, sequence=NULL — verified with v1 algorithm.
+        // New rows: hash_version=2 + monotonic sequence — see audit_chain::compute_record_hash_v2.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE audit_log_chain ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
+        if let Err(e) = conn.execute(
+            "ALTER TABLE audit_log_chain ADD COLUMN sequence INTEGER",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS federated_trust_reports (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -527,10 +548,15 @@ impl VerifierStore {
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<AuditChainVerifyResult> {
         use ed25519_dalek::{Verifier, Signature};
-        use crate::audit_chain::canonical_signing_payload;
+        use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
 
+        // SELECT now includes event_type + hash_version + sequence so the
+        // verifier can dispatch per hash_version and never has to re-query
+        // event_type inside the loop (fragile, dropped to "UNKNOWN" on
+        // failure — gone now).
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_json, previous_hash_hex, record_hash_hex, created_at_ms, signature_b64 \
+            "SELECT id, event_type, event_json, previous_hash_hex, record_hash_hex, \
+             created_at_ms, signature_b64, hash_version, sequence \
              FROM audit_log_chain ORDER BY id ASC",
         )?;
 
@@ -543,41 +569,71 @@ impl VerifierStore {
         let mut signature_valid = true;
         let mut first_invalid_signature_index: Option<u64> = None;
         let mut first_signed_at_ms: Option<u64> = None;
+        // Last-seen v2 sequence; v2 rows must monotonically increment by 1.
+        let mut prev_v2_seq: Option<i64> = None;
 
         let mut rows = stmt.query([])?;
 
         while let Some(row) = rows.next()? {
             let _id: i64 = row.get(0)?;
-            let event_json: String = row.get(1)?;
-            let previous_hash_hex: String = row.get(2)?;
-            let record_hash_hex: String = row.get(3)?;
-            let created_at_ms: i64 = row.get(4)?;
-            let sig_b64: Option<String> = row.get(5)?;
+            let event_type: String = row.get(1)?;
+            let event_json: String = row.get(2)?;
+            let previous_hash_hex: String = row.get(3)?;
+            let record_hash_hex: String = row.get(4)?;
+            let created_at_ms: i64 = row.get(5)?;
+            let sig_b64: Option<String> = row.get(6)?;
+            let hash_version: i64 = row.get(7)?;
+            let sequence_opt: Option<i64> = row.get(8)?;
 
-            // Check hash chain continuity
+            // Chain linkage check applies to every row regardless of version.
             if previous_hash_hex != expected_previous_hash {
                 chain_intact = false;
             }
-            let recalc = crate::audit_chain::AuditChainLinker::compute_record_hash(
-                &previous_hash_hex,
-                &event_json,
-                created_at_ms,
-            );
+            // Recompute hash per version. v1 omits event_type (relabeling
+            // weakness retained for legacy rows); v2 binds event_type and
+            // sequence so this same cheap check catches relabeling/reorder.
+            let recalc = match hash_version {
+                1 => crate::audit_chain::AuditChainLinker::compute_record_hash_v1(
+                    &previous_hash_hex,
+                    &event_json,
+                    created_at_ms,
+                ),
+                2 => {
+                    let seq = sequence_opt.unwrap_or(-1).max(0) as u64;
+                    // v2 sequence monotonicity: each v2 row must be prev_v2 + 1.
+                    if let Some(prev) = prev_v2_seq {
+                        if sequence_opt != Some(prev + 1) {
+                            chain_intact = false;
+                        }
+                    } else {
+                        // First v2 row must start at sequence 0.
+                        if sequence_opt != Some(0) {
+                            chain_intact = false;
+                        }
+                    }
+                    prev_v2_seq = sequence_opt;
+                    crate::audit_chain::AuditChainLinker::compute_record_hash_v2(
+                        &previous_hash_hex,
+                        &event_type,
+                        &event_json,
+                        created_at_ms,
+                        seq,
+                    )
+                }
+                _ => {
+                    // Unknown hash version — fail closed.
+                    chain_intact = false;
+                    String::new()
+                }
+            };
             if recalc != record_hash_hex {
                 chain_intact = false;
             }
             expected_previous_hash = record_hash_hex.clone();
             latest_hash = record_hash_hex.clone();
 
-            // Signature verification
-            // We need the event_type from the JSON for the canonical payload.
-            // The event_type is stored in its own column but not fetched here.
-            // Re-query is expensive; instead we look it up differently.
-            // Actually, let's adjust: we need event_type for canonical payload.
-            // We'll do a separate pass to get event_type from the same row.
-            // Since we can't get it from this query easily, let's add it.
-            // Wait - the query above doesn't include event_type. Let me fix this.
-
+            // Signature verification — payload builder dispatches per version.
+            // Cross-key rotation is a separate follow-up (issue #76).
             match &sig_b64 {
                 None => {
                     unsigned_entries += 1;
@@ -588,21 +644,21 @@ impl VerifierStore {
                         first_signed_at_ms = Some(created_at_ms as u64);
                     }
                     if let Some(vk) = verifying_key {
-                        // We need event_type for the canonical payload — it's not in this query.
-                        // We'll decode a best-effort: verify against the stored sig.
-                        // This requires event_type. We'll fetch it inline.
-                        let event_type: String = self.conn.query_row(
-                            "SELECT event_type FROM audit_log_chain WHERE record_hash_hex = ?1",
-                            rusqlite::params![&record_hash_hex],
-                            |r| r.get(0),
-                        ).unwrap_or_else(|_| "UNKNOWN".to_string());
-
-                        let payload = canonical_signing_payload(
-                            &previous_hash_hex,
-                            &record_hash_hex,
-                            &event_type,
-                            created_at_ms,
-                        );
+                        let payload = match hash_version {
+                            2 => canonical_signing_payload_v2(
+                                &previous_hash_hex,
+                                &record_hash_hex,
+                                &event_type,
+                                created_at_ms,
+                                sequence_opt.unwrap_or(0).max(0) as u64,
+                            ),
+                            _ => canonical_signing_payload(
+                                &previous_hash_hex,
+                                &record_hash_hex,
+                                &event_type,
+                                created_at_ms,
+                            ),
+                        };
                         let sig_result = b64e.decode(s)
                             .ok()
                             .and_then(|bytes| {
@@ -654,7 +710,7 @@ impl VerifierStore {
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<AuditExportPage> {
         use ed25519_dalek::{Verifier, Signature};
-        use crate::audit_chain::canonical_signing_payload;
+        use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
 
         let total: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM audit_log_chain",
@@ -664,7 +720,7 @@ impl VerifierStore {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, event_type, event_json, previous_hash_hex, record_hash_hex, \
-             created_at_ms, signature_b64 \
+             created_at_ms, signature_b64, hash_version, sequence \
              FROM audit_log_chain ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
 
@@ -678,24 +734,37 @@ impl VerifierStore {
             let entry_hash: String = row.get(4)?;
             let timestamp_ms: i64 = row.get(5)?;
             let sig_b64: Option<String> = row.get(6)?;
+            let hash_version: i64 = row.get(7)?;
+            let sequence_opt: Option<i64> = row.get(8)?;
 
-            Ok((id, event_type, event_json, prev_hash, entry_hash, timestamp_ms, sig_b64))
+            Ok((id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
+                sig_b64, hash_version, sequence_opt))
         })?;
 
         let mut entries = Vec::new();
         for row_result in rows {
-            let (id, event_type, event_json, prev_hash, entry_hash, timestamp_ms, sig_b64) = row_result?;
+            let (id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
+                 sig_b64, hash_version, sequence_opt) = row_result?;
 
             let signature_status = match &sig_b64 {
                 None => "unsigned".to_string(),
                 Some(s) => {
                     if let Some(vk) = verifying_key {
-                        let payload = canonical_signing_payload(
-                            &prev_hash,
-                            &entry_hash,
-                            &event_type,
-                            timestamp_ms,
-                        );
+                        let payload = match hash_version {
+                            2 => canonical_signing_payload_v2(
+                                &prev_hash,
+                                &entry_hash,
+                                &event_type,
+                                timestamp_ms,
+                                sequence_opt.unwrap_or(0).max(0) as u64,
+                            ),
+                            _ => canonical_signing_payload(
+                                &prev_hash,
+                                &entry_hash,
+                                &event_type,
+                                timestamp_ms,
+                            ),
+                        };
                         let verified = b64e.decode(s)
                             .ok()
                             .and_then(|bytes| {
@@ -764,29 +833,60 @@ impl VerifierStore {
     }
 
     pub fn verify_audit_chain_integrity(&self) -> Result<bool> {
+        // Cheap hash-only integrity check. Post hash-v2 migration this
+        // catches event_type relabeling and v2 sequence reorder/gaps on
+        // v2 rows without needing the signing key. v1 rows retain the
+        // pre-migration relabeling weakness (cannot be retroactively
+        // strengthened without destructive rewrite) — that boundary is
+        // anchored by the HASH_V2_MIGRATION event.
         let mut stmt = self.conn.prepare(
-            "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms
-             FROM audit_log_chain
-             ORDER BY id ASC",
+            "SELECT event_type, event_json, previous_hash_hex, record_hash_hex, \
+             created_at_ms, hash_version, sequence \
+             FROM audit_log_chain ORDER BY id ASC",
         )?;
 
         let mut expected_previous_hash = "0".repeat(64);
+        let mut prev_v2_seq: Option<i64> = None;
         let mut rows = stmt.query([])?;
 
         while let Some(row) = rows.next()? {
-            let event_json: String = row.get(0)?;
-            let previous_hash_hex: String = row.get(1)?;
-            let record_hash_hex: String = row.get(2)?;
-            let created_at_ms: i64 = row.get(3)?;
+            let event_type: String = row.get(0)?;
+            let event_json: String = row.get(1)?;
+            let previous_hash_hex: String = row.get(2)?;
+            let record_hash_hex: String = row.get(3)?;
+            let created_at_ms: i64 = row.get(4)?;
+            let hash_version: i64 = row.get(5)?;
+            let sequence_opt: Option<i64> = row.get(6)?;
 
             if previous_hash_hex != expected_previous_hash {
                 return Ok(false);
             }
-            let recalc = crate::audit_chain::AuditChainLinker::compute_record_hash(
-                &previous_hash_hex,
-                &event_json,
-                created_at_ms,
-            );
+            let recalc = match hash_version {
+                1 => crate::audit_chain::AuditChainLinker::compute_record_hash_v1(
+                    &previous_hash_hex,
+                    &event_json,
+                    created_at_ms,
+                ),
+                2 => {
+                    let seq = sequence_opt.unwrap_or(-1).max(0) as u64;
+                    if let Some(prev) = prev_v2_seq {
+                        if sequence_opt != Some(prev + 1) {
+                            return Ok(false);
+                        }
+                    } else if sequence_opt != Some(0) {
+                        return Ok(false);
+                    }
+                    prev_v2_seq = sequence_opt;
+                    crate::audit_chain::AuditChainLinker::compute_record_hash_v2(
+                        &previous_hash_hex,
+                        &event_type,
+                        &event_json,
+                        created_at_ms,
+                        seq,
+                    )
+                }
+                _ => return Ok(false), // unknown version → fail closed
+            };
             if recalc != record_hash_hex {
                 return Ok(false);
             }
@@ -1189,6 +1289,59 @@ mod standby_store_tests {
     }
 }
 
+impl VerifierStore {
+    /// Idempotent one-time anchor for the v1 → v2 hash boundary. Should
+    /// be called at service startup after `VerifierStore::new`. If a
+    /// `HASH_V2_MIGRATION` event already exists in the chain this is a
+    /// no-op; otherwise it appends one event whose payload records the
+    /// pre-migration v1 head and v1 row count, providing a partial defence
+    /// against silent truncation at the boundary.
+    ///
+    /// Note: v1 rows retain the pre-migration relabeling weakness (cannot
+    /// be retroactively strengthened without destructive re-hashing).
+    /// Only v2 and future rows benefit from event_type being bound into
+    /// the cheap hash-only integrity check.
+    pub fn ensure_hash_v2_migration_anchor(&mut self, now_ms: u64) -> rusqlite::Result<()> {
+        // Already anchored?
+        let existing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'HASH_V2_MIGRATION'",
+            [],
+            |r| r.get(0),
+        )?;
+        if existing > 0 {
+            return Ok(());
+        }
+        // Snapshot the v1 head (last row with hash_version=1) and v1 count.
+        let v1_total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE hash_version = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if v1_total == 0 {
+            // Nothing to anchor — a brand-new chain skips the marker.
+            return Ok(());
+        }
+        let v1_head: String = self.conn.query_row(
+            "SELECT record_hash_hex FROM audit_log_chain \
+             WHERE hash_version = 1 ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )?;
+        let payload = format!(
+            "{{\"v1_head_record_hash\":\"{v1_head}\",\"v1_total_count\":{v1_total},\"migrated_at_ms\":{now_ms}}}"
+        );
+        let tx = self.conn.transaction()?;
+        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            &tx,
+            "HASH_V2_MIGRATION",
+            &payload,
+            now_ms as i64,
+            self.signing_key.as_ref(),
+        )?;
+        tx.commit()
+    }
+}
+
 /// Regression suite for the audit-chain bypass fix.
 ///
 /// Before this fix, `save_posture_event` (plain INSERT) was the writer at
@@ -1270,5 +1423,207 @@ mod audit_chain_bypass_tests {
         // chain-tamper-detection property is covered separately by the
         // SG-010 fault-injection-suite stub in
         // `tests/cert_003_rtm_gap_stubs.rs`.
+    }
+}
+
+/// Tests for the v2 hash + sequence binding. The CORE WIN is that the
+/// cheap hash-only `verify_audit_chain_integrity` now catches event_type
+/// relabeling and v2 sequence reorder/gaps on v2 rows — without needing
+/// signatures. Pre-v2 these were undetected by the hash-only check.
+#[cfg(test)]
+mod audit_hash_v2_tests {
+    use super::*;
+    use crate::audit_chain::AuditChainLinker;
+
+    fn in_memory() -> VerifierStore {
+        VerifierStore::new(":memory:").unwrap()
+    }
+
+    /// CORE WIN: relabeling a v2 row's event_type is now caught by
+    /// `verify_audit_chain_integrity`. Pre-v2 this was undetected — the
+    /// row's event_type wasn't bound into the hash, so the cheap check
+    /// returned true after relabeling.
+    #[test]
+    fn test_v2_event_type_relabel_detected_by_hash_only_check() {
+        let mut store = in_memory();
+        store
+            .save_posture_event_chained("node", "ATTESTATION_TRUSTED", "{}", None, 1_000)
+            .unwrap();
+        // Sanity: chain verifies clean.
+        assert!(store.verify_audit_chain_integrity().unwrap());
+
+        // Tamper: relabel the just-written event_type via direct UPDATE.
+        // (Both the row's `event_type` and any other tampering of the
+        // row's content must now make the hash mismatch under v2.)
+        store
+            .conn
+            .execute(
+                "UPDATE audit_log_chain SET event_type = 'FEDERATION_ACCEPTED' \
+                 WHERE id = (SELECT MAX(id) FROM audit_log_chain)",
+                [],
+            )
+            .unwrap();
+
+        // Cheap hash-only verifier must now reject — event_type is bound
+        // into compute_record_hash_v2.
+        assert!(
+            !store.verify_audit_chain_integrity().unwrap(),
+            "v2 hash must catch event_type relabeling; this is the relabeling-hole fix"
+        );
+    }
+
+    /// V2 sequence tampering (gap / reorder) is caught.
+    #[test]
+    fn test_v2_sequence_tamper_detected() {
+        let mut store = in_memory();
+        for i in 0..3 {
+            store
+                .save_posture_event_chained("n", "EVT", "{}", None, 1_000 + i)
+                .unwrap();
+        }
+        assert!(store.verify_audit_chain_integrity().unwrap());
+
+        // Tamper: bump the middle row's sequence so it skips a value.
+        store
+            .conn
+            .execute(
+                "UPDATE audit_log_chain SET sequence = 99 \
+                 WHERE id = (SELECT MIN(id) + 1 FROM audit_log_chain)",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            !store.verify_audit_chain_integrity().unwrap(),
+            "v2 verifier must reject when sequence is non-monotonic"
+        );
+    }
+
+    /// V2 hash has no field-splicing ambiguity: ("AB","C") and ("A","BC")
+    /// must produce different hashes. Length-prefixing every variable
+    /// field prevents the boundary from sliding.
+    #[test]
+    fn test_v2_hash_no_field_splicing() {
+        let prev = "0".repeat(64);
+        let ts = 1_000;
+        let seq = 0;
+        let h_ab_c = AuditChainLinker::compute_record_hash_v2(&prev, "AB", "C", ts, seq);
+        let h_a_bc = AuditChainLinker::compute_record_hash_v2(&prev, "A", "BC", ts, seq);
+        assert_ne!(
+            h_ab_c, h_a_bc,
+            "v2 must not collide on field-boundary slides — length-prefixing prevents this"
+        );
+    }
+
+    /// Mixed v1+v2 chain still verifies. We can't create a v1 row through
+    /// the current append (which always writes v2) without raw insert, so
+    /// this test uses raw INSERT to simulate a pre-migration v1 row, then
+    /// chains a v2 row after it.
+    #[test]
+    fn test_mixed_v1_v2_chain_verifies() {
+        let mut store = in_memory();
+
+        // Manually insert a v1-shape row at the start of the chain (the
+        // way upgraded databases will look).
+        let prev_v1 = "0".repeat(64);
+        let v1_ts: i64 = 1_000;
+        let v1_payload = "{\"legacy\":true}";
+        let v1_hash =
+            AuditChainLinker::compute_record_hash_v1(&prev_v1, v1_payload, v1_ts);
+        store
+            .conn
+            .execute(
+                "INSERT INTO audit_log_chain
+                 (event_type, event_json, previous_hash_hex, record_hash_hex,
+                  created_at_ms, signature_b64, hash_version, sequence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, 1, NULL)",
+                rusqlite::params!["LEGACY_V1", v1_payload, prev_v1, v1_hash, v1_ts],
+            )
+            .unwrap();
+
+        // Now append a v2 event via the chained writer. It must chain to
+        // the v1 head and start at sequence 0.
+        store
+            .save_posture_event_chained("n", "NEW_V2", "{}", None, 2_000)
+            .unwrap();
+
+        assert!(
+            store.verify_audit_chain_integrity().unwrap(),
+            "mixed v1+v2 chain must verify under the version-dispatching verifier"
+        );
+    }
+
+    /// V2 payload tamper (event_json changed) is still detected — the
+    /// existing pre-v2 guarantee survives the migration.
+    #[test]
+    fn test_v2_payload_tamper_still_detected() {
+        let mut store = in_memory();
+        store
+            .save_posture_event_chained("n", "EVT", r#"{"x":1}"#, None, 1_000)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE audit_log_chain SET event_json = '{\"x\":2}' \
+                 WHERE id = (SELECT MAX(id) FROM audit_log_chain)",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !store.verify_audit_chain_integrity().unwrap(),
+            "v2 must still detect event_json tampering"
+        );
+    }
+
+    /// Migration anchor is idempotent and is a no-op on a brand-new chain.
+    #[test]
+    fn test_migration_anchor_idempotent_and_noop_on_empty_chain() {
+        let mut store = in_memory();
+        // No v1 rows present → anchor is a no-op.
+        store.ensure_hash_v2_migration_anchor(5_000).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type='HASH_V2_MIGRATION'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "no v1 rows → no migration marker needed");
+
+        // Simulate an upgraded DB: one v1 row, then run the anchor.
+        let h = AuditChainLinker::compute_record_hash_v1(&"0".repeat(64), "{}", 100);
+        store
+            .conn
+            .execute(
+                "INSERT INTO audit_log_chain
+                 (event_type, event_json, previous_hash_hex, record_hash_hex,
+                  created_at_ms, signature_b64, hash_version, sequence)
+                 VALUES ('LEGACY', '{}', ?1, ?2, 100, NULL, 1, NULL)",
+                rusqlite::params![&"0".repeat(64), &h],
+            )
+            .unwrap();
+        store.ensure_hash_v2_migration_anchor(5_000).unwrap();
+        let count_after: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type='HASH_V2_MIGRATION'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after, 1, "exactly one anchor written");
+
+        // Second call must NOT write a second anchor.
+        store.ensure_hash_v2_migration_anchor(6_000).unwrap();
+        let count_idem: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type='HASH_V2_MIGRATION'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_idem, 1, "anchor is idempotent — second call no-ops");
     }
 }
