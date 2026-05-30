@@ -21,6 +21,14 @@ use crate::posture_cache::{
 };
 use crate::verifier::FleetPosture;
 
+/// Hard ceiling on an actuator-command request body. A `ProposedVehicleCommand`
+/// is ~5 × f64 plus serde overhead — a few hundred bytes serialized. 16 KiB is
+/// generous headroom. Anything larger is malformed or hostile; we reject fail
+/// closed (413) before allocating the body. Bounding this prevents an
+/// unbounded-allocation DoS on the actuator perimeter — the previous
+/// `to_bytes(body, usize::MAX)` would happily buffer a multi-gigabyte stream.
+const MAX_VEHICLE_COMMAND_BYTES: usize = 16 * 1024;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,9 +87,15 @@ pub async fn enforce_actuator_safety_envelope(
 
     let (parts, body) = req.into_parts();
 
-    let bytes = axum::body::to_bytes(body, usize::MAX)
+    // Bounded read — see MAX_VEHICLE_COMMAND_BYTES. axum::body::to_bytes
+    // returns Err when the body exceeds the cap, so allocation is capped
+    // at MAX_VEHICLE_COMMAND_BYTES regardless of what the client streams.
+    // 413 (Payload Too Large) is the precise status for oversize; we use
+    // it for both the oversize and the generic read-error cases (fail
+    // closed either way — the command is rejected, never forwarded).
+    let bytes = axum::body::to_bytes(body, MAX_VEHICLE_COMMAND_BYTES)
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
 
     let proposed_cmd: ProposedVehicleCommand =
         serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -143,14 +157,27 @@ pub async fn enforce_actuator_safety_envelope(
 
             // Disk-first (invariant #12): store write before memory update.
             // save_posture_event_chained takes &mut self — must lock the Mutex.
-            if let Ok(mut store) = svc.app.store.lock() {
-                let _ = store.save_posture_event_chained(
-                    "actuator_safety_envelope",
-                    "KINEMATIC_CONTRACT_VIOLATION",
-                    &log_payload.to_string(),
-                    Some("Proposed vehicle command violates non-physical invariants"),
-                    now_ms(),
-                );
+            // Audit-write failures and poisoned locks are LOUD, not
+            // swallowed: this is a security-relevant rejection at the
+            // actuator perimeter, and a missing tamper-evident record is
+            // itself worth knowing about.
+            match svc.app.store.lock() {
+                Ok(mut store) => {
+                    if let Err(e) = store.save_posture_event_chained(
+                        "actuator_safety_envelope",
+                        "KINEMATIC_CONTRACT_VIOLATION",
+                        &log_payload.to_string(),
+                        Some("Proposed vehicle command violates non-physical invariants"),
+                        now_ms(),
+                    ) {
+                        tracing::error!(error = %e, reason = %reason,
+                            "AUDIT-CHAIN WRITE FAILED for kinematic DenyBreach — event missing from tamper-evident log");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(reason = %reason,
+                        "kinematic DenyBreach: store lock poisoned — audit write SKIPPED for this perimeter rejection");
+                }
             }
 
             Err(StatusCode::BAD_REQUEST)
@@ -273,6 +300,34 @@ mod actuator_middleware_tests {
     use super::*;
     use crate::gateway::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
     use crate::verifier::FleetPosture;
+
+    /// The body cap must comfortably exceed a serialized worst-case
+    /// ProposedVehicleCommand so the cap can never reject a legitimate
+    /// vehicle command. f64::MAX serializes to ~25 chars apiece, so a
+    /// command with every field at f64::MAX is the realistic upper bound
+    /// — even then the wire payload is < 1 KiB. 16 KiB is generous
+    /// headroom; this test fails loudly if the cap is ever lowered
+    /// past the actual size of the command type.
+    #[test]
+    fn test_max_vehicle_command_bytes_cap_fits_worst_case_command() {
+        let worst = ProposedVehicleCommand {
+            linear_velocity_mps:        f64::MAX,
+            current_velocity_mps:       f64::MAX,
+            delta_time_s:               f64::MAX,
+            steering_angle_deg:         f64::MAX,
+            current_steering_angle_deg: f64::MAX,
+        };
+        let json = serde_json::to_vec(&worst).expect("serialize");
+        assert!(json.len() < MAX_VEHICLE_COMMAND_BYTES,
+            "worst-case ProposedVehicleCommand serializes to {} bytes — must fit \
+             under MAX_VEHICLE_COMMAND_BYTES ({} bytes)",
+            json.len(), MAX_VEHICLE_COMMAND_BYTES);
+        // And the headroom must be substantial — a 2× factor over the
+        // worst case is the minimum we expect.
+        assert!(json.len() * 2 < MAX_VEHICLE_COMMAND_BYTES,
+            "cap should be >= 2× worst-case ({} bytes) — got cap = {}",
+            json.len(), MAX_VEHICLE_COMMAND_BYTES);
+    }
 
     #[test]
     fn test_nominal_posture_selects_nominal_contract() {
