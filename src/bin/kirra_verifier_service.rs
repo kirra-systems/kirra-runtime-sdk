@@ -24,7 +24,8 @@ use kirra_runtime_sdk::verifier::{
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use kirra_runtime_sdk::verifier_store::VerifierStore;
-use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState};
+use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
+use kirra_runtime_sdk::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
 use kirra_runtime_sdk::security::constant_time_compare;
 use kirra_runtime_sdk::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_runtime_sdk::protocol_adapter::{
@@ -95,6 +96,18 @@ async fn require_client_identity(
 }
 
 // --- Real-time posture stream -----------------------------------------------
+
+/// Fail-closed posture read for action/actuator gating sites.
+///
+/// Delegates to `resolve_posture_with_reason` so the cache-staleness check
+/// (age >= POSTURE_CACHE_TTL_MS), empty-cache check, and poisoned-lock check
+/// all collapse into the same `(FleetPosture::LockedOut, Some(LockoutReason))`
+/// answer — never serving a stale entry as if current. The returned
+/// `LockoutReason` is threaded into the denial-audit payload so operators
+/// can distinguish a DAG-derived LockedOut from a posture-cache-derived one.
+fn gate_posture(svc: &ServiceState) -> (FleetPosture, Option<LockoutReason>) {
+    resolve_posture_with_reason(&svc.posture_cache, POSTURE_CACHE_TTL_MS)
+}
 
 fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String>) {
     let posture = node_id.as_ref().map(|id| state.calculate_posture(id));
@@ -542,11 +555,7 @@ async fn evaluate_action_filter(
 
     let request_id = now_ms().to_string();
 
-    let posture = svc.posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
-        .unwrap_or(FleetPosture::LockedOut);
+    let (posture, lockout_reason) = gate_posture(&svc);
 
     let posture_str = format!("{:?}", posture);
     let decision = evaluate_action_claim(claim.clone(), posture);
@@ -569,6 +578,7 @@ async fn evaluate_action_filter(
         "allowed": decision.allowed,
         "reason": decision.reason,
         "posture": posture_str,
+        "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
     });
     if let Ok(mut store) = svc.app.store.lock() {
         let _ = store.save_posture_event_chained(
@@ -610,11 +620,7 @@ async fn evaluate_industrial_adapter(
         }
     };
 
-    let posture = svc.posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
-        .unwrap_or(kirra_runtime_sdk::verifier::FleetPosture::LockedOut);
+    let (posture, lockout_reason) = gate_posture(&svc);
 
     let audit_ref = now_ms().to_string();
     let protocol_name = format!("{:?}", req.protocol);
@@ -631,6 +637,7 @@ async fn evaluate_industrial_adapter(
                     "allowed": result.allowed,
                     "denial_reason": result.denial_reason,
                     "posture": result.posture_at_evaluation,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
                     "audit_ref": audit_ref,
                 });
                 if let Ok(mut store) = svc.app.store.lock() {
@@ -683,11 +690,7 @@ async fn evaluate_ethernet_ip_adapter(
         }
     };
 
-    let posture = svc.posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
-        .unwrap_or(kirra_runtime_sdk::verifier::FleetPosture::LockedOut);
+    let (posture, lockout_reason) = gate_posture(&svc);
 
     let posture_str = format!("{:?}", posture);
     let eval = EtherNetIpAdapter::evaluate(&msg);
@@ -703,6 +706,7 @@ async fn evaluate_ethernet_ip_adapter(
                     "safety_relevant": eval.safety_relevant,
                     "posture": posture_str,
                     "denial_reason": denial_reason,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
                 }).to_string(),
                 None, now_ms(),
             );
@@ -740,11 +744,7 @@ async fn evaluate_canopen_adapter(
         }
     };
 
-    let posture = svc.posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
-        .unwrap_or(kirra_runtime_sdk::verifier::FleetPosture::LockedOut);
+    let (posture, lockout_reason) = gate_posture(&svc);
 
     let posture_str = format!("{:?}", posture);
     let eval = CanOpenAdapter::evaluate(&msg);
@@ -766,6 +766,7 @@ async fn evaluate_canopen_adapter(
                     "is_emergency": eval.is_emergency,
                     "triggers_recalculation": eval.triggers_recalculation,
                     "posture": posture_str,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
                 }).to_string(),
                 None, now_ms(),
             );
@@ -804,11 +805,7 @@ async fn evaluate_dnp3_adapter(
         }
     };
 
-    let posture = svc.posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()))
-        .unwrap_or(kirra_runtime_sdk::verifier::FleetPosture::LockedOut);
+    let (posture, lockout_reason) = gate_posture(&svc);
 
     let posture_str = format!("{:?}", posture);
     let eval = Dnp3Adapter::evaluate(&msg);
@@ -831,6 +828,7 @@ async fn evaluate_dnp3_adapter(
                     "critical_infrastructure_relevant": eval.critical_infrastructure_relevant,
                     "dest_address": msg.dest_address,
                     "posture": posture_str,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
                 }).to_string(),
                 None, now_ms(),
             );

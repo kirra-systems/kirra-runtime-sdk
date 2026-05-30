@@ -317,7 +317,7 @@ mod posture_engine_v2_tests {
         use std::sync::Arc;
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
-        let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
+        let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
         assert_eq!(posture, FleetPosture::LockedOut);
         assert_eq!(reason, Some(LockoutReason::PostureCacheEmpty));
     }
@@ -334,7 +334,7 @@ mod posture_engine_v2_tests {
             generation: 1,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
-        let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
+        let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
         assert_eq!(posture, FleetPosture::Nominal);
         assert_eq!(reason, None, "fresh cache must not produce a lockout reason");
     }
@@ -352,28 +352,32 @@ mod posture_engine_v2_tests {
             generation: 5,
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
-        let (posture, reason) = resolve_posture_with_reason_sync(&cache, 10_000);
+        let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
         assert_eq!(posture, FleetPosture::LockedOut);
         assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
     }
 
-    fn resolve_posture_with_reason_sync(
-        cache: &SharedPostureCache,
-        ttl_ms: u64,
-    ) -> (FleetPosture, Option<LockoutReason>) {
-        let ts = now_ms_engine();
-        let guard = cache.read().unwrap();
-        match guard.as_ref() {
-            Some(cached) => {
-                let age = ts.saturating_sub(cached.generated_at_ms);
-                if age >= ttl_ms {
-                    (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheStale))
-                } else {
-                    (cached.posture.clone(), None)
-                }
-            }
-            None => (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheEmpty)),
-        }
+    /// Tight boundary: a cache entry exactly `ttl_ms + 1` old must fail closed
+    /// to `LockedOut` with `PostureCacheStale` — proves the TTL is enforced
+    /// at the boundary the bin sites would observe at runtime, using
+    /// `POSTURE_CACHE_TTL_MS` as the TTL (same constant the bin passes).
+    #[test]
+    fn test_stale_boundary_cache_fails_closed_at_runtime_ttl() {
+        use std::sync::Arc;
+        use crate::posture_cache::{CachedFleetPosture, POSTURE_CACHE_TTL_MS};
+
+        let stale_ts = now_ms_engine().saturating_sub(POSTURE_CACHE_TTL_MS + 1);
+        let cached = CachedFleetPosture {
+            posture: FleetPosture::Nominal,
+            generated_at_ms: stale_ts,
+            ttl_ms: POSTURE_CACHE_TTL_MS,
+            generation: 42,
+        };
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
+        let (posture, reason) = resolve_posture_with_reason(&cache, POSTURE_CACHE_TTL_MS);
+        assert_eq!(posture, FleetPosture::LockedOut,
+            "an entry older than POSTURE_CACHE_TTL_MS must NOT be served as current");
+        assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
     }
 
     #[test]
