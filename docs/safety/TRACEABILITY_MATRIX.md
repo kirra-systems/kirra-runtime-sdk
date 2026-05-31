@@ -16,7 +16,7 @@ Do not edit by hand — re-run the script.
 | SG1 | `parko/crates/parko-core/src/rss.rs:108` | rss-longitudinal-distance-failsafe | test_rss_equal_speeds,test_rss_ego_faster,test_long_nan_input_is_failsafe,test_long_zero_brake_min_is_failsafe_not_zero,test_long_zero_brake_max_is_failsafe_not_zero,test_long_negative_brake_min_is_failsafe |
 | SG1 | `parko/crates/parko-core/src/rss.rs:49` | rss-lateral-distance-failsafe | test_lat_zero_accel_is_failsafe,test_lat_nan_input_is_failsafe,test_rss_zero_ego_velocity,test_rss_result_is_finite_and_nonnegative |
 | SG1 | `src/posture_engine_v2.rs:196` | rss-violation-escalates-posture | test_rss_violation_degrades_nominal_posture,test_rss_recovery_requires_full_streak,test_rss_posture_lifecycle_violation_to_recovery |
-| SG2 | `src/gateway/containment.rs:135` | drivable-space-containment | containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token |
+| SG2 | `src/gateway/containment.rs:148` | drivable-space-containment | containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token |
 | SG2 | `src/wcet_gate.rs:315` | drivable-space-containment-wcet | wcet_validate_trajectory_containment_worst_case |
 | SG3 | `src/gateway/cmd_vel.rs:30` | cmd-vel-finite-and-bounded | test_cmd_vel_within_bounds,test_cmd_vel_exceeds_linear_x |
 | SG3 | `src/gateway/kinematics_contract.rs:257` | reject-non-physical-dt | test_zero_time_delta_is_denied,test_negative_time_delta_is_denied,test_time_delta_check_fires_before_speed_check,prop_non_positive_dt_always_denied |
@@ -35,7 +35,7 @@ Do not edit by hand — re-run the script.
 | SG8 | `src/gateway/policy_layer.rs:46` | posture-resolve-fails-closed-locked-out | test_none_cache_denies_all_commands,test_empty_posture_cache_fails_closed_as_locked_out |
 | SG8 | `src/gateway/policy_layer.rs:82` | posture-to-contract-mrc-selection | test_degraded_posture_selects_mrc_contract,test_degraded_posture_clamps_high_speed_to_mrc_limit,test_locked_out_posture_has_no_contract,test_locked_out_rejects_zero_motion_command |
 | SG8 | `src/posture_cache.rs:213` | posture-cache-stale-fails-closed | test_stale_cache_denies_all_non_unknown_commands,test_entry_beyond_ttl_is_stale,test_stale_cache_fails_closed_after_virtual_clock_advance |
-| SG9 | `crates/kirra-ros2-adapter/src/node.rs:292` | subscription-liveness | test_stale_subscription_mrcs |
+| SG9 | `crates/kirra-ros2-adapter/src/node.rs:359` | subscription-liveness | test_stale_subscription_mrcs |
 | SG9 | `parko/crates/parko-core/src/rss.rs:108` | rss-longitudinal-distance-failsafe | test_rss_equal_speeds,test_rss_ego_faster,test_long_nan_input_is_failsafe,test_long_zero_brake_min_is_failsafe_not_zero,test_long_zero_brake_max_is_failsafe_not_zero,test_long_negative_brake_min_is_failsafe |
 | SG9 | `parko/crates/parko-core/src/rss.rs:49` | rss-lateral-distance-failsafe | test_lat_zero_accel_is_failsafe,test_lat_nan_input_is_failsafe,test_rss_zero_ego_velocity,test_rss_result_is_finite_and_nonnegative |
 | SG9 | `src/bin/kirra_verifier_service.rs:1751` | sensor-liveness-watchdog | test_watchdog_dead_mans_switch_fires_after_telemetry_timeout |
@@ -55,7 +55,7 @@ Do not edit by hand — re-run the script.
 | SG | Status | Enforcement / Reference |
 |----|--------|--------------------------|
 | SG1 | ENFORCED | parko-core RSS + posture_engine_v2 + parko-kirra MRC |
-| SG2 | PENDING-WIRING (check built + tested in isolation; live enforcement pends Option-B trajectory wiring) | `gateway::containment::validate_trajectory_containment` + 11 unit tests + WCET gate; the live request-path (ProposedVehicleCommand) is per-command and does not yet carry trajectory + corridor — see Option-B wiring issue and `docs/safety/TRACEABILITY.md` §2 |
+| SG2 | ENFORCED | Wiring live via the Option-B adapter (#131 — `crates/kirra-ros2-adapter` slow loop calls `validate_trajectory_containment` per accepted trajectory; rejects collapse the per-asset slot so the fast loop publishes MRC). Lateral margin = 0.40 m per KIRRA-OCCY-SG2-MARGIN-001 (`docs/safety/OCCY_SG2_MARGIN.md`) — assumes G2 AoU #123 (`ε_localization ≤ 0.10 m` 95th-pct). CARLA containment scenario verification documented in `docs/testing/CARLA_SCENARIO_SUITE.md` §C.2 — integrator-environment artefact, not blocking. |
 | SG3 | ENFORCED | `validate_vehicle_command` P1–P6 + `validate_cmd_vel` + fabric per-profile envelopes |
 | SG4 | DELEGATED | Integrator perception / map prior — SEooC contract #126 |
 | SG5 | DELEGATED | Integrator map prior — SEooC contract #126 |

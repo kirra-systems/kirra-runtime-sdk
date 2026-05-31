@@ -99,6 +99,7 @@ Governor WCET budget S3 must prove**. Do not invent absolute milliseconds yet.
   short / pull over.* [H2]
   - **FTTI:** per-cycle — verdict before actuation within one control cycle; same per-cycle bound as SG1.
   - **Verification method:** drivable-space boundary unit tests + curve/lane-edge scenarios + curb-mount / oncoming injection → Reject/Clamp. Artifact: #92.
+  - **Lateral margin:** 0.40 m (`CONTAINMENT_LATERAL_MARGIN_M`), derived in KIRRA-OCCY-SG2-MARGIN-001 (`docs/safety/OCCY_SG2_MARGIN.md`). Assumes G2 AoU (#123): integrator localization achieves ≤ 0.10 m 95th-percentile lateral error within the deployment ODD. Conservative-fallback 0.75 m documented as a deployment configuration for ODDs that don't meet the G2 AoU.
 - **SG3 (ASIL D)** — The system shall not command kinematics exceeding the safe
   dynamic envelope. *Enforce: Governor (per-step kinematics contract; clamp).*
   [H3]
