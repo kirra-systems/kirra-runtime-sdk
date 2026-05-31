@@ -1508,6 +1508,15 @@ async fn main() {
 
     let app_state = Arc::new(AppState::new(store, mode));
 
+    // S3 Pass B2 (#115): spawn the audit-writer task and install its Sender
+    // into AppState. The deny arm of the actuator-safety-envelope middleware
+    // reaches the Sender via `svc.app.audit_writer_tx.get()` to push the
+    // kinematic-violation audit record off the verdict path. Done before
+    // the listener binds so no request can race the install.
+    let audit_tx =
+        kirra_runtime_sdk::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
+    app_state.install_audit_writer(audit_tx);
+
     {
         let guard = app_state.store.lock()
             .expect("verifier store lock poisoned during boot hydration");

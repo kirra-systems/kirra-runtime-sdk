@@ -200,6 +200,16 @@ pub struct AppState {
     /// an unreadable epoch — fall through and rely on the existing
     /// `held == 0` / non-Active checks for fail-closed.
     pub cached_db_epoch: Arc<AtomicU64>,
+    /// Pass B2 (S3 / #115): bounded mpsc Sender for the audit-writer task.
+    /// The deny arm of the actuator-safety-envelope middleware does
+    /// `audit_writer_tx.get().try_send(job)` to push the kinematic-violation
+    /// audit record off the verdict path. `None` (writer not installed)
+    /// causes the deny arm to fall back to the previous inline lock+save
+    /// path — production main always installs the writer at startup; tests
+    /// that don't may still exercise the verdict path. Use
+    /// `install_audit_writer` once to install.
+    pub audit_writer_tx:
+        std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>>,
     /// Bounded broadcast channel for real-time posture stream subscribers.
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
@@ -225,6 +235,7 @@ impl AppState {
             mode_active: Arc::new(AtomicBool::new(mode == VerifierOperationMode::Active)),
             held_epoch: Arc::new(AtomicU64::new(0)),
             cached_db_epoch: Arc::new(AtomicU64::new(initial_db_epoch)),
+            audit_writer_tx: std::sync::OnceLock::new(),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
@@ -237,6 +248,20 @@ impl AppState {
     #[inline]
     pub fn is_active(&self) -> bool {
         self.mode_active.load(Ordering::SeqCst)
+    }
+
+    /// Install the audit-writer mpsc Sender. Called once at startup, after
+    /// `audit_writer::spawn_audit_writer`. Subsequent calls are ignored
+    /// (OnceLock semantics) and logged as a duplicate-install warning.
+    pub fn install_audit_writer(
+        &self,
+        tx: tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>,
+    ) {
+        if self.audit_writer_tx.set(tx).is_err() {
+            tracing::warn!(
+                "audit writer Sender already installed — ignoring duplicate install"
+            );
+        }
     }
 
     /// Returns the current VerifierOperationMode derived from the atomic.

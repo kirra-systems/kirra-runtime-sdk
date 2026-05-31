@@ -12,6 +12,9 @@ use axum::{
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::audit_writer::{
+    fleet_posture_str, AuditWriteJob, KinematicViolationPayload, ProposedCommandPayload,
+};
 use crate::gateway::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
@@ -134,49 +137,80 @@ pub async fn enforce_actuator_safety_envelope(
             Ok(next.run(rebuilt).await)
         }
 
-        EnforceAction::DenyBreach(ref reason) => {
+        EnforceAction::DenyBreach(code) => {
             tracing::error!(
-                reason               = %reason,
+                reason               = %code,
                 linear_velocity_mps  = %proposed_cmd.linear_velocity_mps,
                 steering_angle_deg   = %proposed_cmd.steering_angle_deg,
                 delta_time_s         = %proposed_cmd.delta_time_s,
                 "Inadmissible actuator command rejected at kinematic safety perimeter"
             );
 
-            let log_payload = serde_json::json!({
-                "violation": reason,
-                "proposed_command": {
-                    "linear_velocity_mps": proposed_cmd.linear_velocity_mps,
-                    "current_velocity_mps": proposed_cmd.current_velocity_mps,
-                    "delta_time_s": proposed_cmd.delta_time_s,
-                    "steering_angle_deg": proposed_cmd.steering_angle_deg,
-                    "current_steering_angle_deg": proposed_cmd.current_steering_angle_deg,
+            // Pass B2 + B3 (S3 / #115): build the audit job with byte-identical
+            // typed payload and hand it to the writer task via try_send. The
+            // verdict path now takes NO store.lock() here. Channel-full /
+            // writer-gone are best-effort drops with LOUD logs (matches the
+            // previous fire-and-best-effort behavior — the 400 response was
+            // never gated on the audit write succeeding). Field-for-field
+            // alphabetical ordering preserves audit-chain hash stability;
+            // see audit_writer::byte_identity_tests.
+            let job = AuditWriteJob {
+                event_type: "KINEMATIC_CONTRACT_VIOLATION",
+                payload: KinematicViolationPayload {
+                    posture_at_rejection: fleet_posture_str(&posture),
+                    proposed_command: ProposedCommandPayload {
+                        current_steering_angle_deg: proposed_cmd.current_steering_angle_deg,
+                        current_velocity_mps: proposed_cmd.current_velocity_mps,
+                        delta_time_s: proposed_cmd.delta_time_s,
+                        linear_velocity_mps: proposed_cmd.linear_velocity_mps,
+                        steering_angle_deg: proposed_cmd.steering_angle_deg,
+                    },
+                    violation: code.reason(),
                 },
-                "posture_at_rejection": format!("{posture:?}"),
-            });
+                created_at_ms: now_ms() as i64,
+                node_id: "actuator_safety_envelope",
+                reason: "Proposed vehicle command violates non-physical invariants",
+            };
 
-            // Disk-first (invariant #12): store write before memory update.
-            // save_posture_event_chained takes &mut self — must lock the Mutex.
-            // Audit-write failures and poisoned locks are LOUD, not
-            // swallowed: this is a security-relevant rejection at the
-            // actuator perimeter, and a missing tamper-evident record is
-            // itself worth knowing about.
-            match svc.app.store.lock() {
-                Ok(mut store) => {
-                    if let Err(e) = store.save_posture_event_chained(
-                        "actuator_safety_envelope",
-                        "KINEMATIC_CONTRACT_VIOLATION",
-                        &log_payload.to_string(),
-                        Some("Proposed vehicle command violates non-physical invariants"),
-                        now_ms(),
-                    ) {
-                        tracing::error!(error = %e, reason = %reason,
-                            "AUDIT-CHAIN WRITE FAILED for kinematic DenyBreach — event missing from tamper-evident log");
+            if let Some(tx) = svc.app.audit_writer_tx.get() {
+                match tx.try_send(job) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::error!(
+                            reason = %code,
+                            "audit queue FULL — dropping kinematic DenyBreach record; sequence gap will be detectable in the chain"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::error!(
+                            reason = %code,
+                            "audit writer task GONE — kinematic DenyBreach record dropped"
+                        );
                     }
                 }
-                Err(_) => {
-                    tracing::error!(reason = %reason,
-                        "kinematic DenyBreach: store lock poisoned — audit write SKIPPED for this perimeter rejection");
+            } else {
+                // Writer not installed (test harness / transitional). Fall back
+                // to the direct lock+save so existing tests observing chain
+                // entries still pass. Production main always installs the
+                // writer at startup; this branch is unreachable in deployment.
+                let event_json = serde_json::to_string(&job.payload).unwrap_or_default();
+                match svc.app.store.lock() {
+                    Ok(mut store) => {
+                        if let Err(e) = store.save_posture_event_chained(
+                            job.node_id,
+                            job.event_type,
+                            &event_json,
+                            Some(job.reason),
+                            job.created_at_ms as u64,
+                        ) {
+                            tracing::error!(error = %e, reason = %code,
+                                "AUDIT-CHAIN WRITE FAILED (fallback path) for kinematic DenyBreach");
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(reason = %code,
+                            "kinematic DenyBreach: store lock poisoned (fallback path) — audit write SKIPPED");
+                    }
                 }
             }
 

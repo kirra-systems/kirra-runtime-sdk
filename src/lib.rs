@@ -30,6 +30,7 @@ pub mod telemetry_watchdog;
 pub mod clock;
 pub mod scenario_runner;
 pub mod audit_chain;
+pub mod audit_writer;
 pub mod federation;
 pub mod federation_reconciliation;
 pub mod protocol_adapter;
