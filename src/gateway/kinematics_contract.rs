@@ -190,7 +190,8 @@ pub fn validate_vehicle_command(
     contract: &VehicleKinematicsContract,
 ) -> EnforceAction {
     // ------------------------------------------------------------------
-    // Safety: SG-004 (AEGIS-SG-001) ≅ SG9 (OCCY_SAFETY_GOALS).
+    // SAFETY: SG9 | REQ: fail-closed-nonfinite | TEST: test_nan_linear_velocity_is_denied_before_any_arithmetic,test_nan_current_velocity_is_denied_with_specific_code,test_nan_steering_angle_is_denied_with_specific_code,prop_nan_in_any_field_produces_deny_breach
+    // (≅ AEGIS SG-004 — cross-map per OCCY_SAFETY_GOALS.md §6.2.)
     // Priority 0: NaN/Inf guard — must run before ANY arithmetic.
     //
     // IEEE 754 NaN/Inf values poison every subsequent computation silently:
@@ -223,6 +224,8 @@ pub fn validate_vehicle_command(
     }
 
     // ------------------------------------------------------------------
+    // SAFETY: SG3 | REQ: reject-non-physical-dt | TEST: test_zero_time_delta_is_denied,test_negative_time_delta_is_denied,test_time_delta_check_fires_before_speed_check,prop_non_positive_dt_always_denied
+    // (≅ AEGIS SG-003.)
     // Priority 1: Non-physical time delta
     // Zero or negative dt makes rate-of-change calculations undefined.
     // ------------------------------------------------------------------
@@ -231,7 +234,8 @@ pub fn validate_vehicle_command(
     }
 
     // ------------------------------------------------------------------
-    // Safety: SG-001 (AEGIS-SG-001) ≅ SG3 (OCCY_SAFETY_GOALS).
+    // SAFETY: SG3 | REQ: velocity-hard-ceiling | TEST: test_speed_above_ceiling_triggers_clamp_linear,test_reverse_speed_above_ceiling_clamps_with_correct_sign,prop_clamp_linear_value_within_speed_contract,prop_allow_result_satisfies_speed_contract
+    // (≅ AEGIS SG-001.)
     // Priority 2: Linear velocity hard ceiling
     // Checked before acceleration rate — a velocity-over-limit command
     // implies an over-limit acceleration; no need to compute it.
@@ -267,6 +271,7 @@ pub fn validate_vehicle_command(
     let mut delta = cmd.steering_angle_deg;
     let mut delta_clamped = false;
 
+    // SAFETY: SG3 | REQ: accel-ceiling | TEST: test_excessive_acceleration_triggers_linear_clamping,prop_clamp_linear_value_within_speed_contract
     // Priority 3: Implied acceleration ceiling
     let implied_accel =
         (cmd.linear_velocity_mps - cmd.current_velocity_mps) / cmd.delta_time_s;
@@ -277,6 +282,7 @@ pub fn validate_vehicle_command(
         v_clamped = true;
     }
 
+    // SAFETY: SG3 | REQ: brake-ceiling | TEST: test_excessive_braking_triggers_linear_clamping
     // Priority 4: Implied deceleration ceiling
     // Asymmetric from acceleration: braking limit is typically higher.
     if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 + 1e-9 {
@@ -285,12 +291,14 @@ pub fn validate_vehicle_command(
         v_clamped = true;
     }
 
+    // SAFETY: SG3 | REQ: steering-hard-limit | TEST: test_high_speed_lateral_acceleration_forces_steering_clamp,prop_clamp_steering_value_is_finite
     // Priority 5a: Absolute steering angle hard limit
     if delta.abs() > contract.max_steering_deg {
         delta = contract.max_steering_deg * delta.signum();
         delta_clamped = true;
     }
 
+    // SAFETY: SG3 | REQ: steering-rate-ceiling | TEST: test_excessive_steering_rate_triggers_steering_clamp
     // Priority 5b: Steering rate ceiling
     // Rate is measured from current_steering to the (possibly P5a-clamped)
     // delta so that a bounded target is never inflated back up by the rate.
@@ -304,7 +312,8 @@ pub fn validate_vehicle_command(
         delta_clamped = true;
     }
 
-    // Safety: SG-002 (AEGIS-SG-001) ≅ SG3 (OCCY_SAFETY_GOALS).
+    // SAFETY: SG3 | REQ: lateral-accel-envelope | TEST: test_high_speed_lateral_acceleration_forces_steering_clamp,prop_clamp_steering_satisfies_lateral_accel_invariant,test_mrc_lateral_limit_is_tighter_than_nominal
+    // (≅ AEGIS SG-002.)
     // Priority 6: Dynamic lateral acceleration envelope (bicycle model)
     //
     //   a_lat = (v² × |tan(δ)|) / L

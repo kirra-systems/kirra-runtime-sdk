@@ -14,6 +14,11 @@ pub enum OperationalCommand {
 
 /// Classifies an HTTP request into an OperationalCommand based solely on method
 /// and path prefix. No state access — pure function, always total.
+// SAFETY: SG7 SG9 | REQ: doer-agnostic-classification | TEST: sg7_doer_agnostic_verdict_byte_identical_across_ingress_paths,test_safety_goal_sg_006_unknown_command_denial
+// (No `source` field in the signature: the classifier is path/method-only,
+//  so teleop vs planner ingress produces identical OperationalCommands —
+//  SG7. Unknown HTTP method maps to OperationalCommand::Unknown which
+//  feeds SG9 fail-closed at should_route_command.)
 pub fn classify_http_command(method: &str, path: &str) -> OperationalCommand {
     match method {
         "GET" | "HEAD" => OperationalCommand::ReadTelemetry,

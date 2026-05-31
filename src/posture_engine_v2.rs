@@ -193,6 +193,10 @@ pub type PostureEngineSender = mpsc::Sender<PostureRecalcTrigger>;
 /// Safe tick (safe==true) while violation is active: advances the streak.
 /// Recovery is confirmed when the streak reaches `AV_RECOVERY_STREAK_THRESHOLD`
 /// within `AV_RECOVERY_WINDOW_MS`; the violation flag is cleared on confirmation.
+// SAFETY: SG1 | REQ: rss-violation-escalates-posture | TEST: test_rss_violation_degrades_nominal_posture,test_rss_recovery_requires_full_streak,test_rss_posture_lifecycle_violation_to_recovery
+// (Occy SG1 enforcement coupling: when parko RSS reports `safe==false`,
+//  this escalates fleet posture to Degraded via the streak/window
+//  hysteresis defined in recovery_hysteresis.)
 pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
     if !rss.safe {
         app.rss_active_violation.store(true, Ordering::SeqCst);

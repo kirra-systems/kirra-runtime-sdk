@@ -69,6 +69,9 @@ impl AssetGovernor {
         Self { asset_id, profile }
     }
 
+    // SAFETY: SG8 | REQ: fabric-posture-gated-mrc-or-deny | TEST: test_locked_out_denies_all_commands,test_mrc_profile_selected_on_degraded_posture
+    // (≅ AEGIS SG-007. LockedOut → DenyCode::AssetLockedOut; Degraded →
+    //  MRC contract; Nominal → full envelope. Posture-driven MRC selection.)
     pub fn evaluate_command(
         &self,
         cmd: &ProposedVehicleCommand,

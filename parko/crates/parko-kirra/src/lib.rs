@@ -112,6 +112,9 @@ impl KirraGovernor {
     /// Applies the MRC velocity cap — Degraded semantics.
     /// Used by both the Degraded posture branch and the RSS unsafe gate.
     /// NOT used for LockedOut (which is a hard stop returning 0.0).
+    // SAFETY: SG8 | REQ: mrc-velocity-ceiling-clamp | TEST: degraded_above_cap_clamps_to_mrc_ceiling,rss_unsafe_above_ceiling_clamps_to_mrc
+    // (MRC envelope contraction on Degraded posture — clamps to
+    //  MRC_VELOCITY_CEILING_MPS rather than denying outright.)
     fn apply_mrc_profile(&self, proposed: &ControlCommand) -> EnforcementAction {
         let safe = proposed.linear_velocity.min(MRC_VELOCITY_CEILING_MPS);
         if safe < proposed.linear_velocity {

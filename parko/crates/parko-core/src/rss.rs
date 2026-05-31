@@ -46,6 +46,9 @@ fn finite_positive(x: f64) -> bool {
 /// `RSS_FAILSAFE_DISTANCE_M`. This is defence in depth — the primary
 /// defence is validating the asset profile at load time (see module-level
 /// note about the absence of a profile loader as of this writing).
+// SAFETY: SG1 SG9 | REQ: rss-lateral-distance-failsafe | TEST: test_lat_zero_accel_is_failsafe,test_lat_nan_input_is_failsafe,test_rss_zero_ego_velocity,test_rss_result_is_finite_and_nonnegative
+// (≅ Occy SG1 RSS over horizon. Non-finite or non-positive input returns
+//  RSS_FAILSAFE_DISTANCE_M — defence-in-depth fail-closed for SG9.)
 pub fn lateral_safe_distance(
     ego_lat_vel: f64,
     obj_lat_vel: f64,
@@ -102,6 +105,9 @@ pub fn lateral_safe_distance(
 ///
 /// On any invalid input (non-finite, or `brake_min <= 0`, or
 /// `brake_max <= 0`) returns `RSS_FAILSAFE_DISTANCE_M`.
+// SAFETY: SG1 SG9 | REQ: rss-longitudinal-distance-failsafe | TEST: test_rss_equal_speeds,test_rss_ego_faster,test_long_nan_input_is_failsafe,test_long_zero_brake_min_is_failsafe_not_zero,test_long_zero_brake_max_is_failsafe_not_zero,test_long_negative_brake_min_is_failsafe
+// (≅ Occy SG1 longitudinal collision RSS. Non-finite or non-positive
+//  brake/accel returns RSS_FAILSAFE_DISTANCE_M — fail-closed via SG9.)
 pub fn longitudinal_safe_distance(
     ego_vel: f64,
     lead_vel: f64,

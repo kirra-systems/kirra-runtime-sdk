@@ -43,6 +43,9 @@ fn now_ms() -> u64 {
 ///
 /// None (cold start or expired cache) and a poisoned RwLock both map to
 /// LockedOut — fail-closed in all ambiguous cases.
+// SAFETY: SG8 SG9 | REQ: posture-resolve-fails-closed-locked-out | TEST: test_none_cache_denies_all_commands,test_empty_posture_cache_fails_closed_as_locked_out
+// (Poisoned-lock and missing-cache both map to LockedOut; SG8 = correct
+//  MRC selection on degraded, SG9 = fail-closed on lock/cache anomaly.)
 fn resolve_posture(svc: &ServiceState) -> FleetPosture {
     match svc.posture_cache.read() {
         Ok(guard) => match guard.as_ref() {
@@ -76,6 +79,9 @@ pub async fn enforce_actuator_safety_envelope(
 ) -> Result<Response, StatusCode> {
     let posture = resolve_posture(&svc);
 
+    // SAFETY: SG8 | REQ: posture-to-contract-mrc-selection | TEST: test_degraded_posture_selects_mrc_contract,test_degraded_posture_clamps_high_speed_to_mrc_limit,test_locked_out_posture_has_no_contract,test_locked_out_rejects_zero_motion_command
+    // (Nominal → nominal envelope; Degraded → MRC fallback envelope;
+    //  LockedOut → fail-closed 403 with no contract evaluated.)
     let contract: VehicleKinematicsContract = match posture {
         FleetPosture::Nominal => VehicleKinematicsContract::nominal_reference_profile(),
         FleetPosture::Degraded => VehicleKinematicsContract::mrc_fallback_profile(),
@@ -455,5 +461,84 @@ mod actuator_middleware_tests {
             EnforceAction::ClampLinear(v) => assert_eq!(v, 5.0),
             other => panic!("mrc: expected ClampLinear, got {other:?}"),
         }
+    }
+
+    // SAFETY: SG7 | REQ: doer-agnostic-verdict | TEST: sg7_doer_agnostic_verdict_byte_identical_across_ingress_paths
+    /// SG7 parity test — the Governor's verdict is a pure function of
+    /// `(ProposedVehicleCommand, VehicleKinematicsContract)`. Identical command
+    /// bytes MUST produce identical verdicts regardless of which ingress path
+    /// (planner vs teleoperator vs any future source) delivered the command.
+    /// This is enforced structurally because `validate_vehicle_command` has NO
+    /// `source` / `command_source` parameter — the only inputs are the command
+    /// and the contract. If a future change introduces a source-typed
+    /// parameter that would make the verdict source-dependent, this test
+    /// either (a) still passes (parity preserved — fine) or (b) breaks here
+    /// or fails to compile (regression caught LOUD).
+    ///
+    /// Same property holds for `classify_http_command(method, path)` — it
+    /// takes no source field, so an identical (method, path) tuple from any
+    /// ingress yields the same OperationalCommand.
+    #[test]
+    fn sg7_doer_agnostic_verdict_byte_identical_across_ingress_paths() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+
+        // Two construction paths that mimic "planner submission" and
+        // "teleoperator submission" framings: the actual ProposedVehicleCommand
+        // values are byte-identical, which is exactly the doer-agnostic
+        // contract.
+        let cmd_from_planner = ProposedVehicleCommand {
+            linear_velocity_mps: 12.5,
+            current_velocity_mps: 10.0,
+            delta_time_s: 0.05,
+            steering_angle_deg: 8.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let cmd_from_teleop = ProposedVehicleCommand {
+            linear_velocity_mps: 12.5,
+            current_velocity_mps: 10.0,
+            delta_time_s: 0.05,
+            steering_angle_deg: 8.0,
+            current_steering_angle_deg: 0.0,
+        };
+
+        let planner_verdict = validate_vehicle_command(&cmd_from_planner, &contract);
+        let teleop_verdict = validate_vehicle_command(&cmd_from_teleop, &contract);
+
+        assert_eq!(
+            planner_verdict, teleop_verdict,
+            "SG7 doer-agnostic property violated: identical command bytes \
+             produced different verdicts — the Governor must NOT make the \
+             verdict depend on which ingress path delivered the command"
+        );
+
+        // Cross-check the same property on classify_http_command: identical
+        // method+path from any ingress must yield identical OperationalCommand.
+        use crate::gateway::policy::classify_http_command;
+        let planner_cmd = classify_http_command("POST", "/actuator/vehicle");
+        let teleop_cmd = classify_http_command("POST", "/actuator/vehicle");
+        assert_eq!(
+            planner_cmd, teleop_cmd,
+            "SG7 doer-agnostic property violated on classify_http_command"
+        );
+
+        // And an oversize/unsafe command behaves identically too — i.e., the
+        // SOURCE doesn't relax the check, including for a clearly-bad input.
+        let unsafe_cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 100.0, // far above any contract ceiling
+            current_velocity_mps: 10.0,
+            delta_time_s: 0.05,
+            steering_angle_deg: 5.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let planner_unsafe = validate_vehicle_command(&unsafe_cmd, &contract);
+        let teleop_unsafe = validate_vehicle_command(&unsafe_cmd, &contract);
+        assert_eq!(
+            planner_unsafe, teleop_unsafe,
+            "SG7 source-based relaxation: an unsafe command verdict must NOT depend on ingress path"
+        );
+        assert!(
+            matches!(planner_unsafe, EnforceAction::ClampLinear(_)),
+            "expected ClampLinear for over-cap unsafe input, got {planner_unsafe:?}"
+        );
     }
 }

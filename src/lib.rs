@@ -32,6 +32,7 @@ pub mod scenario_runner;
 pub mod audit_chain;
 pub mod audit_writer;
 pub mod wcet_gate;
+pub mod traceability_gate;
 pub mod federation;
 pub mod federation_reconciliation;
 pub mod protocol_adapter;

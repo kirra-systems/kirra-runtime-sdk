@@ -27,6 +27,9 @@ pub const DEFAULT_CMD_VEL_LIMITS: CmdVelLimits = CmdVelLimits {
     max_angular_z_abs: 1.0,
 };
 
+// SAFETY: SG3 SG9 | REQ: cmd-vel-finite-and-bounded | TEST: test_cmd_vel_within_bounds,test_cmd_vel_exceeds_linear_x
+// (≅ AEGIS SG-001 + SG-004 — finite-input check feeds SG9 fail-closed;
+//  per-axis bounds feed SG3 envelope.)
 pub fn validate_cmd_vel(cmd: &CmdVel, limits: CmdVelLimits) -> bool {
     if !cmd.linear_x.is_finite()
         || !cmd.linear_y.is_finite()

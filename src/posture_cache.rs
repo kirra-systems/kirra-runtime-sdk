@@ -129,6 +129,9 @@ impl CachedFleetPosture {
 
 
     /// Returns true if this entry has exceeded its TTL relative to `now_ms`.
+    // SAFETY: SG9 | REQ: ttl-staleness-detection | TEST: test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale
+    // (≅ AEGIS SG-005. Saturating subtraction handles clock-skew without
+    //  panic; comparison threshold is the entry's owned ttl_ms.)
     pub fn is_stale(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.generated_at_ms) >= self.ttl_ms
     }
@@ -194,7 +197,8 @@ pub fn should_route_command(
     now_ms: u64,
     command: OperationalCommand,
 ) -> bool {
-    // Safety: SG-006 (AEGIS-SG-001) ≅ SG9 (OCCY_SAFETY_GOALS).
+    // SAFETY: SG9 | REQ: unknown-command-denied | TEST: test_unknown_command_denied_before_posture_check,test_safety_goal_sg_006_unknown_command_denial
+    // (≅ AEGIS SG-006.)
     // Invariant #9: Unknown is denied before any posture evaluation.
     // This early return must never be removed.
     if command == OperationalCommand::Unknown {
@@ -206,7 +210,8 @@ pub fn should_route_command(
         return false;
     };
 
-    // Safety: SG-005 (AEGIS-SG-001) ≅ SG8/SG9 (OCCY_SAFETY_GOALS).
+    // SAFETY: SG8 SG9 | REQ: posture-cache-stale-fails-closed | TEST: test_stale_cache_denies_all_non_unknown_commands,test_entry_beyond_ttl_is_stale,test_stale_cache_fails_closed_after_virtual_clock_advance
+    // (≅ AEGIS SG-005.)
     // Staleness check uses entry.is_stale() — the TTL is owned by the entry,
     // not hardcoded here. This aligns with policy_layer.rs resolve_posture.
     if entry.is_stale(now_ms) {
