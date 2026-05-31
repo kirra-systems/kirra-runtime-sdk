@@ -1748,6 +1748,26 @@ async fn main() {
             .expect("posture_engine_tx must not be set before startup wiring");
         tracing::info!("posture: serialized worker started");
 
+        // SAFETY: SG9 | REQ: sensor-liveness-watchdog | TEST: test_watchdog_dead_mans_switch_fires_after_telemetry_timeout
+        // Phase 4 (S131): wire the telemetry watchdog into the
+        // production binary. This is the first real consumer of the
+        // PostureEngineSender from a sensor-liveness path — gated until
+        // now on the cold-refresh deadlock fix that landed on
+        // `s3-watchdog-deadlock-fix`. The watchdog runs as a background
+        // task; a node going silent past AV_TELEMETRY_TIMEOUT_MS
+        // produces a WatchdogTimeout trigger, which the posture engine
+        // worker consumes and recomputes the posture (typically
+        // collapsing to LockedOut for the affected node, which fails
+        // the actuator gate closed).
+        kirra_runtime_sdk::telemetry_watchdog::spawn_telemetry_watchdog(
+            Arc::clone(&svc_state.app),
+            posture_tx.clone(),
+        );
+        tracing::info!(
+            timeout_ms = kirra_runtime_sdk::telemetry_watchdog::AV_TELEMETRY_TIMEOUT_MS,
+            "telemetry watchdog spawned (SG9 sensor-liveness)"
+        );
+
         let refresh_tx = posture_tx;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(

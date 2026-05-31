@@ -91,12 +91,32 @@ SG7 (teleop): the operation-mode manager routes Local/Remote sources through the
 gate; the Governor's final gate is doer-agnostic — it checks the command
 regardless of source (planner / MRM / remote), preserving SG7.
 
-## 7. SG2 goes live
+## 7. SG2 goes live — status
 
-This wiring activates validate_trajectory_containment in the verdict path →
-**SG2 moves PENDING-WIRING → ENFORCED**. The containment lateral margin (0.30 m
-placeholder) needs the S8 number → **#131 and S8 interlock**: SG2 isn't credibly
-live until S8 sets the margin (the matrix flips only when both land).
+**As of Phase 4 (S131 implementation complete):** the
+`validate_trajectory_containment` check IS called on every candidate
+trajectory in `validate_trajectory_slow` (the slow-loop entry point);
+a containment failure short-circuits to `TrajectoryVerdict::MRCFallback`,
+which removes the per-asset `AcceptedTrajectory` slot so the fast loop
+publishes MRC on the next cycle. The wiring is live in the adapter
+binary (`kirra_ros2_adapter_node`).
+
+**SG2 nevertheless remains `PENDING-WIRING` in `TRACEABILITY_MATRIX.md`.**
+Two gates still hold the formal `ENFORCED` flip:
+- The `CONTAINMENT_LATERAL_MARGIN_M = 0.30` placeholder needs the
+  S8 (#120) characterization — the real margin is
+  `localization_error + perception_error + control_error`, the same
+  loop-closure that ADR-0001 uses for the speed cap.
+- The CARLA scenario suite (§9 below) must verify containment
+  end-to-end against an Autoware-driven trajectory injection, with
+  the gated MRC command observed on `~/output/control_cmd`. The
+  scenario plan ships as a separate artifact
+  (`docs/testing/CARLA_SCENARIO_SUITE.md`); the integrator runs it
+  against their ROS environment.
+
+When BOTH land, the matrix flips and the safety case carries SG2 as
+`ENFORCED`. The disposition is honest about which fields are
+implementation-complete vs measurement-complete.
 
 ## 8. ROS 2 ↔ Rust adapter
 
@@ -116,6 +136,34 @@ Autoware-in-CARLA as the doer; Governor as the final gate. Inject:
 - an over-aggressive trajectory exceeding the envelope → SG3 clamp/reject.
 Contrast: bare Autoware (its QM checks) proceeds; the Governor catches + MRCs —
 plus the fail-closed / MRC / integrity-evidence properties RSS-in-CARLA lacks.
+
+## 9a. Audit disposition (pilot)
+
+**Pilot evidence (Phase 4):** every slow-loop trajectory verdict
+(`Accept` / `Clamp` / `MRCFallback`) and every fast-loop conformance
+verdict (`Accept` / `MRCFallback`) is emitted as a structured
+`tracing` log line with the asset id, verdict, elapsed-μs, and the
+proximate cause. The `subscription_staleness_mrc` path additionally
+emits the configured timeout. These structured logs are the pilot
+audit evidence: an integrator can replay a CARLA scenario, capture the
+JSON-line stream from the adapter binary's `tracing-subscriber::fmt`,
+and demonstrate that every MRC published on `~/output/control_cmd` is
+accompanied by a matching log line stating the cause.
+
+**Full integration with the hash-chained `audit_log_chain` in
+`kirra_verifier_service` is a productization step**, not a Phase 4
+deliverable. The adapter binary and the verifier service are separate
+processes today; closing this loop requires one of:
+- IPC between the adapter and the service (the natural fit: the
+  adapter posts deny/MRC events to a `POST /actuator/trajectory/audit`
+  endpoint, joining the existing `audit_writer` Pass-B2 pipeline), OR
+- Co-locating `AppState` so the adapter holds an `Arc<AppState>` and
+  writes via the same `audit_writer_tx` the actuator middleware uses.
+
+Either route preserves the byte-identical-payload contract (Pass B3 —
+alphabetical struct fields, deterministic serialization). The pilot
+ships tracing logs; productization moves to the chained ledger.
+Tracked separately from the safety case.
 
 ## 10. Decisions to flag (NOT decided here)
 
