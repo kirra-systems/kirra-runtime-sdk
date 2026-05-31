@@ -336,4 +336,48 @@ mod tests {
             "NaN reaction_time must fail safe, got {r}"
         );
     }
+
+    /// SG1 / SG9 / GAP 4: lateral post-arithmetic overflow failsafe.
+    /// All inputs are individually finite and `lat_accel_max > 0`, so the
+    /// input gate passes — but `reaction_time.powi(2)` overflows the f64
+    /// range, producing Inf inside `lateral_stop_distance`. The post-
+    /// arithmetic `margin.is_finite()` check at l.83 must catch this and
+    /// return the failsafe distance, never silently leak Inf or `0.0`.
+    #[test]
+    fn test_lat_post_arithmetic_overflow_is_failsafe() {
+        let r = lateral_safe_distance(1.0, 0.0, 1.0e-10, 1.0e200);
+        assert!(
+            r.is_finite(),
+            "must not leak Inf downstream; got {r}"
+        );
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "post-arithmetic overflow must fail safe, got {r}"
+        );
+    }
+
+    /// SG1 / SG9 / GAP 5: longitudinal post-arithmetic overflow failsafe.
+    /// All inputs pass the entry gate (`brake_min`, `brake_max` both finite
+    /// and > 0; ego/lead velocities, reaction_time, accel_max finite), but
+    /// the squared `reaction_time` term overflows mid-calculation. The
+    /// `raw.is_finite()` check at l.137 must catch this and return the
+    /// failsafe distance.
+    #[test]
+    fn test_long_post_arithmetic_overflow_is_failsafe() {
+        let r = longitudinal_safe_distance(
+            1.0, 1.0,
+            1.0e200,   // reaction_time → reaction_time.powi(2) overflows
+            1.0e-10,   // accel_max  finite-positive
+            1.0e-10,   // brake_min  finite-positive
+            1.0e-10,   // brake_max  finite-positive
+        );
+        assert!(
+            r.is_finite(),
+            "must not leak Inf downstream; got {r}"
+        );
+        assert!(
+            r >= RSS_FAILSAFE_DISTANCE_M,
+            "post-arithmetic overflow must fail safe, got {r}"
+        );
+    }
 }

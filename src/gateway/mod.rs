@@ -5,6 +5,7 @@ pub mod policy;
 pub mod policy_layer;
 pub mod cmd_vel;
 pub mod kinematics_contract;
+pub mod containment;
 
 #[cfg(test)]
 mod kinematics_proptest;

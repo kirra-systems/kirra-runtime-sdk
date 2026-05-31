@@ -71,4 +71,63 @@ mod tests {
     fn test_cmd_vel_exceeds_linear_x() {
         assert!(!validate_cmd_vel(&sample_cmd(0.6, 0.0), DEFAULT_CMD_VEL_LIMITS));
     }
+
+    /// SG9 / GAP 1: NaN or Inf in ANY of the six axes must reject before any
+    /// arithmetic / bounds-comparison runs. Parameterized across all six.
+    #[test]
+    fn test_cmd_vel_nan_in_any_axis_rejects() {
+        let axes_set_nan: [fn(&mut CmdVel); 6] = [
+            |c| c.linear_x = f64::NAN,
+            |c| c.linear_y = f64::NAN,
+            |c| c.linear_z = f64::NAN,
+            |c| c.angular_x = f64::NAN,
+            |c| c.angular_y = f64::NAN,
+            |c| c.angular_z = f64::NAN,
+        ];
+        for (i, set_nan) in axes_set_nan.iter().enumerate() {
+            let mut cmd = sample_cmd(0.1, 0.1);
+            set_nan(&mut cmd);
+            assert!(
+                !validate_cmd_vel(&cmd, DEFAULT_CMD_VEL_LIMITS),
+                "axis index {i}: NaN must reject"
+            );
+        }
+        for (i, set_inf) in [
+            |c: &mut CmdVel| c.linear_x = f64::INFINITY,
+            |c: &mut CmdVel| c.linear_y = f64::NEG_INFINITY,
+            |c: &mut CmdVel| c.linear_z = f64::INFINITY,
+            |c: &mut CmdVel| c.angular_x = f64::INFINITY,
+            |c: &mut CmdVel| c.angular_y = f64::NEG_INFINITY,
+            |c: &mut CmdVel| c.angular_z = f64::INFINITY,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut cmd = sample_cmd(0.1, 0.1);
+            set_inf(&mut cmd);
+            assert!(
+                !validate_cmd_vel(&cmd, DEFAULT_CMD_VEL_LIMITS),
+                "axis index {i}: Inf must reject"
+            );
+        }
+    }
+
+    /// SG3 / GAP 2: differential-drive platform restriction — angular_x or
+    /// angular_y ≠ 0 must reject regardless of bounds. Exercises the
+    /// non-zero arm at validate_cmd_vel l.44.
+    #[test]
+    fn test_cmd_vel_rejects_nonzero_angular_xy() {
+        let mut cmd = sample_cmd(0.25, 0.4);
+        cmd.angular_x = 0.1;
+        assert!(
+            !validate_cmd_vel(&cmd, DEFAULT_CMD_VEL_LIMITS),
+            "non-zero angular_x must reject"
+        );
+        let mut cmd = sample_cmd(0.25, 0.4);
+        cmd.angular_y = -0.1;
+        assert!(
+            !validate_cmd_vel(&cmd, DEFAULT_CMD_VEL_LIMITS),
+            "non-zero angular_y must reject"
+        );
+    }
 }

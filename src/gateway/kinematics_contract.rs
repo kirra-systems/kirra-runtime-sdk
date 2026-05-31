@@ -46,6 +46,18 @@ pub struct VehicleKinematicsContract {
     /// Vehicle wheelbase (meters). Used in the bicycle model denominator.
     /// Must match the physical platform.
     pub wheelbase_m: f64,
+    /// Bumper-to-bumper width (meters). Used by the SG2 drivable-space
+    /// containment check (`gateway::containment::validate_trajectory_containment`)
+    /// to compute the vehicle's per-pose footprint. Same dimension across
+    /// Nominal/MRC profiles — the vehicle does not shrink in degraded posture.
+    pub width_m: f64,
+    /// Bumper-to-bumper length (meters); equals
+    /// `wheelbase_m + overhang_front_m + overhang_rear_m`.
+    pub length_m: f64,
+    /// Distance from front wheel axle to front bumper (meters).
+    pub overhang_front_m: f64,
+    /// Distance from rear wheel axle to rear bumper (meters).
+    pub overhang_rear_m: f64,
 }
 
 impl VehicleKinematicsContract {
@@ -61,6 +73,12 @@ impl VehicleKinematicsContract {
             min_follow_distance_m: 2.0,
             max_lateral_accel_mps2: 3.5,
             wheelbase_m: 2.8,
+            // Reference mid-size vehicle footprint (sedan / small SUV). 2.8
+            // wheelbase + 0.9 front + 1.1 rear = 4.8 m length, 1.85 m width.
+            width_m: 1.85,
+            length_m: 4.8,
+            overhang_front_m: 0.9,
+            overhang_rear_m: 1.1,
         }
     }
 
@@ -76,6 +94,11 @@ impl VehicleKinematicsContract {
             min_follow_distance_m: 5.0,
             max_lateral_accel_mps2: 1.5,
             wheelbase_m: 2.8,
+            // Footprint dimensions are platform geometry — same as Nominal.
+            width_m: 1.85,
+            length_m: 4.8,
+            overhang_front_m: 0.9,
+            overhang_rear_m: 1.1,
         }
     }
 }
@@ -150,6 +173,12 @@ pub enum DenyCode {
     InvalidTimeDelta,
     /// Safety: SG-007 ≅ SG8. Asset is under LockedOut fleet posture in the fabric.
     AssetLockedOut,
+    /// Safety: SG-002 ≅ SG2. Trajectory pose / vehicle footprint departs the
+    /// drivable-space corridor (with margin), or the corridor input is
+    /// absent/stale/low-confidence (conservative containment failure per
+    /// OCCY_FAULT_MODEL §3 sensor-availability rule). Issued by
+    /// `gateway::containment::validate_trajectory_containment`.
+    DrivableSpaceDeparture,
 }
 
 impl DenyCode {
@@ -166,6 +195,7 @@ impl DenyCode {
             Self::NanInfDeltaTime       => "NAN_INF_DELTA_TIME",
             Self::InvalidTimeDelta      => "INVALID_TIME_DELTA",
             Self::AssetLockedOut        => "ASSET_LOCKED_OUT",
+            Self::DrivableSpaceDeparture => "DRIVABLE_SPACE_DEPARTURE",
         }
     }
 }
@@ -790,5 +820,77 @@ mod kinematics_contract_tests {
             EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity),
             "NaN guard (priority 0) must fire before zero-dt check (priority 1)"
         );
+    }
+
+    /// SG3 / GAP 6: Priority-3 implied-acceleration guard at the zero boundary.
+    /// Exercises the FALSE arm of `implied_accel > 0.0` (l.279). When
+    /// commanded == current velocity, implied_accel = 0.0, so neither P3 nor
+    /// P4 should clamp; the command should Allow.
+    #[test]
+    fn test_implied_accel_at_zero_boundary_treated_as_no_clamp() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 10.0,
+            current_velocity_mps: 10.0,
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        assert_eq!(
+            validate_vehicle_command(&cmd, &contract),
+            EnforceAction::Allow,
+            "implied_accel == 0.0 must NOT trigger the P3 acceleration clamp"
+        );
+    }
+
+    /// SG3 / GAP 7: Priority-4 implied-deceleration guard at the zero boundary.
+    /// Exercises the FALSE arm of `implied_accel < 0.0` (l.288). A negligible
+    /// positive accel (just below the max-accel threshold) keeps implied_accel
+    /// strictly above zero so P4 does not consider it; the command must Allow.
+    #[test]
+    fn test_implied_decel_at_zero_boundary_treated_as_no_clamp() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        // implied_accel = (10.0 - 10.000001) / 0.1 = -1e-5 m/s² — well below
+        // max_brake_mps2 (4.5), exercises the P4 false arm where the
+        // computed |implied_accel| is non-zero but below the brake ceiling.
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 10.0,
+            current_velocity_mps: 10.000_001,
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        assert_eq!(
+            validate_vehicle_command(&cmd, &contract),
+            EnforceAction::Allow,
+            "tiny negative implied_accel must NOT trigger the P4 brake clamp"
+        );
+    }
+
+    /// SG9 / GAP 8: `Display for DenyCode` must render byte-identical to
+    /// `DenyCode::reason()`. Audit-chain hash stability depends on this
+    /// (every variant must match its SCREAMING_SNAKE_CASE token).
+    #[test]
+    fn test_deny_code_display_matches_reason() {
+        let all = [
+            DenyCode::NanInfLinearVelocity,
+            DenyCode::NanInfCurrentVelocity,
+            DenyCode::NanInfSteeringAngle,
+            DenyCode::NanInfCurrentSteering,
+            DenyCode::NanInfDeltaTime,
+            DenyCode::InvalidTimeDelta,
+            DenyCode::AssetLockedOut,
+            // SG2 — merged in from sg2-drivable-space (#128); the union of
+            // SG2 + GAP 8 means the corridor-departure variant must also
+            // pin its Display token for audit-hash stability.
+            DenyCode::DrivableSpaceDeparture,
+        ];
+        for code in all {
+            assert_eq!(
+                format!("{code}"),
+                code.reason(),
+                "Display for {code:?} must equal reason() token"
+            );
+        }
     }
 }

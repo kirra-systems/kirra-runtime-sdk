@@ -443,6 +443,59 @@ mod posture_engine_v2_tests {
             "PeriodicRefresh Display must be the bare variant name (no state to print)");
     }
 
+    /// SG9 / GAP 13: every `PostureRecalcTrigger` variant must render a
+    /// stable, non-empty Display string. Audit/log lines downstream key on
+    /// these tokens; covers the variants not exercised by the targeted
+    /// tests above (ManualTrigger, DependencyGraphChanged, RssViolation).
+    #[test]
+    fn test_posture_recalc_trigger_display_per_variant() {
+        let mt = PostureRecalcTrigger::ManualTrigger {
+            operator_id: "alice".to_string(),
+        };
+        let s = mt.to_string();
+        assert!(s.starts_with("ManualTrigger"));
+        assert!(s.contains("alice"));
+
+        let dg = PostureRecalcTrigger::DependencyGraphChanged.to_string();
+        assert_eq!(dg, "DependencyGraphChanged");
+
+        let rss = PostureRecalcTrigger::RssViolation(RssState {
+            safe: false,
+            longitudinal_margin: 1.25,
+            lateral_margin: 0.50,
+        });
+        let s = rss.to_string();
+        assert!(s.contains("RssViolation"));
+        assert!(s.contains("safe=false"));
+        assert!(s.contains("1.25"));
+        assert!(s.contains("0.50"));
+    }
+
+    /// SG9 / GAP 11: a poisoned posture-cache `RwLock` must fail closed.
+    /// `resolve_posture_with_reason` returns `(LockedOut, PostureCachePoisoned)`
+    /// on the `Err(_)` arm of `cache.read()` (l.96–102). We poison the lock
+    /// the standard way: take a write guard in a thread and panic inside it.
+    #[test]
+    fn test_resolve_posture_with_reason_poisoned_lock_fails_closed() {
+        use std::sync::{Arc, RwLock};
+        use std::thread;
+
+        let cache: SharedPostureCache = Arc::new(RwLock::new(None));
+        let poisoner = Arc::clone(&cache);
+        let handle = thread::spawn(move || {
+            let _guard = poisoner.write().expect("acquire write before poison");
+            panic!("poisoning the RwLock for the test");
+        });
+        let _ = handle.join();
+        assert!(cache.is_poisoned(), "test setup: lock must be poisoned");
+
+        let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
+        assert_eq!(posture, FleetPosture::LockedOut,
+            "a poisoned cache must fail closed to LockedOut");
+        assert_eq!(reason, Some(LockoutReason::PostureCachePoisoned),
+            "must surface the PostureCachePoisoned reason");
+    }
+
     /// PeriodicRefresh on an Active instance must re-stamp the cache —
     /// strictly-increasing generation and updated `generated_at_ms` — but
     /// NOT cause a posture change when state is unchanged. The first call

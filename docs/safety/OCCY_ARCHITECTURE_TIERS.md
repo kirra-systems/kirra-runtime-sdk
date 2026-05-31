@@ -84,6 +84,39 @@ verifies at runtime and fails safe — derate/MRC — when unmet):
   indicators live and derates when they fail; assumptions it cannot verify at
   runtime are documented assumptions-of-use in the safety case.
 
+### 4.1 SG2 drivable-space containment inputs (Option-B; pending live wiring)
+
+The SG2 corridor-containment check (`gateway::containment::validate_trajectory_containment`,
+KIRRA-OCCY-FAULT-001 / OCCY_SAFETY_GOALS.md SG2) requires three inputs that
+the integrator's perception / map layer must supply through the Option-B
+trajectory + corridor wiring (the follow-up issue tracks the live wire-up;
+the check itself is built and unit-tested today):
+
+- **Planned trajectory** — sequence of poses (`x`, `y`, `heading`) over a
+  bounded look-ahead horizon (≤ `MAX_TRAJECTORY_HORIZON = 50` per call); pose
+  convention is the rear axle to match the bicycle-model used by P6.
+- **Drivable-space corridor** — left + right polylines bounding the maneuver
+  envelope, sourced from **perception or map prior, NOT the planner** (the
+  doer/checker independence requires the corridor be an independent
+  signal from the trajectory being checked). The corridor MUST span the
+  full maneuver envelope (e.g. both same-direction lanes when a lane change
+  is planned) so legitimate lane changes that stay within the corridor pass
+  containment.
+  - Per side ≤ `MAX_CORRIDOR_VERTICES = 128` vertices.
+  - Health: `confidence ∈ [0, 1]` + `age_ms`; thresholds are integrator-set
+    (`min_confidence`, `max_age_ms`). The check is conservative — absent /
+    stale / low-confidence corridor → `DenyCode::DrivableSpaceDeparture` →
+    MRC (the SG4 untraversable-default pattern; see OCCY_FAULT_MODEL §3).
+- **Vehicle footprint** — platform geometry on `VehicleKinematicsContract`
+  (`width_m`, `length_m`, `overhang_front_m`, `overhang_rear_m`,
+  `wheelbase_m`). Same dimensions across Nominal/MRC profiles (the vehicle
+  does not shrink in degraded posture).
+
+**Inward margin.** The check enforces a `CONTAINMENT_LATERAL_MARGIN_M`
+(default 0.30 m) inside every corridor edge. The real value is derived in
+S8 / #120 as worst-case (localization + perception + control) error,
+analogous to the SSD ≈ R cap derivation in SPEED_ENVELOPE.md.
+
 This contract is also the **commercial hook**: it shows an integrator exactly
 what their perception must deliver — and D1 is KIRRA's answer when it can't (or
 when they want the premium envelope / night / water / the ASIL-D omission claim).

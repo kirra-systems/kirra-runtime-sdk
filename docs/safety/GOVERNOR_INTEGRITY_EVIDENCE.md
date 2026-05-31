@@ -83,8 +83,8 @@ As an SEooC, the manual states the conditions under which the ASIL-D claim holds
 - [x] Verify no-alloc + panic-freedom on the Governor check path; bound the WCET — **done** on branch `s3-wcet-pass-b`. Pass A removed per-verdict heap allocs + set `panic = "abort"`. Pass B1+B2 made the verdict path lock-free in production. The structural boundedness argument lives in `src/wcet_gate.rs` (O(1) per call; no loops, no recursion, no alloc, no locks). CI-measured steady-state p99.9 = 170–352 ns; max with OS jitter ≤ 219 µs (target hardware re-measure under S8/#120).
 - [x] Set the SG9 timeout to the proven WCET; wire a CI guard against regressions — **done**. `GOVERNOR_VERDICT_WCET_TARGET_MICROS = 100` (deployment target). CI guard at `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS = 1000` (generous for shared-runner variance). Six tests in `wcet_gate::ci_gate_tests` cover Allow / P0-NaN-Deny / P2-Clamp / P6-Clamp / posture-route Nominal / posture-route Stale-FailClosed. Target re-validated on D3 independent compute under S8 (#120).
 - [ ] Measure MC/DC on the safety-critical functions; extend tests to 100%
-- [ ] Complete the SG→requirement→code→test traceability matrix; extract in CI
-- [ ] Document FFI evidence (D3 separation + input validation)
+- [x] Complete the SG→requirement→code→test traceability matrix; extract in CI — **done** (S3 traceability build, commit `3026535`). `docs/safety/TRACEABILITY.md` defines the parseable `// SAFETY: SGx | REQ: ... | TEST: ...` convention; `docs/safety/TRACEABILITY_MATRIX.md` is auto-generated via `scripts/extract_safety_traceability.sh`; `src/traceability_gate.rs::ci_gate_tests` is the Rust CI gate (every ENFORCED SG has ≥ 1 tagged site; every tagged site has non-empty REQ + TEST; SG ids in range; tag-count floor).
+- [x] Document FFI evidence (D3 separation + input validation) — **done**. See `docs/safety/OCCY_FFI_EVIDENCE.md` (KIRRA-OCCY-FFI-001) — spatial / temporal / communication isolation evidence consolidation; D3 independent-compute deployment is the assumption of use.
 - [ ] Adopt Ferrocene for the Governor crate; confirm target support
 - [ ] Draft the Governor Safety Manual (§4)
 

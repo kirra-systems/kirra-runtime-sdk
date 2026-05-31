@@ -39,6 +39,8 @@ Date: 2026-05-23
 | KIRRA-OCCY-FAULT-001 | Occy Governor fault model + degraded-mode availability (S7) | 0.1 | Draft | docs/safety/OCCY_FAULT_MODEL.md | 2026-05-31 |
 | KIRRA-OCCY-TRACE-001 | Occy Safety Traceability Convention (tag format + CI gate spec) | 0.1 | Draft | docs/safety/TRACEABILITY.md | 2026-05-31 |
 | KIRRA-OCCY-TRACE-MATRIX-001 | Occy Safety Traceability Matrix (auto-generated from `// SAFETY:` tags) | 0.1 | Auto-generated | docs/safety/TRACEABILITY_MATRIX.md | 2026-05-31 |
+| KIRRA-OCCY-MANUAL-001 | KIRRA Governor Safety Manual (SEooC consolidated deliverable for integrators/assessors) | 0.1 | Draft | docs/safety/GOVERNOR_SAFETY_MANUAL.md | 2026-05-31 |
+| KIRRA-OCCY-FFI-001 | Occy Freedom From Interference (FFI) evidence — spatial / temporal / communication isolation | 0.1 | Draft | docs/safety/OCCY_FFI_EVIDENCE.md | 2026-05-31 |
 
 ---
 
