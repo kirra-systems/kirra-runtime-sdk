@@ -91,47 +91,47 @@ Governor WCET budget S3 must prove**. Do not invent absolute milliseconds yet.
   longitudinal collision (shall maintain an RSS-safe longitudinal distance to
   the nearest lead object). *Enforce: Governor (RSS over horizon). Safe state:
   stop short.* [H1]
-  - **FTTI:** per-cycle — verdict must complete before actuation, so no unsafe command is ever actuated (≤ 1 control cycle). Scenario-level closing dynamics set the required look-ahead horizon + RSS params (S4/S8), not the mechanism FTTI.
+  - **FTTI:** per-cycle — verdict before actuation within one control cycle; 0.5 s chain reaction budget is the dead time; Governor WCET is a slice (target ≪ 0.5 s; exact bound proven in S3/#115). RSS look-ahead horizon at the 50 mph cap follows the SG4/SG5 ≈ 94 m basis.
   - **Verification method:** sim scenario suite (cut-in, lead-brake, occluded-pedestrian) + fault-injection (inject unsafe trajectory → assert Reject→MRC) + conservatism check that Governor RSS ≥ parko-core rss bound. Artifacts: #92 (1.C), Phase 2.
 - **SG2 (ASIL D)** — The system shall not command a trajectory that departs the
   drivable area or crosses into oncoming traffic / curb / static obstacle.
   *Enforce: Governor (per-step kinematics + drivable-space). Safe state: stop
   short / pull over.* [H2]
-  - **FTTI:** per-cycle (≤ 1 control cycle; verdict before actuation).
+  - **FTTI:** per-cycle — verdict before actuation within one control cycle; same per-cycle bound as SG1.
   - **Verification method:** drivable-space boundary unit tests + curve/lane-edge scenarios + curb-mount / oncoming injection → Reject/Clamp. Artifact: #92.
 - **SG3 (ASIL D)** — The system shall not command kinematics exceeding the safe
   dynamic envelope. *Enforce: Governor (per-step kinematics contract; clamp).*
   [H3]
-  - **FTTI:** per-cycle (≤ 1 control cycle).
+  - **FTTI:** per-cycle — verdict before actuation within one control cycle; same per-cycle bound as SG1.
   - **Verification method:** per-step kinematics unit tests (over-speed/accel/curvature, zero/neg dt, NaN) + clamp-correctness test (egress actually rewritten). Artifact: #92 (existing tests).
-- **SG4 (ASIL B; up to C in flood-prone ODD)** — The system shall not enter
+- **SG4 (ASIL B — active, water in deployment ODD)** — The system shall not enter
   standing water of unverified depth. *Enforce: Governor (WATER_UNTRAVERSABLE).
   Safe state: stop short of water.* [H4]
-  - **FTTI:** look-ahead — must Reject far enough ahead that the stop-short MRC completes before the water boundary (≥ stopping time at ODD max speed + sensing/map range). Absolute TBD S4/S8.
+  - **FTTI:** look-ahead — Reject ≥ **94 m ahead** at the 50 mph cap (SSD = v·t_react + v²/2a with t_react=0.5 s, a=3 m/s² comfortable; v_max = 22.35 m/s). Derates with the cap under degraded conditions (rain / fog / low-light) per the dynamic-derate rule in ADR-0001.
   - **Verification method:** unbounded-depth → WATER_UNTRAVERSABLE unit test + flood CARLA demo (#100) + earn-back negative test (no false-traverse without evidence, ties F1/#98).
-- **SG5 (ASIL B; up to C with frequent crossings)** — The system shall not enter
+- **SG5 (ASIL B)** — The system shall not enter
   a high-consequence commit zone without confirmed clearance and a verified
   exit, and shall not stop within one. *Enforce: Governor (map-anchored
   COMMIT_ZONE_BLOCKED). Safe state: stop short of zone.* [H5]
-  - **FTTI:** look-ahead — Reject early enough to stop short of the zone entry (≥ stopping time at ODD max speed). Absolute TBD S4/S8.
+  - **FTTI:** look-ahead — Reject ≥ **94 m ahead** at the 50 mph cap (same SSD derivation as SG4). Derates with the cap under degraded conditions.
   - **Verification method:** gate-down / can't-exit / stop-inside unit tests + map-prior perception-miss test (Reject fires from map alone) + commit-zone CARLA demo (#109).
-- **SG6 (ASIL A by table; priority-elevated)** — After a detected collision with
+- **SG6 (ASIL A by table; developed to elevated rigor per owner decision)** — After a detected collision with
   unconfirmed clearance, the system shall immobilize and execute no further
   motion until clearance is confirmed. *Enforce: Governor (post-collision latch
   + motion veto). Safe state: immobilize in place.* [H6]
-  - **FTTI:** very short — immobilize within ≤ 1 control cycle of confirmed impact; FDTI dominated by impact-detection latency (PC1/#102).
+  - **FTTI:** ≤ 1 control cycle from confirmed impact; FDTI dominated by impact-detection latency (PC1/#102).
   - **Verification method:** impact → immobilize + motion-veto fault-injection + "no resume without clearance" test + post-collision CARLA demo (#105).
 - **SG7 (inherits ASIL D)** — The system shall apply the same safety checks to
   teleoperator/remote commands as to planner commands, with no source-based
   relaxation. *Enforce: Governor (doer-agnostic check). command_source is
   audit-only.* [H7]
-  - **FTTI:** per-cycle, identical to the planner path (≤ 1 control cycle).
+  - **FTTI:** per-cycle, identical to the planner path; same per-cycle bound as SG1.
   - **Verification method:** teleop unsafe-command injection → verdict identical to planner + command_source-does-not-alter-verdict test + teleop curb-mount integration (1.D / #112).
 - **SG8 (ASIL D)** — The system shall at all times have a reachable,
   context-appropriate minimal-risk condition, and shall commit it on any check
   failure, timeout, or stale world state. *Enforce: planner (standing
   validated MRC) + control adapter (commit-on-failure).* [H8]
-  - **FTTI:** standing property — a validated MRC is continuously available; on any failure, commit within ≤ 1 control cycle; the MRC trajectory itself reaches minimal risk within its own bounded horizon (TBD S4/S8).
+  - **FTTI:** standing — a validated MRC is continuously available; commit within ≤ 1 control cycle on failure. MRC controlled stop ≈ **50 m firm to 83 m comfortable** at the 50 mph cap (kinematic, v²/2a).
   - **Verification method:** standing-MRC always-present invariant test + commit-on-failure integration (Reject/timeout/stale → MRC committed) + wrong-context guard (no stop-in-live-lane default; ties S7/#119).
 - **SG9 (ASIL D)** — The safety check shall fail closed: any fault, timeout, or
   non-finite input shall result in rejection (→ MRC), never silent acceptance.
@@ -141,17 +141,17 @@ Governor WCET budget S3 must prove**. Do not invent absolute milliseconds yet.
 
 ### 4.1 Verification & FTTI summary
 
-| SG | ASIL | FTTI (form) | Verification artifact | Sets S3 budget? |
-|----|------|-------------|------------------------|-----------------|
-| SG1 | D | per-cycle (verdict before actuation) | scenario suite + injection; #92 | yes |
+| SG | ASIL | FTTI (50 mph cap) | Verification artifact | Sets S3 budget? |
+|----|------|-------------------|------------------------|-----------------|
+| SG1 | D | per-cycle; WCET ≪ 0.5 s (bound in S3) | scenario suite + injection; #92 | yes |
 | SG2 | D | per-cycle | drivable-space tests + injection; #92 | yes |
 | SG3 | D | per-cycle | kinematics + clamp tests; #92 | yes |
-| SG4 | B–C | look-ahead ≥ stop-short | flood demo #100 + unit tests | indirectly (horizon) |
-| SG5 | B–C | look-ahead ≥ stop-short | commit-zone demo #109 + map-prior test | indirectly (horizon) |
-| SG6 | A* | ≤ 1 cycle from impact | post-collision demo #105 + injection | yes (detection) |
+| SG4 | **B (active)** | look-ahead ≥ 94 m at cap (derates) | flood demo #100 + unit tests | indirectly (horizon) |
+| SG5 | B | look-ahead ≥ 94 m at cap (derates) | commit-zone demo #109 + map-prior test | indirectly (horizon) |
+| SG6 | A* (elevated rigor) | ≤ 1 cycle from impact | post-collision demo #105 + injection | yes (detection) |
 | SG7 | D | per-cycle (= planner path) | teleop injection; #112 | yes |
-| SG8 | D | standing + ≤ 1 cycle commit | invariant + commit-on-failure tests | partially |
-| SG9 | D | ≤ 1 cycle (= WCET bound) | NaN/timeout/fault tests | DEFINES it |
+| SG8 | D | standing + ≤ 1 cycle commit; MRC stop ≈ 50–83 m at cap | invariant + commit-on-failure tests | partially |
+| SG9 | D | ≤ 1 cycle (= WCET bound in S3) | NaN/timeout/fault tests | DEFINES it |
 
 ---
 

@@ -2,10 +2,12 @@
 
 **Issue:** S4 (#116) — ODD + triggering-condition catalog + acceptance argument.
 **Doc ID (proposed):** KIRRA-OCCY-ODD-001.
-**Status:** Working draft for review. The ODD parameters in §1 are *proposed
-candidates* requiring sign-off; once confirmed they fix the FTTI absolutes in
-OCCY_SAFETY_GOALS.md (#113) and the SG4/SG5 ASILs, and feed the S3 (#115) WCET
-proof. Not a certified analysis.
+**Status:** Working draft for review. The ODD parameters in §1 are **signed
+off** (full-driverless decision, 2026-05-31): urban / surface, day + night,
+all-weather, water / rail in scope, 50 mph cap. FTTI absolutes and the SG4 /
+SG5 ASILs have been propagated to OCCY_SAFETY_GOALS.md (#113); the cap-as-
+function-of-measured-detection-range rule waits on S8 (#120) and the Governor
+WCET bound on S3 (#115). Not a certified analysis.
 
 ---
 
@@ -22,33 +24,36 @@ Two ODDs must be distinguished — conflating them is a common error:
   deployment can narrow to *defer* hazards we can't yet handle. A constrained
   deployment ODD is itself a SOTIF risk-reduction measure.
 
-### 1.1 Proposed Phase-1 deployment ODD (candidate — to confirm)
+### 1.1 Phase-1 deployment ODD (signed off, 2026-05-31)
 
-| Dimension | Phase-1 candidate | Notes |
+| Dimension | Phase-1 deployment | Notes |
 |---|---|---|
-| Road types | Urban/suburban surface streets, marked lanes | No highways/ramps in Phase 1 |
-| Speed range | ≤ 50 km/h (~13.9 m/s) | Sets look-ahead FTTI (see §5) |
-| Lighting | Daytime | Night = later phase |
-| Weather | Dry / clear | Excludes rain/fog/flooding from *deployment* (SG4 deferred to later ODD; still tested in sim) |
+| Road types | Urban / suburban surface streets, marked lanes | Highways / ramps deferred to a future ODD |
+| Speed range | ≤ 50 mph (80 km/h, 22.35 m/s) — clear-conditions maximum; dynamic derate in degraded conditions (see ADR-0001 + #99) | Sets look-ahead FTTI (see §5); cap-as-function-of-measured-detection-range rule per ADR-0001 |
+| Lighting | Day + night | Full-feature lighting envelope |
+| Weather | All-weather with conservative water rule + dynamic speed derating | Water / rain / fog / flooding **in scope** (NOT excluded); SG4 active (conservative untraversable + earn-back #98); cap derates in degraded perception (#99) |
 | Junctions | Signalized + unsignalized intersections | |
 | Commit zones | Rail crossings present on route | In-scope; SG5 active |
 | Dynamic agents | Vehicles, pedestrians, cyclists | Trains at crossings (high-consequence class) |
 | Teleop | Available as remote-assist | SG7 active |
-| Controllability basis | Driverless (C3) | If an interim safety operator is retained, several ASILs drop — but driverless is the design basis |
-| Subject vehicle | Single platform; dynamics per S8 | Stopping model is an S8 input |
+| Controllability basis | Driverless (C3) | No human-in-the-loop fallback; C3 is the design basis for all ASIL assignments |
+| Subject vehicle | Single platform; dynamics per S8 (#120) | Stopping model is an S8 input; cap presumes worst-case detection range R supports ≥ 94 m look-ahead |
 
-The Phase-1 *deployment* ODD deliberately **excludes flooding** (so SG4's
-real-world exposure → QM/out-of-scope for Phase 1, while the flood demo #100
-still validates the mechanism in the *sim* ODD for when the ODD later expands).
-Rail crossings are **included** (SG5 active), since they occur on ordinary
-urban routes and can't be geofenced away as cleanly.
+The Phase-1 deployment ODD **includes** flood-prone and adverse-weather
+conditions, handled via the conservative SG4 untraversable-default rule +
+depth-evidence earn-back (#98) and the flood demo (#100). Rail crossings are
+**included** (SG5 active). Highways / ramps are **deferred** to a later ODD.
+This is the full-driverless deployment basis: all core safety goals carry
+ASIL D under C3 controllability; SG4 and SG5 are **active at ASIL B** (not QM).
 
 ### 1.2 Target ODD
 
-The L4 generalization expands speed, adds weather/night/highway, and brings
-flood-prone and rail-dense regions into the *deployment* ODD — at which point
-SG4/SG5 exposure rises and their ASILs re-rate upward (§5). ODD expansion is
-the unit of safety-scope growth.
+The L4 generalization expands the road envelope to include highways / ramps
+and raises the speed cap (per a separate S8 validation that the worst-case
+detection range supports the higher cap's required look-ahead). Weather, night,
+water-prone, and rail-dense regions are already in Phase-1 scope. ODD expansion
+remains the unit of safety-scope growth: each expansion is a distinct S8
+evidence package + ADR + re-validation of the cap rule.
 
 ---
 
@@ -123,32 +128,40 @@ conservative architecture and coverage evidence."
 
 Fixing the ODD resolves the two things S1 deferred.
 
-**FTTI absolutes.** With deployment-ODD v_max = 13.9 m/s (candidate):
-- *Per-cycle goals* (SG1/2/3/7/9): FTTI = one control-cycle period (a design
-  parameter); the Governor verdict must complete before actuation. WCET budget
-  for S3 = control period − actuation latency.
-- *Look-ahead goals* (SG4/SG5): worked example — stopping distance at 13.9 m/s
-  with a comfortable 3 m/s² decel is ≈ v²/2a ≈ 32 m, plus reaction. So the
-  hazard must be detected and the trajectory rejected at **≥ ~35–40 m
-  look-ahead** (exact value pending the S8 dynamics model + chosen decel limit).
-  That look-ahead requirement bounds both the sensing/map range and the
-  Governor's horizon. *This illustration shows the chain ODD → FTTI → S3; it is
-  not a final number.*
+**FTTI absolutes.** With locked deployment-ODD cap v_max = 22.35 m/s (50 mph):
+- *Per-cycle goals* (SG1/2/3/7/9): FTTI = verdict before actuation within one
+  control cycle; the 0.5 s chain reaction-time budget is the dead time; the
+  Governor WCET is a slice of that (target ≪ 0.5 s, exact bound proven in
+  S3/#115).
+- *Look-ahead goals* (SG4/SG5): stopping sight distance at the cap with
+  t_react = 0.5 s and comfortable a = 3 m/s² is SSD = v·t + v²/(2a) ≈ 11.2 +
+  83.3 = **≈ 94 m look-ahead**. The MRC controlled stop (kinematic only) is
+  ≈ v²/(2a) ≈ **83 m** comfortable / **50 m** firm (5 m/s²). The 94 m look-
+  ahead bounds both sensing/map range and Governor horizon; reliable dry
+  detection range R ≈ 130 m gives ~28% margin. The cap is **a function of the
+  S8-measured worst-case (wet/night) R** — if S8 shows R drops below the level
+  needed to support 94 m look-ahead, the cap derates per SSD(v) = R. See
+  SPEED_ENVELOPE.md (KIRRA-OCCY-SPEED-001) and ADR-0001 for the derivation,
+  the breaking-point analysis (~60 mph comfortable basis), and the cap-raise
+  gate. *Dynamic derating in degraded conditions ties to the weather-posture
+  coupling (#99).*
 
 **SG4/SG5 ASIL re-rating against the Phase-1 deployment ODD:**
 
 | SG | S1 (target-ODD) ASIL | Phase-1 deployment ODD | Rationale |
 |----|----|----|----|
-| SG4 water | B (C if flood-prone) | **QM / out-of-scope (Phase 1)** | Phase-1 deployment ODD excludes flooding; mechanism still tested in sim (#100), re-enters at ASIL B when the ODD adds wet conditions |
+| SG4 water | B (C if flood-prone) | **B (active)** | Water is in the deployment ODD per the full-driverless decision; conservative untraversable-default + depth-evidence earn-back (#98); flood demo #100 validates the mechanism |
 | SG5 commit-zone | B (C if crossing-dense) | **B** | Rail crossings in-scope; standard urban density → E2 |
 
-This is the honest payoff of defining the ODD: it lets the safety scope be
-*phased* — you only carry the ASIL for hazards your deployment ODD actually
-exposes you to, and you expand both together.
+**SG6** rates ASIL A by the S/E/C table (low exposure) but is **developed to
+elevated rigor** (hard constraint per owner decision) given its catastrophic
+severity and the known reputation-ending failure mode it addresses.
 
-Action: once the ODD candidates are signed off, update OCCY_SAFETY_GOALS.md —
-fill the FTTI absolutes, set SG4 Phase-1 = QM (with a note it re-rates on ODD
-expansion), confirm SG5 = B — then #113 can close and the numbers flow to S3.
+ODD sign-off completed 2026-05-31. OCCY_SAFETY_GOALS.md (#113) has been
+updated: FTTI absolutes filled per the 50 mph cap, SG4 = B (active, water in
+scope), SG5 = B, SG6 elevated rigor. Both #113 (S1) and this issue (#116, S4)
+close on commit. The Governor WCET bound flows to S3 (#115); the cap-as-
+function-of-detection-range validation flows to S8 (#120).
 
 ---
 
