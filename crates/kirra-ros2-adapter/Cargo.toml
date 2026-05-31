@@ -1,0 +1,96 @@
+# crates/kirra-ros2-adapter/Cargo.toml
+#
+# S131 Phase 1 — Option-B per-trajectory wiring adapter (skeleton).
+#
+# Owns the ROS 2 ↔ Rust bridge for the Kirra Governor. Built as a separate
+# crate so the safety kernel (`kirra-runtime-sdk`) stays free of ROS deps
+# and can ship on platforms that don't carry rclpy / ros-base. Production
+# integrators that DO run ROS 2 (e.g. Autoware) enable the `ros2` feature
+# here and link this crate into their node graph.
+#
+# Phase 1 scope (this crate, this commit):
+#   - AcceptedTrajectory state machine + `AdaptorState` (DashMap-backed).
+#   - `CorridorSource` trait + `MockCorridorSource` (5 m half-width corridor).
+#   - r2r-backed `run_adapter` node skeleton with stubbed subscriptions
+#     and internal mpsc channels feeding slow- and fast-loop task stubs.
+#   - NO call into `validate_trajectory_containment` yet — Phase 2 wiring.
+#   - NO kirra-runtime-sdk dep yet — Phase 1 owns its own shared types.
+#
+# r2r is pinned (=0.9.5) because the project explicitly states "the API will
+# change". Bumping is a deliberate maintenance action, not a transitive ride.
+
+[package]
+name = "kirra-ros2-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "ROS 2 adapter for the Kirra Governor (Option-B per-trajectory wiring, S131 Phase 1)"
+license = "Apache-2.0 OR MIT"
+
+[features]
+# Default build = no ROS deps. Enables the state machine + corridor trait
+# only, which is what the rest of the workspace consumes today.
+default = []
+
+# Enable r2r + the ROS 2 node skeleton in src/node.rs + the
+# Lanelet2CorridorSource (cxx wrap of `lanelet2_core`'s
+# boost::serialization deserializer). ROS distros: Humble / Jazzy /
+# Kilted (per r2r 0.9.5 support matrix). Production integrators turn
+# this on; the safety kernel CI keeps it OFF. Requires
+#   source /opt/ros/jazzy/setup.bash
+#   apt install ros-jazzy-lanelet2 libboost-serialization-dev
+# (or the integrator's equivalents) — see README.
+ros2 = ["dep:r2r", "dep:cxx", "dep:cxx-build", "dep:tracing-subscriber", "dep:futures"]
+
+[dependencies]
+# Concurrency primitives shared with the safety kernel.
+dashmap = "6"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+# Safety kernel — pulled in Phase 2A so the slow-loop validator can call
+# `validate_trajectory_containment` (SG2) and `validate_vehicle_command`
+# (per-pose kinematics). NOT feature-gated: the algorithm is needed in
+# `cargo test` runs that don't enable the ros2 feature.
+kirra-runtime-sdk = { path = "../.." }
+parko-core        = { path = "../../parko/crates/parko-core" }
+
+# ROS 2 bindings — feature-gated. Pinned (`=`) because r2r explicitly does
+# not guarantee API stability; a deliberate bump is a separate maintenance
+# action. Runtime-agnostic + async-from-the-ground-up.
+r2r = { version = "=0.9.5", optional = true }
+
+# cxx — Rust ↔ C++ FFI bridge. Used by `Lanelet2CorridorSource` to call
+# into `lanelet2_core`'s boost::serialization deserializer (`fromBinMsg`
+# canonical path). Pinned to 1.0 to match cxx-build (build-deps below).
+cxx = { version = "1.0", optional = true }
+
+# Phase 4: structured logging in the adapter binary. Optional + gated on
+# the ros2 feature because only the binary uses it (the library uses
+# `tracing` directly without a subscriber).
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
+
+# Phase 4: futures Stream / StreamExt for consuming r2r's untyped
+# subscription streams in the subscription-stamping tasks. r2r itself
+# pulls this in transitively at the same major version; depending on it
+# explicitly pins our usage. Gated on `ros2` since only the node code
+# touches r2r streams.
+futures = { version = "0.3", optional = true }
+
+[build-dependencies]
+# cxx-build — compiles the C++ shim and the cxx-generated glue. Must
+# match the `cxx` major version pinned above. Skipped when the `ros2`
+# feature is OFF: `build.rs` is a no-op without it.
+cxx-build = { version = "1.0", optional = true }
+
+[dev-dependencies]
+# State-machine tests don't need the ros2 feature.
+tokio = { version = "1", features = ["full", "test-util"] }
+
+# Phase 4: the adapter node binary. Feature-gated to `ros2`; the default
+# cargo build does not see this entry. `tracing-subscriber` is only
+# referenced from the binary's `init_tracing()`, so it's a feature-gated
+# dev-style dep folded into the optional set.
+[[bin]]
+name = "kirra_ros2_adapter_node"
+path = "src/bin/kirra_ros2_adapter_node.rs"
+required-features = ["ros2"]

@@ -108,3 +108,9 @@ config change.
 
 Cross-refs: OCCY_SOTIF.md (#116), OCCY_SAFETY_GOALS.md (#113), S3 WCET (#115),
 S8 validation (#120). Recorded in ADR-0001.
+
+Assumption validation: see **KIRRA-OCCY-SPEED-VAL-001**
+(`docs/safety/OCCY_SPEED_CAP_VALIDATION.md`) — S8 Item C (#120). Each
+ADR-0001 assumption is dispositioned PROVEN / OK-ANALYTICAL / AoU-GAP /
+DEFERRED; the four AoU-GAP clauses are filed against #126 (perception)
+and #127 (actuation). The cap is unchanged at 22.35 m/s.

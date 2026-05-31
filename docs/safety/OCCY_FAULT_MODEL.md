@@ -4,8 +4,9 @@
 **Doc ID (proposed):** KIRRA-OCCY-FAULT-001.
 **Status:** Working fault model for review. Qualitative (FMEA-style) fault →
 reaction analysis + the sensor-availability degraded-mode design. The
-*quantitative* hardware metrics (SPFM/LFM/PMHF for ASIL-D) feed off this but are
-S8 territory. Surfaces one load-bearing implicit assumption (actuator safe-stop).
+*quantitative* hardware metrics (SPFM/LFM/PMHF for ASIL-D) are documented in
+**KIRRA-OCCY-QUANT-001** (`docs/safety/OCCY_QUANTITATIVE_METRICS.md`) — S8 Item
+D / #120. Surfaces one load-bearing implicit assumption (actuator safe-stop).
 
 ---
 

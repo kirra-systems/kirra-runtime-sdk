@@ -35,12 +35,25 @@ pub const MAX_CORRIDOR_VERTICES: usize = 128;
 
 /// Inward lateral safety margin from the drivable-space boundary (meters).
 ///
-/// Documented placeholder; the real value is derived in S8 / #120 as
-/// (worst-case localization error + worst-case perception error +
-/// control error) — same loop closure as the speed cap (ADR-0001). The
+/// **Derived value — KIRRA-OCCY-SG2-MARGIN-001.** The PRIMARY pilot setting
+/// is 0.40 m, the rounded-up sum of:
+///   - `v_lat_max × FTTI_fast` (per-cycle residual)  ≈ 0.128 m
+///   - `ε_localization` (G2 AoU — RTK 95th-pct typical)   = 0.10  m
+///   - `ε_perception`   (HD-map lane-edge typical)        = 0.10  m
+///   - `ε_control`      (urban steering typical)          = 0.05  m
+///   →                                                    ≈ 0.378 m → 0.40 m
+///
+/// **G2 assumption-of-use (#123):** this value is valid IFF the integrator's
+/// localization stack achieves ≤ 0.10 m 95th-percentile lateral error within
+/// the deployment ODD. Above that, the conservative-fallback 0.75 m
+/// (documented in `docs/safety/OCCY_SG2_MARGIN.md` §3) is required —
+/// configuration-flag-driven, not the code default.
+///
+/// See `docs/safety/OCCY_SG2_MARGIN.md` (KIRRA-OCCY-SG2-MARGIN-001) for the
+/// full derivation, navigability analysis, and AoU residuals. The
 /// containment check enforces that every footprint corner is at least
 /// `CONTAINMENT_LATERAL_MARGIN_M` inside the corridor polygon's edges.
-pub const CONTAINMENT_LATERAL_MARGIN_M: f64 = 0.30;
+pub const CONTAINMENT_LATERAL_MARGIN_M: f64 = 0.40;
 
 /// Vehicle pose in world frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -435,8 +448,10 @@ mod tests {
     fn containment_rejects_footprint_corner_clip() {
         // Pose center is inside, but a yaw at the edge makes a single corner
         // clip outside the corridor. Sedan half-width 0.925; rear-axle at
-        // y=2.0, heading slightly off-axis → front-left corner at y ≈ 2.93,
-        // which is past the corridor edge (y = 3.0) minus margin (0.3) = 2.7.
+        // y=2.0, heading slightly off-axis → front-left corner at y ≈ 3.29,
+        // which is past the corridor edge (y = 3.0) regardless of the
+        // CONTAINMENT_LATERAL_MARGIN_M value — the test exercises the
+        // corner-clip rejection itself, not the margin boundary.
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 2.0, 0.1)]; // ~5.7° yaw left
