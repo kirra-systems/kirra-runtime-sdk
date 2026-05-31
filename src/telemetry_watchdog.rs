@@ -31,9 +31,9 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{interval, Duration};
 
+use crate::clock::{Clock, SystemClock};
 use crate::posture_engine_v2::{PostureEngineSender, PostureRecalcTrigger};
 use crate::verifier::{AppState, NodeTrustState};
 
@@ -76,14 +76,14 @@ pub const AV_WATCHDOG_NODE_REFRESH_MS: u64 = 30_000; // 30 seconds
 /// Derived from av_subsystem_meta at startup and on each refresh cycle.
 /// Not persisted — the watchdog reconstructs it from SQLite on restart.
 #[derive(Debug, Clone)]
-struct WatchdogNodeEntry {
-    node_id: String,
+pub(crate) struct WatchdogNodeEntry {
+    pub(crate) node_id: String,
     /// Last telemetry timestamp from av_subsystem_meta.last_telemetry_ms.
     /// Updated in memory when the watchdog observes a fresh telemetry report.
-    last_seen_ms: u64,
+    pub(crate) last_seen_ms: u64,
     /// Whether a timeout warning has already been logged for this sweep cycle.
     /// Prevents repeated WARN logs for the same ongoing silence.
-    warn_logged: bool,
+    pub(crate) warn_logged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,155 +121,192 @@ pub fn spawn_telemetry_watchdog(
     app: Arc<AppState>,
     posture_engine_tx: PostureEngineSender,
 ) {
+    // DI seam (S3 / #115): production callers stay untouched; they implicitly
+    // get the real SystemClock. The `_with_clock` form below is the test-only
+    // entry point — see `watchdog_di_tests` for the deterministic VirtualClock
+    // wiring. The body is identical except `now_ms()` becomes `clock.now_ms()`.
+    spawn_telemetry_watchdog_with_clock(app, posture_engine_tx, Arc::new(SystemClock));
+}
+
+/// Same as [`spawn_telemetry_watchdog`] but takes an injected clock.
+///
+/// Production must pass `Arc::new(SystemClock)` — which is exactly what
+/// [`spawn_telemetry_watchdog`] does — so the production code path through
+/// this function is byte-for-byte equivalent to the previous direct
+/// `now_ms()` implementation. The seam exists solely to let tests pass a
+/// `VirtualClock` to exercise the dead-man's switch deterministically.
+pub fn spawn_telemetry_watchdog_with_clock(
+    app: Arc<AppState>,
+    posture_engine_tx: PostureEngineSender,
+    clock: Arc<dyn Clock>,
+) {
     tokio::spawn(async move {
         let mut sweep_interval = interval(Duration::from_millis(AV_WATCHDOG_SWEEP_MS));
         let mut last_node_refresh_ms: u64 = 0;
-
-        // In-memory node health map: node_id → WatchdogNodeEntry
-        // Keyed by node_id for O(1) lookup per sweep.
         let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
-
         loop {
             sweep_interval.tick().await;
-            let now = now_ms();
-
-            // ------------------------------------------------------------------
-            // Periodically refresh the registered node list from SQLite.
-            // This picks up nodes registered after the watchdog started.
-            // ------------------------------------------------------------------
-            if now.saturating_sub(last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
-                || last_node_refresh_ms == 0
-            {
-                match app.store.lock().unwrap().load_all_registered_av_node_ids() {
-                    Ok(node_ids) => {
-                        for node_id in node_ids {
-                            // Insert new nodes; don't overwrite existing entries
-                            // (that would reset their last_seen_ms).
-                            node_health.entry(node_id.clone()).or_insert_with(|| {
-                                // Load initial last_seen from persistent store.
-                                let last_seen = app.store.lock().unwrap()
-                                    .get_last_telemetry_timestamp(&node_id)
-                                    .unwrap_or(0);
-                                WatchdogNodeEntry {
-                                    node_id: node_id.clone(),
-                                    last_seen_ms: last_seen,
-                                    warn_logged: false,
-                                }
-                            });
-                        }
-                        last_node_refresh_ms = now;
-                        tracing::debug!(
-                            node_count = node_health.len(),
-                            "Watchdog: node list refreshed from store"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Watchdog: failed to refresh node list — using cached list"
-                        );
-                    }
-                }
-            }
-
-            // ------------------------------------------------------------------
-            // Sweep: check each node's last telemetry timestamp.
-            // We read last_telemetry_ms from memory (WatchdogNodeEntry), not from
-            // SQLite on every tick. The fault handler updates av_subsystem_meta
-            // on disk; the watchdog snapshot is refreshed at node list refresh time.
-            // ------------------------------------------------------------------
-            for entry in node_health.values_mut() {
-                // Sync last_seen_ms from the store on each sweep.
-                // This is a lightweight in-memory read path; SQLite is only hit
-                // on the node refresh cycle above.
-                // Note: For high-frequency production use, maintain a DashMap<String, u64>
-                // of last_telemetry_ms updated by the fault handler on each report,
-                // then read that map here instead of the store. This avoids all SQLite
-                // contact in the sweep hot path.
-                if let Ok(ts) = app.store.lock().unwrap().get_last_telemetry_timestamp(&entry.node_id) {
-                    if ts > entry.last_seen_ms {
-                        // Fresh telemetry received since last sweep — reset warn flag.
-                        entry.last_seen_ms = ts;
-                        entry.warn_logged = false;
-                    }
-                }
-
-                // Skip nodes that have never reported (last_seen_ms == 0).
-                // These are newly registered nodes that haven't sent their first
-                // health report yet — not a timeout condition.
-                if entry.last_seen_ms == 0 {
-                    continue;
-                }
-
-                let silence_ms = now.saturating_sub(entry.last_seen_ms);
-
-                if silence_ms >= AV_TELEMETRY_TIMEOUT_MS {
-                    // Check if this node is already marked timed-out to avoid
-                    // sending repeated triggers for the same ongoing silence.
-                    let already_timed_out = app.nodes
-                        .get(&entry.node_id)
-                        .map(|n| {
-                            n.status
-                                == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string())
-                        })
-                        .unwrap_or(false);
-
-                    if !already_timed_out {
-                        tracing::error!(
-                            node_id      = %entry.node_id,
-                            silence_ms   = silence_ms,
-                            timeout_ms   = AV_TELEMETRY_TIMEOUT_MS,
-                            "Watchdog: sensor node silent beyond timeout — marking Untrusted"
-                        );
-
-                        // Mark Untrusted in AppState.nodes (DashMap — memory).
-                        // Disk-first note: the posture engine's recalculate_and_broadcast
-                        // will persist the resulting posture event to the audit chain
-                        // before updating the cache. We don't write to SQLite here
-                        // because the watchdog is not responsible for audit entries —
-                        // the engine is.
-                        if let Some(mut node) = app.nodes.get_mut(&entry.node_id) {
-                            node.status =
-                                NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
-                        }
-
-                        // Route through the serialized posture engine worker.
-                        // Multiple simultaneous timeouts will be coalesced into
-                        // a single recalculation by the worker.
-                        let trigger = PostureRecalcTrigger::WatchdogTimeout {
-                            node_id: entry.node_id.clone(),
-                            timeout_ms: silence_ms,
-                        };
-                        if let Err(e) = posture_engine_tx.try_send(trigger) {
-                            tracing::error!(
-                                error   = %e,
-                                node_id = %entry.node_id,
-                                "Watchdog: failed to send recalc trigger — engine channel full or closed"
-                            );
-                        }
-                    }
-                } else if silence_ms >= AV_TELEMETRY_WARN_MS && !entry.warn_logged {
-                    // Warn threshold crossed — log once per silence episode.
-                    tracing::warn!(
-                        node_id    = %entry.node_id,
-                        silence_ms = silence_ms,
-                        warn_ms    = AV_TELEMETRY_WARN_MS,
-                        timeout_ms = AV_TELEMETRY_TIMEOUT_MS,
-                        "Watchdog: sensor node approaching telemetry timeout"
-                    );
-                    entry.warn_logged = true;
-                }
-            }
+            watchdog_sweep_once(
+                &app,
+                &posture_engine_tx,
+                clock.as_ref(),
+                &mut node_health,
+                &mut last_node_refresh_ms,
+            );
         }
     });
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+/// One sweep cycle of the watchdog: refresh the node list (rate-limited
+/// by `AV_WATCHDOG_NODE_REFRESH_MS`), check each node's last-telemetry
+/// timestamp against the current clock, and emit warn/timeout actions.
+///
+/// Extracted into a sync function (no `.await`) so it can be exercised
+/// deterministically from tests without driving the tokio interval timer.
+/// `spawn_telemetry_watchdog_with_clock` calls this once per
+/// `sweep_interval.tick()` — production behavior is byte-for-byte the
+/// same as the previous in-loop body.
+pub(crate) fn watchdog_sweep_once(
+    app: &Arc<AppState>,
+    posture_engine_tx: &PostureEngineSender,
+    clock: &dyn Clock,
+    node_health: &mut HashMap<String, WatchdogNodeEntry>,
+    last_node_refresh_ms: &mut u64,
+) {
+    let now = clock.now_ms();
+
+    // ----------------------------------------------------------------------
+    // Periodically refresh the registered node list from SQLite.
+    // This picks up nodes registered after the watchdog started.
+    //
+    // LOCK SCOPING (S3 / #115 — fixed self-deadlock):
+    // `app.store` is a non-reentrant `std::sync::Mutex`. Previously the load
+    // call was the match scrutinee, which held the guard for the entire
+    // Ok arm — including the `or_insert_with` closure that tries to re-lock
+    // the same mutex to read each node's last-telemetry timestamp.
+    // Non-reentrant + nested lock = self-deadlock. We now acquire the lock
+    // only long enough to collect the node IDs into a local, drop the
+    // guard, then iterate. Each `get_last_telemetry_timestamp` re-locks
+    // briefly (released at the end of its own expression). Same operations
+    // in the same order — only the lock scope changes.
+    // ----------------------------------------------------------------------
+    if now.saturating_sub(*last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
+        || *last_node_refresh_ms == 0
+    {
+        let load_result = {
+            let store = app.store.lock().unwrap();
+            store.load_all_registered_av_node_ids()
+        }; // outer guard released here — before any per-node re-lock below
+
+        match load_result {
+            Ok(node_ids) => {
+                for node_id in node_ids {
+                    // Insert new nodes; don't overwrite existing entries
+                    // (that would reset their last_seen_ms).
+                    node_health.entry(node_id.clone()).or_insert_with(|| {
+                        // Load initial last_seen from persistent store.
+                        // Safe: outer guard already released above.
+                        let last_seen = app.store.lock().unwrap()
+                            .get_last_telemetry_timestamp(&node_id)
+                            .unwrap_or(0);
+                        WatchdogNodeEntry {
+                            node_id: node_id.clone(),
+                            last_seen_ms: last_seen,
+                            warn_logged: false,
+                        }
+                    });
+                }
+                *last_node_refresh_ms = now;
+                tracing::debug!(
+                    node_count = node_health.len(),
+                    "Watchdog: node list refreshed from store"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Watchdog: failed to refresh node list — using cached list"
+                );
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Sweep: check each node's last telemetry timestamp.
+    // We read last_telemetry_ms from memory (WatchdogNodeEntry), not from
+    // SQLite on every tick. The fault handler updates av_subsystem_meta
+    // on disk; the watchdog snapshot is refreshed at node list refresh time.
+    // ----------------------------------------------------------------------
+    for entry in node_health.values_mut() {
+        // Sync last_seen_ms from the store on each sweep.
+        // Lightweight in-memory read path; SQLite is only hit on the node
+        // refresh cycle above.
+        if let Ok(ts) = app.store.lock().unwrap().get_last_telemetry_timestamp(&entry.node_id) {
+            if ts > entry.last_seen_ms {
+                // Fresh telemetry received since last sweep — reset warn flag.
+                entry.last_seen_ms = ts;
+                entry.warn_logged = false;
+            }
+        }
+
+        // Skip nodes that have never reported (last_seen_ms == 0).
+        // Newly registered nodes that haven't sent their first health
+        // report yet — not a timeout condition.
+        if entry.last_seen_ms == 0 {
+            continue;
+        }
+
+        let silence_ms = now.saturating_sub(entry.last_seen_ms);
+
+        if silence_ms >= AV_TELEMETRY_TIMEOUT_MS {
+            // Already-timed-out check avoids repeated triggers for the
+            // same ongoing silence.
+            let already_timed_out = app.nodes
+                .get(&entry.node_id)
+                .map(|n| {
+                    n.status == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string())
+                })
+                .unwrap_or(false);
+
+            if !already_timed_out {
+                tracing::error!(
+                    node_id      = %entry.node_id,
+                    silence_ms   = silence_ms,
+                    timeout_ms   = AV_TELEMETRY_TIMEOUT_MS,
+                    "Watchdog: sensor node silent beyond timeout — marking Untrusted"
+                );
+
+                if let Some(mut node) = app.nodes.get_mut(&entry.node_id) {
+                    node.status =
+                        NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
+                }
+
+                let trigger = PostureRecalcTrigger::WatchdogTimeout {
+                    node_id: entry.node_id.clone(),
+                    timeout_ms: silence_ms,
+                };
+                if let Err(e) = posture_engine_tx.try_send(trigger) {
+                    tracing::error!(
+                        error   = %e,
+                        node_id = %entry.node_id,
+                        "Watchdog: failed to send recalc trigger — engine channel full or closed"
+                    );
+                }
+            }
+        } else if silence_ms >= AV_TELEMETRY_WARN_MS && !entry.warn_logged {
+            // Warn threshold crossed — log once per silence episode.
+            tracing::warn!(
+                node_id    = %entry.node_id,
+                silence_ms = silence_ms,
+                warn_ms    = AV_TELEMETRY_WARN_MS,
+                timeout_ms = AV_TELEMETRY_TIMEOUT_MS,
+                "Watchdog: sensor node approaching telemetry timeout"
+            );
+            entry.warn_logged = true;
+        }
+    }
 }
+
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -342,5 +379,254 @@ mod watchdog_tests {
         let trust = NodeTrustState::Untrusted("SENSOR_FAULT".to_string());
         let is_timeout = trust == NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
         assert!(!is_timeout, "different untrusted reason must not suppress watchdog");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DI seam tests — GAP 17 (S3 / #115)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod watchdog_di_tests {
+    //! GAP 17 — telemetry-watchdog dead-man's switch tests + cold-refresh
+    //! deadlock regression.
+    //!
+    //! The cold-refresh path used to hold `app.store.lock()` open across
+    //! the match scrutinee while the `or_insert_with` closure re-locked
+    //! the same non-reentrant `std::sync::Mutex` → self-deadlock. That
+    //! bug was fixed by tightening the lock scope (collect node_ids
+    //! under the first lock, drop the guard, then iterate). The
+    //! `test_watchdog_cold_refresh_completes_without_deadlock` test in
+    //! this module is the regression test for that fix — it drives the
+    //! cold-refresh arm directly under a 5-second timeout so any
+    //! reintroduction fails LOUDLY instead of hanging CI.
+    //!
+    //! The other tests (fire/no-fire/idempotency) target the sweep loop
+    //! directly via `watchdog_sweep_once` to keep them fast and
+    //! independent of the SQLite refresh arm.
+
+    use super::*;
+    use crate::clock::VirtualClock;
+    use crate::posture_engine_v2::PostureRecalcTrigger;
+    use crate::verifier::{AppState, RegisteredNode, VerifierOperationMode};
+    use crate::verifier_store::VerifierStore;
+    use tokio::sync::mpsc;
+
+    fn insert_trusted_node(app: &Arc<AppState>, node_id: &str, registered_at_ms: u64) {
+        app.nodes.insert(
+            node_id.to_string(),
+            RegisteredNode {
+                node_id: node_id.to_string(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms,
+                last_trust_update_ms: registered_at_ms,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+            },
+        );
+    }
+
+    fn prepopulated_node_health(node_id: &str, last_seen_ms: u64) -> HashMap<String, WatchdogNodeEntry> {
+        let mut m = HashMap::new();
+        m.insert(node_id.to_string(), WatchdogNodeEntry {
+            node_id: node_id.to_string(),
+            last_seen_ms,
+            warn_logged: false,
+        });
+        m
+    }
+
+    /// SG9 / GAP 17: telemetry watchdog dead-man's switch — the fire arm.
+    ///
+    /// Pre-populates `node_health` and sets `last_node_refresh_ms = now`
+    /// so the refresh arm is bypassed; the test then exercises only the
+    /// sweep-loop logic that the dead-man's switch rides on. Anchored at
+    /// a virtual `now` past the timeout boundary; one sweep must:
+    ///   (a) mutate the node to `Untrusted("TELEMETRY_TIMEOUT")`, and
+    ///   (b) send a `PostureRecalcTrigger::WatchdogTimeout` on the engine
+    ///       channel with `timeout_ms == observed silence`.
+    #[test]
+    fn test_watchdog_dead_mans_switch_fires_after_telemetry_timeout() {
+        let anchor: u64 = 1_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 250;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "lidar_front", anchor);
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = prepopulated_node_health("lidar_front", anchor);
+        // Bypass the refresh arm by claiming a recent refresh.
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once(
+            &app, &tx, clock.as_ref(),
+            &mut node_health, &mut last_node_refresh_ms,
+        );
+
+        // (a) node was mutated to Untrusted("TELEMETRY_TIMEOUT").
+        let status = app.nodes.get("lidar_front").unwrap().status.clone();
+        assert_eq!(
+            status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "watchdog must mark a silent node Untrusted(TELEMETRY_TIMEOUT); got {status:?}"
+        );
+
+        // (b) a WatchdogTimeout trigger landed on the engine channel.
+        let trigger = rx.try_recv()
+            .expect("watchdog must send PostureRecalcTrigger::WatchdogTimeout");
+        match trigger {
+            PostureRecalcTrigger::WatchdogTimeout { node_id, timeout_ms } => {
+                assert_eq!(node_id, "lidar_front");
+                assert_eq!(timeout_ms, now - anchor,
+                    "trigger.timeout_ms must report observed silence (now - last_seen)");
+            }
+            other => panic!("expected WatchdogTimeout, got {other:?}"),
+        }
+    }
+
+    /// Companion: in the warn band (silence > WARN, < TIMEOUT) the
+    /// watchdog must NOT fire — node stays Trusted and warn_logged flips.
+    #[test]
+    fn test_watchdog_does_not_fire_before_timeout() {
+        let anchor: u64 = 5_000_000;
+        let now = anchor + AV_TELEMETRY_WARN_MS + 200;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "imu_main", anchor);
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = prepopulated_node_health("imu_main", anchor);
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once(
+            &app, &tx, clock.as_ref(),
+            &mut node_health, &mut last_node_refresh_ms,
+        );
+
+        assert!(
+            matches!(
+                app.nodes.get("imu_main").map(|n| n.status.clone()),
+                Some(NodeTrustState::Trusted)
+            ),
+            "node must remain Trusted while in warn band (silence < TIMEOUT)"
+        );
+        assert!(rx.try_recv().is_err(),
+            "no WatchdogTimeout trigger may be sent before the timeout fires");
+        assert!(node_health.get("imu_main").unwrap().warn_logged,
+            "warn_logged must flip true so the WARN log fires once per silence episode");
+    }
+
+    /// Idempotency: a second sweep after the timeout has already fired
+    /// must NOT emit another trigger for the same ongoing silence.
+    /// Exercises the `already_timed_out` short-circuit.
+    #[test]
+    fn test_watchdog_does_not_double_fire_on_repeated_sweeps() {
+        let anchor: u64 = 9_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "radar_left", anchor);
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = prepopulated_node_health("radar_left", anchor);
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once(&app, &tx, clock.as_ref(),
+            &mut node_health, &mut last_node_refresh_ms);
+        assert!(rx.try_recv().is_ok(), "first sweep past timeout must fire");
+
+        // Advance the virtual clock further past the timeout but keep
+        // the node silent — already-timed-out must suppress re-fire.
+        clock.advance_ms(500);
+        watchdog_sweep_once(&app, &tx, clock.as_ref(),
+            &mut node_health, &mut last_node_refresh_ms);
+        assert!(rx.try_recv().is_err(),
+            "second sweep on the same ongoing silence must NOT re-fire");
+    }
+
+    /// SG9 / regression — cold-refresh path COMPLETES without deadlock.
+    ///
+    /// Drives the cold-refresh arm (`last_node_refresh_ms == 0` + at
+    /// least one registered av_subsystem_meta row not yet in
+    /// `node_health`) under a 5 s tokio timeout so any regression of
+    /// the previous self-deadlock fails LOUDLY instead of hanging CI.
+    /// Asserts the refresh completes its three observable contracts:
+    ///   (1) `node_health` is populated from the registered rows,
+    ///   (2) each entry's `last_seen_ms` is loaded from
+    ///        `av_subsystem_meta.last_telemetry_ms`, and
+    ///   (3) `*last_node_refresh_ms` is advanced to `now`.
+    ///
+    /// Replaces the prior `KIRRA_RUN_WATCHDOG_DEADLOCK_REPRO`-gated
+    /// diagnostic. This test now runs unconditionally.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_watchdog_cold_refresh_completes_without_deadlock() {
+        use std::time::Duration;
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        {
+            let store = app.store.lock().unwrap();
+            store.register_av_subsystem_meta(
+                "lidar_front", "LIDAR", "hw-0001", 0.7, 1_000_000,
+            ).expect("register av subsystem");
+            store.register_av_subsystem_meta(
+                "imu_main", "IMU", "hw-0002", 0.7, 1_000_500,
+            ).expect("register av subsystem");
+        }
+        insert_trusted_node(&app, "lidar_front", 1_000_000);
+        insert_trusted_node(&app, "imu_main", 1_000_500);
+
+        // Choose a `now` in the warn band for lidar_front but NOT yet
+        // past the timeout — so no fire arm is taken; we're only
+        // measuring that the refresh path itself terminates.
+        let now: u64 = 1_001_500;
+        let clock = VirtualClock::starting_at(now);
+
+        let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
+        let mut last_node_refresh_ms: u64 = 0; // <- cold refresh
+
+        // Run on a blocking worker so a regression in the std::sync::Mutex
+        // scoping deadlocks the *worker*, not the test runtime. The
+        // 5-second timeout then fires and we get a clean failure instead
+        // of a 60-second cargo "running for over N seconds" hang.
+        let app_for_task = Arc::clone(&app);
+        let clock_for_task: Arc<dyn Clock> = clock.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            watchdog_sweep_once(
+                &app_for_task,
+                &tx,
+                clock_for_task.as_ref(),
+                &mut node_health,
+                &mut last_node_refresh_ms,
+            );
+            (node_health, last_node_refresh_ms)
+        });
+
+        let (node_health, observed_last_refresh) =
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("cold-refresh path must complete within 5s (no deadlock)")
+                .expect("watchdog_sweep_once must not panic");
+
+        // (1) node_health populated from the registered rows.
+        assert_eq!(node_health.len(), 2,
+            "cold refresh must seed node_health from av_subsystem_meta");
+        assert!(node_health.contains_key("lidar_front"));
+        assert!(node_health.contains_key("imu_main"));
+
+        // (2) last_seen_ms loaded from each row's last_telemetry_ms.
+        assert_eq!(node_health.get("lidar_front").unwrap().last_seen_ms, 1_000_000);
+        assert_eq!(node_health.get("imu_main").unwrap().last_seen_ms, 1_000_500);
+
+        // (3) refresh stamp advanced to `now`.
+        assert_eq!(observed_last_refresh, now,
+            "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
     }
 }

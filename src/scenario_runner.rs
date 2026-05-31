@@ -302,7 +302,11 @@ impl ScenarioRunner {
                                 // evaluate_recovery_report uses ts (virtual time), not wall time
                                 let decision = {
                                     let guard = self.app.store.lock().unwrap();
-                                    evaluate_recovery_report(&guard, node_id, ts)
+                                    // `&*guard` explicitly dereferences the MutexGuard so the
+                                    // generic `S: RecoveryStreakStore` bound resolves to
+                                    // `&VerifierStore` (S3 / #115 — trait seam, behavior
+                                    // unchanged: the trait impl delegates verbatim).
+                                    evaluate_recovery_report(&*guard, node_id, ts)
                                 };
                                 match decision {
                                     HysteresisDecision::RecoveryConfirmed { streak } => {

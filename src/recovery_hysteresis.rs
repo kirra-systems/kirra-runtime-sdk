@@ -28,6 +28,38 @@
 use crate::verifier_store::VerifierStore;
 
 // ---------------------------------------------------------------------------
+// DI seam (S3 / #115): RecoveryStreakStore
+// ---------------------------------------------------------------------------
+//
+// `evaluate_recovery_report` historically took `&VerifierStore` directly. To
+// exercise the failure arms of `load_recovery_streak` and
+// `increment_recovery_streak` from tests, those three store ops are abstracted
+// behind this trait. Production passes `&VerifierStore` (which `impl`s the
+// trait below); the trait impl delegates verbatim to the existing inherent
+// methods, so the production code path is byte-for-byte unchanged. Tests pass
+// a fault-injecting fake.
+//
+// The trait is intentionally minimal: ONLY the three ops this module touches.
+
+pub trait RecoveryStreakStore {
+    fn load_recovery_streak(&self, node_id: &str) -> rusqlite::Result<(u32, u64)>;
+    fn reset_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<()>;
+    fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<u32>;
+}
+
+impl RecoveryStreakStore for VerifierStore {
+    fn load_recovery_streak(&self, node_id: &str) -> rusqlite::Result<(u32, u64)> {
+        VerifierStore::load_recovery_streak(self, node_id)
+    }
+    fn reset_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<()> {
+        VerifierStore::reset_recovery_streak(self, node_id, now_ms)
+    }
+    fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> rusqlite::Result<u32> {
+        VerifierStore::increment_recovery_streak(self, node_id, now_ms)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -85,8 +117,8 @@ pub enum HysteresisDecision {
 /// Store writes happen inside this function before returning the decision.
 /// The caller must not write to the store after calling this function for the
 /// same event — that would violate the disk-first invariant for the streak data.
-pub fn evaluate_recovery_report(
-    store: &VerifierStore,
+pub fn evaluate_recovery_report<S: RecoveryStreakStore + ?Sized>(
+    store: &S,
     node_id: &str,
     now_ms: u64,
 ) -> HysteresisDecision {
@@ -411,5 +443,167 @@ mod hysteresis_tests {
         let elapsed: u64 = window + 5_000;
         let remaining = window.saturating_sub(elapsed);
         assert_eq!(remaining, 0, "window remaining must saturate at 0, not underflow");
+    }
+
+    // -----------------------------------------------------------------------
+    // DI seam tests — GAPs 9 / 10 (S3 / #115)
+    //
+    // Fault-injecting `RecoveryStreakStore` fakes. Test-only; production
+    // continues to use `&VerifierStore` via the inherent-method-delegating
+    // impl, so these tests do NOT change the production code path.
+    // -----------------------------------------------------------------------
+
+    use std::cell::Cell;
+
+    /// Fake whose `load_recovery_streak` always returns Err — exercises the
+    /// fail-closed "treat-as-fresh" arm in `evaluate_recovery_report` at
+    /// l.94–104.
+    struct FailingLoadStore {
+        load_calls: Cell<u32>,
+        increment_calls: Cell<u32>,
+        reset_calls: Cell<u32>,
+    }
+
+    impl FailingLoadStore {
+        fn new() -> Self {
+            Self {
+                load_calls: Cell::new(0),
+                increment_calls: Cell::new(0),
+                reset_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl RecoveryStreakStore for FailingLoadStore {
+        fn load_recovery_streak(&self, _node_id: &str) -> rusqlite::Result<(u32, u64)> {
+            self.load_calls.set(self.load_calls.get() + 1);
+            Err(rusqlite::Error::ExecuteReturnedResults)
+        }
+        fn reset_recovery_streak(&self, _node_id: &str, _now_ms: u64) -> rusqlite::Result<()> {
+            self.reset_calls.set(self.reset_calls.get() + 1);
+            Ok(())
+        }
+        fn increment_recovery_streak(&self, _node_id: &str, _now_ms: u64) -> rusqlite::Result<u32> {
+            self.increment_calls.set(self.increment_calls.get() + 1);
+            // After "treat as fresh" the increment lands and counts as 1.
+            Ok(1)
+        }
+    }
+
+    /// SG9 / GAP 9: load failure must be treated as a fresh streak.
+    /// `streak_start_ms = 0` after the Err arm → window-expiry guard does
+    /// NOT trigger (the `streak_start_ms > 0` condition is false), and
+    /// the function falls through to increment (returning StreakBuilding).
+    /// Fail-closed: never confirms recovery on a load error.
+    #[test]
+    fn test_load_recovery_streak_failure_treats_as_fresh_streak() {
+        let store = FailingLoadStore::new();
+        let decision = evaluate_recovery_report(&store, "lidar_front", 5_000);
+
+        assert_eq!(store.load_calls.get(), 1, "must attempt to load once");
+        assert_eq!(store.reset_calls.get(), 0,
+            "load failure must NOT trigger a reset (no expired window in a fresh streak)");
+        assert_eq!(store.increment_calls.get(), 1,
+            "after fail-closed treat-as-fresh, the increment must still run");
+
+        match decision {
+            HysteresisDecision::StreakBuilding { current, required, .. } => {
+                assert_eq!(current, 1,
+                    "fresh streak after load failure must report streak=1, not Confirmed");
+                assert_eq!(required, AV_RECOVERY_STREAK_THRESHOLD);
+            }
+            other => panic!(
+                "load failure must fail closed to StreakBuilding (never RecoveryConfirmed); \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    /// Fake whose `load_recovery_streak` reports a valid streak but
+    /// `increment_recovery_streak` always returns Err. Exercises the
+    /// fail-closed arm at l.133–143.
+    struct FailingIncrementStore {
+        load_streak: u32,
+        load_start_ms: u64,
+        increment_calls: Cell<u32>,
+    }
+
+    impl RecoveryStreakStore for FailingIncrementStore {
+        fn load_recovery_streak(&self, _node_id: &str) -> rusqlite::Result<(u32, u64)> {
+            Ok((self.load_streak, self.load_start_ms))
+        }
+        fn reset_recovery_streak(&self, _node_id: &str, _now_ms: u64) -> rusqlite::Result<()> {
+            Ok(())
+        }
+        fn increment_recovery_streak(&self, _node_id: &str, _now_ms: u64) -> rusqlite::Result<u32> {
+            self.increment_calls.set(self.increment_calls.get() + 1);
+            Err(rusqlite::Error::ExecuteReturnedResults)
+        }
+    }
+
+    /// SG9 / GAP 10: increment failure must fail closed to StreakBuilding
+    /// reporting the LAST KNOWN streak — never RecoveryConfirmed. This
+    /// covers the case where the streak loaded looked confirmable but the
+    /// store refused to persist the increment.
+    #[test]
+    fn test_increment_recovery_streak_failure_fails_closed_to_streak_building() {
+        // Loaded streak says we're 1 below the threshold; without a failure
+        // arm the increment would push us to threshold and report Confirmed.
+        // The failure arm must short-circuit BEFORE Confirmed is reachable.
+        let store = FailingIncrementStore {
+            load_streak: AV_RECOVERY_STREAK_THRESHOLD - 1,
+            load_start_ms: 1_000,
+            increment_calls: Cell::new(0),
+        };
+        let decision = evaluate_recovery_report(&store, "lidar_front", 2_000);
+
+        assert_eq!(store.increment_calls.get(), 1,
+            "increment must be attempted exactly once before the failure arm");
+
+        match decision {
+            HysteresisDecision::StreakBuilding { current, required, window_remaining_ms } => {
+                assert_eq!(current, AV_RECOVERY_STREAK_THRESHOLD - 1,
+                    "on increment failure, must report the LOADED streak (no virtual advance)");
+                assert_eq!(required, AV_RECOVERY_STREAK_THRESHOLD);
+                assert!(window_remaining_ms <= AV_RECOVERY_WINDOW_MS,
+                    "window_remaining must reflect actual elapsed time");
+            }
+            other => panic!(
+                "increment failure must fail closed to StreakBuilding — never RecoveryConfirmed \
+                 even if loaded streak is at threshold-1; got {other:?}"
+            ),
+        }
+    }
+
+    /// Companion: a happy-path through the trait seam must match the
+    /// production VerifierStore behavior. This pins the seam's contract:
+    /// "real store → real Confirmed at threshold". If anyone ever changes
+    /// the trait dispatch this test catches it.
+    #[test]
+    fn test_happy_path_through_real_verifier_store_via_trait_seam() {
+        use crate::verifier_store::VerifierStore;
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        store.register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 0)
+            .expect("register subsystem");
+
+        // Drive streak to threshold-1 via direct increment.
+        for _ in 0..(AV_RECOVERY_STREAK_THRESHOLD - 1) {
+            store.increment_recovery_streak("lidar_front", 1_000).expect("inc");
+        }
+
+        // Now exercise evaluate_recovery_report via the trait seam.
+        // The trait impl delegates verbatim to the inherent methods, so
+        // production behavior is byte-for-byte preserved.
+        let decision = evaluate_recovery_report(&store, "lidar_front", 1_500);
+        match decision {
+            HysteresisDecision::RecoveryConfirmed { streak } => {
+                assert_eq!(streak, AV_RECOVERY_STREAK_THRESHOLD,
+                    "real store reaching threshold must report Confirmed at the exact value");
+            }
+            other => panic!(
+                "happy path through real VerifierStore + trait must produce \
+                 RecoveryConfirmed; got {other:?}"
+            ),
+        }
     }
 }

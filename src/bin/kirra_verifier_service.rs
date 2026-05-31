@@ -1205,7 +1205,11 @@ async fn handle_sensor_fault_report(
     }
 
     let decision = match svc.app.store.lock() {
-        Ok(store) => evaluate_recovery_report(&store, &req.source_node_id, now),
+        // `&*store` dereferences the MutexGuard so the generic
+        // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
+        // resolves to `&VerifierStore` (S3 / #115 — trait seam, behavior
+        // unchanged: the trait impl delegates verbatim).
+        Ok(store) => evaluate_recovery_report(&*store, &req.source_node_id, now),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
                           Json(json!({ "error": "store lock poisoned" }))).into_response(),
     };
