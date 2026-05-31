@@ -46,6 +46,18 @@ pub struct VehicleKinematicsContract {
     /// Vehicle wheelbase (meters). Used in the bicycle model denominator.
     /// Must match the physical platform.
     pub wheelbase_m: f64,
+    /// Bumper-to-bumper width (meters). Used by the SG2 drivable-space
+    /// containment check (`gateway::containment::validate_trajectory_containment`)
+    /// to compute the vehicle's per-pose footprint. Same dimension across
+    /// Nominal/MRC profiles — the vehicle does not shrink in degraded posture.
+    pub width_m: f64,
+    /// Bumper-to-bumper length (meters); equals
+    /// `wheelbase_m + overhang_front_m + overhang_rear_m`.
+    pub length_m: f64,
+    /// Distance from front wheel axle to front bumper (meters).
+    pub overhang_front_m: f64,
+    /// Distance from rear wheel axle to rear bumper (meters).
+    pub overhang_rear_m: f64,
 }
 
 impl VehicleKinematicsContract {
@@ -61,6 +73,12 @@ impl VehicleKinematicsContract {
             min_follow_distance_m: 2.0,
             max_lateral_accel_mps2: 3.5,
             wheelbase_m: 2.8,
+            // Reference mid-size vehicle footprint (sedan / small SUV). 2.8
+            // wheelbase + 0.9 front + 1.1 rear = 4.8 m length, 1.85 m width.
+            width_m: 1.85,
+            length_m: 4.8,
+            overhang_front_m: 0.9,
+            overhang_rear_m: 1.1,
         }
     }
 
@@ -76,6 +94,11 @@ impl VehicleKinematicsContract {
             min_follow_distance_m: 5.0,
             max_lateral_accel_mps2: 1.5,
             wheelbase_m: 2.8,
+            // Footprint dimensions are platform geometry — same as Nominal.
+            width_m: 1.85,
+            length_m: 4.8,
+            overhang_front_m: 0.9,
+            overhang_rear_m: 1.1,
         }
     }
 }
@@ -150,6 +173,12 @@ pub enum DenyCode {
     InvalidTimeDelta,
     /// Safety: SG-007 ≅ SG8. Asset is under LockedOut fleet posture in the fabric.
     AssetLockedOut,
+    /// Safety: SG-002 ≅ SG2. Trajectory pose / vehicle footprint departs the
+    /// drivable-space corridor (with margin), or the corridor input is
+    /// absent/stale/low-confidence (conservative containment failure per
+    /// OCCY_FAULT_MODEL §3 sensor-availability rule). Issued by
+    /// `gateway::containment::validate_trajectory_containment`.
+    DrivableSpaceDeparture,
 }
 
 impl DenyCode {
@@ -166,6 +195,7 @@ impl DenyCode {
             Self::NanInfDeltaTime       => "NAN_INF_DELTA_TIME",
             Self::InvalidTimeDelta      => "INVALID_TIME_DELTA",
             Self::AssetLockedOut        => "ASSET_LOCKED_OUT",
+            Self::DrivableSpaceDeparture => "DRIVABLE_SPACE_DEPARTURE",
         }
     }
 }
@@ -850,6 +880,10 @@ mod kinematics_contract_tests {
             DenyCode::NanInfDeltaTime,
             DenyCode::InvalidTimeDelta,
             DenyCode::AssetLockedOut,
+            // SG2 — merged in from sg2-drivable-space (#128); the union of
+            // SG2 + GAP 8 means the corridor-departure variant must also
+            // pin its Display token for audit-hash stability.
+            DenyCode::DrivableSpaceDeparture,
         ];
         for code in all {
             assert_eq!(

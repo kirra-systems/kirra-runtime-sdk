@@ -24,6 +24,10 @@ impl KinematicProfileType {
                 min_follow_distance_m:  0.3,
                 max_lateral_accel_mps2: 2.0,
                 wheelbase_m:            0.2,
+                width_m:                0.5,
+                length_m:               0.6,
+                overhang_front_m:       0.2,
+                overhang_rear_m:        0.2,
             },
             Self::DroneNominal => VehicleKinematicsContract {
                 max_speed_mps:          15.0,
@@ -34,6 +38,10 @@ impl KinematicProfileType {
                 min_follow_distance_m:  1.0,
                 max_lateral_accel_mps2: 5.0,
                 wheelbase_m:            0.4,
+                width_m:                0.6,
+                length_m:               0.6,
+                overhang_front_m:       0.1,
+                overhang_rear_m:        0.1,
             },
             Self::IndustrialNominal => VehicleKinematicsContract {
                 max_speed_mps:          0.5,
@@ -44,6 +52,10 @@ impl KinematicProfileType {
                 min_follow_distance_m:  0.5,
                 max_lateral_accel_mps2: 0.5,
                 wheelbase_m:            0.5,
+                width_m:                1.2,
+                length_m:               1.5,
+                overhang_front_m:       0.5,
+                overhang_rear_m:        0.5,
             },
             Self::Custom => VehicleKinematicsContract::nominal_reference_profile(),
         }
@@ -60,6 +72,11 @@ impl KinematicProfileType {
             min_follow_distance_m: nominal.min_follow_distance_m * 2.0,
             max_lateral_accel_mps2: nominal.max_lateral_accel_mps2 * 0.4,
             wheelbase_m: nominal.wheelbase_m,
+            // Footprint dimensions are platform geometry — same as nominal.
+            width_m: nominal.width_m,
+            length_m: nominal.length_m,
+            overhang_front_m: nominal.overhang_front_m,
+            overhang_rear_m: nominal.overhang_rear_m,
         }
     }
 }

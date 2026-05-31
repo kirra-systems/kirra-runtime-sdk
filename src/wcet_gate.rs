@@ -104,6 +104,24 @@ pub const GOVERNOR_VERDICT_WCET_TARGET_MICROS: u64 = 100;
 /// on target hardware under S8.
 pub const GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS: u64 = 1000;
 
+/// CI regression-gate threshold for the SG2 drivable-space containment
+/// check (microseconds).
+///
+/// The containment check is structurally heavier than the per-command
+/// kinematic guards: per call it does
+///   `MAX_TRAJECTORY_HORIZON × (left_vertices + right_vertices) × 4`
+/// polygon-edge tests at worst case (≈ 50 × 256 × 4 = 51 200 tests, each
+/// a ray-cast crossing test + a closed-form segment-distance computation).
+/// That's ~3 orders of magnitude more scalar work than the per-command
+/// checks, so the per-command threshold (1 ms) does not apply directly.
+///
+/// 10 000 µs is generous for debug-mode CI (where this test runs by
+/// default — release builds are ~5–10× faster, putting the same workload
+/// well under 1 ms). Same caveat as the per-command threshold: this is
+/// CI-relative; S8 (#120) re-measures on the target SoC for the SG9
+/// fail-closed timeout setting.
+pub const GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS: u64 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Measurement helpers
 // ---------------------------------------------------------------------------
@@ -290,6 +308,78 @@ mod ci_gate_tests {
             ));
         });
         assert_under_budget("should_route_command::Nominal", max_ns, p999_ns);
+    }
+
+    #[test]
+    fn wcet_validate_trajectory_containment_worst_case() {
+        // SAFETY: SG2 SG9 | REQ: drivable-space-containment-wcet | TEST: wcet_validate_trajectory_containment_worst_case
+        // Worst-case input: MAX_TRAJECTORY_HORIZON poses × MAX_CORRIDOR_VERTICES
+        // per side, all-Allow path (forces the inner loop to walk every polygon
+        // edge against every footprint corner of every pose, max work). A
+        // regression that introduces an alloc, Mutex, or unbounded loop on the
+        // SG2 check would surface here.
+        use crate::gateway::containment::{
+            validate_trajectory_containment, Corridor, Pose, Point, VehicleFootprint,
+            MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
+        };
+        use crate::gateway::kinematics_contract::VehicleKinematicsContract;
+
+        let n = MAX_CORRIDOR_VERTICES;
+        let half_w = 6.0;
+        let x_max = 200.0;
+        let dx = x_max / (n as f64 - 1.0);
+        let left: Vec<Point> = (0..n)
+            .map(|i| Point { x_m: i as f64 * dx, y_m: half_w })
+            .collect();
+        let right: Vec<Point> = (0..n)
+            .map(|i| Point { x_m: i as f64 * dx, y_m: -half_w })
+            .collect();
+        let corridor = Corridor {
+            left: &left,
+            right: &right,
+            confidence: 0.95,
+            age_ms: 0,
+            min_confidence: 0.5,
+            max_age_ms: 500,
+        };
+        let traj: Vec<Pose> = (0..MAX_TRAJECTORY_HORIZON)
+            .map(|i| Pose {
+                x_m: 10.0 + (i as f64) * 2.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            })
+            .collect();
+        let footprint = VehicleFootprint::from(&VehicleKinematicsContract::nominal_reference_profile());
+
+        // Slightly fewer iterations than the per-command checks because the
+        // per-call work is O(poses × vertices × 4) — still plenty of samples
+        // for p99.9.
+        const CONTAINMENT_ITERS: u32 = 1_000;
+        let (max_ns, p999_ns) = measure_stats(CONTAINMENT_ITERS, || {
+            let _ = std::hint::black_box(validate_trajectory_containment(
+                std::hint::black_box(&traj),
+                std::hint::black_box(&corridor),
+                std::hint::black_box(&footprint),
+            ));
+        });
+        let max_us = max_ns / 1000;
+        let p999_us = p999_ns / 1000;
+        println!(
+            "WCET-GATE validate_trajectory_containment::worst_case ({}poses × {}verts/side): \
+             max={max_ns}ns ({max_us}us)  p99.9={p999_ns}ns ({p999_us}us)  \
+             vs SG2-CI-threshold {}us (per-cmd target {}us; containment is structurally heavier — see GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS)",
+            MAX_TRAJECTORY_HORIZON, MAX_CORRIDOR_VERTICES,
+            GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS,
+            GOVERNOR_VERDICT_WCET_TARGET_MICROS,
+        );
+        assert!(
+            p999_us < GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS as u128,
+            "WCET REGRESSION on validate_trajectory_containment::worst_case: \
+             p99.9 {p999_us}us exceeds SG2-specific CI threshold {}us — the \
+             SG2 containment path has acquired a heap alloc, Mutex, or I/O \
+             on top of its expected O(poses × vertices × 4) edge work.",
+            GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS,
+        );
     }
 
     #[test]
