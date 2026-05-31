@@ -43,6 +43,7 @@ Date: 2026-05-23
 | KIRRA-OCCY-FFI-001 | Occy Freedom From Interference (FFI) evidence — spatial / temporal / communication isolation | 0.1 | Draft | docs/safety/OCCY_FFI_EVIDENCE.md | 2026-05-31 |
 | KIRRA-OCCY-MCDC-001 | Occy MC/DC coverage evidence (pair-completing tests + branch-coverage fallback measurement) | 0.1 | Draft | docs/safety/OCCY_MCDC_EVIDENCE.md | 2026-05-31 |
 | KIRRA-OCCY-OPTIONB-001 | Occy #131 Option-B per-trajectory wiring on Autoware (two-rate check; SG2 live; ROS 2 adapter) | 0.1 | Draft | docs/safety/OCCY_131_OPTIONB_DESIGN.md | 2026-05-31 |
+| KIRRA-OCCY-SG2-MARGIN-001 | Occy SG2 lateral margin derivation (S8 #120 Item A; PRIMARY 0.40 m + 0.75 m fallback; G2 AoU #123) | 0.1 | Draft | docs/safety/OCCY_SG2_MARGIN.md | 2026-05-31 |
 
 ---
 
