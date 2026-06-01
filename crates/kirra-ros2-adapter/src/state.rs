@@ -24,7 +24,7 @@ use kirra_runtime_sdk::verifier::FleetPosture;
 
 use crate::config::VehicleConfig;
 use crate::corridor::Point;
-use crate::posture_tracker::PostureTracker;
+use kirra_runtime_sdk::posture_tracker::PostureTracker;
 
 /// One pose along a trajectory, in world frame. The shape matches
 /// `kirra_runtime_sdk::gateway::containment::Pose` so a Phase 2 conversion

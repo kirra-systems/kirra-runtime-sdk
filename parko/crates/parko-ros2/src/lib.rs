@@ -23,8 +23,15 @@
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
+pub mod posture_state;
 pub mod sensor_mapping;
 pub mod tick_pipeline;
+
+// Re-export the kernel's PostureTracker so parko-ros2 consumers can
+// refer to `parko_ros2::PostureTracker` directly — single
+// implementation, shared with kirra-ros2-adapter via the kernel.
+pub use kirra_runtime_sdk::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
+pub use crate::posture_state::{fleet_to_safety, ParkoPostureState};
 
 #[cfg(feature = "ros2")]
 pub mod node;

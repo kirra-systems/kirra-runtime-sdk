@@ -39,7 +39,7 @@
 // (`nominal_default_no_source`) is preserved for callers that pass no
 // posture source.
 
-use kirra_runtime_sdk::verifier::FleetPosture;
+use crate::verifier::FleetPosture;
 
 /// Maximum wall-clock age a posture observation may have before the
 /// tracker derates to `Degraded`.

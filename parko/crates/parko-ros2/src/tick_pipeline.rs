@@ -91,6 +91,43 @@ pub async fn run_pipeline_tick<B>(
 where
     B: InferenceBackend + 'static,
 {
+    run_pipeline_tick_inner(config, loop_mutex, frame, posture).await
+}
+
+/// **M2b** — tick driver that reads the effective posture from the
+/// shared `PostureTracker` instead of taking a static parameter.
+/// This is the variant the node binary calls so the parko-kirra
+/// governor receives the live, fail-closed posture (pre-first-event
+/// → Degraded; staleness → Degraded; LockedOut sticky).
+///
+/// Implementation: read `posture_state.current_safety_posture()`
+/// ONCE per tick (the tracker resolves the FleetPosture at the
+/// current wall-clock instant + bridges to SafetyPosture), then
+/// dispatch into the shared `run_pipeline_tick_inner`.
+///
+// SAFETY: SG8 SG9 | REQ: parko-ros2-tick-posture-source-fail-closed | TEST: tick_with_no_posture_source_is_nominal,tick_with_source_pre_first_event_is_degraded,tick_with_source_after_locked_out_event_is_locked_out,tick_with_source_after_nominal_event_is_nominal
+pub async fn run_pipeline_tick_with_posture_state<B>(
+    config:        &ParkoNodeConfig,
+    loop_mutex:    Arc<Mutex<InferenceLoop<B>>>,
+    frame:         SensorFrame,
+    posture_state: &crate::posture_state::ParkoPostureState,
+) -> TickOutcome
+where
+    B: InferenceBackend + 'static,
+{
+    let posture = posture_state.current_safety_posture();
+    run_pipeline_tick_inner(config, loop_mutex, frame, posture).await
+}
+
+async fn run_pipeline_tick_inner<B>(
+    config:      &ParkoNodeConfig,
+    loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
+    frame:       SensorFrame,
+    posture:     SafetyPosture,
+) -> TickOutcome
+where
+    B: InferenceBackend + 'static,
+{
     // Staleness check (priority 1 — even an error from the backend on a
     // stale frame would be misleading; the frame is the wrong artifact).
     let now_ms = current_time_ms();
@@ -337,5 +374,92 @@ mod tick_pipeline_tests {
         };
         let twist = enforce_outgoing_twist(&cmd);
         assert_eq!(twist, OutgoingTwist::stopped(100));
+    }
+
+    // -----------------------------------------------------------------------
+    // M2b — `run_pipeline_tick_with_posture_state` exercises the shared
+    // `PostureTracker` inside the tick. These tests mirror M1b's
+    // adapter-side coverage, applied to parko-ros2's path.
+    // -----------------------------------------------------------------------
+    //
+    // Together they show that the same `PostureTracker` instance has TWO
+    // consumers — adapter (M1b) and parko-ros2 (M2b) — with identical
+    // fail-closed behaviour. Duplicating the state machine is exactly
+    // what M2b exists to prevent.
+
+    use kirra_runtime_sdk::verifier::FleetPosture;
+    use crate::posture_state::ParkoPostureState;
+
+    /// **No source → Nominal default (preserves the M2 behaviour).**
+    /// A node constructed without a posture source must publish the
+    /// model output unmodified (subject to the kinematics envelope,
+    /// not posture-driven MRC clamping). The 0.1 m/s command stays
+    /// at 0.1 m/s — Nominal.
+    #[tokio::test(start_paused = true)]
+    async fn tick_with_no_posture_source_is_nominal() {
+        let (infer, _rx) = build_loop(0.1, 0.2);
+        let frame = make_frame(101, 0);
+        let state = ParkoPostureState::no_source();
+        let outcome = run_pipeline_tick_with_posture_state(
+            &default_config(), infer, frame, &state).await;
+        assert!(outcome.error.is_none(), "no-source path must not surface a TickError");
+        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+            "no-source default is Nominal — model output ~0.1 m/s passes through; got {}",
+            outcome.twist.linear_x_mps);
+    }
+
+    /// **Source configured, no event yet → Degraded floor.**
+    /// The operator's intent to govern is explicit (the source is
+    /// configured) but the verifier hasn't confirmed posture yet. The
+    /// tracker's pre-first-event seed is Degraded → the governor
+    /// applies the MRC cap. A 10 m/s command (well under the 35 m/s
+    /// nominal max but over the 5 m/s MRC cap) MUST be clamped.
+    #[tokio::test(start_paused = true)]
+    async fn tick_with_source_pre_first_event_is_degraded() {
+        let (infer, _rx) = build_loop(10.0, 0.1);
+        let frame = make_frame(102, 0);
+        let state = ParkoPostureState::with_source();
+        let outcome = run_pipeline_tick_with_posture_state(
+            &default_config(), infer, frame, &state).await;
+        assert!(outcome.twist.linear_x_mps <= 5.0 + 1e-6,
+            "pre-first-event source must derate to Degraded (≤5 m/s MRC); got {}",
+            outcome.twist.linear_x_mps);
+    }
+
+    /// **Source configured, LockedOut event observed → hard stop.**
+    /// Mirrors M1b's `locked_out_dominates_*` invariant for the
+    /// parko path. The kernel tracker's sticky-LockedOut latch
+    /// holds; the governor returns Deny on `SafetyPosture::LockedOut`;
+    /// the published twist is zero.
+    #[tokio::test(start_paused = true)]
+    async fn tick_with_source_after_locked_out_event_is_locked_out() {
+        let (infer, _rx) = build_loop(2.5, 0.1);
+        let frame = make_frame(103, 0);
+        let state = ParkoPostureState::with_source();
+        state.observe(FleetPosture::LockedOut);
+        let outcome = run_pipeline_tick_with_posture_state(
+            &default_config(), infer, frame, &state).await;
+        assert_eq!(outcome.twist.linear_x_mps,   0.0,
+            "LockedOut event must drive the tick to a stopped twist (linear=0)");
+        assert_eq!(outcome.twist.angular_z_rads, 0.0,
+            "LockedOut event must drive the tick to a stopped twist (angular=0)");
+    }
+
+    /// **Source configured, Nominal event observed → live posture.**
+    /// Once the source confirms Nominal, the tracker exits its
+    /// fail-closed seed; subsequent ticks use the full envelope.
+    /// A 0.1 m/s request passes through unmodified.
+    #[tokio::test(start_paused = true)]
+    async fn tick_with_source_after_nominal_event_is_nominal() {
+        let (infer, _rx) = build_loop(0.1, 0.2);
+        let frame = make_frame(104, 0);
+        let state = ParkoPostureState::with_source();
+        state.observe(FleetPosture::Nominal);
+        let outcome = run_pipeline_tick_with_posture_state(
+            &default_config(), infer, frame, &state).await;
+        assert!(outcome.error.is_none());
+        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+            "Nominal observation must release the Degraded seed; got {}",
+            outcome.twist.linear_x_mps);
     }
 }

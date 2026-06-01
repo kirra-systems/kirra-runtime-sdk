@@ -25,6 +25,7 @@ pub mod verifier_store;
 pub mod posture_cache;
 pub mod posture_engine;
 pub mod posture_engine_v2;
+pub mod posture_tracker;
 pub mod recovery_hysteresis;
 pub mod telemetry_watchdog;
 pub mod clock;
