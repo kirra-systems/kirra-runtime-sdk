@@ -24,6 +24,7 @@ use kirra_runtime_sdk::verifier::FleetPosture;
 
 use crate::config::VehicleConfig;
 use crate::corridor::Point;
+use crate::posture_tracker::PostureTracker;
 
 /// One pose along a trajectory, in world frame. The shape matches
 /// `kirra_runtime_sdk::gateway::containment::Pose` so a Phase 2 conversion
@@ -266,21 +267,34 @@ pub struct AdaptorState {
     /// Wall-clock-ms when the LAST nav_msgs::Odometry message arrived.
     pub last_odom_ms:       Arc<AtomicU64>,
 
-    /// Current fleet posture, consumed by `validate_trajectory_slow` to
-    /// select the effective kinematics contract:
+    /// Fail-closed fleet-posture state machine, consumed by
+    /// `validate_trajectory_slow` to select the effective kinematics
+    /// contract:
     ///
     ///   - `Nominal`   → `VehicleConfig::to_kinematics_contract()` (full envelope)
     ///   - `Degraded`  → `VehicleConfig::to_mrc_kinematics_contract()` (MRC cap)
     ///   - `LockedOut` → short-circuit to `TrajectoryVerdict::MRCFallback`
     ///
-    /// M1: this field defaults to `Nominal` and is updated synchronously
-    /// via `update_posture`. M1b (follow-up — tracked as a doc-comment
-    /// at the slow-loop call site in `node.rs`) will subscribe to the
-    /// verifier's `/system/posture/stream` SSE (or a bridged ROS 2
-    /// posture topic) to drive this live. Until M1b lands the field
-    /// stays at the default, which means the adapter behaves as if the
-    /// fleet is always Nominal — matching pre-M1 behaviour exactly.
-    pub current_posture: Arc<RwLock<FleetPosture>>,
+    /// **M1 path** (`AdaptorState::new` / `with_config`): the tracker is
+    /// constructed in `nominal_default_no_source` mode — `current_posture`
+    /// always returns `Nominal`, behaviour byte-for-byte unchanged from
+    /// the pre-M1b era. Use this for verifier-less deployments and unit
+    /// tests.
+    ///
+    /// **M1b path** (`AdaptorState::with_posture_source`): the tracker is
+    /// constructed in `with_source` mode — pre-first-event seed
+    /// = `Degraded`; staleness derates Nominal → Degraded; `LockedOut`
+    /// is sticky-toward-safe. The SSE subscriber task in the binary
+    /// drives `update_posture` whenever a posture event arrives.
+    pub posture_tracker: Arc<RwLock<PostureTracker>>,
+}
+
+#[inline]
+fn now_ms_wall() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl AdaptorState {
@@ -295,7 +309,8 @@ impl AdaptorState {
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
-            current_posture:    Arc::new(RwLock::new(FleetPosture::Nominal)),
+            posture_tracker:    Arc::new(RwLock::new(
+                PostureTracker::nominal_default_no_source())),
         })
     }
 
@@ -312,33 +327,62 @@ impl AdaptorState {
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
-            current_posture:    Arc::new(RwLock::new(FleetPosture::Nominal)),
+            posture_tracker:    Arc::new(RwLock::new(
+                PostureTracker::nominal_default_no_source())),
         })
     }
 
-    /// Updates the cached fleet posture. Called by M1b (the live
-    /// posture source — verifier SSE subscriber or bridged ROS 2 topic
-    /// — see node.rs slow-loop call site). Until M1b lands this is
-    /// only exercised by tests; the production default is `Nominal`.
+    /// **M1b** — constructs an `AdaptorState` with a live posture source
+    /// configured. The `PostureTracker` starts in the source-configured
+    /// mode (pre-first-event seed = `Degraded`); the SSE subscriber in
+    /// the binary drives `update_posture` with each event from the
+    /// verifier's `/system/posture/stream`. See
+    /// `crate::posture_tracker::PostureTracker::with_source`.
+    pub fn with_posture_source(config: VehicleConfig) -> Arc<Self> {
+        config.warn_if_missing_odd_cap();
+        Arc::new(Self {
+            by_asset: DashMap::new(),
+            objects_cache: Arc::new(RwLock::new(Vec::new())),
+            config: Arc::new(config),
+            latest_odom: Arc::new(RwLock::new(None)),
+            last_trajectory_ms: Arc::new(AtomicU64::new(0)),
+            last_objects_ms:    Arc::new(AtomicU64::new(0)),
+            last_odom_ms:       Arc::new(AtomicU64::new(0)),
+            posture_tracker:    Arc::new(RwLock::new(
+                PostureTracker::with_source())),
+        })
+    }
+
+    /// Feeds the posture tracker with a fresh observation from the
+    /// configured source. No-op for the no-source tracker (preserves
+    /// the M1 default-Nominal behaviour). The SSE subscriber calls
+    /// this on every received posture event.
     ///
     /// Poisoned-lock recovery: a panicked writer leaves the cell
     /// poisoned but readable. We mark-and-replace via `into_inner` of
     /// the guard so subsequent reads return the new value rather than
     /// inheriting the poison.
     pub fn update_posture(&self, posture: FleetPosture) {
-        match self.current_posture.write() {
-            Ok(mut guard) => *guard = posture,
-            Err(poisoned) => *poisoned.into_inner() = posture,
+        let now = now_ms_wall();
+        match self.posture_tracker.write() {
+            Ok(mut guard) => guard.observe(now, posture),
+            Err(poisoned) => poisoned.into_inner().observe(now, posture),
         }
     }
 
-    /// Reads the current cached posture. Returns `FleetPosture::Nominal`
-    /// if the lock is poisoned and the inner value is also unreachable
-    /// (defensive — would only happen in tests today).
+    /// Reads the effective fleet posture from the tracker at the current
+    /// wall-clock instant. Fail-closed: a poisoned lock returns
+    /// `Degraded` rather than `Nominal` so a panic in the writer can
+    /// never widen the envelope.
     pub fn current_posture(&self) -> FleetPosture {
-        match self.current_posture.read() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+        let now = now_ms_wall();
+        match self.posture_tracker.read() {
+            Ok(guard) => guard.current_posture(now),
+            // Defensive — if the lock is poisoned and we can't read it,
+            // assume the worst-tractable posture (Degraded) rather than
+            // Nominal. A poisoned tracker on a source-configured
+            // deployment would otherwise risk a stale Nominal leak.
+            Err(_) => FleetPosture::Degraded,
         }
     }
 

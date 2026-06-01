@@ -19,6 +19,7 @@
 pub mod config;
 pub mod corridor;
 pub mod geometry;
+pub mod posture_tracker;
 pub mod state;
 pub mod validation;
 
@@ -28,6 +29,9 @@ pub mod node;
 #[cfg(feature = "ros2")]
 pub mod parsing;
 
+#[cfg(feature = "ros2")]
+pub mod posture_source;
+
 // Re-exports for downstream consumers (Phase 2 will be the verifier service
 // binary; for now these are the public surface).
 pub use crate::config::VehicleConfig;
@@ -35,6 +39,7 @@ pub use crate::corridor::{CorridorSource, MockCorridorSource, Point};
 #[cfg(feature = "ros2")]
 pub use crate::corridor::{Lanelet2CorridorSource, Lanelet2Error};
 pub use crate::geometry::quat_to_yaw;
+pub use crate::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
 pub use crate::state::{
     AcceptedTrajectory, AdaptorState, IncomingTrajectory, PerceivedObject, Pose,
     TrajectoryPoint, TrajectoryVerdict,

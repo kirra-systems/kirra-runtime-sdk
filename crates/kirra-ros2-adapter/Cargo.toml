@@ -39,7 +39,7 @@ default = []
 #   source /opt/ros/jazzy/setup.bash
 #   apt install ros-jazzy-lanelet2 libboost-serialization-dev
 # (or the integrator's equivalents) — see README.
-ros2 = ["dep:r2r", "dep:cxx", "dep:cxx-build", "dep:tracing-subscriber", "dep:futures"]
+ros2 = ["dep:r2r", "dep:cxx", "dep:cxx-build", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes"]
 
 [dependencies]
 # Concurrency primitives shared with the safety kernel.
@@ -75,6 +75,15 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # explicitly pins our usage. Gated on `ros2` since only the node code
 # touches r2r streams.
 futures = { version = "0.3", optional = true }
+
+# M1b — SSE client for the verifier's /system/posture/stream endpoint.
+# `reqwest` is already a workspace-wide dep (via the kernel's
+# kirra_carla_client); the adapter binary uses its streaming API to pump
+# posture events into `PostureTracker`. Gated on `ros2` because the
+# transport only matters when the binary is built.
+reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+serde_json = { version = "1",    optional = true }
+bytes      = { version = "1",    optional = true }
 
 [build-dependencies]
 # cxx-build — compiles the C++ shim and the cxx-generated glue. Must

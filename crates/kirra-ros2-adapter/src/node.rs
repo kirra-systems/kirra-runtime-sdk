@@ -318,14 +318,16 @@ pub async fn run_adapter(
     //   5) Log WCET for the cycle (warns if > 10 ms — the per-trajectory
     //      budget from the design §3).
     //
-    // M1b (follow-up — tracked at AdaptorState::current_posture): the
-    // posture cache is populated by `AdaptorState::update_posture`. The
-    // remaining integration is to drive that method from a live source
-    // — either an SSE subscriber on the verifier's
-    // `/system/posture/stream` endpoint, or a bridged ROS 2 posture
-    // topic from a fleet-monitor node. Until M1b lands the posture
-    // stays at its construction default (Nominal), which makes the
-    // slow-loop behaviour byte-for-byte identical to the pre-M1 path.
+    // M1b (live posture source): `AdaptorState::current_posture()`
+    // resolves via the fail-closed `PostureTracker` state machine.
+    // When the binary is built with `KIRRA_POSTURE_STREAM_URL` set,
+    // the SSE subscriber in `crate::posture_source` feeds the tracker
+    // from the verifier's `/system/posture/stream` endpoint
+    // (pre-first-event seed = Degraded; staleness derates to
+    // Degraded; LockedOut is sticky-toward-safe). When the env var
+    // is unset the tracker stays in `nominal_default_no_source` mode
+    // and `current_posture()` returns Nominal forever — preserving
+    // the M1-era behaviour for verifier-less deployments.
     let slow_state = Arc::clone(&state);
     let slow_corridor = Arc::clone(&corridor);
     tokio::spawn(async move {
