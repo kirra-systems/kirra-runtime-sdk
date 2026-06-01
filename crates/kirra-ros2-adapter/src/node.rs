@@ -175,20 +175,22 @@ pub async fn run_adapter(
 
     // ----- Subscriptions ------------------------------------------------
     //
-    // r2r 0.9 takes string-typed message names so the integrator's
-    // package layout is what binds them. The exact field shapes are
-    // pinned in Phase 2 with the integrator's Autoware release tag.
-    // Each subscription returns a Stream<Item = …> that we hold for the
-    // lifetime of the adapter task and drain in dedicated stamping
-    // tasks (below).
-    let traj_stream = node.subscribe_untyped(
+    // Phase 4c — typed subscriptions. r2r auto-generates bindings for the
+    // three Autoware message types from the integrator's sourced ROS env
+    // (AMENT_PREFIX_PATH discovery at build time). Each subscription
+    // returns a `Stream<Item = T>` of the typed message, which the drain
+    // task hands to `crate::parsing::*` for the kernel-shape conversion.
+    //
+    // Map + control_cmd remain untyped (the map is a one-shot binary
+    // blob handed to lanelet2_bridge; the control command's parser is
+    // Phase 5+ scope and is currently logged-only via the
+    // `IngressControlCommand` channel).
+    let traj_stream = node.subscribe::<r2r::autoware_planning_msgs::msg::Trajectory>(
         "~/input/trajectory",
-        "autoware_planning_msgs/msg/Trajectory",
         r2r::QosProfile::default(),
     )?;
-    let obj_stream = node.subscribe_untyped(
+    let obj_stream = node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
         "~/input/objects",
-        "autoware_perception_msgs/msg/PredictedObjects",
         r2r::QosProfile::default(),
     )?;
     let _map_sub = node.subscribe_untyped(
@@ -196,9 +198,8 @@ pub async fn run_adapter(
         "autoware_map_msgs/msg/LaneletMapBin",
         r2r::QosProfile::default(),
     )?;
-    let odom_stream = node.subscribe_untyped(
+    let odom_stream = node.subscribe::<r2r::nav_msgs::msg::Odometry>(
         "~/input/odometry",
-        "nav_msgs/msg/Odometry",
         r2r::QosProfile::default(),
     )?;
     let _ctrl_sub = node.subscribe_untyped(
@@ -225,21 +226,57 @@ pub async fn run_adapter(
     // fast loop publishes MRC every cycle (the safe direction, but
     // useless behavior).
     //
-    // Phase 4: untyped — we throw away the deserialized payload and
-    // only carry the arrival timestamp. Phase 4-follow-up (or the
-    // integrator's typed-callback pin) replaces these with typed
-    // deserializers that also push to trajectory_tx / control_tx /
-    // update_objects / update_odom.
+    // Phase 4c — typed parsing + forwarding. Each drain task:
+    //   1. Stamps the SG9 liveness slot via `state.touch_*(now)`.
+    //   2. Calls `crate::parsing::parse_*` to convert the typed r2r
+    //      message into the kernel-shape envelope.
+    //   3. Forwards the result onward:
+    //        - Trajectory  → trajectory_tx channel (wrapped in
+    //                        `IngressTrajectory` with the constant
+    //                        `asset_id = "ego"` and a monotonic
+    //                        `trajectory_id`).
+    //        - Objects     → `state.update_objects(...)` write-replace.
+    //        - Odometry    → `state.update_odom(...)` write-replace.
     use futures::StreamExt;
 
+    // Per-node asset id. Phase 4c is single-asset (one Governor instance
+    // per vehicle); Phase 5+ may multi-multiplex but that's out of scope.
+    let asset_id_str: &'static str = "ego";
+
     let traj_state = Arc::clone(&state);
+    let traj_tx_clone = trajectory_tx.clone();
     tokio::spawn(async move {
         let mut s = traj_stream;
-        while let Some(item) = s.next().await {
-            match item {
-                Ok(_msg) => traj_state.touch_trajectory(now_ms_wall()),
-                Err(e) => tracing::warn!(error = ?e,
-                    "trajectory subscription stream returned Err — slot left un-touched this tick"),
+        let mut traj_seq: u64 = 0;
+        while let Some(msg) = s.next().await {
+            let now = now_ms_wall();
+            traj_state.touch_trajectory(now);
+            let parsed = crate::parsing::parse_trajectory(&msg, now);
+            if parsed.points.is_empty() {
+                tracing::debug!("trajectory message had zero points — skipping forward");
+                continue;
+            }
+            traj_seq = traj_seq.wrapping_add(1);
+            let envelope = IngressTrajectory {
+                asset_id: asset_id_str.to_string(),
+                trajectory_id: traj_seq,
+                points: parsed.points,
+            };
+            match traj_tx_clone.try_send(envelope) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(dropped)) => {
+                    tracing::warn!(
+                        asset_id = %dropped.asset_id,
+                        trajectory_id = dropped.trajectory_id,
+                        "trajectory channel FULL — dropping candidate (slow loop is behind)"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        "trajectory channel CLOSED — slow loop is gone; adapter must restart"
+                    );
+                    return;
+                }
             }
         }
         tracing::error!("trajectory subscription stream closed — staleness will fire fleet-wide");
@@ -248,12 +285,10 @@ pub async fn run_adapter(
     let obj_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut s = obj_stream;
-        while let Some(item) = s.next().await {
-            match item {
-                Ok(_msg) => obj_state.touch_objects(now_ms_wall()),
-                Err(e) => tracing::warn!(error = ?e,
-                    "objects subscription stream returned Err — slot left un-touched this tick"),
-            }
+        while let Some(msg) = s.next().await {
+            obj_state.touch_objects(now_ms_wall());
+            let parsed = crate::parsing::parse_predicted_objects(&msg);
+            obj_state.update_objects(parsed);
         }
         tracing::error!("objects subscription stream closed — staleness will fire fleet-wide");
     });
@@ -261,12 +296,10 @@ pub async fn run_adapter(
     let odom_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut s = odom_stream;
-        while let Some(item) = s.next().await {
-            match item {
-                Ok(_msg) => odom_state.touch_odom(now_ms_wall()),
-                Err(e) => tracing::warn!(error = ?e,
-                    "odometry subscription stream returned Err — slot left un-touched this tick"),
-            }
+        while let Some(msg) = s.next().await {
+            odom_state.touch_odom(now_ms_wall());
+            let parsed = crate::parsing::parse_odom(&msg);
+            odom_state.update_odom(parsed);
         }
         tracing::error!("odometry subscription stream closed — staleness will fire fleet-wide");
     });

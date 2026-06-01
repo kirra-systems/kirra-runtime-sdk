@@ -187,6 +187,24 @@ pub struct PerceivedObject {
     pub heading_rad: f64,
 }
 
+/// Phase 4c — typed-payload envelope for a freshly-received trajectory
+/// after the r2r-side parser has extracted the planner-published points.
+/// The slow-loop receives this on the trajectory channel; the drain
+/// task in `node.rs::run_adapter` builds it from
+/// `autoware_planning_msgs::msg::Trajectory` via `parsing::parse_trajectory`.
+///
+/// `received_ms` is the wall-clock at the drain-task's receipt of the
+/// r2r message (the same value stamped into `AdaptorState::last_trajectory_ms`
+/// for the SG9 subscription-staleness path). Phase 4c uses it for
+/// per-trajectory liveness logging; Phase 5 may use it for slow-loop
+/// FTTI budget enforcement (drop trajectories that arrived too long ago
+/// before the slow loop got to them).
+#[derive(Debug, Clone)]
+pub struct IncomingTrajectory {
+    pub points: Vec<TrajectoryPoint>,
+    pub received_ms: u64,
+}
+
 /// Minimal ego-odometry snapshot. Phase 3 introduces this to fix the
 /// `current_steering_angle_deg = 0.0` approximation in
 /// `validate_trajectory_slow` AND to feed the fast-loop conformance
