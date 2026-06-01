@@ -23,6 +23,7 @@ use kirra_runtime_sdk::gateway::containment::{
 use kirra_runtime_sdk::gateway::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
 };
+use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance,
 };
@@ -60,20 +61,48 @@ const RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
 /// Returns:
 ///   Accept       — clean: containment + per-pose kinematics + RSS all green
 ///   Clamp        — per-pose requested a Clamp on ≥ 1 pose; containment + RSS green
-///   MRCFallback  — containment fail / per-pose DenyBreach / RSS violation
+///   MRCFallback  — containment fail / per-pose DenyBreach / RSS violation /
+///                  posture = LockedOut
 ///
 /// `latest_odom`: the most recent ego odometry snapshot, used by the
 /// per-pose mapping to derive the FIRST segment's `current_steering_angle_deg`
 /// from `omega · L / v_x`. `None` (no odom yet) → falls back to `0.0`
 /// (the Phase 2A behaviour), which is the conservative direction (the
 /// kernel's P5b steering-rate check still bounds the implied change).
+///
+/// `posture` (M1): selects the effective per-pose kinematics contract.
+/// `Nominal` is the unchanged Phase-2A behaviour (full envelope);
+/// `Degraded` swaps in the MRC-derated contract (mirror of parko-kirra's
+/// posture mapping); `LockedOut` short-circuits to `MRCFallback` without
+/// running geometry checks. The containment + RSS checks always run for
+/// `Nominal` and `Degraded` — posture AUGMENTS, does not REPLACE, the
+/// physical invariants.
+///
+// SAFETY: SG8 | REQ: posture-driven-profile-selection | TEST: nominal_posture_clean_trajectory_accepts,degraded_posture_caps_kinematics_to_mrc,locked_out_short_circuits_to_mrcfallback,degraded_with_corridor_breach_still_mrcs,nominal_behavior_matches_prior_default
+/// (M1 closeout. Pairs with parko-kirra's `evaluate()` posture→profile
+///  mapping so the AV slow-loop and the differential-drive bridge stay
+///  consistent. M1b — wiring `current_posture` to the live verifier
+///  stream — is tracked at the slow-loop call site in `node.rs`.)
 pub fn validate_trajectory_slow(
     trajectory: &[TrajectoryPoint],
     corridor: &dyn CorridorSource,
     objects: &[PerceivedObject],
     config: &VehicleConfig,
     latest_odom: Option<&EgoOdom>,
+    posture: FleetPosture,
 ) -> TrajectoryVerdict {
+    // ----- Posture short-circuit (M1) ----------------------------------
+    //
+    // A LockedOut fleet must not be commanded — the safe response is to
+    // refuse the trajectory and let the fast loop emit the MRC topic.
+    // We do this BEFORE the geometry checks so a locked-out fleet doesn't
+    // even spend CPU on the (now meaningless) acceptance question, and so
+    // an integrator inspecting verdicts in a LockedOut state always sees
+    // `MRCFallback` regardless of the trajectory shape.
+    if posture == FleetPosture::LockedOut {
+        return TrajectoryVerdict::MRCFallback;
+    }
+
     // Reject empty / single-point trajectories outright (the per-pose
     // loop needs ≥ 2 points to compute deltas). Conservative MRC.
     if trajectory.len() < 2 {
@@ -120,7 +149,17 @@ pub fn validate_trajectory_slow(
     // steering as the "current" steering, so the kernel's P5b
     // steering-rate check sees the actual transition rather than always
     // measuring against 0.
-    let kinematics = config.to_kinematics_contract();
+    // Posture-driven kinematics contract:
+    //   - Nominal  → integrator's full envelope (`to_kinematics_contract`)
+    //   - Degraded → MRC-derated dynamic limits, same integrator geometry
+    //                (`to_mrc_kinematics_contract`)
+    // LockedOut was short-circuited above; this match is exhaustive on
+    // the remaining variants.
+    let kinematics = match posture {
+        FleetPosture::Nominal  => config.to_kinematics_contract(),
+        FleetPosture::Degraded => config.to_mrc_kinematics_contract(),
+        FleetPosture::LockedOut => unreachable!("handled by the posture short-circuit above"),
+    };
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
     let mut clamp_seen = false;
     let mut prev_steering_deg = initial_steering_deg;

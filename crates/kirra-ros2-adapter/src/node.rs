@@ -304,16 +304,28 @@ pub async fn run_adapter(
         tracing::error!("odometry subscription stream closed — staleness will fire fleet-wide");
     });
 
-    // ----- Slow loop (Phase 2A) ----------------------------------------
+    // ----- Slow loop (Phase 2A; posture-aware as of M1) ----------------
     //
     // For each candidate trajectory:
     //   1) Snapshot the perception cache (read-and-clone; do NOT hold
     //      the RwLock across the validation).
-    //   2) Run validate_trajectory_slow.
-    //   3) update_trajectory(asset_id, ..., verdict, now_ms) — installs
+    //   2) Snapshot the current fleet posture from AdaptorState.
+    //   3) Run validate_trajectory_slow with that posture — Nominal /
+    //      Degraded select the effective kinematics contract;
+    //      LockedOut short-circuits to MRCFallback.
+    //   4) update_trajectory(asset_id, ..., verdict, now_ms) — installs
     //      on Accept/Clamp, removes on MRC.
-    //   4) Log WCET for the cycle (warns if > 10 ms — the per-trajectory
+    //   5) Log WCET for the cycle (warns if > 10 ms — the per-trajectory
     //      budget from the design §3).
+    //
+    // M1b (follow-up — tracked at AdaptorState::current_posture): the
+    // posture cache is populated by `AdaptorState::update_posture`. The
+    // remaining integration is to drive that method from a live source
+    // — either an SSE subscriber on the verifier's
+    // `/system/posture/stream` endpoint, or a bridged ROS 2 posture
+    // topic from a fleet-monitor node. Until M1b lands the posture
+    // stays at its construction default (Nominal), which makes the
+    // slow-loop behaviour byte-for-byte identical to the pre-M1 path.
     let slow_state = Arc::clone(&state);
     let slow_corridor = Arc::clone(&corridor);
     tokio::spawn(async move {
@@ -322,12 +334,14 @@ pub async fn run_adapter(
             let start = std::time::Instant::now();
             let objects = slow_state.snapshot_objects();
             let odom = slow_state.snapshot_odom();
+            let posture = slow_state.current_posture();
             let verdict = validate_trajectory_slow(
                 &traj.points,
                 slow_corridor.as_ref(),
                 &objects,
                 &slow_state.config,
                 odom.as_ref(),
+                posture,
             );
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

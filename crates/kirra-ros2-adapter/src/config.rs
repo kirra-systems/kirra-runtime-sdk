@@ -103,6 +103,29 @@ impl VehicleConfig {
         }
     }
 
+    /// Builds the MRC-derated kinematics contract — same integrator
+    /// geometry (wheelbase, footprint), but the dynamic limits
+    /// (max_speed, max_accel, max_brake, max_steering, lateral_accel)
+    /// are replaced with the kernel's `mrc_fallback_profile()` values.
+    ///
+    /// Used in `Degraded` posture by the adapter slow loop (M1) to
+    /// mirror parko-kirra's posture→profile mapping while preserving
+    /// the per-platform footprint required by SG2 containment + the
+    /// bicycle-model lateral-accel check.
+    // SAFETY: SG8 | REQ: mrc-derated-contract-shape | TEST: to_mrc_kinematics_contract_keeps_geometry_swaps_dynamic
+    pub fn to_mrc_kinematics_contract(&self) -> VehicleKinematicsContract {
+        let mut c   = self.to_kinematics_contract();
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        c.max_speed_mps           = mrc.max_speed_mps;
+        c.max_accel_mps2          = mrc.max_accel_mps2;
+        c.max_brake_mps2          = mrc.max_brake_mps2;
+        c.max_steering_deg        = mrc.max_steering_deg;
+        c.max_steering_rate_deg_s = mrc.max_steering_rate_deg_s;
+        c.min_follow_distance_m   = mrc.min_follow_distance_m;
+        c.max_lateral_accel_mps2  = mrc.max_lateral_accel_mps2;
+        c
+    }
+
     /// Builds the kernel-side `VehicleFootprint` from this config. The
     /// containment check (`validate_trajectory_containment`) consumes
     /// this directly.
@@ -147,5 +170,34 @@ mod tests {
         // default_urban uses 35° (0.6109… rad). Round-trip back to
         // degrees should hit 35.0 within numeric tolerance.
         assert!((kc.max_steering_deg - 35.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn to_mrc_kinematics_contract_keeps_geometry_swaps_dynamic() {
+        let cfg = VehicleConfig::default_urban();
+        let nominal = cfg.to_kinematics_contract();
+        let mrc     = cfg.to_mrc_kinematics_contract();
+        let kernel_mrc = VehicleKinematicsContract::mrc_fallback_profile();
+
+        // Dynamic limits must come from the kernel's MRC profile.
+        assert_eq!(mrc.max_speed_mps,           kernel_mrc.max_speed_mps);
+        assert_eq!(mrc.max_accel_mps2,          kernel_mrc.max_accel_mps2);
+        assert_eq!(mrc.max_brake_mps2,          kernel_mrc.max_brake_mps2);
+        assert_eq!(mrc.max_steering_deg,        kernel_mrc.max_steering_deg);
+        assert_eq!(mrc.max_steering_rate_deg_s, kernel_mrc.max_steering_rate_deg_s);
+        assert_eq!(mrc.min_follow_distance_m,   kernel_mrc.min_follow_distance_m);
+        assert_eq!(mrc.max_lateral_accel_mps2,  kernel_mrc.max_lateral_accel_mps2);
+
+        // Geometry must come from the integrator's nominal contract.
+        assert_eq!(mrc.wheelbase_m,      nominal.wheelbase_m);
+        assert_eq!(mrc.width_m,          nominal.width_m);
+        assert_eq!(mrc.length_m,         nominal.length_m);
+        assert_eq!(mrc.overhang_front_m, nominal.overhang_front_m);
+        assert_eq!(mrc.overhang_rear_m,  nominal.overhang_rear_m);
+
+        // The MRC speed cap is strictly tighter than the nominal vehicle max.
+        assert!(mrc.max_speed_mps < nominal.max_speed_mps,
+            "MRC cap ({}) must be tighter than vehicle nominal max ({})",
+            mrc.max_speed_mps, nominal.max_speed_mps);
     }
 }

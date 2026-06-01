@@ -20,6 +20,8 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use kirra_runtime_sdk::verifier::FleetPosture;
+
 use crate::config::VehicleConfig;
 use crate::corridor::Point;
 
@@ -263,6 +265,22 @@ pub struct AdaptorState {
     pub last_objects_ms:    Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST nav_msgs::Odometry message arrived.
     pub last_odom_ms:       Arc<AtomicU64>,
+
+    /// Current fleet posture, consumed by `validate_trajectory_slow` to
+    /// select the effective kinematics contract:
+    ///
+    ///   - `Nominal`   → `VehicleConfig::to_kinematics_contract()` (full envelope)
+    ///   - `Degraded`  → `VehicleConfig::to_mrc_kinematics_contract()` (MRC cap)
+    ///   - `LockedOut` → short-circuit to `TrajectoryVerdict::MRCFallback`
+    ///
+    /// M1: this field defaults to `Nominal` and is updated synchronously
+    /// via `update_posture`. M1b (follow-up — tracked as a doc-comment
+    /// at the slow-loop call site in `node.rs`) will subscribe to the
+    /// verifier's `/system/posture/stream` SSE (or a bridged ROS 2
+    /// posture topic) to drive this live. Until M1b lands the field
+    /// stays at the default, which means the adapter behaves as if the
+    /// fleet is always Nominal — matching pre-M1 behaviour exactly.
+    pub current_posture: Arc<RwLock<FleetPosture>>,
 }
 
 impl AdaptorState {
@@ -275,6 +293,7 @@ impl AdaptorState {
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
+            current_posture:    Arc::new(RwLock::new(FleetPosture::Nominal)),
         })
     }
 
@@ -290,7 +309,34 @@ impl AdaptorState {
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
+            current_posture:    Arc::new(RwLock::new(FleetPosture::Nominal)),
         })
+    }
+
+    /// Updates the cached fleet posture. Called by M1b (the live
+    /// posture source — verifier SSE subscriber or bridged ROS 2 topic
+    /// — see node.rs slow-loop call site). Until M1b lands this is
+    /// only exercised by tests; the production default is `Nominal`.
+    ///
+    /// Poisoned-lock recovery: a panicked writer leaves the cell
+    /// poisoned but readable. We mark-and-replace via `into_inner` of
+    /// the guard so subsequent reads return the new value rather than
+    /// inheriting the poison.
+    pub fn update_posture(&self, posture: FleetPosture) {
+        match self.current_posture.write() {
+            Ok(mut guard) => *guard = posture,
+            Err(poisoned) => *poisoned.into_inner() = posture,
+        }
+    }
+
+    /// Reads the current cached posture. Returns `FleetPosture::Nominal`
+    /// if the lock is poisoned and the inner value is also unreachable
+    /// (defensive — would only happen in tests today).
+    pub fn current_posture(&self) -> FleetPosture {
+        match self.current_posture.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Replaces the ego-odometry snapshot. Called by the adapter's

@@ -14,6 +14,7 @@ use kirra_ros2_adapter::{
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
     validation::validate_trajectory_slow,
 };
+use kirra_runtime_sdk::verifier::FleetPosture;
 
 /// Build a straight n-pose trajectory along +X at uniform velocity.
 ///
@@ -47,7 +48,9 @@ fn test_clean_trajectory_accepts() {
     let cfg = VehicleConfig::default_urban();
 
     let start = std::time::Instant::now();
-    let verdict = validate_trajectory_slow(&trajectory, &corridor, &objects, &cfg, None);
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
     let elapsed_us = start.elapsed().as_micros();
 
     // Print the WCET for the report.
@@ -74,7 +77,9 @@ fn test_corridor_departure_rejects() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
 
-    let verdict = validate_trajectory_slow(&trajectory, &corridor, &objects, &cfg, None);
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "pose outside the corridor must MRC; got {verdict:?}");
 }
@@ -100,7 +105,9 @@ fn test_rss_violation_rejects() {
     }];
     let cfg = VehicleConfig::default_urban();
 
-    let verdict = validate_trajectory_slow(&trajectory, &corridor, &objects, &cfg, None);
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "object 4 m ahead at ego 10 m/s must trigger RSS MRC; got {verdict:?}");
 }
@@ -131,7 +138,9 @@ fn test_kinematic_deny_rejects() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
 
-    let verdict = validate_trajectory_slow(&trajectory, &corridor, &objects, &cfg, None);
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "P1 InvalidTimeDelta DenyBreach must MRC; got {verdict:?}");
 }
@@ -166,8 +175,126 @@ fn test_clamp_returns_clamp() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
 
-    let verdict = validate_trajectory_slow(&trajectory, &corridor, &objects, &cfg, None);
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
     assert_eq!(verdict, TrajectoryVerdict::Clamp,
         "trajectory with per-pose ClampLinear (P3 accel ceiling) but containment + RSS \
          clean must produce Clamp; got {verdict:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 6. M1 — Posture-driven profile selection
+// ---------------------------------------------------------------------------
+//
+// These tests cover the M1 wiring: validate_trajectory_slow consumes
+// FleetPosture and selects the effective per-pose kinematics contract.
+//
+//   posture    | trajectory shape         | expected verdict
+//   -----------+--------------------------+---------------------
+//   Nominal    | clean 5 m/s              | Accept
+//   Degraded   | 10 m/s (within Nominal)  | Clamp  (5 m/s MRC cap fires)
+//   LockedOut  | any                       | MRCFallback (short-circuit)
+//   Degraded   | corridor breach          | MRCFallback (geometry wins)
+//   Nominal    | (regression)              | matches Accept from #1
+
+#[test]
+fn nominal_posture_clean_trajectory_accepts() {
+    // Same shape as #1, named to anchor the matrix.
+    let trajectory = straight_trajectory(10, 5.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::Accept,
+        "Nominal posture + clean trajectory must Accept; got {verdict:?}");
+}
+
+#[test]
+fn degraded_posture_caps_kinematics_to_mrc() {
+    // 10 m/s is well within the Nominal max_speed (35 m/s) — Accepts under
+    // Nominal. Under Degraded the contract drops to mrc_fallback_profile()
+    // (max_speed = 5 m/s) so the per-pose check requests ClampLinear and
+    // the aggregate verdict becomes Clamp (containment + RSS still pass).
+    let trajectory = straight_trajectory(10, 10.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    // Sanity: Nominal accepts.
+    let nominal_verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(nominal_verdict, TrajectoryVerdict::Accept,
+        "10 m/s trajectory under Nominal must Accept (within 35 m/s vehicle max); got {nominal_verdict:?}");
+
+    // Degraded must clamp (per-pose ClampLinear fires against the 5 m/s
+    // MRC cap; containment + RSS remain green so the aggregate is Clamp).
+    let degraded_verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+    );
+    assert_eq!(degraded_verdict, TrajectoryVerdict::Clamp,
+        "10 m/s trajectory under Degraded must Clamp against the 5 m/s MRC cap; got {degraded_verdict:?}");
+}
+
+#[test]
+fn locked_out_short_circuits_to_mrcfallback() {
+    // Even a perfectly clean trajectory must produce MRCFallback under
+    // LockedOut. The geometry checks are not required to run — the
+    // short-circuit is the contract.
+    let trajectory = straight_trajectory(10, 5.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::LockedOut,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "LockedOut posture must MRC regardless of trajectory shape; got {verdict:?}");
+}
+
+#[test]
+fn locked_out_short_circuits_even_on_empty_trajectory() {
+    // Degenerate input — the short-circuit must still win.
+    let trajectory: Vec<TrajectoryPoint> = Vec::new();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::LockedOut,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback);
+}
+
+#[test]
+fn degraded_with_corridor_breach_still_mrcs() {
+    // Most-restrictive-wins: under Degraded a corridor breach still
+    // produces MRCFallback (containment beats the kinematics Clamp the
+    // MRC cap would otherwise produce).
+    let mut trajectory = straight_trajectory(10, 5.0, 0.1);
+    trajectory[5].pose.y_m = 6.0; // outside the 5 m half-width corridor
+
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "Degraded + corridor breach must still MRC — most-restrictive-wins; got {verdict:?}");
+}
+
+#[test]
+fn nominal_behavior_matches_prior_default() {
+    // Regression: every prior test in this file passed Nominal explicitly
+    // (above). This test pins the rule that Nominal is the construction
+    // default for `AdaptorState::current_posture` — until M1b wires a
+    // live posture source, the slow-loop verdict is byte-for-byte the
+    // pre-M1 behaviour.
+    use kirra_ros2_adapter::state::AdaptorState;
+    let state = AdaptorState::new();
+    assert_eq!(state.current_posture(), FleetPosture::Nominal,
+        "AdaptorState must default to Nominal so pre-M1 callers see no behaviour change");
 }

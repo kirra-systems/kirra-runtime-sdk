@@ -127,6 +127,36 @@ Governor's internal types (kinematics contract, corridor, footprint). Independen
 + separate compute fall out of the ROS 2 node/process model (the FFI/D3 story for
 free).
 
+### 8a. Posture awareness (M1)
+
+`validate_trajectory_slow` now consumes a `FleetPosture` parameter and
+selects the effective per-pose kinematics contract per the same mapping
+parko-kirra uses, so the AV slow-loop and the differential-drive bridge
+stay consistent:
+
+| Posture | Per-pose contract | Containment / RSS | Verdict effect |
+|---|---|---|---|
+| `Nominal` | `VehicleConfig::to_kinematics_contract` (full envelope) | always run | unchanged from Phase 2A |
+| `Degraded` | `VehicleConfig::to_mrc_kinematics_contract` (MRC-derated dynamic limits, integrator geometry preserved) | always run | per-pose Clamp fires at the tighter cap |
+| `LockedOut` | n/a — short-circuit | not run | always `MRCFallback` |
+
+Posture **augments** the geometry checks; it does not replace them.
+Containment (SG2) and RSS (SG1) always run when posture is `Nominal` or
+`Degraded`, so a corridor breach under `Degraded` still produces
+`MRCFallback` (most-restrictive-wins).
+
+The current-posture cache lives on `AdaptorState::current_posture`
+(default `Nominal`) with `update_posture` / `current_posture` accessors.
+Until **M1b** lands — wiring this cache to a live source (an SSE
+subscriber on the verifier's `/system/posture/stream`, or a bridged ROS 2
+posture topic from a fleet-monitor node) — the adapter behaves exactly
+as the pre-M1 path did.
+
+Enforcement site: `crates/kirra-ros2-adapter/src/validation.rs::validate_trajectory_slow`
+(SAFETY: SG8 | REQ: posture-driven-profile-selection). Helper:
+`VehicleConfig::to_mrc_kinematics_contract`
+(SAFETY: SG8 | REQ: mrc-derated-contract-shape).
+
 ## 9. Demo (CARLA + scenario_runner)
 
 Autoware-in-CARLA as the doer; Governor as the final gate. Inject:
