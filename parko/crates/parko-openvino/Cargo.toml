@@ -1,0 +1,33 @@
+# parko/crates/parko-openvino/Cargo.toml
+#
+# OpenVINO inference backend for parko-core. Mirrors `parko-onnx`:
+#   - Always-compiles default. The `openvino` crate is gated on the
+#     `runtime-linking` feature so `cargo build` does NOT require the
+#     OpenVINO toolkit installed at build time. The shared library is
+#     discovered at runtime via the OpenVINO crate's standard
+#     mechanism — `OPENVINO_LIB_PATH` (or the OS-default search path
+#     when the toolkit is `apt`-installed).
+#   - Implements `parko_core::backend::InferenceBackend` so the
+#     existing `InferenceLoop` + `GovernorComparator` + parko-ros2
+#     transport all work unchanged with this backend.
+
+[package]
+name = "parko-openvino"
+version = "0.1.0"
+edition = "2021"
+description = "OpenVINO inference backend for parko-core (CPU device; runtime-linked)"
+license = "Apache-2.0"
+
+[dependencies]
+parko-core = { path = "../parko-core" }
+# `runtime-linking` is the OpenVINO analog of ort's `load-dynamic`:
+# the build does NOT link against libopenvino_c.so at build time;
+# the crate dlopens it at runtime. This matches the parko-onnx
+# layout where the workspace builds without the runtime installed.
+openvino   = { version = "0.11", features = ["runtime-linking"] }
+
+[dev-dependencies]
+# The cross-backend equivalence test loads the same MNIST ONNX file
+# parko-onnx already tests against. OpenVINO ingests ONNX directly
+# (no separate IR conversion needed).
+parko-onnx = { path = "../parko-onnx" }

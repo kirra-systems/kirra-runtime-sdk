@@ -39,6 +39,24 @@ The workspace contains three crates:
 - One backend implementation: `OrtBackend` (CPU only)
 - Integration test passing against MNIST-12
 
+**`parko-openvino`** — OpenVINO backend, using the `openvino` crate.
+- One backend implementation: `OvBackend` (CPU device, ingests ONNX directly)
+- Integration tests including a **cross-backend numerical-equivalence
+  test** against the same MNIST-12 fixture parko-onnx uses — the first
+  evidence that the `InferenceBackend` abstraction works for two
+  independent runtimes (the core of the vendor-neutral thesis).
+
+### Backend status
+
+| Backend | Crate | Hardware | Runtime install | Status |
+|---|---|---|---|---|
+| ONNX Runtime CPU | `parko-onnx` | any x86 CPU | `libonnxruntime.so` + `ORT_DYLIB_PATH` (v1.24.2) | ✅ full |
+| Intel OpenVINO | `parko-openvino` | any x86 Intel CPU | `libopenvino_c.so` from the Intel apt repo (`openvino-2024.x`) | ✅ full (CPU; `cargo build` does not require the toolkit) |
+| TensorRT (NVIDIA) | — | NVIDIA GPU | — | planned (PARK-020) |
+| Qualcomm QNN | — | Qualcomm NPU | — | planned (PARK-027) |
+| TI TIDL | — | TI hardware | — | planned (PARK-028) |
+| AMD Vitis | — | AMD hardware | — | planned (PARK-030) |
+
 **`parko-kirra`** — Kirra safety kernel adapter.
 - Implements `SafetyGovernor` via the Kirra kinematics contract
 - Enforces linear velocity bounds; selects nominal or MRC fallback profile by `FleetPosture`
@@ -71,6 +89,41 @@ Run the tests with `ORT_DYLIB_PATH` set:
 ```bash
 cd parko && ORT_DYLIB_PATH=$HOME/.local/onnxruntime/lib/libonnxruntime.so cargo test -p parko-onnx 2>&1
 ```
+
+## Running parko-openvino tests
+
+parko-openvino uses the `openvino` crate with the `runtime-linking`
+feature — the analog of ort's `load-dynamic`. This requires
+`libopenvino_c.so` to be available at runtime; `cargo build` does not
+need the toolkit installed.
+
+The recommended install path is the Intel public apt repository (see
+the [OpenVINO 2024 install guide](https://docs.openvino.ai/2024/get-started/install-openvino/install-openvino-linux.html)):
+
+```bash
+wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+  | sudo gpg --dearmor -o /usr/share/keyrings/intel.gpg
+echo "deb [signed-by=/usr/share/keyrings/intel.gpg] https://apt.repos.intel.com/openvino/2024 ubuntu22 main" \
+  | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
+sudo apt-get update && sudo apt-get install -y openvino-2024.5.0
+```
+
+Run the tests with the library path exported:
+
+```bash
+cd parko && \
+  LD_LIBRARY_PATH=/opt/intel/openvino/runtime/lib/intel64 \
+  OPENVINO_LIB_PATH=/opt/intel/openvino/runtime/lib/intel64 \
+  cargo test -p parko-openvino
+```
+
+The integration suite includes a **cross-backend equivalence test**
+(`ort_ov_output_equivalence_on_mnist`) that loads the same MNIST-12
+ONNX file in both `OrtBackend` and `OvBackend`, runs the same input,
+and asserts the outputs match within `EQUIV_TOL = 1e-3` per element.
+This is the first numerical-equivalence check across backends — it
+seeds the planned model-validation tooling (a generic harness that
+can swap any two `InferenceBackend` impls).
 
 ## Running parko-kirra tests
 

@@ -121,6 +121,50 @@ jobs:
           ORT_DYLIB_PATH: ${{ env.HOME }}/.local/onnxruntime/lib/libonnxruntime.so
         run: cargo test -p parko-onnx
 
+  parko-openvino:
+    name: Parko OpenVINO Backend Tests (apt openvino-2024)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install OpenVINO runtime (Intel apt repo, 2024.x)
+        # The `openvino = "0.11"` crate links against OpenVINO 2024.x.
+        # Intel ships a Debian package via their public apt repo —
+        # this is the upstream-supported install path. The
+        # `runtime-linking` feature means the crate dlopens
+        # libopenvino_c.so at backend construction (OvBackend::new)
+        # rather than at build time; the build never needed this,
+        # but the integration tests do.
+        run: |
+          set -euo pipefail
+          # Intel public GPG key + apt repo (per
+          # https://docs.openvino.ai/2024/get-started/install-openvino/install-openvino-linux.html).
+          wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+            | sudo gpg --dearmor -o /usr/share/keyrings/intel.gpg
+          echo "deb [signed-by=/usr/share/keyrings/intel.gpg] https://apt.repos.intel.com/openvino/2024 ubuntu22 main" \
+            | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
+          sudo apt-get update
+          sudo apt-get install -y openvino-2024.5.0
+          # Find the C library — the openvino-finder probes the
+          # standard install paths automatically, but we sanity-check
+          # before running the tests so a missing lib produces a
+          # clear CI failure rather than a panic deep in a test.
+          find /opt/intel -name "libopenvino_c.so*" -print | head -5
+      - name: parko-openvino tests
+        # OpenVINO-dependent. Same flakiness disposition as
+        # parko-onnx: if this job becomes unreliable in CI (Intel apt
+        # outage, future Ubuntu ABI break), it MAY be flipped to
+        # `continue-on-error: true`. The parko-safety gate above must
+        # remain gating regardless.
+        working-directory: parko
+        env:
+          # The openvino-finder crate uses LD_LIBRARY_PATH /
+          # OPENVINO_LIB_PATH when set; the apt install lands the
+          # library at /opt/intel/openvino/runtime/lib/intel64/.
+          LD_LIBRARY_PATH: /opt/intel/openvino/runtime/lib/intel64
+          OPENVINO_LIB_PATH: /opt/intel/openvino/runtime/lib/intel64
+        run: cargo test -p parko-openvino
+
   static-analysis:
     name: Static Analysis (ISO 26262)
     runs-on: ubuntu-latest
