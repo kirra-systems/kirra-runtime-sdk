@@ -64,6 +64,63 @@ jobs:
         # instrumentation overhead invalidates wall-clock thresholds.
         run: cargo test -p kirra-runtime-sdk --lib wcet_gate::ci_gate_tests
 
+  parko-safety:
+    name: Parko Safety Tests (no ROS, no ORT)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: parko safety-critical tests
+        # `parko/` is a separate workspace and the root `cargo test
+        # --workspace` does NOT descend into it. Without this job the
+        # ML-path safety tests (parko-core RSS + NaN failsafe,
+        # parko-kirra H1 angular-velocity bound + GovernorComparator
+        # divergence detection, parko-ros2 M2 MockBackend fail-closed
+        # paths) compile as path deps but never RUN in CI — a
+        # regression to e.g. the H1 angular cap would land on main with
+        # CI green.
+        #
+        # `--exclude parko-onnx` keeps this job ORT-free (the
+        # parko-onnx tests need libonnxruntime + ORT_DYLIB_PATH; see
+        # the parko-onnx job below). Future parko crates added to the
+        # sub-workspace (parko-ros2 already, anything else later) are
+        # picked up automatically by `--workspace`.
+        working-directory: parko
+        run: cargo test --workspace --exclude parko-onnx
+
+  parko-onnx:
+    name: Parko ONNX Backend Tests (ORT v1.24.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ONNX Runtime v1.24.2
+        # Exact version match: `ort 2.0.0-rc.12` (pinned in
+        # parko-onnx/Cargo.toml) is compiled against
+        # ORT_API_VERSION = 24, which requires ONNX Runtime v1.24.x.
+        # The matching minor is v1.24.2 per parko/README.md §"Building
+        # and testing parko-onnx" — older runtimes deadlock in the ort
+        # error path (documented upstream bug in 2.0.0-rc.12).
+        run: |
+          set -euo pipefail
+          curl -L -o /tmp/onnxruntime-1.24.2.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz
+          mkdir -p "$HOME/.local/onnxruntime"
+          tar -xzf /tmp/onnxruntime-1.24.2.tgz \
+            -C "$HOME/.local/onnxruntime" --strip-components=1
+          test -f "$HOME/.local/onnxruntime/lib/libonnxruntime.so" \
+            || (echo "libonnxruntime.so missing after install"; exit 1)
+      - name: parko-onnx tests
+        # ORT-dependent. If this job proves flaky in CI (network
+        # download, ABI mismatch on a future Ubuntu image, etc.), it
+        # MAY be flipped to `continue-on-error: true` so the safety
+        # gate above continues to gate on its own — but the safety
+        # gate must NEVER be made non-gating.
+        working-directory: parko
+        env:
+          ORT_DYLIB_PATH: ${{ env.HOME }}/.local/onnxruntime/lib/libonnxruntime.so
+        run: cargo test -p parko-onnx
+
   static-analysis:
     name: Static Analysis (ISO 26262)
     runs-on: ubuntu-latest
