@@ -133,6 +133,99 @@ parko-kirra depends on the kirra-runtime-sdk at the repository root. No addition
 cd parko && cargo test -p parko-kirra 2>&1
 ```
 
+## SensorInputMapping library — camera + odometry
+
+`parko-ros2::sensor_mapping` ships **pre-tested mappings for the two most common Parko inputs**: camera images and odometry/state. Integrators pick a config and plug a mapping into the Parko node — no hand-written normalization, channel-order, layout, or quaternion code required.
+
+### Camera
+
+```rust
+use parko_ros2::{
+    CameraConfig, CameraEncoding, CameraLayout, CameraMapping,
+    CameraNormalization, CameraResize,
+};
+
+let mapping = CameraMapping::new(CameraConfig {
+    encoding:      CameraEncoding::Bgr8,         // sensor_msgs/Image is typically bgr8
+    target_height: 224, target_width: 224,       // model input dims
+    resize:        CameraResize::Nearest,        // M1 default; bilinear is a future feature
+    normalization: CameraNormalization::MeanStd {
+        mean: vec![0.485, 0.456, 0.406],         // ImageNet
+        std:  vec![0.229, 0.224, 0.225],
+    },
+    layout:        CameraLayout::Nchw,           // PyTorch / ONNX
+    tensor_name:   "input".to_string(),
+});
+```
+
+**Configurable surface:**
+
+| Field | Choices | Notes |
+|---|---|---|
+| `encoding` | `Rgb8`, `Bgr8`, `Mono8` | The output is **always RGB-ordered** for 3-channel encodings — `Bgr8` source bytes are channel-swapped on the way out, eliminating the classic-bug rgb-vs-bgr confusion |
+| `normalization` | `Unit01` (`[0,1]`), `SignedUnit` (`[-1,1]`), `MeanStd { mean, std }` | Per-channel mean/std required for ImageNet-style models |
+| `layout` | `Nchw` (PyTorch/ONNX), `Nhwc` (TensorFlow/TFLite) | Match the model's input contract |
+| `resize` | `Nearest` | Bilinear is the next addition |
+| `target_height`, `target_width` | u32 | The output is resized to these dims via the configured algorithm |
+| `tensor_name` | String | Must match the model's input-node name |
+
+**Defaults chosen + rationale:**
+- **Resize: nearest-neighbour** — simplest to test exactly, no interpolation artifacts. Bilinear is the obvious next addition and will be feature-gated so existing nearest-resize models don't drift.
+- **Layout: NCHW** — matches the MNIST-12 ONNX fixture and the dominant PyTorch/ONNX convention; NHWC is supplied for TFLite users.
+
+**Errors:** the pure transform returns `Result<TensorBatch, CameraMappingError>`. The trait-level `to_frame` falls back to a zero tensor + a `tracing::error!` so the downstream tick pipeline's staleness / governor MRC path kicks in — fail-closed by construction.
+
+### Odometry
+
+```rust
+use parko_ros2::{OdomConfig, OdomMapping, OdomOrientation};
+
+let mapping = OdomMapping::new(OdomConfig {
+    include_position:         true,
+    include_orientation:      Some(OdomOrientation::Yaw),   // planar control default
+    include_linear_velocity:  true,
+    include_angular_velocity: true,
+    tensor_name:              "state".to_string(),
+});
+```
+
+**Configurable surface:**
+
+| Field | Choices | Notes |
+|---|---|---|
+| `include_position` | bool | (x, y, z) — 3 floats |
+| `include_orientation` | `None`, `Some(Yaw)`, `Some(FullEuler)`, `Some(Quaternion)` | 0, 1, 3, or 4 floats respectively. **`Yaw` is the planar-control default** and matches `kirra-ros2-adapter::geometry::quat_to_yaw` |
+| `include_linear_velocity` | bool | (vx, vy, vz) — 3 floats |
+| `include_angular_velocity` | bool | (wx, wy, wz) — 3 floats |
+| `tensor_name` | String | Must match the model's input-node name |
+
+**Output vector layout** (each block present only if its toggle is on, in this fixed order):
+
+```
+[ pos.x, pos.y, pos.z,    {orientation block},    vlin.x, vlin.y, vlin.z,    vang.x, vang.y, vang.z ]
+```
+
+**Quaternion convention:** ROS `(x, y, z, w)`. The conversion uses Tait–Bryan ZYX intrinsic Euler — same convention the `kirra-ros2-adapter::geometry::quat_to_yaw` helper uses, so the adapter and parko-ros2 agree on what "yaw" means.
+
+### Plugging into the Parko node
+
+```rust
+use std::sync::Arc;
+let mapping = Arc::new(mapping);   // Arc<CameraMapping> or Arc<OdomMapping>
+// hand `mapping` to `parko_ros2::node::run_node(.., mapping, ..)`
+```
+
+The trait dispatch keeps the pipeline generic — the same `run_node` accepts any `SensorInputMapping` impl.
+
+### What's tested now vs. what needs ROS
+
+| Component | Tested on stable today | Requires ROS / runtime |
+|---|---|---|
+| `CameraMapping::to_tensor` (pure transform) | ✅ rgb vs bgr channel order, NCHW vs NHWC, all 3 normalizations, mono, resize up + down, all 3 error paths | — |
+| `OdomMapping::to_tensor` (pure transform) | ✅ quaternion → yaw (positive + negative), full Euler, raw quaternion, field selection, vector layout | — |
+| `sensor_msgs/Image` → `OwnedCameraSample` shim | — | ros2 feature (next-milestone wiring) |
+| `nav_msgs/Odometry` → `OdomSample` shim | — | ros2 feature (next-milestone wiring) |
+
 ## Design notes
 
 ### Why a separate trait abstraction for backends and governors

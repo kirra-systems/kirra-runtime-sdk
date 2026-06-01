@@ -39,5 +39,9 @@ pub mod node;
 pub use crate::command_mapping::{enforce_outgoing_twist, OutgoingTwist};
 pub use crate::comparator_adapter::ComparatorAsGovernor;
 pub use crate::config::ParkoNodeConfig;
-pub use crate::sensor_mapping::SensorInputMapping;
+pub use crate::sensor_mapping::{
+    CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
+    CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping,
+    OdomOrientation, OdomSample, OwnedCameraSample, SensorInputMapping,
+};
 pub use crate::tick_pipeline::{run_pipeline_tick, TickError, TickOutcome};
