@@ -212,7 +212,10 @@ fn test_classify_actuator_and_control_are_write_state() {
     assert_eq!(classify_http_command("POST", "/actuator/servo"),   OperationalCommand::WriteState);
     assert_eq!(classify_http_command("PUT",  "/actuator/valve"),   OperationalCommand::WriteState);
     assert_eq!(classify_http_command("POST", "/cmd_vel"),          OperationalCommand::WriteState);
-    assert_eq!(classify_http_command("POST", "/control/arm"),      OperationalCommand::WriteState);
+    // #69 / SG-006: `/control/arm` is NOT a registered route and NOT on the
+    // write-path allowlist, so it now classifies as Unknown (denied in all
+    // postures) rather than silently riding the old catch-all into WriteState.
+    assert_eq!(classify_http_command("POST", "/control/arm"),      OperationalCommand::Unknown);
 }
 
 #[test]
