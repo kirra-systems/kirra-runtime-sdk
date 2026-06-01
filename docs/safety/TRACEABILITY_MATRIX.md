@@ -30,7 +30,8 @@ Do not edit by hand — re-run the script.
 | SG7 | `src/gateway/policy.rs:17` | doer-agnostic-classification | sg7_doer_agnostic_verdict_byte_identical_across_ingress_paths,test_safety_goal_sg_006_unknown_command_denial |
 | SG7 | `src/gateway/policy_layer.rs:466` | doer-agnostic-verdict | sg7_doer_agnostic_verdict_byte_identical_across_ingress_paths |
 | SG8 | `crates/kirra-ros2-adapter/src/validation.rs:258` | fast-loop-trajectory-conformance | test_conforming_command_passes,test_overspeed_command_mrcs,test_stale_trajectory_mrcs,test_no_trajectory_mrcs |
-| SG8 | `parko/crates/parko-kirra/src/lib.rs:115` | mrc-velocity-ceiling-clamp | degraded_above_cap_clamps_to_mrc_ceiling,rss_unsafe_above_ceiling_clamps_to_mrc |
+| SG8 | `parko/crates/parko-kirra/src/lib.rs:209` | mrc-envelope-multiaxis-clamp | degraded_above_cap_clamps_to_mrc_ceiling,rss_unsafe_above_ceiling_clamps_to_mrc,degraded_angular_above_bound_clamps_to_mrc_angular_ceiling,degraded_both_axes_above_bound_returns_clampmotion |
+| SG8 | `parko/crates/parko-kirra/src/lib.rs:236` | angular-velocity-bound | nominal_angular_above_bound_clamps_to_max,nominal_angular_below_bound_passes_through,in_place_rotation_above_bound_is_clamped,linear_and_angular_both_above_bound_returns_clampmotion,locked_out_dominates_high_angular_velocity,reverse_spin_above_bound_clamps_with_correct_sign |
 | SG8 | `src/fabric/governor.rs:89` | fabric-posture-gated-mrc-or-deny | test_locked_out_denies_all_commands,test_mrc_profile_selected_on_degraded_posture |
 | SG8 | `src/gateway/policy_layer.rs:46` | posture-resolve-fails-closed-locked-out | test_none_cache_denies_all_commands,test_empty_posture_cache_fails_closed_as_locked_out |
 | SG8 | `src/gateway/policy_layer.rs:82` | posture-to-contract-mrc-selection | test_degraded_posture_selects_mrc_contract,test_degraded_posture_clamps_high_speed_to_mrc_limit,test_locked_out_posture_has_no_contract,test_locked_out_rejects_zero_motion_command |
