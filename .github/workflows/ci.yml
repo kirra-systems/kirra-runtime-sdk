@@ -35,15 +35,34 @@ jobs:
         # TODO: restore `--mcdc` once cargo-llvm-cov and rustc nightly realign on
         # the coverage-options value. Current nightly accepts only block|branch|
         # condition; --branch is the closest substitute that compiles today.
+        #
+        # `--skip wcet_gate` excludes WCET timing assertions from the
+        # instrumented run. llvm-cov instrumentation adds 20–50% overhead on
+        # O(n) scans, which invalidates wall-clock budgets. The authoritative
+        # WCET measurement runs in the dedicated `wcet-gate` job below on a
+        # clean stable toolchain.
         run: |
           cargo llvm-cov --workspace --branch \
             --ignore-filename-regex='/.cargo/registry' \
-            --lcov --output-path lcov.info
+            --lcov --output-path lcov.info \
+            -- --skip wcet_gate
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           files: lcov.info
           fail_ci_if_error: false
+
+  wcet-gate:
+    name: WCET Gate (non-instrumented timing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run WCET gate tests
+        # Authoritative WCET measurement. Runs on stable, non-instrumented,
+        # without llvm-cov. The coverage job above skips these tests because
+        # instrumentation overhead invalidates wall-clock thresholds.
+        run: cargo test -p kirra-runtime-sdk --lib wcet_gate::ci_gate_tests
 
   static-analysis:
     name: Static Analysis (ISO 26262)
