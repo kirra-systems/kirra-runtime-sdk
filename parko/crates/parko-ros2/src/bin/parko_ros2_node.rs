@@ -28,7 +28,7 @@ use parko_core::backends::mock::MockBackend;
 use parko_core::commands::ControlCommand;
 use parko_core::safety::SafetyPosture;
 use parko_core::scheduler::InferenceLoop;
-use parko_kirra::{GovernorComparator, KirraGovernor};
+use parko_kirra::{DiverseKirraGovernor, GovernorComparator, KirraGovernor};
 use parko_ros2::{
     comparator_adapter::ComparatorAsGovernor,
     config::ParkoNodeConfig,
@@ -91,7 +91,10 @@ where
         }
     });
 
-    let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+    // CERT-006: diverse redundancy — primary KirraGovernor paired with a
+    // structurally diverse DiverseKirraGovernor shadow, so the comparator can
+    // catch implementation-level systematic faults, not just random ones.
+    let comparator = GovernorComparator::new(KirraGovernor::new(), DiverseKirraGovernor::new());
     let infer = InferenceLoop::new(backend, model, actuator_tx)
         .with_governor(ComparatorAsGovernor(comparator))
         .with_tick_period(tick_period_s);

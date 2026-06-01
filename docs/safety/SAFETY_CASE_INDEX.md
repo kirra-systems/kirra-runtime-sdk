@@ -25,6 +25,7 @@ Date: 2026-05-23
 | AEGIS-61508-001 | IEC 61508 SIL 3 Preliminary Claim Mapping | 1.0.0 | Draft | docs/safety/IEC_61508_MAPPING.md | 2026-05-23 |
 | KIRRA-SIL3-001 | IEC 61508 SIL 3 Requirements Mapping (current) | 1.0 | Draft | docs/safety/IEC_61508_SIL3_MAPPING.md | 2026-05-29 |
 | KIRRA-REV-001 | External Security/Safety Review Wrap-Up | 1.0 | Final | docs/safety/REVIEW_WRAPUP_2026-05-30.md | 2026-05-30 |
+| KIRRA-CERT006-DIVERSITY-001 | Governor Comparator Diversity Argument (CERT-006; structural/algorithmic diverse shadow + honest limits) | 0.1 | Draft — pending review | docs/safety/COMPARATOR_DIVERSITY.md | 2026-06-01 |
 | KIRRA-OCCY-SG-001 | Occy Safety Goals (HARA + STPA derivation for Occy planner item; complements AEGIS-SG-001) | 0.1 | Draft | docs/safety/OCCY_SAFETY_GOALS.md | 2026-05-30 |
 | KIRRA-OCCY-ODD-001 | Occy ODD + SOTIF triggering-condition catalog (ISO 21448) | 0.1 | Draft | docs/safety/OCCY_SOTIF.md | 2026-05-31 |
 | KIRRA-OCCY-SPEED-001 | Occy speed-envelope analysis (SSD / breaking-point / derate) | 0.1 | Draft | docs/safety/SPEED_ENVELOPE.md | 2026-05-31 |

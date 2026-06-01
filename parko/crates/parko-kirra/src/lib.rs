@@ -44,8 +44,10 @@ use parko_core::RssState;
 
 pub mod angular_bound;
 pub mod comparator;
+pub mod diverse;
 pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEAR_VELOCITY_MPS};
-pub use comparator::GovernorComparator;
+pub use comparator::{GovernorComparator, RssAwareGovernor};
+pub use diverse::DiverseKirraGovernor;
 
 /// MRC (Minimum Risk Condition) velocity ceiling.
 /// Applied when posture is Degraded or RSS state is unsafe.

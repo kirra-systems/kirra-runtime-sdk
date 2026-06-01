@@ -8,3 +8,6 @@ license = "Apache-2.0"
 [dependencies]
 parko-core = { path = "../parko-core" }
 kirra-runtime-sdk = { path = "../../.." }
+
+[dev-dependencies]
+proptest = "1"

@@ -12,6 +12,7 @@
 // (fallback). Read the module carefully before modifying — the
 // complexity below exists specifically to prevent a hard stop at speed.
 
+use crate::diverse::DiverseKirraGovernor;
 use crate::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
@@ -19,6 +20,30 @@ use parko_core::RssState;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// RSS-aware governor capability
+// ---------------------------------------------------------------------------
+
+/// A [`SafetyGovernor`] whose RSS safe-distance state can be updated.
+///
+/// `SafetyGovernor::evaluate` is stateless w.r.t. RSS, but the Kirra
+/// governors hold an RSS gate that the control loop refreshes each cycle.
+/// The comparator is generic over the shadow governor (CERT-006 diversity),
+/// so it needs a trait to push RSS state into whatever shadow is wired —
+/// the primary `KirraGovernor` or the `DiverseKirraGovernor`.
+///
+/// The method is named `set_rss_state` (not `update_rss_state`) to avoid
+/// shadowing the governors' existing inherent `update_rss_state` methods.
+pub trait RssAwareGovernor: SafetyGovernor {
+    fn set_rss_state(&mut self, state: RssState);
+}
+
+impl RssAwareGovernor for KirraGovernor {
+    fn set_rss_state(&mut self, state: RssState) {
+        self.update_rss_state(state);
+    }
+}
 
 /// Tolerance for floating-point comparison between primary and shadow.
 /// 1e-9 is effectively exact equality for f64 safety computations.
@@ -193,44 +218,36 @@ struct DivState {
 /// to LockedOut **only** when the divergence is persistent **AND** the
 /// vehicle is already at a safe speed — never as a hard stop at speed.
 ///
-/// # FOLLOW-UP (true diverse redundancy)
+/// # Redundancy Model (CERT-006)
 ///
-/// `GovernorComparator` is hard-wired to two `KirraGovernor` instances, so
-/// primary and shadow run identical code and only catch RANDOM faults.
-/// Making the comparator generic over `SafetyGovernor` would (a) allow an
-/// independent second implementation as the shadow — the implementation
-/// diversity the safety case says automotive requires — and (b) make
-/// angular-divergence reachable in integration tests via a mock governor.
-/// Tracked separately.
+/// The comparator is generic over the shadow governor `S`. The default,
+/// and the production wiring, pairs the primary `KirraGovernor` with the
+/// structurally diverse `DiverseKirraGovernor` (`S = DiverseKirraGovernor`).
 ///
-/// # Redundancy Model
+/// - **Diverse redundancy (default).** Primary and shadow enforce the SAME
+///   safety properties via DIFFERENT computation (see
+///   `crate::diverse::DiverseKirraGovernor`). This catches RANDOM faults AND
+///   the most common class of SYSTEMATIC faults: implementation-level logic
+///   / numerical bugs, which are unlikely to manifest identically in two
+///   structurally different code paths.
+/// - **Identical redundancy (`S = KirraGovernor`).** Still constructible
+///   (e.g. for tests). Catches RANDOM faults only — a logic bug in the
+///   shared code path produces the same wrong output in both copies and the
+///   comparator stays silent.
 ///
-/// Primary and shadow currently run IDENTICAL code. This catches
-/// RANDOM faults (memory corruption, bit flips, transient errors) and
-/// state divergence from differing inputs / updates. It does NOT catch
-/// systematic faults — a logic bug in the shared code path produces
-/// the same wrong output in both instances and the comparator stays
-/// silent.
+/// ## Honest limit (do not overstate in any safety case)
 ///
-/// ## Diversity roadmap (do not overstate in any safety case)
-///
-/// - Parameterized diversity (different rate-limit / recovery params
-///   per instance) catches ONLY state-/config-DEPENDENT systematic
-///   faults. Shared-code-path logic faults (e.g. a wrong comparison
-///   operator in the clamp) survive it. It is a weak mitigation.
-/// - Independent implementation (two codebases) is the gold standard
-///   for systematic faults, but a common SPECIFICATION fault still
-///   defeats it — diverse review of the spec is part of the story.
-///
-/// **Current:** identical redundancy + posture-aware, speed-gated
-/// divergence handling. Adequate for stationary / slow robots and
-/// industrial systems. **High-speed automotive deployment REQUIRES
-/// implementation diversity in addition to this fix.**
+/// The diverse shadow shares the SPECIFICATION and the config/contract with
+/// the primary. A SPEC-level fault (a wrong limit value, or a flaw in the
+/// shared ω_max derivation) appears identically in both and is NOT caught.
+/// Closing that requires diverse spec review and ultimately an N-version
+/// clean-room reimplementation. See `docs/safety/COMPARATOR_DIVERSITY.md`
+/// (DRAFT — pending safety-engineer review).
 ///
 /// Per CERT-006 — ISO 26262 ASIL-D decomposition argument.
-pub struct GovernorComparator {
+pub struct GovernorComparator<S: SafetyGovernor = DiverseKirraGovernor> {
     primary: KirraGovernor,
-    shadow: KirraGovernor,
+    shadow: S,
     state: Mutex<DivState>,
     sink: Arc<dyn DivergenceEventSink>,
 }
@@ -305,10 +322,14 @@ pub(crate) fn actions_diverge(
     (p_lin - s_lin).abs() > tol || (p_ang - s_ang).abs() > tol
 }
 
-impl GovernorComparator {
-    /// Create a comparator with two independent governor instances and the
-    /// default in-memory divergence sink.
-    pub fn new(primary: KirraGovernor, shadow: KirraGovernor) -> Self {
+impl<S: SafetyGovernor> GovernorComparator<S> {
+    /// Create a comparator with a primary `KirraGovernor` and a shadow
+    /// governor `S`, and the default in-memory divergence sink.
+    ///
+    /// Production wiring passes a `DiverseKirraGovernor` shadow (CERT-006
+    /// implementation diversity); passing a second `KirraGovernor` yields the
+    /// legacy identical-redundancy comparator.
+    pub fn new(primary: KirraGovernor, shadow: S) -> Self {
         Self::with_sink(primary, shadow, Arc::new(InMemoryDivergenceSink::new()))
     }
 
@@ -317,7 +338,7 @@ impl GovernorComparator {
     /// in `kirra-runtime-sdk`.
     pub fn with_sink(
         primary: KirraGovernor,
-        shadow: KirraGovernor,
+        shadow: S,
         sink: Arc<dyn DivergenceEventSink>,
     ) -> Self {
         Self {
@@ -465,12 +486,15 @@ impl GovernorComparator {
         action
     }
 
+}
+
+impl<S: RssAwareGovernor> GovernorComparator<S> {
     /// Update RSS state on both governors. Must be called via this method
     /// (not on either inner governor directly) to maintain identical state
     /// between primary and shadow.
     pub fn update_rss_state(&mut self, state: RssState) {
         self.primary.update_rss_state(state.clone());
-        self.shadow.update_rss_state(state);
+        self.shadow.set_rss_state(state);
     }
 }
 
@@ -874,6 +898,102 @@ mod tests {
             !actions_diverge(&p, &s, &proposed, COMPARATOR_TOLERANCE),
             "Same physical effect via different variants must not be flagged \
              (compare effect, not variant)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // CERT-006 — DETECTION: a seeded systematic fault in ONE governor
+    // path must make the comparator diverge and escalate (fail-closed).
+    //
+    // This is the demonstrable half of the diversity argument: we inject a
+    // fault into the shadow and prove the comparator catches the resulting
+    // disagreement. (The CORRECTNESS / no-false-divergence half — that the
+    // real DiverseKirraGovernor AGREES with the primary on valid inputs —
+    // lives in `crate::diverse::tests`.)
+    // -----------------------------------------------------------------
+
+    /// A deliberately-broken shadow governor: it omits the linear
+    /// ODD-ceiling / rate clamp entirely (always `Allow` outside LockedOut).
+    /// This models a SYSTEMATIC implementation fault localized to the linear
+    /// envelope — exactly the class identical redundancy cannot see but
+    /// diverse redundancy can.
+    struct CeilingBlindShadow;
+
+    impl SafetyGovernor for CeilingBlindShadow {
+        fn evaluate(
+            &self,
+            _proposed: &ControlCommand,
+            _previous: Option<&ControlCommand>,
+            _delta_time_s: f64,
+            posture: SafetyPosture,
+        ) -> EnforcementAction {
+            match posture {
+                // LockedOut still hard-stops (so the bug is narrow: it agrees
+                // with the primary everywhere except the linear envelope).
+                SafetyPosture::LockedOut => EnforcementAction::Deny {
+                    reason: "CeilingBlindShadow: locked out".to_string(),
+                },
+                // BUG: never clamps the linear axis.
+                _ => EnforcementAction::Allow,
+            }
+        }
+    }
+
+    /// An over-ceiling command makes the correct primary clamp while the
+    /// fault-injected shadow passes it through — the comparator must diverge,
+    /// and at a safe speed escalate to a fail-closed Deny (LockedOut).
+    #[test]
+    fn test_injected_fault_is_detected_and_escalates() {
+        let comparator =
+            GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
+
+        // 40 m/s is above the 35 m/s ODD ceiling: primary → ClampLinear(35),
+        // shadow → Allow(40). Previous = 3 m/s is below SAFE_LOCKOUT_SPEED.
+        let commanded = cmd(40.0);
+        let slow_prev = cmd(3.0);
+
+        // First tick already diverges and reconciles (no hard stop at speed).
+        let first =
+            comparator.evaluate(&commanded, Some(&slow_prev), 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(first, EnforcementAction::ClampMotion { .. }),
+            "First divergent tick must reconcile (ClampMotion), not hard stop. Got {first:?}"
+        );
+
+        // Sustained divergence at a safe speed escalates to LockedOut.
+        let mut last = first;
+        for _ in 0..10 {
+            last = comparator.evaluate(&commanded, Some(&slow_prev), 0.05, SafetyPosture::Nominal);
+        }
+        assert!(
+            matches!(last, EnforcementAction::Deny { .. }),
+            "Persistent injected-fault divergence at safe speed must escalate \
+             to a fail-closed Deny. Got {last:?}"
+        );
+        if let EnforcementAction::Deny { reason } = last {
+            assert!(
+                reason.contains("divergence"),
+                "Escalation Deny must reference divergence; got {reason:?}"
+            );
+        }
+    }
+
+    /// Control case: with the SAME fault-injected shadow but an in-envelope
+    /// command (both governors return the same physical effect), the
+    /// comparator must NOT diverge — proving the detection above is caused by
+    /// the fault, not by the pairing itself.
+    #[test]
+    fn test_injected_fault_silent_when_command_in_envelope() {
+        let comparator =
+            GovernorComparator::new(KirraGovernor::new(), CeilingBlindShadow);
+        let in_env = cmd(3.0);
+        let prev = cmd(3.0);
+        let out = comparator.evaluate(&in_env, Some(&prev), 0.05, SafetyPosture::Nominal);
+        // Primary Allows (3 m/s steady state), shadow Allows → agreement →
+        // primary output, never a divergence Deny.
+        assert!(
+            !matches!(out, EnforcementAction::Deny { .. }),
+            "In-envelope command must not trigger divergence. Got {out:?}"
         );
     }
 }

@@ -86,12 +86,23 @@ Kirra implementation:
 Source: `src/posture_cache.rs`, `src/verifier.rs`
 
 #### FM-002: Redundant Safety Enforcement (Software Lockstep)
-IEC 61508 reference: §7.4.5 — Redundancy
+IEC 61508 reference: §7.4.5 — Redundancy; §7.4.4 — diverse (N-version) software
 Kirra implementation:
-- `GovernorComparator` runs two independent `KirraGovernor` instances
-- Divergence beyond `COMPARATOR_TOLERANCE = 1e-9` → `EnforcementAction::Deny` (LockedOut semantics)
-- Software equivalent of hardware dual-core lockstep (NVIDIA DRIVE AGX / NXP S32)
-Source: `parko/crates/parko-kirra/src/comparator.rs` (CERT-006)
+- `GovernorComparator` runs a primary `KirraGovernor` against a **diverse**
+  shadow `DiverseKirraGovernor` (CERT-006 diversity). The two enforce the same
+  safety properties via structurally different computation, so a systematic
+  *implementation* fault is unlikely to manifest identically in both. The
+  comparator is generic over the shadow; a second `KirraGovernor` still yields
+  the legacy identical-redundancy pairing (random-fault detection only).
+- Divergence beyond `COMPARATOR_TOLERANCE = 1e-9` → posture-aware, speed-gated
+  escalation to `EnforcementAction::Deny` (LockedOut semantics)
+- Software equivalent of hardware dual-core lockstep (NVIDIA DRIVE AGX / NXP S32),
+  now with implementation diversity layered on top
+- **Honest limit:** diversity is at the implementation layer only; primary and
+  shadow share the specification and config, so spec-level faults are NOT
+  covered. See `docs/safety/COMPARATOR_DIVERSITY.md` (DRAFT — pending review).
+Source: `parko/crates/parko-kirra/src/comparator.rs`,
+`parko/crates/parko-kirra/src/diverse.rs` (CERT-006)
 
 #### FM-003: Watchdog and Telemetry Timeout Detection
 IEC 61508 reference: §7.4.2.5 — Watchdog

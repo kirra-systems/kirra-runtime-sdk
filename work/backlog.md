@@ -1892,6 +1892,21 @@ a follow-up issue.
 
 ## CERT-006 `kirra-governor` `safety-case` `certification`
 
+> **Status: derived / implemented — pending safety-engineer review (NOT closed).**
+> - v1–v3: software lockstep comparator with posture-aware, speed-gated,
+>   two-axis divergence escalation + audit sink (`comparator.rs`).
+> - **Diversity (2026-06-01):** the identical-redundancy instantiation is
+>   replaced by structural/algorithmic diversity (Approach A) —
+>   `DiverseKirraGovernor` (`parko/crates/parko-kirra/src/diverse.rs`) is a
+>   second governor enforcing the same properties via different computation;
+>   the comparator is now generic over the shadow (default = diverse). This
+>   catches implementation-level systematic faults; it does NOT catch
+>   spec-level faults shared by both (honest limit). Full N-version
+>   (Approach B) is the stronger-but-later step.
+> - Diversity argument: `docs/safety/COMPARATOR_DIVERSITY.md`
+>   (KIRRA-CERT006-DIVERSITY-001, DRAFT). Needs the same human review as #136
+>   before it can be cited as validated coverage.
+
 **Primary + Shadow Governor Comparator**
 
 NVIDIA DRIVE AGX uses hardware lockstep — two cores run the same
