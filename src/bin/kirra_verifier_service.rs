@@ -8,7 +8,7 @@ use axum::{
     middleware::{self, Next},
     response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use tower_http::cors::{CorsLayer, Any};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ use kirra_runtime_sdk::standby_monitor::{
 };
 use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_runtime_sdk::gateway::policy_layer::{
-    enforce_actuator_safety_envelope, enforce_posture_routing,
+    enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
 use kirra_runtime_sdk::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
 use kirra_runtime_sdk::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
@@ -1092,24 +1092,36 @@ async fn get_federated_reports(
 
 async fn handle_actuator_motion_command(
     State(svc): State<Arc<ServiceState>>,
+    // Threaded by `enforce_actuator_safety_envelope` (the route always runs it
+    // first). It carries the TRUE verdict — `cmd` below is already the enforced
+    // (post-clamp) command, but only this tells us WHETHER a clamp happened, so
+    // the response can report it instead of always claiming "Allow".
+    Extension(outcome): Extension<EnforcementOutcome>,
     Json(cmd): Json<ProposedVehicleCommand>,
 ) -> impl IntoResponse {
     let now = now_ms();
 
     tracing::info!(
+        action              = %outcome.action.as_str(),
         linear_velocity_mps = %cmd.linear_velocity_mps,
         steering_angle_deg  = %cmd.steering_angle_deg,
         delta_time_s        = %cmd.delta_time_s,
         "Actuator motion command admitted through safety envelope"
     );
 
+    // Record the verdict in the tamper-evident log, including whether a clamp
+    // occurred and the original vs enforced values (previously a clamp was
+    // logged indistinguishably from a plain admit).
     let audit = serde_json::json!({
-        "linear_velocity_mps":        cmd.linear_velocity_mps,
-        "steering_angle_deg":         cmd.steering_angle_deg,
-        "current_velocity_mps":       cmd.current_velocity_mps,
-        "current_steering_angle_deg": cmd.current_steering_angle_deg,
-        "delta_time_s":               cmd.delta_time_s,
-        "admitted_at_ms":             now,
+        "action":                       outcome.action.as_str(),
+        "original_linear_velocity_mps": outcome.original_linear_velocity_mps,
+        "original_steering_angle_deg":  outcome.original_steering_angle_deg,
+        "enforced_linear_velocity_mps": outcome.enforced_linear_velocity_mps,
+        "enforced_steering_angle_deg":  outcome.enforced_steering_angle_deg,
+        "current_velocity_mps":         cmd.current_velocity_mps,
+        "current_steering_angle_deg":   cmd.current_steering_angle_deg,
+        "delta_time_s":                 cmd.delta_time_s,
+        "admitted_at_ms":               now,
     });
     if let Ok(mut store) = svc.app.store.lock() {
         if let Err(e) = store.save_posture_event_chained(
@@ -1121,11 +1133,9 @@ async fn handle_actuator_motion_command(
         }
     }
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "linear_velocity_mps": cmd.linear_velocity_mps,
-        "steering_angle_deg":  cmd.steering_angle_deg,
-        "enforcement_action":  "Allow",
-    }))).into_response()
+    // Response speaks the ROS interceptor's schema (action / enforced_*) AND
+    // the legacy keys (now accurate). See `EnforcementOutcome::response_body`.
+    (StatusCode::OK, Json(outcome.response_body())).into_response()
 }
 
 async fn handle_sensor_fault_report(

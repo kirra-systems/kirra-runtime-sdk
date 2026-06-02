@@ -70,11 +70,16 @@ struct MotionCommandRequest {
     current_steering_angle_deg: f64,
 }
 
+/// Canonical enforcement-response schema — the same keys the ROS
+/// `cmd_vel_interceptor` reads (`action` / `enforced_*`). The gateway also
+/// still emits the legacy `enforcement_action` / `linear_velocity_mps` keys
+/// for transition, but both in-repo consumers now read this canonical form.
+/// Extra keys in the body are ignored by serde.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MotionCommandResponse {
-    linear_velocity_mps: f64,
-    steering_angle_deg: f64,
-    enforcement_action: String,
+    action: String,
+    enforced_linear_velocity_mps: f64,
+    enforced_steering_angle_deg: f64,
     #[serde(default)]
     denial_reason: Option<String>,
 }
@@ -333,15 +338,15 @@ impl KirraClient {
         match resp.status().as_u16() {
             200 => resp.json::<MotionCommandResponse>().map_err(|e| e.to_string()),
             400 => Ok(MotionCommandResponse {
-                linear_velocity_mps: 0.0,
-                steering_angle_deg: 0.0,
-                enforcement_action: "DenyBreach".to_string(),
+                action: "DenyBreach".to_string(),
+                enforced_linear_velocity_mps: 0.0,
+                enforced_steering_angle_deg: 0.0,
                 denial_reason: Some("COMMAND_DENIED".to_string()),
             }),
             403 => Ok(MotionCommandResponse {
-                linear_velocity_mps: 0.0,
-                steering_angle_deg: 0.0,
-                enforcement_action: "DenyBreach".to_string(),
+                action: "DenyBreach".to_string(),
+                enforced_linear_velocity_mps: 0.0,
+                enforced_steering_angle_deg: 0.0,
                 denial_reason: Some("FLEET_LOCKED_OUT".to_string()),
             }),
             s => Err(format!("submit_motion_command: unexpected status {s}")),
@@ -602,9 +607,9 @@ fn run_scenario_headless(
         let cmd = planner.command(&state, DT_S);
         match client.submit_motion_command(&cmd) {
             Ok(resp) => {
-                let enforced_v = resp.linear_velocity_mps;
-                let enforced_delta = resp.steering_angle_deg;
-                match resp.enforcement_action.as_str() {
+                let enforced_v = resp.enforced_linear_velocity_mps;
+                let enforced_delta = resp.enforced_steering_angle_deg;
+                match resp.action.as_str() {
                     "ClampLinear" => {
                         println!("  t={t}ms: CLAMP linear {:.2}\u{2192}{:.2} m/s",
                             cmd.linear_velocity_mps, enforced_v);
@@ -619,7 +624,7 @@ fn run_scenario_headless(
                     }
                     _ => {}
                 }
-                stats.record_enforcement(&resp.enforcement_action);
+                stats.record_enforcement(&resp.action);
                 state = state.step(enforced_v, enforced_delta, DT_S, wheelbase_m);
             }
             Err(e) => {

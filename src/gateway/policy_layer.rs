@@ -56,6 +56,108 @@ fn resolve_posture(svc: &ServiceState) -> FleetPosture {
     }
 }
 
+/// The enforcement verdict the actuator middleware reached for one command,
+/// threaded to the downstream handler via a request extension so the HTTP
+/// RESPONSE can report it faithfully.
+///
+/// WHY THIS EXISTS (Phase 0 schema-coherence finding): the middleware clamps a
+/// command by transparently rewriting the request body, so the handler could
+/// not tell whether a clamp happened — it always reported `"Allow"`, and it
+/// emitted the enforced value only under `linear_velocity_mps` /
+/// `steering_angle_deg`. The ROS `cmd_vel_interceptor` reads `action` /
+/// `enforced_linear_velocity_mps` / `enforced_steering_angle_deg`; finding none
+/// of them, it fell back to forwarding the ORIGINAL (unclamped) command to the
+/// motors — the gateway's clamp never reached the actuator. This type carries
+/// the verdict + both original and enforced values so the response can speak
+/// the interceptor's schema AND keep the legacy keys (accurately).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnforcementOutcome {
+    pub action: EnforcementOutcomeKind,
+    pub original_linear_velocity_mps: f64,
+    pub original_steering_angle_deg: f64,
+    pub enforced_linear_velocity_mps: f64,
+    pub enforced_steering_angle_deg: f64,
+}
+
+/// The enforcement action a 200 response carries (deny is a 4xx, not a 200).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnforcementOutcomeKind {
+    /// Command was within the envelope — forwarded unchanged.
+    Allow,
+    /// Linear velocity was clamped to the envelope ceiling.
+    ClampLinear,
+    /// Steering angle was clamped to the envelope limit.
+    ClampSteering,
+}
+
+impl EnforcementOutcomeKind {
+    /// Stable wire string. Matches the values the ROS interceptor and the CARLA
+    /// client already switch on.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "Allow",
+            Self::ClampLinear => "ClampLinear",
+            Self::ClampSteering => "ClampSteering",
+        }
+    }
+}
+
+impl EnforcementOutcome {
+    fn allow(cmd: &ProposedVehicleCommand) -> Self {
+        Self {
+            action: EnforcementOutcomeKind::Allow,
+            original_linear_velocity_mps: cmd.linear_velocity_mps,
+            original_steering_angle_deg: cmd.steering_angle_deg,
+            enforced_linear_velocity_mps: cmd.linear_velocity_mps,
+            enforced_steering_angle_deg: cmd.steering_angle_deg,
+        }
+    }
+
+    fn clamp_linear(cmd: &ProposedVehicleCommand, safe_speed: f64) -> Self {
+        Self {
+            action: EnforcementOutcomeKind::ClampLinear,
+            original_linear_velocity_mps: cmd.linear_velocity_mps,
+            original_steering_angle_deg: cmd.steering_angle_deg,
+            enforced_linear_velocity_mps: safe_speed,
+            enforced_steering_angle_deg: cmd.steering_angle_deg,
+        }
+    }
+
+    fn clamp_steering(cmd: &ProposedVehicleCommand, safe_angle: f64) -> Self {
+        Self {
+            action: EnforcementOutcomeKind::ClampSteering,
+            original_linear_velocity_mps: cmd.linear_velocity_mps,
+            original_steering_angle_deg: cmd.steering_angle_deg,
+            enforced_linear_velocity_mps: cmd.linear_velocity_mps,
+            enforced_steering_angle_deg: safe_angle,
+        }
+    }
+
+    /// The 200 response body. Carries BOTH the interceptor-aligned keys
+    /// (`action`, `enforced_*`) — the fix — AND the legacy keys
+    /// (`enforcement_action`, `linear_velocity_mps`, `steering_angle_deg`),
+    /// now accurate, for the CARLA client and any existing reader. Also
+    /// surfaces the original (pre-enforcement) values for observability.
+    #[must_use]
+    pub fn response_body(&self) -> serde_json::Value {
+        serde_json::json!({
+            // Interceptor-aligned keys (the schema-coherence fix):
+            "action": self.action.as_str(),
+            "enforced_linear_velocity_mps": self.enforced_linear_velocity_mps,
+            "enforced_steering_angle_deg": self.enforced_steering_angle_deg,
+            // Legacy keys, now accurate (CARLA client reads enforcement_action;
+            // the value fields carry the ENFORCED command):
+            "enforcement_action": self.action.as_str(),
+            "linear_velocity_mps": self.enforced_linear_velocity_mps,
+            "steering_angle_deg": self.enforced_steering_angle_deg,
+            // Pre-enforcement values, for observability / interceptor logging:
+            "original_linear_velocity_mps": self.original_linear_velocity_mps,
+            "original_steering_angle_deg": self.original_steering_angle_deg,
+        })
+    }
+}
+
 /// Actuator command safety envelope middleware.
 ///
 /// Intercepts inbound actuator motion commands, resolves the active fleet posture,
@@ -94,7 +196,7 @@ pub async fn enforce_actuator_safety_envelope(
         }
     };
 
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
 
     // Bounded read — see MAX_VEHICLE_COMMAND_BYTES. axum::body::to_bytes
     // returns Err when the body exceeds the cap, so allocation is capped
@@ -111,6 +213,8 @@ pub async fn enforce_actuator_safety_envelope(
 
     match validate_vehicle_command(&proposed_cmd, &contract) {
         EnforceAction::Allow => {
+            // Thread the verdict to the handler so the response reports it.
+            parts.extensions.insert(EnforcementOutcome::allow(&proposed_cmd));
             let rebuilt = Request::from_parts(parts, Body::from(bytes));
             Ok(next.run(rebuilt).await)
         }
@@ -125,6 +229,9 @@ pub async fn enforce_actuator_safety_envelope(
             clamped_cmd.linear_velocity_mps = safe_speed;
             let serialized = serde_json::to_vec(&clamped_cmd)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            parts
+                .extensions
+                .insert(EnforcementOutcome::clamp_linear(&proposed_cmd, safe_speed));
             let rebuilt = Request::from_parts(parts, Body::from(serialized));
             Ok(next.run(rebuilt).await)
         }
@@ -139,6 +246,9 @@ pub async fn enforce_actuator_safety_envelope(
             clamped_cmd.steering_angle_deg = safe_angle;
             let serialized = serde_json::to_vec(&clamped_cmd)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            parts
+                .extensions
+                .insert(EnforcementOutcome::clamp_steering(&proposed_cmd, safe_angle));
             let rebuilt = Request::from_parts(parts, Body::from(serialized));
             Ok(next.run(rebuilt).await)
         }

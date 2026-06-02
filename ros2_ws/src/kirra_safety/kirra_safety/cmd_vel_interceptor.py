@@ -25,6 +25,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 
+from kirra_safety.enforcement_decision import decide_enforcement, Forward
+
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -156,27 +158,37 @@ class CmdVelInterceptor(Node):
             )
 
             if resp.status_code == 200:
-                result = resp.json()
-                action = result.get('action', 'Allow')
-                enforced_v = result.get('enforced_linear_velocity_mps', proposed['linear_velocity_mps'])
-                enforced_s = result.get('enforced_steering_angle_deg', proposed['steering_angle_deg'])
+                # Parse defensively — a 200 with a non-JSON body is a fault.
+                try:
+                    parsed = resp.json()
+                except ValueError:
+                    parsed = None
 
-                if action == 'DenyBreach':
-                    reason = result.get('reason', 'UNKNOWN')
-                    self._publish_stop(reason)
-                    self._publish_action(f'DENIED:{reason}')
-                    self.get_logger().warn(
-                        f'Kirra denied cmd_vel: {reason} '
-                        f'(requested v={proposed["linear_velocity_mps"]:.2f} m/s)'
-                    )
-                else:
-                    safe_twist = self._build_safe_twist(msg, enforced_v, enforced_s)
+                # Pure, fail-closed decision (see enforcement_decision.py). A 200
+                # is only ever Allow / ClampLinear / ClampSteering (denials are
+                # 400, lockouts 403, handled below). The canonical keys are now
+                # REQUIRED: a 200 missing them — or with a non-finite enforced
+                # value — STOPS the robot. It is NEVER forwarded as the original
+                # (unclamped) command; that removes the last fail-OPEN path.
+                decision = decide_enforcement(200, parsed, proposed)
+                if isinstance(decision, Forward):
+                    safe_twist = self._build_safe_twist(
+                        msg, decision.enforced_v, decision.enforced_s)
                     self._pub_safe.publish(safe_twist)
-                    self._publish_action(f'{action}:v={enforced_v:.2f}')
+                    self._publish_action(f'{decision.action}:v={decision.enforced_v:.2f}')
 
                     with self._lock:
-                        self._current_velocity_mps = enforced_v
-                        self._current_steering_deg = enforced_s
+                        self._current_velocity_mps = decision.enforced_v
+                        self._current_steering_deg = decision.enforced_s
+                else:
+                    # Contract-violating 200 → fail closed, like every other
+                    # anomalous branch of this node.
+                    self._publish_stop(decision.reason)
+                    self._publish_action(f'BLOCKED:{decision.reason}')
+                    self.get_logger().error(
+                        'Kirra 200 missing canonical enforcement keys — stopping, '
+                        f'fail-closed (reason={decision.reason})'
+                    )
 
             elif resp.status_code in (403, 503):
                 # Fleet locked out or Kirra down -- fail closed

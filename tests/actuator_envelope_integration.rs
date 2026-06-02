@@ -14,12 +14,13 @@ use std::sync::atomic::Ordering;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::routing::post;
-use axum::Router;
+use axum::{Extension, Json, Router};
+use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
 
 use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_runtime_sdk::gateway::policy_layer::{
-    enforce_actuator_safety_envelope, enforce_posture_routing,
+    enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
 use kirra_runtime_sdk::posture_cache::{
     CachedFleetPosture, ServiceState, SharedPostureCache,
@@ -185,6 +186,108 @@ async fn test_actuator_envelope_deny_breach_persists_audit_row() {
 // ---------------------------------------------------------------------------
 // GAP 16: HA epoch fence — diverged held/db epoch → 503 + mode_active cleared
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Interceptor schema coherence (Phase 0): the 200 response must carry the keys
+// the ROS cmd_vel_interceptor reads (action / enforced_*), accurately. This
+// probe handler is byte-identical to handle_actuator_motion_command's response
+// path — it reads the threaded EnforcementOutcome and returns response_body().
+// ---------------------------------------------------------------------------
+
+async fn echo_outcome(Extension(outcome): Extension<EnforcementOutcome>) -> Json<Value> {
+    Json(outcome.response_body())
+}
+
+fn build_schema_app(svc: Arc<ServiceState>) -> Router {
+    Router::new()
+        .route("/actuator/motion/command", post(echo_outcome))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&svc),
+            enforce_actuator_safety_envelope,
+        ))
+        .with_state(svc)
+}
+
+async fn send_json(app: Router, body: Body) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/actuator/motion/command")
+        .header("content-type", "application/json")
+        .body(body)
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("router service must not panic");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("read response body");
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+fn cmd_json(linear: f64, current_v: f64, dt: f64, steer: f64, current_s: f64) -> Vec<u8> {
+    serde_json::to_vec(&ProposedVehicleCommand {
+        linear_velocity_mps: linear,
+        current_velocity_mps: current_v,
+        delta_time_s: dt,
+        steering_angle_deg: steer,
+        current_steering_angle_deg: current_s,
+    })
+    .unwrap()
+}
+
+/// An in-envelope command → action "Allow", enforced == original, and the
+/// interceptor keys are present.
+#[tokio::test]
+async fn test_response_schema_allow_carries_interceptor_keys() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(10.0, 9.8, 0.1, 2.0, 1.8))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["action"], "Allow");
+    // interceptor keys present and equal to the original (no clamp).
+    assert_eq!(v["enforced_linear_velocity_mps"], 10.0);
+    assert_eq!(v["enforced_steering_angle_deg"], 2.0);
+    // legacy keys accurate too.
+    assert_eq!(v["enforcement_action"], "Allow");
+    assert_eq!(v["linear_velocity_mps"], 10.0);
+}
+
+/// THE FIX: an over-speed command is clamped, and the clamp is reported under
+/// the key the interceptor reads (`enforced_linear_velocity_mps`) AND
+/// `action == "ClampLinear"` — so the interceptor forwards 35.0, not 100.0.
+#[tokio::test]
+async fn test_response_schema_clamp_linear_is_visible_to_interceptor() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(100.0, 30.0, 0.1, 0.0, 0.0))).await;
+    assert_eq!(status, StatusCode::OK, "over-speed is clamped, not denied");
+    assert_eq!(v["action"], "ClampLinear", "response must report the clamp");
+
+    // The interceptor key MUST be present and carry the clamped value (Nominal
+    // ceiling 35.0) — not the original 100.0 it would otherwise forward.
+    let enforced = v["enforced_linear_velocity_mps"].as_f64().expect("key present");
+    assert!((enforced - 35.0).abs() < 0.01, "clamped to 35.0, got {enforced}");
+    assert!(enforced < 100.0);
+    // Legacy value key carries the same enforced value (internal consistency).
+    assert_eq!(v["linear_velocity_mps"], v["enforced_linear_velocity_mps"]);
+    // Original preserved for observability.
+    assert_eq!(v["original_linear_velocity_mps"], 100.0);
+}
+
+/// Over-steer at low speed → action "ClampSteering", enforced steering visible
+/// to the interceptor and below the requested 90°.
+#[tokio::test]
+async fn test_response_schema_clamp_steering_is_visible_to_interceptor() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(2.0, 2.0, 0.1, 90.0, 0.0))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["action"], "ClampSteering");
+    let enforced = v["enforced_steering_angle_deg"].as_f64().expect("key present");
+    assert!(enforced < 90.0 && enforced > 0.0, "clamped below 90°, sign kept, got {enforced}");
+    assert_eq!(v["steering_angle_deg"], v["enforced_steering_angle_deg"]);
+    assert_eq!(v["original_steering_angle_deg"], 90.0);
+}
 
 /// SG8 / SG9 / GAP 16: when this instance's held_epoch is non-zero and
 /// differs from the cached DB epoch (both observed, both non-zero), the
