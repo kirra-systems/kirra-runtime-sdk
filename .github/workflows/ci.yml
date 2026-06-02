@@ -162,23 +162,31 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
           sudo apt-get update
           sudo apt-get install -y openvino-2024.5.0
-          # Sanity-check the C runtime BEFORE running the tests so a
-          # missing lib is a clear failure here rather than a panic deep
-          # in a test. The apt/DEB package installs to the system FHS
-          # location /usr/lib/x86_64-linux-gnu — NOT /opt/intel, which is
-          # only created by the standalone OpenVINO archive installer.
-          # /usr/lib/x86_64-linux-gnu is exactly what openvino-finder
-          # (SYSTEM_INSTALLATION_DIRECTORIES, OpenVINO >= 2022.3) probes by
-          # default, so no LD_LIBRARY_PATH / OPENVINO_* env var is needed
-          # at test time.
-          if ! ls /usr/lib/x86_64-linux-gnu/libopenvino_c.so* >/dev/null 2>&1; then
-            echo "::error::libopenvino_c.so not found in /usr/lib/x86_64-linux-gnu after apt install"
-            echo "Installed openvino shared objects (for diagnosis):"
-            dpkg -L openvino-2024.5.0 | grep -E 'libopenvino.*\.so' || true
+          # DISCOVER the runtime location instead of ASSUMING it. The Intel
+          # apt package's actual install path has proven not to be the
+          # standalone-archive `/opt/intel/...` layout NOR the distro-DEB
+          # `/usr/lib/x86_64-linux-gnu` FHS path, so we locate libopenvino_c.so
+          # wherever the package placed it and export that dir for the test
+          # step's LD_LIBRARY_PATH (which openvino-finder probes first). If the
+          # library is genuinely absent, fail loudly with package diagnostics
+          # so the real layout is visible in the log.
+          echo "Locating libopenvino_c.so after apt install ..."
+          OPENVINO_LIBDIR="$(dirname "$(find /usr /opt /lib -name 'libopenvino_c.so*' -print 2>/dev/null | head -n1)")"
+          if [ -z "${OPENVINO_LIBDIR}" ] || [ "${OPENVINO_LIBDIR}" = "." ]; then
+            echo "::error::libopenvino_c.so not found under /usr /opt /lib after apt install of openvino-2024.5.0"
+            echo "--- installed openvino packages ---"
+            dpkg -l | grep -i openvino || true
+            echo "--- .so files owned by those packages ---"
+            dpkg -l | awk '/^ii/ && /openvino/ {print $2}' \
+              | while read -r p; do echo "== ${p} =="; dpkg -L "${p}" 2>/dev/null | grep -E '\.so' || true; done
+            echo "--- ldconfig cache (openvino) ---"
+            ldconfig -p | grep -i openvino || true
             exit 1
           fi
-          echo "OpenVINO C runtime present:"
-          ls -1 /usr/lib/x86_64-linux-gnu/libopenvino_c.so*
+          echo "OpenVINO C runtime found in: ${OPENVINO_LIBDIR}"
+          ls -1 "${OPENVINO_LIBDIR}"/libopenvino_c.so*
+          # Export for subsequent steps (GitHub Actions step-to-step env).
+          echo "OPENVINO_LIBDIR=${OPENVINO_LIBDIR}" >> "${GITHUB_ENV}"
       - name: parko-openvino tests
         # OpenVINO-dependent. Same flakiness disposition as
         # parko-onnx: if this job becomes unreliable in CI (Intel apt
@@ -188,13 +196,13 @@ jobs:
         working-directory: parko
         env:
           # ONNX runtime for the cross-backend equivalence test (parko-onnx
-          # `OrtBackend`, ort load-dynamic). OpenVINO itself needs NO env
-          # var: the apt/DEB package lands libopenvino_c.so in
-          # /usr/lib/x86_64-linux-gnu, which openvino-finder probes by
-          # default. (The previous /opt/intel paths were the archive
-          # installer's layout, which apt never creates — that stale
-          # assumption is what broke this job.)
+          # `OrtBackend`, ort load-dynamic).
           ORT_DYLIB_PATH: ${{ env.HOME }}/.local/onnxruntime/lib/libonnxruntime.so
+          # OpenVINO runtime dir discovered by the install step above (the apt
+          # package's real location, not an assumed path). openvino-finder
+          # checks LD_LIBRARY_PATH before its built-in dir list, so this makes
+          # the runtime discoverable wherever apt put it.
+          LD_LIBRARY_PATH: ${{ env.OPENVINO_LIBDIR }}
         run: cargo test -p parko-openvino
 
 
