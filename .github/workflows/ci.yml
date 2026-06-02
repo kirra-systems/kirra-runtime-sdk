@@ -116,10 +116,22 @@ jobs:
         # MAY be flipped to `continue-on-error: true` so the safety
         # gate above continues to gate on its own — but the safety
         # gate must NEVER be made non-gating.
+        #
+        # FAST-FAIL: `ort 2.0.0-rc.12` can DEADLOCK in its error path,
+        # hanging the test binary indefinitely (observed: the job ran for
+        # >1h with no progress). `timeout-minutes` converts that 6h hang
+        # into a fast, visible failure WITHOUT making the job non-gating
+        # (no continue-on-error — a real failure still blocks). A healthy
+        # compile+run finishes well inside the budget. `--nocapture` +
+        # backtrace surface the panic reason inline so a fast-failed run is
+        # diagnosable (the captured "failures:" section never prints when the
+        # binary hangs).
+        timeout-minutes: 10
         working-directory: parko
         env:
           ORT_DYLIB_PATH: ${{ env.HOME }}/.local/onnxruntime/lib/libonnxruntime.so
-        run: cargo test -p parko-onnx
+          RUST_BACKTRACE: "1"
+        run: cargo test -p parko-onnx -- --nocapture
 
   parko-openvino:
     name: Parko OpenVINO Backend Tests (apt openvino-2024)
@@ -193,6 +205,15 @@ jobs:
         # outage, future Ubuntu ABI break), it MAY be flipped to
         # `continue-on-error: true`. The parko-safety gate above must
         # remain gating regardless.
+        #
+        # FAST-FAIL (same rationale as parko-onnx): the cross-backend
+        # equivalence test uses ORT, whose 2.0.0-rc.12 error-path deadlock
+        # hangs the binary indefinitely; `timeout-minutes` makes that a fast,
+        # visible failure while the job stays GATING (no continue-on-error).
+        # `--nocapture` + backtrace surface why the OvBackend tests fail (the
+        # 3 `OvBackend::new(...).expect(...)` panics) inline, since a hung
+        # binary never prints the captured failures section.
+        timeout-minutes: 10
         working-directory: parko
         env:
           # ONNX runtime for the cross-backend equivalence test (parko-onnx
@@ -203,7 +224,8 @@ jobs:
           # checks LD_LIBRARY_PATH before its built-in dir list, so this makes
           # the runtime discoverable wherever apt put it.
           LD_LIBRARY_PATH: ${{ env.OPENVINO_LIBDIR }}
-        run: cargo test -p parko-openvino
+          RUST_BACKTRACE: "1"
+        run: cargo test -p parko-openvino -- --nocapture
 
 
   static-analysis:
