@@ -180,36 +180,32 @@ jobs:
         # validation (continue-on-error is kept on for that reason).
         run: |
           set -euo pipefail
-          OPENVINO_VER="2025.1"        # pinned minor (>= 2025.1 satisfies openvino-rs#167)
           OPENVINO_DIST="ubuntu24"     # runs-on: ubuntu-latest == ubuntu-24.04
           HOST="https://storage.openvinotoolkit.org"
-          PREFIX="repositories/openvino/packages/${OPENVINO_VER}/linux/"
-          # storage.openvinotoolkit.org is an S3 bucket fronted by a JS directory
-          # browser (list.js): a plain GET of a directory OR a non-existent key
-          # returns a 1061-byte index.html with HTTP 200 — not a listing/file —
-          # so there is no server-side index to grep and `curl -f` can't detect a
-          # wrong key. Enumerate REAL object keys via the S3 ListObjects v2 API
-          # (what list.js itself uses), then download by exact key.
-          echo "S3 ListObjects: ${HOST}/?prefix=${PREFIX}"
-          XML="$(curl -sSL "${HOST}/?list-type=2&prefix=${PREFIX}&max-keys=1000" || true)"
-          KEY="$(printf '%s' "${XML}" \
-            | grep -oE "${PREFIX}(l_)?openvino_toolkit_${OPENVINO_DIST}_[0-9][0-9.]*_x86_64\.tgz" \
+          # storage.openvinotoolkit.org is the S3 *website* endpoint: it serves a
+          # 1061-byte index.html (HTTP 200) for any directory OR missing key and
+          # IGNORES the S3 ?list-type=2 API (both proven by prior runs). Its
+          # browser enumerates via the precomputed `filetree.json` the page
+          # references — so resolve the real tarball KEY from that, picking the
+          # newest ubuntu24 2025.x archive (>= 2025.1 satisfies openvino-rs#167).
+          echo "Fetching host file index ${HOST}/filetree.json ..."
+          curl -fsSL "${HOST}/filetree.json" -o /tmp/filetree.json || true
+          echo "filetree.json size: $(wc -c < /tmp/filetree.json 2>/dev/null || echo 0) bytes"
+          KEY="$(grep -oE "[A-Za-z0-9_./-]*openvino_toolkit_${OPENVINO_DIST}_2025\.[0-9.]+_x86_64\.tgz" /tmp/filetree.json \
             | sort -V | tail -n1 || true)"
           if [ -z "${KEY}" ]; then
-            echo "::error::No ${OPENVINO_DIST} OpenVINO tarball found under ${PREFIX}"
-            echo "  ---- object keys for this prefix ----"
-            printf '%s' "${XML}" | grep -oE "<Key>[^<]+</Key>" | head -40 || true
-            echo "  ---- available package version dirs (fix OPENVINO_VER if needed) ----"
-            curl -sSL "${HOST}/?list-type=2&prefix=repositories/openvino/packages/&delimiter=/" \
-              | grep -oE "<Prefix>[^<]+</Prefix>" | head -60 || true
+            echo "::error::No ${OPENVINO_DIST} 2025.x OpenVINO archive found in filetree.json"
+            echo "  ---- any openvino_toolkit archives seen (sample) ----"
+            grep -oE "[A-Za-z0-9_./-]*openvino_toolkit_[A-Za-z0-9_.]+\.tgz" /tmp/filetree.json | sort -u | tail -30 || true
             exit 1
           fi
-          URL="${HOST}/${KEY}"
-          echo "Resolved key: ${KEY}"
+          # KEY is a bucket-relative path; build the absolute URL.
+          case "${KEY}" in /*) URL="${HOST}${KEY}";; *) URL="${HOST}/${KEY}";; esac
+          echo "Resolved: ${KEY}"
           curl -fL -o /tmp/openvino.tgz "${URL}"
           MAGIC="$(head -c2 /tmp/openvino.tgz | od -An -tx1 | tr -d ' \n')"
           if [ "${MAGIC}" != "1f8b" ]; then
-            echo "::error::Resolved object is not gzip (magic=${MAGIC}). Body head:"
+            echo "::error::Resolved object is not gzip (magic=${MAGIC}, URL=${URL}). Body head:"
             head -c 600 /tmp/openvino.tgz; echo
             exit 1
           fi
