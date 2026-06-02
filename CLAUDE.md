@@ -26,7 +26,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 
 2. **`constant_time_compare` must be used** for all token comparisons. Standard `==` is forbidden on security-critical byte sequences.
 
-3. **`verify_attestation` must never use `let status = NodeTrustState::Trusted` mock**. The HMAC-SHA256 proof must be computed and compared.
+3. **`verify_attestation` must never mock trust** (`let status = NodeTrustState::Trusted` without verification). It MUST cryptographically verify a per-node proof: the node's Ed25519 signature over the `(node_id, nonce)` challenge payload, checked against the registered per-node `ak_public_pem` via `attestation::verify_attestation_proof` (issue #73). Fail-closed — no registered AK / malformed key / malformed proof / bad signature → reject; never accept by default. (The prior `HMAC(KIRRA_ADMIN_TOKEN, nonce)` proof was admin-asserted, not node-proven, and is removed. PCR16 measured-boot quote verification is a tracked follow-up.)
 
 4. **`FleetNodePosture` and the gray/black two-set DAG algorithm must never be replaced with a mock**. The real traversal in `AppState::recursive_calculate` must remain intact.
 

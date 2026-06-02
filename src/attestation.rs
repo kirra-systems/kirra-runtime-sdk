@@ -1,0 +1,377 @@
+// src/attestation.rs
+//
+// Node attestation proof verification (issue #73).
+//
+// WHAT CHANGED AND WHY
+// --------------------
+// The prior `verify_attestation` accepted `HMAC-SHA256(KIRRA_ADMIN_TOKEN,
+// nonce)` as the attestation "proof". That key is the SHARED admin token, not
+// a per-node secret — so anyone holding the admin token could attest ANY
+// `node_id` as Trusted. That is admin-ASSERTED trust, not node-PROVEN
+// identity, and the per-node `ak_public_pem` was never read (issue #73, P0).
+//
+// This module replaces that with a per-node challenge-response: the node must
+// prove possession of the PRIVATE attestation key (AK) corresponding to the
+// `ak_public_pem` it registered, by signing the challenge payload for
+// (node_id, nonce) with Ed25519. The verifier checks that signature against
+// the registered public key. Possession of the admin token no longer attests
+// anything — the challenge-response now genuinely "provides its own guarantee".
+//
+// CRYPTO DISCIPLINE (issue #73 prompt):
+//   - No hand-rolled primitives. Signature verification uses the vetted
+//     `ed25519-dalek` crate (already the repo's attestation/federation crypto)
+//     via `VerifyingKey::verify_strict`. SPKI/DER parsing uses the vetted
+//     `pkcs8`/`spki` parser (`from_public_key_der`); only the PEM *armor*
+//     stripping (removing the `-----BEGIN/END-----` lines) is local text
+//     handling, not cryptography.
+//   - No secrets in source/logs/errors. `AttestationError` carries only a
+//     category, never key or signature bytes. Private keys live only in tests,
+//     generated ephemerally at runtime — never committed.
+//   - Fail-closed: a node with no registered AK, a malformed key, a malformed
+//     proof, or a bad signature is REJECTED. There is no accept-by-default.
+//
+// SCOPE / FOLLOW-UP (honest limits — needs human security review):
+//   - This binds the proof to (node_id, nonce) via an Ed25519 signature. It
+//     does NOT yet verify a TPM *quote* over `expected_pcr16_digest_hex`
+//     (measured-boot binding) — that requires parsing a TPMS_ATTEST quote and
+//     is tracked as a separate follow-up. PCR16 remains stored-but-unverified
+//     until then; this is documented rather than silently claimed.
+//   - The verifier-side change is here; the NODE side must sign the payload
+//     with its AK private key, and real AK/PCR provisioning (TPM / secure
+//     element / KMS) is a DEPLOYMENT concern, not a source change.
+//   - This closes the specific "admin token forges attestation" gap and the
+//     valid/invalid-signature tests pass. It does NOT prove absence of
+//     replay/downgrade/side-channel/protocol flaws — that needs human review.
+
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ed25519_dalek::pkcs8::DecodePublicKey;
+use ed25519_dalek::{Signature, VerifyingKey};
+
+/// Domain-separation tag for the attestation challenge payload. Bumping this
+/// (v1 → v2) is how a future payload-format change is made unambiguous.
+const ATTESTATION_DOMAIN: &[u8] = b"kirra-attestation-challenge-v1";
+
+/// Length of a raw Ed25519 signature in bytes.
+const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// Structured, non-leaking attestation failure reasons.
+///
+/// Each maps to a stable token (`as_str`) suitable for an HTTP error body and
+/// the audit log. Deliberately carries NO key material, signature bytes, or
+/// the proof itself — only the failure category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationError {
+    /// The node has no registered `ak_public_pem`. Node-proven attestation is
+    /// impossible without a registered AK — fail closed (this is the core
+    /// #73 refusal: trust can no longer be asserted for an un-keyed node).
+    NoRegisteredKey,
+    /// The registered `ak_public_pem` could not be parsed as an Ed25519
+    /// SubjectPublicKeyInfo public key.
+    MalformedRegisteredKey,
+    /// `proof_hex` was not valid hex, or not a 64-byte Ed25519 signature.
+    MalformedProof,
+    /// The signature did not verify against the registered key over the
+    /// challenge payload for (node_id, nonce).
+    SignatureInvalid,
+}
+
+impl AttestationError {
+    /// Stable, material-free reason token for HTTP/audit surfaces.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoRegisteredKey => "node has no registered attestation key",
+            Self::MalformedRegisteredKey => "registered attestation key is malformed",
+            Self::MalformedProof => "attestation proof malformed",
+            Self::SignatureInvalid => "attestation signature invalid",
+        }
+    }
+}
+
+/// The exact byte payload the node signs with its AK private key and the
+/// verifier reconstructs to check the signature.
+///
+/// Domain-separated and length-prefixed on `node_id` so two different
+/// `(node_id, nonce)` pairs can never collide on the same payload — a
+/// signature issued for one node/nonce cannot be replayed as another's.
+/// Both the node and the verifier MUST construct this identically.
+#[must_use]
+pub fn attestation_signing_payload(node_id: &str, nonce: u64) -> Vec<u8> {
+    let id = node_id.as_bytes();
+    let mut payload = Vec::with_capacity(ATTESTATION_DOMAIN.len() + 8 + id.len() + 8);
+    payload.extend_from_slice(ATTESTATION_DOMAIN);
+    payload.extend_from_slice(&(id.len() as u64).to_le_bytes());
+    payload.extend_from_slice(id);
+    payload.extend_from_slice(&nonce.to_le_bytes());
+    payload
+}
+
+/// Parse an Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.
+///
+/// The PEM armor (`-----BEGIN/END PUBLIC KEY-----` lines + whitespace) is
+/// stripped here as plain text; the resulting DER is parsed by the vetted
+/// `spki` parser via `VerifyingKey::from_public_key_der`. Returns `None` on
+/// any malformation — callers fail closed.
+fn parse_ed25519_public_pem(pem: &str) -> Option<VerifyingKey> {
+    let der_b64: String = pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    let der = B64.decode(der_b64.as_bytes()).ok()?;
+    VerifyingKey::from_public_key_der(&der).ok()
+}
+
+/// Verify a node attestation proof (issue #73).
+///
+/// The node proves possession of the AK private key matching its registered
+/// `ak_public_pem` by signing [`attestation_signing_payload`] for
+/// `(node_id, nonce)`. Returns `Ok(())` only if a registered key is present,
+/// parses, and the proof is a valid Ed25519 signature over that exact payload.
+/// Every failure path is fail-closed (`Err`), never an accept.
+///
+/// `nonce` single-use / freshness is enforced separately by the caller's
+/// challenge store (`consume_challenge`); this function is the cryptographic
+/// half only.
+// SAFETY: SG9 | REQ: attestation-node-proven-identity | TEST: valid_signature_verifies,wrong_key_is_rejected,tampered_nonce_is_rejected,tampered_node_id_is_rejected,absent_registered_key_fails_closed,malformed_registered_key_fails_closed,malformed_proof_fails_closed,legacy_admin_token_hmac_proof_is_rejected
+// (≅ AEGIS SG-006 node identity. #73: per-node Ed25519 proof against the
+//  registered AK replaces the shared-admin-token HMAC; absent/malformed/
+//  invalid → reject. Verification uses ed25519-dalek verify_strict.)
+pub fn verify_attestation_proof(
+    ak_public_pem: Option<&str>,
+    node_id: &str,
+    nonce: u64,
+    proof_hex: &str,
+) -> Result<(), AttestationError> {
+    // Fail closed: no per-node key registered → cannot prove node identity.
+    let pem = ak_public_pem.ok_or(AttestationError::NoRegisteredKey)?;
+    let verifying_key =
+        parse_ed25519_public_pem(pem).ok_or(AttestationError::MalformedRegisteredKey)?;
+
+    // Decode the proof into a 64-byte Ed25519 signature. (The legacy HMAC
+    // proof is 32 bytes → rejected here as MalformedProof, which is exactly
+    // the gap being closed.)
+    let sig_bytes = hex::decode(proof_hex).map_err(|_| AttestationError::MalformedProof)?;
+    let sig_array: [u8; ED25519_SIGNATURE_LEN] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AttestationError::MalformedProof)?;
+    let signature = Signature::from_bytes(&sig_array);
+
+    let payload = attestation_signing_payload(node_id, nonce);
+    verifying_key
+        .verify_strict(&payload, &signature)
+        .map_err(|_| AttestationError::SignatureInvalid)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — ephemeral keypairs generated at runtime; NO committed key material.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Per-call counter mixed into the seed so two keypairs created in the
+    /// same nanosecond are still distinct.
+    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Fill an ephemeral 32-byte AK seed at runtime via splitmix64 (seeded
+    /// from the clock + a per-call counter), then derive a signing key. The
+    /// private key exists only for the test's duration and is never written
+    /// to disk or source — an ephemeral test-only keypair, not committed key
+    /// material.
+    fn ephemeral_signing_key() -> SigningKey {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xDEAD_BEEF);
+        let mut state = nanos ^ SEED_COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let mut seed = [0u8; 32];
+        for chunk in seed.chunks_mut(8) {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let bytes = z.to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        SigningKey::from_bytes(&seed)
+    }
+
+    /// Build a valid Ed25519 SubjectPublicKeyInfo PEM for a verifying key.
+    /// The 12-byte prefix is the canonical RFC 8410 Ed25519 SPKI header; this
+    /// is test-only encoding of a PUBLIC key (no secret).
+    fn public_key_to_pem(vk: &VerifyingKey) -> String {
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let mut der = ED25519_SPKI_PREFIX.to_vec();
+        der.extend_from_slice(vk.as_bytes());
+        let body = B64.encode(&der);
+        format!("-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n")
+    }
+
+    fn sign_proof(sk: &SigningKey, node_id: &str, nonce: u64) -> String {
+        let payload = attestation_signing_payload(node_id, nonce);
+        hex::encode(sk.sign(&payload).to_bytes())
+    }
+
+    /// CRYPTO CORRECTNESS: a valid signature over the challenge verifies.
+    #[test]
+    fn valid_signature_verifies() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 42);
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 42, &proof),
+            Ok(())
+        );
+    }
+
+    /// LEGITIMATE ENROLLMENT: a second independent node enrolls with its own
+    /// key and succeeds — the happy path is preserved for properly-keyed nodes.
+    #[test]
+    fn independent_node_enrollment_succeeds() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "lidar-front", 7);
+        assert!(verify_attestation_proof(Some(&pem), "lidar-front", 7, &proof).is_ok());
+    }
+
+    /// CRYPTO CORRECTNESS: a signature from a DIFFERENT key is rejected
+    /// against the registered key.
+    #[test]
+    fn wrong_key_is_rejected() {
+        let registered = ephemeral_signing_key();
+        let attacker = ephemeral_signing_key();
+        let pem = public_key_to_pem(&registered.verifying_key());
+        let forged = sign_proof(&attacker, "node-a", 42);
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 42, &forged),
+            Err(AttestationError::SignatureInvalid)
+        );
+    }
+
+    /// REPLAY/BINDING: a signature for nonce N must not verify for nonce N+1.
+    #[test]
+    fn tampered_nonce_is_rejected() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 100);
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 101, &proof),
+            Err(AttestationError::SignatureInvalid)
+        );
+    }
+
+    /// DOMAIN BINDING: a signature for node "a" must not verify for node "b"
+    /// (payload binds node_id).
+    #[test]
+    fn tampered_node_id_is_rejected() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 42);
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-b", 42, &proof),
+            Err(AttestationError::SignatureInvalid)
+        );
+    }
+
+    /// FAIL-CLOSED: a node with no registered AK cannot attest. This is the
+    /// core #73 refusal — trust can no longer be asserted for an un-keyed node.
+    #[test]
+    fn absent_registered_key_fails_closed() {
+        let sk = ephemeral_signing_key();
+        let proof = sign_proof(&sk, "node-a", 42);
+        assert_eq!(
+            verify_attestation_proof(None, "node-a", 42, &proof),
+            Err(AttestationError::NoRegisteredKey)
+        );
+    }
+
+    /// FAIL-CLOSED: a malformed registered key is rejected, not bypassed.
+    #[test]
+    fn malformed_registered_key_fails_closed() {
+        let sk = ephemeral_signing_key();
+        let proof = sign_proof(&sk, "node-a", 42);
+        assert_eq!(
+            verify_attestation_proof(Some("-----BEGIN PUBLIC KEY-----\nnot-base64!!\n-----END PUBLIC KEY-----"), "node-a", 42, &proof),
+            Err(AttestationError::MalformedRegisteredKey)
+        );
+        // A syntactically-valid-but-wrong-algorithm / truncated DER also fails.
+        assert_eq!(
+            verify_attestation_proof(Some("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"), "node-a", 42, &proof),
+            Err(AttestationError::MalformedRegisteredKey)
+        );
+    }
+
+    /// FAIL-CLOSED: a malformed proof (bad hex / wrong length) is rejected.
+    #[test]
+    fn malformed_proof_fails_closed() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 42, "zzzz"),
+            Err(AttestationError::MalformedProof)
+        );
+        assert_eq!(
+            verify_attestation_proof(Some(&pem), "node-a", 42, "abcd"),
+            Err(AttestationError::MalformedProof)
+        );
+    }
+
+    /// GAP CLOSED: the pre-#73 proof — `HMAC-SHA256(admin_token, nonce)`,
+    /// which anyone holding the admin token could compute for ANY node — is
+    /// now rejected. (It is a 32-byte MAC, not a 64-byte Ed25519 signature,
+    /// and it is not a signature by the node's AK regardless.)
+    #[test]
+    fn legacy_admin_token_hmac_proof_is_rejected() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+
+        // Reconstruct exactly what the old verifier accepted.
+        let admin_token = "any-admin-token-value";
+        let nonce: u64 = 42;
+        let mut mac = HmacSha256::new_from_slice(admin_token.as_bytes()).unwrap();
+        mac.update(&nonce.to_le_bytes());
+        let legacy_proof = hex::encode(mac.finalize().into_bytes());
+
+        let result = verify_attestation_proof(Some(&pem), "node-a", nonce, &legacy_proof);
+        assert!(
+            result.is_err(),
+            "the legacy admin-token HMAC proof must NOT be accepted (#73); got {result:?}"
+        );
+        // Specifically rejected at the length gate (HMAC-SHA256 is 32 bytes).
+        assert_eq!(result, Err(AttestationError::MalformedProof));
+    }
+
+    /// The signing payload is deterministic and bound to (node_id, nonce).
+    #[test]
+    fn payload_is_deterministic_and_bound() {
+        assert_eq!(
+            attestation_signing_payload("n", 1),
+            attestation_signing_payload("n", 1)
+        );
+        assert_ne!(
+            attestation_signing_payload("n", 1),
+            attestation_signing_payload("n", 2)
+        );
+        assert_ne!(
+            attestation_signing_payload("a", 1),
+            attestation_signing_payload("b", 1)
+        );
+        // Length-prefixing prevents a node_id/nonce boundary-shift collision.
+        assert_ne!(
+            attestation_signing_payload("ab", 1),
+            attestation_signing_payload("a", 1)
+        );
+    }
+}

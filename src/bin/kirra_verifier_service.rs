@@ -306,22 +306,40 @@ async fn verify_attestation(
     }
     let now = now_ms();
 
-    let admin_token = match std::env::var("KIRRA_ADMIN_TOKEN").ok().filter(|s| !s.is_empty()) {
-        Some(t) => t,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({ "error": "attestation key not configured" }))).into_response(),
+    // SAFETY: SG9 | REQ: attestation-node-proven-identity | TEST: valid_signature_verifies,legacy_admin_token_hmac_proof_is_rejected,absent_registered_key_fails_closed,wrong_key_is_rejected
+    // (#73) Node-PROVEN identity: the node must prove possession of the
+    // PRIVATE attestation key matching the `ak_public_pem` it registered, by
+    // signing the (node_id, nonce) challenge with Ed25519. The prior
+    // `HMAC(KIRRA_ADMIN_TOKEN, nonce)` proof was admin-ASSERTED trust —
+    // anyone with the admin token could attest any node. Fail-closed: a node
+    // with no registered AK, a malformed key, a malformed proof, or a bad
+    // signature is rejected here, before the nonce is consumed or any trust
+    // state is written. PCR16 (measured-boot) quote verification is a
+    // documented follow-up; see src/attestation.rs.
+    let ak_public_pem = match svc.app.nodes.get(&req.node_id) {
+        Some(node) => node.ak_public_pem.clone(),
+        None => return (StatusCode::NOT_FOUND,
+                        Json(json!({ "error": "node not registered" }))).into_response(),
     };
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(admin_token.as_bytes())
-        .expect("HMAC accepts any key length");
-    mac.update(&req.nonce.to_le_bytes());
-    let expected_hex = hex::encode(mac.finalize().into_bytes());
 
-    if !constant_time_compare(req.proof_hex.as_bytes(), expected_hex.as_bytes()) {
-        return (StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "attestation proof invalid" }))).into_response();
+    if let Err(reason) = kirra_runtime_sdk::attestation::verify_attestation_proof(
+        ak_public_pem.as_deref(),
+        &req.node_id,
+        req.nonce,
+        &req.proof_hex,
+    ) {
+        // No registered key is a precondition failure (403); a present-but-
+        // failing proof is an authentication failure (401). Either way the
+        // attestation is REFUSED — never accepted by default.
+        let status = match reason {
+            kirra_runtime_sdk::attestation::AttestationError::NoRegisteredKey => {
+                StatusCode::FORBIDDEN
+            }
+            _ => StatusCode::UNAUTHORIZED,
+        };
+        tracing::warn!(node_id = %req.node_id, reason = %reason.as_str(),
+            "attestation proof rejected (fail-closed, #73)");
+        return (status, Json(json!({ "error": reason.as_str() }))).into_response();
     }
 
     if !svc.app.consume_challenge(&req.node_id, req.nonce, now) {

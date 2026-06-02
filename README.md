@@ -348,9 +348,9 @@ trajectories) and share only the safety primitives (parko-core RSS,
 
 ### Trust Evaluation Pipeline
 
-1. Node registers with an attestation key (AK) and PCR16 value
-2. Verifier issues a time-limited HMAC challenge (TTL: 30 s)
-3. Node responds with a proof; verifier computes and compares HMAC-SHA256
+1. Node registers its attestation-key (AK) public key (`ak_public_pem`) and PCR16 value
+2. Verifier issues a time-limited nonce challenge (TTL: 30 s)
+3. Node signs the `(node_id, nonce)` challenge with its AK **private** key; the verifier verifies that Ed25519 signature against the registered `ak_public_pem` (issue #73 — node-proven identity, not admin-asserted). Fail-closed: no registered AK / bad signature → rejected. PCR16 measured-boot quote verification is a tracked follow-up.
 4. Trust state (`Trusted` / `Untrusted` / `Unknown`) stored to SQLite
 5. Fleet posture recalculated via DAG traversal; broadcast over SSE
 
