@@ -23,6 +23,7 @@
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
+pub mod pointcloud2_shim;
 pub mod posture_state;
 pub mod sensor_mapping;
 pub mod tick_pipeline;
