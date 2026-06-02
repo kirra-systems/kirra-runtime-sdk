@@ -23,6 +23,7 @@
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
+pub mod image_shim;
 pub mod pointcloud2_shim;
 pub mod imu_shim;
 pub mod odometry_shim;
