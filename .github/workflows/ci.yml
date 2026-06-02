@@ -134,7 +134,7 @@ jobs:
         run: cargo test -p parko-onnx -- --nocapture
 
   parko-openvino:
-    name: Parko OpenVINO Backend Tests (archive openvino-2025.1+)
+    name: Parko OpenVINO Backend Tests (pip openvino-2025.1)
     runs-on: ubuntu-latest
     # NON-GATING for now (#143). Kept continue-on-error: true while this archive
     # install is validated by the REAL CI run — it can't be proven green locally
@@ -164,73 +164,46 @@ jobs:
             -C "$HOME/.local/onnxruntime" --strip-components=1
           test -f "$HOME/.local/onnxruntime/lib/libonnxruntime.so" \
             || (echo "libonnxruntime.so missing after install"; exit 1)
-      - name: Install OpenVINO runtime (official archive, >= 2025.1)
-        # openvino-rs REQUIRES OpenVINO >= 2025.1: the `ov_element_type_e` enum
-        # changed incompatibly in 2025.1, so the crate REJECTS older runtimes as
-        # "version too old" (openvino-rs#167) to avoid silently creating
-        # wrong-type tensors. That gate is PROTECTIVE — we satisfy it rather than
-        # bypass it (no OPENVINO_SKIP_LINKING / force-accept; those make the
-        # crate build but inference stays broken). The apt `openvino-2024.5.0`
-        # package is therefore unusable; install a pinned 2025.1+ release ARCHIVE
-        # whose version satisfies the gate and whose layout is fixed
-        # (/opt/intel/openvino_2025/runtime/lib/intel64).
+      - name: Install OpenVINO runtime (pip wheel, >= 2025.1)
+        # openvino-rs REQUIRES OpenVINO >= 2025.1: `ov_element_type_e` changed
+        # incompatibly in 2025.1, so the crate REJECTS older runtimes as "version
+        # too old" (openvino-rs#167) to avoid silently creating wrong-type
+        # tensors. That gate is PROTECTIVE — we SATISFY it (>= 2025.1), never
+        # bypass it (no OPENVINO_SKIP_LINKING / force-accept).
         #
-        # UNVERIFIED HERE: authored 403-blocked from storage.openvinotoolkit.org,
-        # so the URL/install could not be tested locally — the real CI run is the
-        # validation (continue-on-error is kept on for that reason).
+        # Why pip, not the apt package or the .tgz archive: the apt 2024.5 build
+        # fails the gate, and storage.openvinotoolkit.org (the archive host) is an
+        # S3 *website* endpoint that serves index.html for any path and only
+        # cleanly exposes non-reproducible NIGHTLY builds — no pinnable GA URL
+        # (proven across prior runs on this PR). The PyPI `openvino` wheel ships
+        # the GA runtime (libopenvino_c.so + CPU plugin + TBB) — exactly what the
+        # crate dlopens at OvBackend::new — and is exactly version-pinnable.
+        #
+        # A venv avoids PEP-668 "externally-managed-environment" on the runner's
+        # system python. (continue-on-error stays on; validated by this CI run.)
         run: |
           set -euo pipefail
-          OPENVINO_DIST="ubuntu24"     # runs-on: ubuntu-latest == ubuntu-24.04
-          HOST="https://storage.openvinotoolkit.org"
-          # storage.openvinotoolkit.org is the S3 *website* endpoint: it serves a
-          # 1061-byte index.html (HTTP 200) for any directory OR missing key and
-          # IGNORES the S3 ?list-type=2 API (both proven by prior runs). Its
-          # browser enumerates via the precomputed `filetree.json` the page
-          # references — so resolve the real tarball KEY from that, picking the
-          # newest ubuntu24 2025.x archive (>= 2025.1 satisfies openvino-rs#167).
-          echo "Fetching host file index ${HOST}/filetree.json ..."
-          curl -fsSL "${HOST}/filetree.json" -o /tmp/filetree.json || true
-          echo "filetree.json size: $(wc -c < /tmp/filetree.json 2>/dev/null || echo 0) bytes"
-          KEY="$(grep -oE "[A-Za-z0-9_./-]*openvino_toolkit_${OPENVINO_DIST}_2025\.[0-9.]+_x86_64\.tgz" /tmp/filetree.json \
-            | sort -V | tail -n1 || true)"
-          if [ -z "${KEY}" ]; then
-            echo "::error::No ${OPENVINO_DIST} 2025.x OpenVINO archive found in filetree.json"
-            echo "  ---- any openvino_toolkit archives seen (sample) ----"
-            grep -oE "[A-Za-z0-9_./-]*openvino_toolkit_[A-Za-z0-9_.]+\.tgz" /tmp/filetree.json | sort -u | tail -30 || true
+          python3 -m venv "$HOME/ovenv"
+          "$HOME/ovenv/bin/pip" install --quiet --upgrade pip
+          "$HOME/ovenv/bin/pip" install "openvino==2025.1.0"
+          OV_PKG="$("$HOME/ovenv/bin/python" -c 'import openvino, os; print(os.path.dirname(openvino.__file__))')"
+          echo "openvino package dir: ${OV_PKG}"
+          # The wheel bundles native libs under openvino/libs (or a sibling
+          # openvino.libs). Locate libopenvino_c.so* wherever it landed.
+          LIB="$(find "${OV_PKG}" "${OV_PKG}.libs" -name 'libopenvino_c.so*' 2>/dev/null | head -n1 || true)"
+          if [ -z "${LIB}" ]; then
+            echo "::error::libopenvino_c.so not found in the openvino wheel (auditwheel may have hash-mangled the name)."
+            echo "  ---- .so files in the wheel ----"
+            find "${OV_PKG}" "${OV_PKG}.libs" -name '*.so*' 2>/dev/null | sort | head -60 || true
             exit 1
           fi
-          # KEY is a bucket-relative path; build the absolute URL.
-          case "${KEY}" in /*) URL="${HOST}${KEY}";; *) URL="${HOST}/${KEY}";; esac
-          echo "Resolved: ${KEY}"
-          curl -fL -o /tmp/openvino.tgz "${URL}"
-          MAGIC="$(head -c2 /tmp/openvino.tgz | od -An -tx1 | tr -d ' \n')"
-          if [ "${MAGIC}" != "1f8b" ]; then
-            echo "::error::Resolved object is not gzip (magic=${MAGIC}, URL=${URL}). Body head:"
-            head -c 600 /tmp/openvino.tgz; echo
-            exit 1
-          fi
-          echo "Got a real gzip archive — proceeding."
-          sudo mkdir -p /opt/intel/openvino_2025
-          # --strip-components=1 drops the top-level versioned dir so the runtime
-          # lands directly under /opt/intel/openvino_2025.
-          sudo tar -xzf /tmp/openvino.tgz -C /opt/intel/openvino_2025 --strip-components=1
-          # Runtime dependencies (libtbb etc.).
-          if [ -f /opt/intel/openvino_2025/install_dependencies/install_openvino_dependencies.sh ]; then
-            sudo -E bash /opt/intel/openvino_2025/install_dependencies/install_openvino_dependencies.sh -y
-          fi
-          test -f /opt/intel/openvino_2025/runtime/lib/intel64/libopenvino_c.so \
-            || { echo "::error::libopenvino_c.so missing after archive extract"; ls -R /opt/intel/openvino_2025 | head -40; exit 1; }
-          # Per-step shells don't share env, so `source setupvars.sh` here would
-          # NOT reach the cargo step. Source it and persist the resulting
-          # OpenVINO env to $GITHUB_ENV; openvino-finder discovers the archive
-          # libs via INTEL_OPENVINO_DIR + LD_LIBRARY_PATH (NOT the old apt/FHS
-          # path — that OPENVINO_LIBDIR export is removed).
-          set +u
-          source /opt/intel/openvino_2025/setupvars.sh
-          set -u
-          echo "INTEL_OPENVINO_DIR=${INTEL_OPENVINO_DIR}" >> "${GITHUB_ENV}"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
-          echo "OpenVINO runtime ready: INTEL_OPENVINO_DIR=${INTEL_OPENVINO_DIR}"
+          OV_LIBDIR="$(dirname "${LIB}")"
+          echo "OpenVINO runtime libs in: ${OV_LIBDIR}"
+          ls -1 "${OV_LIBDIR}"/libopenvino_c.so*
+          # Per-step shells don't share env: expose the lib dir to the cargo step
+          # via $GITHUB_ENV. openvino-finder probes LD_LIBRARY_PATH first and
+          # handles versioned SONAMEs (e.g. libopenvino_c.so.2510).
+          echo "LD_LIBRARY_PATH=${OV_LIBDIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "${GITHUB_ENV}"
       - name: parko-openvino tests
         # OpenVINO-dependent. Same flakiness disposition as
         # parko-onnx: if this job becomes unreliable in CI (Intel apt
