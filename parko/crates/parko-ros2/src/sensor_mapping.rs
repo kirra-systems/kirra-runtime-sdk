@@ -274,6 +274,12 @@ pub enum CameraMappingError {
     /// `MeanStd` channel count disagrees with the encoding's channel
     /// count.
     NormalizationChannelMismatch { expected: usize, got: usize },
+    /// `MeanStd` has a non-finite `mean[channel]`, or a `std[channel]` that
+    /// is non-finite or `<= 0`. `(value/255 - mean)/std` would then be
+    /// non-finite (`std == 0` → ±inf/NaN), violating the "MeanStd → finite"
+    /// invariant. Rejected before any output is produced so the integrator
+    /// sees the misconfiguration rather than a silently non-finite tensor.
+    MeanStdNonFiniteScale { channel: usize },
 }
 
 /// Pure camera-to-tensor mapping. Cloning is cheap.
@@ -314,6 +320,18 @@ impl CameraMapping {
                     expected: channels,
                     got: mean.len().min(std.len()),
                 });
+            }
+            // Fail-closed scale validation (quality-hardening finding): the
+            // per-channel transform `(value/255 - mean[c]) / std[c]` is finite
+            // for every valid byte ONLY if each mean is finite and each std is
+            // finite and strictly positive. `std == 0` yields ±inf/NaN; a
+            // non-finite mean/std yields non-finite output. Reject here, before
+            // producing any output, so "MeanStd → finite" holds at the source
+            // instead of relying on the downstream governor's non-finite guard.
+            for c in 0..channels {
+                if !mean[c].is_finite() || !std[c].is_finite() || std[c] <= 0.0 {
+                    return Err(CameraMappingError::MeanStdNonFiniteScale { channel: c });
+                }
             }
         }
 
@@ -784,6 +802,44 @@ mod camera_tests {
         }).expect_err("must error");
         assert!(matches!(err, CameraMappingError::NormalizationChannelMismatch { .. }));
     }
+
+    /// `std == 0` fails closed with a structured error (the offending channel),
+    /// never a non-finite tensor. Hardening finding.
+    #[test]
+    fn meanstd_zero_std_returns_structured_error() {
+        let bytes = [0u8, 0, 0]; // 1×1 rgb8
+        let cfg = CameraConfig {
+            target_height: 1, target_width: 1,
+            normalization: CameraNormalization::MeanStd { mean: vec![0.5; 3], std: vec![0.5, 0.0, 0.5] },
+            ..cfg_2x2_unit01_nchw(CameraEncoding::Rgb8)
+        };
+        let err = CameraMapping::new(cfg).to_tensor(&CameraSample {
+            bytes: &bytes, src_width: 1, src_height: 1,
+        }).expect_err("std==0 must error");
+        assert_eq!(err, CameraMappingError::MeanStdNonFiniteScale { channel: 1 });
+    }
+
+    /// Non-finite mean, non-finite std, and negative std each fail closed at
+    /// the offending channel.
+    #[test]
+    fn meanstd_non_finite_or_negative_scale_returns_structured_error() {
+        for (mean, std, ch) in [
+            (vec![0.5, f32::NAN, 0.5], vec![0.5_f32; 3],            1usize),
+            (vec![0.5_f32; 3],        vec![f32::INFINITY, 0.5, 0.5], 0usize),
+            (vec![0.5_f32; 3],        vec![0.5, 0.5, -1.0],          2usize),
+        ] {
+            let bytes = [0u8, 0, 0];
+            let cfg = CameraConfig {
+                target_height: 1, target_width: 1,
+                normalization: CameraNormalization::MeanStd { mean, std },
+                ..cfg_2x2_unit01_nchw(CameraEncoding::Rgb8)
+            };
+            let err = CameraMapping::new(cfg).to_tensor(&CameraSample {
+                bytes: &bytes, src_width: 1, src_height: 1,
+            }).expect_err("non-finite/negative scale must error");
+            assert_eq!(err, CameraMappingError::MeanStdNonFiniteScale { channel: ch });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1034,6 +1090,39 @@ mod property_tests {
                 .expect("valid sized input must map");
             for &x in out.named_tensors.get("image").unwrap().as_slice() {
                 prop_assert!(x.is_finite(), "MeanStd produced non-finite {x} (mean={mean}, std={std})");
+            }
+        }
+
+        /// INVARIANT (complement of the above + the std-guard finding fix):
+        /// for ARBITRARY mean/std — including std ∈ {0, negative} and
+        /// non-finite mean/std — `to_tensor` NEVER returns a non-finite
+        /// tensor. It either rejects fail-closed with `MeanStdNonFiniteScale`
+        /// or returns all-finite output. This locks in the up-front scale
+        /// guard so the "MeanStd → finite" invariant holds on the FULL domain,
+        /// not just std > 0.
+        #[test]
+        fn prop_meanstd_never_emits_non_finite(
+            (cfg, bytes, sw, sh) in camera_case(),
+            mean in prop_oneof![Just(f32::NAN), Just(f32::INFINITY), Just(f32::NEG_INFINITY), -5.0_f32..5.0],
+            std  in prop_oneof![Just(0.0_f32), Just(-1.0_f32), Just(f32::NAN), Just(f32::INFINITY), 0.05_f32..5.0],
+        ) {
+            let ch = cfg.encoding.channels();
+            let cfg = CameraConfig {
+                normalization: CameraNormalization::MeanStd { mean: vec![mean; ch], std: vec![std; ch] },
+                ..cfg
+            };
+            match CameraMapping::new(cfg)
+                .to_tensor(&CameraSample { bytes: &bytes, src_width: sw, src_height: sh })
+            {
+                Ok(out) => {
+                    for &x in out.named_tensors.get("image").unwrap().as_slice() {
+                        prop_assert!(x.is_finite(), "emitted non-finite {x} for mean={mean} std={std}");
+                    }
+                }
+                Err(e) => prop_assert!(
+                    matches!(e, CameraMappingError::MeanStdNonFiniteScale { .. }),
+                    "unexpected error variant for mean={mean} std={std}: {e:?}",
+                ),
             }
         }
 
