@@ -374,4 +374,57 @@ mod tests {
             attestation_signing_payload("a", 1)
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PROPERTY: the signing payload is INJECTIVE over (node_id, nonce).
+    //
+    // INVARIANT: distinct (node_id, nonce) pairs NEVER produce the same signing
+    // payload. SOURCE: the construction is a domain tag, then the node_id
+    // LENGTH (u64 LE), then the node_id bytes, then the nonce (u64 LE). The
+    // length prefix makes the (node_id || nonce) boundary unambiguous, so the
+    // map is injective. Why it matters: if two different (node_id, nonce) pairs
+    // shared a payload, a signature issued for one could be replayed for the
+    // other — a cross-node / cross-nonce attestation forgery. This property is
+    // the cryptographic justification for the length-prefix.
+    // -----------------------------------------------------------------------
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4000))]
+
+        /// Different inputs ⇒ different payloads (injectivity / no collisions).
+        #[test]
+        fn prop_signing_payload_is_injective(
+            id_a in "[ -~]{0,40}",
+            n_a in any::<u64>(),
+            id_b in "[ -~]{0,40}",
+            n_b in any::<u64>(),
+        ) {
+            let same_input = id_a == id_b && n_a == n_b;
+            let same_payload = attestation_signing_payload(&id_a, n_a)
+                == attestation_signing_payload(&id_b, n_b);
+            // Equal payloads are permitted ONLY when the inputs are equal.
+            prop_assert_eq!(
+                same_payload, same_input,
+                "payload collision across distinct inputs: ({:?},{}) vs ({:?},{})",
+                id_a, n_a, id_b, n_b
+            );
+        }
+
+        /// A specific stress on the boundary-shift class: moving a byte across
+        /// the node_id/nonce seam must change the payload (length-prefix guard).
+        #[test]
+        fn prop_no_boundary_shift_collision(
+            head in "[ -~]{1,20}",
+            tail in "[ -~]{1,20}",
+            nonce in any::<u64>(),
+        ) {
+            let combined = format!("{head}{tail}");
+            // Same concatenated id-bytes split at two different points must
+            // still yield distinct payloads unless they are literally equal.
+            let p1 = attestation_signing_payload(&combined, nonce);
+            let p2 = attestation_signing_payload(&head, nonce);
+            prop_assert_ne!(p1, p2);
+        }
+    }
 }

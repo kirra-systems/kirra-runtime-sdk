@@ -937,3 +937,171 @@ mod odom_tests {
         assert_eq!(v, &[0.1_f32, 0.2, 0.3, 0.4]);
     }
 }
+
+// ===========================================================================
+// PROPERTY TESTS — sensor mapping invariants (quality-hardening pass)
+//
+// Each property states the invariant + its source. The mappings are the
+// untrusted-input boundary (raw sensor bytes → model tensor); a violated
+// range/shape invariant is a real safety risk (an out-of-contract tensor fed
+// to the policy). These are written to assert REAL behavior, not to chase a
+// mutation score.
+// ===========================================================================
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn encoding_strategy() -> impl Strategy<Value = CameraEncoding> {
+        prop_oneof![
+            Just(CameraEncoding::Rgb8),
+            Just(CameraEncoding::Bgr8),
+            Just(CameraEncoding::Mono8),
+        ]
+    }
+
+    /// Build a config + a correctly-sized random byte buffer for the chosen
+    /// encoding and source dims. Keeps dims small so the property runs fast.
+    fn camera_case() -> impl Strategy<Value = (CameraConfig, Vec<u8>, u32, u32)> {
+        (encoding_strategy(), 1u32..6, 1u32..6, 1u32..6, 1u32..6).prop_flat_map(
+            |(enc, sw, sh, tw, th)| {
+                let ch = enc.channels();
+                let nbytes = (sw as usize) * (sh as usize) * ch;
+                proptest::collection::vec(any::<u8>(), nbytes).prop_map(move |bytes| {
+                    let cfg = CameraConfig {
+                        encoding: enc,
+                        target_height: th,
+                        target_width: tw,
+                        resize: CameraResize::Nearest,
+                        normalization: CameraNormalization::Unit01,
+                        layout: CameraLayout::Nchw,
+                        tensor_name: "image".to_string(),
+                    };
+                    (cfg, bytes, sw, sh)
+                })
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1500))]
+
+        /// INVARIANT: Unit01 normalization output is ALWAYS in [0, 1].
+        /// SOURCE: sensor_mapping.rs — `raw / 255.0`, raw ∈ [0, 255].
+        #[test]
+        fn prop_unit01_output_in_0_1((cfg, bytes, sw, sh) in camera_case()) {
+            let cfg = CameraConfig { normalization: CameraNormalization::Unit01, ..cfg };
+            let out = CameraMapping::new(cfg)
+                .to_tensor(&CameraSample { bytes: &bytes, src_width: sw, src_height: sh })
+                .expect("valid sized input must map");
+            for &x in out.named_tensors.get("image").unwrap().as_slice() {
+                prop_assert!((0.0..=1.0).contains(&x), "Unit01 out-of-range: {x}");
+            }
+        }
+
+        /// INVARIANT: SignedUnit normalization output is ALWAYS in [-1, 1].
+        /// SOURCE: `raw / 127.5 - 1.0`; raw ∈ [0,255] ⇒ [-1.0, 1.0].
+        #[test]
+        fn prop_signedunit_output_in_pm1((cfg, bytes, sw, sh) in camera_case()) {
+            let cfg = CameraConfig { normalization: CameraNormalization::SignedUnit, ..cfg };
+            let out = CameraMapping::new(cfg)
+                .to_tensor(&CameraSample { bytes: &bytes, src_width: sw, src_height: sh })
+                .expect("valid sized input must map");
+            for &x in out.named_tensors.get("image").unwrap().as_slice() {
+                prop_assert!((-1.0..=1.0).contains(&x), "SignedUnit out-of-range: {x}");
+            }
+        }
+
+        /// INVARIANT: MeanStd output is finite for finite mean and std > 0.
+        /// SOURCE: `(raw/255 - mean)/std`; finite ÷ nonzero-finite is finite.
+        /// (std = 0 is an integrator misconfiguration — see the finding note
+        /// in the hardening report; this property is the valid-domain claim.)
+        #[test]
+        fn prop_meanstd_output_finite_for_positive_std(
+            (cfg, bytes, sw, sh) in camera_case(),
+            mean in -5.0_f32..5.0,
+            std in 0.05_f32..5.0,
+        ) {
+            let ch = cfg.encoding.channels();
+            let cfg = CameraConfig {
+                normalization: CameraNormalization::MeanStd {
+                    mean: vec![mean; ch], std: vec![std; ch],
+                },
+                ..cfg
+            };
+            let out = CameraMapping::new(cfg)
+                .to_tensor(&CameraSample { bytes: &bytes, src_width: sw, src_height: sh })
+                .expect("valid sized input must map");
+            for &x in out.named_tensors.get("image").unwrap().as_slice() {
+                prop_assert!(x.is_finite(), "MeanStd produced non-finite {x} (mean={mean}, std={std})");
+            }
+        }
+
+        /// INVARIANT: resize yields EXACTLY target_height × target_width ×
+        /// channels elements. SOURCE: `out = vec![0.0; dst_h*dst_w*channels]`.
+        /// A wrong-length tensor breaks the model input contract.
+        #[test]
+        fn prop_output_length_matches_target_dims((cfg, bytes, sw, sh) in camera_case()) {
+            let expect = (cfg.target_height as usize)
+                * (cfg.target_width as usize)
+                * cfg.encoding.channels();
+            let out = CameraMapping::new(cfg)
+                .to_tensor(&CameraSample { bytes: &bytes, src_width: sw, src_height: sh })
+                .expect("valid sized input must map");
+            prop_assert_eq!(out.named_tensors.get("image").unwrap().as_slice().len(), expect);
+        }
+
+        /// INVARIANT: the rgb8↔bgr8 reorder is a TRUE PERMUTATION — the same
+        /// physical pixel (R,G,B) maps to the SAME RGB-ordered output whether
+        /// the source is declared Rgb8 (bytes R,G,B) or Bgr8 (bytes B,G,R).
+        /// No channel is lost or duplicated. SOURCE: `dst_c = channels-1-c`
+        /// for Bgr8 is the reverse permutation on 3 channels.
+        #[test]
+        fn prop_rgb8_bgr8_is_permutation(r in any::<u8>(), g in any::<u8>(), b in any::<u8>()) {
+            let base = CameraConfig {
+                encoding: CameraEncoding::Rgb8,
+                target_height: 1, target_width: 1,
+                resize: CameraResize::Nearest,
+                normalization: CameraNormalization::Unit01,
+                layout: CameraLayout::Nchw,
+                tensor_name: "image".to_string(),
+            };
+            let rgb = CameraMapping::new(base.clone())
+                .to_tensor(&CameraSample { bytes: &[r, g, b], src_width: 1, src_height: 1 })
+                .unwrap();
+            let bgr = CameraMapping::new(CameraConfig { encoding: CameraEncoding::Bgr8, ..base })
+                .to_tensor(&CameraSample { bytes: &[b, g, r], src_width: 1, src_height: 1 })
+                .unwrap();
+            // Same RGB-ordered output for both source orderings.
+            prop_assert_eq!(
+                rgb.named_tensors.get("image").unwrap().as_slice(),
+                bgr.named_tensors.get("image").unwrap().as_slice()
+            );
+            // And it is exactly [R,G,B]/255 — no channel dropped/duplicated.
+            let got = rgb.named_tensors.get("image").unwrap().as_slice();
+            prop_assert_eq!(got, &[r as f32/255.0, g as f32/255.0, b as f32/255.0]);
+        }
+
+        /// INVARIANT: quaternion→yaw is finite and within atan2's range
+        /// [-π, π]. SOURCE: `yaw = siny_cosp.atan2(cosy_cosp)` (Tait–Bryan ZYX).
+        /// NOTE: atan2's range is [-π, π]; the spec's "(-π, π]" is the typical
+        /// non-boundary case — the boundary value -π is a legal atan2 output,
+        /// so the asserted invariant is the mathematically-exact closed range.
+        #[test]
+        fn prop_quat_to_yaw_in_range(
+            qx in -1.0_f64..1.0, qy in -1.0_f64..1.0,
+            qz in -1.0_f64..1.0, qw in -1.0_f64..1.0,
+        ) {
+            // Skip the degenerate zero quaternion (not a rotation).
+            let norm = (qx*qx + qy*qy + qz*qz + qw*qw).sqrt();
+            prop_assume!(norm > 1e-6);
+            let (nx, ny, nz, nw) = (qx/norm, qy/norm, qz/norm, qw/norm);
+            let (_roll, _pitch, yaw) = quat_to_euler(nx, ny, nz, nw);
+            prop_assert!(yaw.is_finite(), "yaw must be finite, got {yaw}");
+            prop_assert!(
+                (-std::f64::consts::PI..=std::f64::consts::PI).contains(&yaw),
+                "yaw {yaw} outside [-π, π]"
+            );
+        }
+    }
+}

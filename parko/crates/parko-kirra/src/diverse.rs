@@ -548,6 +548,74 @@ mod tests {
         }
     }
 
+    // -- Gap-closing tests driven by mutation survivors (PART 1 triage) ---
+
+    fn effective_lin(action: &EnforcementAction, proposed: f64) -> f64 {
+        match action {
+            EnforcementAction::Allow => proposed,
+            EnforcementAction::ClampLinearVelocity(v) => *v,
+            EnforcementAction::ClampAngularVelocity(_) => proposed,
+            EnforcementAction::ClampMotion { linear, .. } => linear.unwrap_or(proposed),
+            EnforcementAction::Deny { .. } => 0.0,
+        }
+    }
+
+    /// FAIL-CLOSED finiteness: a non-finite linear velocity, current velocity,
+    /// time delta, OR a non-physical dt must Deny in the Nominal path — even
+    /// when the OTHER inputs are finite. Guards the per-field OR in the
+    /// finiteness check (kills the `||`→`&&` survivors at enforce_nominal):
+    /// with `&&` a single NaN would slip through to an unbounded command.
+    #[test]
+    fn diverse_denies_each_nonfinite_input_in_nominal() {
+        let gov = DiverseKirraGovernor::new();
+        let fin = twist(1.0, 0.0);
+        // Non-finite linear (current + dt finite).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let out = gov.evaluate(&twist(bad, 0.0), Some(&fin), 0.05, SafetyPosture::Nominal);
+            assert!(matches!(out, EnforcementAction::Deny { .. }),
+                "non-finite linear {bad} must fail-closed; got {out:?}");
+        }
+        // Non-finite current velocity (proposed + dt finite).
+        let out = gov.evaluate(&fin, Some(&twist(f64::NAN, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::Deny { .. }), "non-finite current must Deny");
+        // Non-finite dt, and non-physical dt <= 0.
+        assert!(matches!(gov.evaluate(&fin, Some(&fin), f64::NAN, SafetyPosture::Nominal),
+            EnforcementAction::Deny { .. }), "non-finite dt must Deny");
+        assert!(matches!(gov.evaluate(&fin, Some(&fin), 0.0, SafetyPosture::Nominal),
+            EnforcementAction::Deny { .. }), "dt=0 must Deny");
+    }
+
+    /// The Nominal accel-rate clamp produces the SPEC value
+    /// `current + max_accel·dt` (2.5 m/s² · 0.05 s = 0.125 m/s from rest),
+    /// not the raw command and not a mis-scaled value. Pins the rate-envelope
+    /// arithmetic to the kinematics contract.
+    #[test]
+    fn diverse_accel_clamp_equals_spec_value() {
+        let gov = DiverseKirraGovernor::new();
+        let out = gov.evaluate(&twist(20.0, 0.0), Some(&twist(0.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        let v = effective_lin(&out, 20.0);
+        assert!((v - 0.125).abs() < 1e-6,
+            "accel clamp must be current + max_accel*dt = 0.125 m/s, got {v}");
+    }
+
+    /// The `RssAwareGovernor::set_rss_state` TRAIT impl must actually update
+    /// the RSS gate — the comparator drives the shadow through this method, so
+    /// a no-op here would let the diverse shadow ignore RSS-unsafe and diverge
+    /// from the primary. (The agreement proptest uses the inherent
+    /// `update_rss_state`, leaving the trait path untested — this closes it.)
+    #[test]
+    fn diverse_set_rss_state_trait_takes_effect() {
+        use crate::comparator::RssAwareGovernor;
+        let mut gov = DiverseKirraGovernor::new();
+        RssAwareGovernor::set_rss_state(&mut gov, unsafe_rss());
+        // RSS unsafe ⇒ MRC path ⇒ 20 m/s clamped to the MRC ceiling (5.0),
+        // not the ~35 m/s Nominal envelope.
+        let out = gov.evaluate(&twist(20.0, 0.0), None, 0.05, SafetyPosture::Nominal);
+        let v = effective_lin(&out, 20.0);
+        assert!((v - MRC_VELOCITY_CEILING_MPS).abs() < 1e-9,
+            "set_rss_state(unsafe) must route to MRC ceiling {MRC_VELOCITY_CEILING_MPS}, got {v}");
+    }
+
     // -- Property-based broad agreement ----------------------------------
 
     proptest! {

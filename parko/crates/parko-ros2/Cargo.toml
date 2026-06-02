@@ -72,6 +72,8 @@ parko-onnx = { path = "../parko-onnx", optional = true }
 [dev-dependencies]
 # State-machine tests use parko-core's MockBackend (no ORT, no ROS).
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
+# Property tests for the pure sensor mappings (quality-hardening pass).
+proptest = "1"
 
 # The node binary is feature-gated to `ros2`; the default cargo build
 # does not see this entry.

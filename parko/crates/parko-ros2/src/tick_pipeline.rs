@@ -376,6 +376,123 @@ mod tick_pipeline_tests {
         assert_eq!(twist, OutgoingTwist::stopped(100));
     }
 
+    // =======================================================================
+    // PART 3 — fault injection across the parko pipeline stage
+    //   sensor → inference → ControlCommand → governor → gated cmd_vel.
+    //
+    // Each test injects a fault and asserts an EXPLICIT fail-closed outcome
+    // (safe-stop / bounded / InferenceError), not merely "no panic". Mirrors
+    // the comparator's injected-fault style. The stale-sensor, locked-out,
+    // degraded-MRC, and posture-unfed→Degraded faults are covered by the
+    // tests above and in the M2b section below; these add the inference-output
+    // and backend-failure faults that were previously untested end-to-end.
+    // =======================================================================
+
+    /// A backend whose `run()` always fails — models an inference-engine error
+    /// (ORT/OpenVINO dlopen/exec failure) at the pipeline's inference stage.
+    #[derive(Debug)]
+    struct FailingBackend;
+    impl parko_core::backend::InferenceBackend for FailingBackend {
+        fn load_model(
+            &self,
+            path: &str,
+        ) -> Result<parko_core::backend::ModelHandle, parko_core::backend::BackendError> {
+            Ok(parko_core::backend::ModelHandle {
+                model_id: format!("failing::{path}"),
+                input_shapes: HashMap::new(),
+                output_shapes: HashMap::new(),
+                expected_precision: parko_core::backend::PrecisionMode::FP32,
+            })
+        }
+        fn run(
+            &self,
+            _model: &parko_core::backend::ModelHandle,
+            _inputs: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, parko_core::backend::BackendError> {
+            Err(parko_core::backend::BackendError::ExecutionFailure(
+                "injected backend failure".to_string(),
+            ))
+        }
+        fn descriptor(&self) -> BackendDescriptor {
+            BackendDescriptor::Cpu
+        }
+    }
+
+    fn build_loop_with_backend<B: parko_core::backend::InferenceBackend + 'static>(
+        backend: Arc<B>,
+    ) -> Arc<Mutex<InferenceLoop<B>>> {
+        let model = backend.load_model("test.onnx").expect("mock model loads");
+        let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
+        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        let infer = InferenceLoop::new(backend, model, tx)
+            .with_governor(ComparatorAsGovernor(comparator))
+            .with_tick_period(0.05);
+        Arc::new(Mutex::new(infer))
+    }
+
+    /// FAULT: inference emits NaN linear velocity. ASSERT fail-closed — the
+    /// gated cmd_vel is a safe stop; the NaN command never reaches the
+    /// actuator. (Scheduler scrubs non-finite output; `enforce_outgoing_twist`
+    /// is the defence-in-depth backstop.)
+    #[tokio::test(start_paused = true)]
+    async fn fault_nan_inference_output_publishes_stopped_twist() {
+        let (infer, _rx) = build_loop(f32::NAN, 0.5);
+        let frame = make_frame(101, 0);
+        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "NaN inference must safe-stop (linear=0), got {}", outcome.twist.linear_x_mps);
+        assert_eq!(outcome.twist.angular_z_rads, 0.0,
+            "NaN inference must safe-stop (angular=0), got {}", outcome.twist.angular_z_rads);
+        assert!(outcome.twist.linear_x_mps.is_finite() && outcome.twist.angular_z_rads.is_finite(),
+            "the published command must be finite (no NaN leak to cmd_vel)");
+    }
+
+    /// FAULT: inference emits +∞ linear velocity. ASSERT fail-closed safe stop.
+    #[tokio::test(start_paused = true)]
+    async fn fault_inf_inference_output_publishes_stopped_twist() {
+        let (infer, _rx) = build_loop(f32::INFINITY, 0.0);
+        let frame = make_frame(102, 0);
+        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "inf inference must safe-stop, got {}", outcome.twist.linear_x_mps);
+        assert!(outcome.twist.linear_x_mps.is_finite(),
+            "no inf leak to cmd_vel");
+    }
+
+    /// FAULT: inference emits a wildly out-of-range (but finite) 1000 m/s.
+    /// ASSERT the governor BOUNDS it — a wrong-but-in-bounds command is never
+    /// admitted as-is. The published value is the safe-envelope clamp, far
+    /// below the requested 1000 m/s, finite and non-negative.
+    #[tokio::test(start_paused = true)]
+    async fn fault_out_of_range_inference_is_bounded_not_admitted() {
+        let (infer, _rx) = build_loop(1000.0, 0.0);
+        let frame = make_frame(103, 0);
+        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        let v = outcome.twist.linear_x_mps;
+        assert!(v.is_finite(), "published velocity must be finite, got {v}");
+        assert!(v >= 0.0, "must not flip sign, got {v}");
+        assert!(v < 1000.0,
+            "1000 m/s must be CLAMPED by the governor envelope, never admitted as-is; got {v}");
+    }
+
+    /// FAULT: the inference backend itself errors. ASSERT fail-closed — the
+    /// pipeline emits a stopped twist AND surfaces a structured InferenceError,
+    /// never a fail-OPEN pass-through.
+    #[tokio::test(start_paused = true)]
+    async fn fault_backend_failure_fails_closed() {
+        let infer = build_loop_with_backend(Arc::new(FailingBackend));
+        let frame = make_frame(104, 0);
+        let outcome = run_pipeline_tick(&default_config(), infer, frame, SafetyPosture::Nominal).await;
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "backend failure must safe-stop (linear=0)");
+        assert_eq!(outcome.twist.angular_z_rads, 0.0,
+            "backend failure must safe-stop (angular=0)");
+        match outcome.error {
+            Some(TickError::InferenceError(_)) => {}
+            other => panic!("backend failure must surface InferenceError (fail-closed), got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // M2b — `run_pipeline_tick_with_posture_state` exercises the shared
     // `PostureTracker` inside the tick. These tests mirror M1b's

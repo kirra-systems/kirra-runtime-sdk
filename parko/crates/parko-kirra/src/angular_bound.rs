@@ -427,4 +427,140 @@ mod tests {
         assert!((omega - 0.4167_f64).abs() < 1e-3,
             "MRC at v=0: expected ~0.4167 rad/s (sweep with halved v_edge_safe), got {omega}");
     }
+
+    // -----------------------------------------------------------------------
+    // PROPERTY TESTS — invariants of ω_max(v) = min(rollover(v), sweep, ftti),
+    // derived from docs/safety/ANGULAR_VELOCITY_SOTIF.md §2-§3 and the
+    // rollover physics a_lat = v·|ω| ≤ g·t/(2·h). These assert the SAFETY
+    // SHAPE of the bound, not specific numbers; a good property kills a class
+    // of mutants (sign flips, min→max, dropped terms).
+    // -----------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    /// Strategy: physically-plausible platform params (all geometry > 0,
+    /// posture factor in (0, 1]). Mirrors `PlatformParams::validate`'s domain.
+    fn plausible_params() -> impl Strategy<Value = PlatformParams> {
+        (
+            0.05_f64..2.0,   // track_width_m
+            0.05_f64..2.0,   // cog_height_m
+            0.05_f64..2.0,   // robot_extent_m
+            0.01_f64..2.0,   // v_edge_safe_mps
+            0.005_f64..1.5,  // theta_max_rad
+            0.01_f64..1.0,   // ftti_s
+            0.05_f64..1.0,   // mrc_posture_factor (in (0,1])
+        )
+            .prop_map(|(t, h, r, ve, th, ftti, pf)| PlatformParams {
+                track_width_m: t,
+                cog_height_m: h,
+                robot_extent_m: r,
+                v_edge_safe_mps: ve,
+                theta_max_rad: th,
+                ftti_s: ftti,
+                mrc_posture_factor: pf,
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        /// INVARIANT: ω_max(v) is always finite and ≥ 0 (it is a bound on a
+        /// non-negative magnitude |ω|). Source: SOTIF §2 — every term is a
+        /// ratio of positive quantities; the v→0 singularity is masked.
+        #[test]
+        fn prop_omega_max_is_finite_and_nonnegative(
+            p in plausible_params(),
+            v in -50.0_f64..50.0,
+        ) {
+            let nom = AngularVelocityBound::nominal(p.clone());
+            let mrc = AngularVelocityBound::mrc(p);
+            for w in [nom.omega_max(v), mrc.omega_max(v)] {
+                prop_assert!(w.is_finite(), "ω_max must be finite, got {w}");
+                prop_assert!(w >= 0.0, "ω_max must be ≥ 0, got {w}");
+            }
+        }
+
+        /// INVARIANT: ω_max(v) ≤ the v-independent ceiling min(sweep, ftti) for
+        /// EVERY v — the rollover term can only tighten the bound, never loosen
+        /// it. Source: SOTIF §2 — ω_max = min(rollover, sweep, ftti) ≤ sweep,
+        /// ≤ ftti. This is the "≤ configured Nominal cap" invariant.
+        #[test]
+        fn prop_omega_max_never_exceeds_sweep_ftti_ceiling(
+            p in plausible_params(),
+            v in -50.0_f64..50.0,
+        ) {
+            let sweep = p.v_edge_safe_mps / p.robot_extent_m;
+            let ftti  = p.theta_max_rad / p.ftti_s;
+            let ceiling = sweep.min(ftti);
+            let w = AngularVelocityBound::nominal(p).omega_max(v);
+            prop_assert!(w <= ceiling + 1e-9,
+                "ω_max({v})={w} exceeded the sweep/ftti ceiling {ceiling}");
+        }
+
+        /// INVARIANT: ω_max is NON-INCREASING in |v| — faster forward speed can
+        /// only tighten the rollover constraint (ω_rollover(v) = g·t/(2·h·v) is
+        /// strictly decreasing in v), never loosen it. Source: rollover physics
+        /// a_lat = v·|ω|; SOTIF §2(a). Kills a min→max / sign-flip mutant.
+        #[test]
+        fn prop_omega_max_is_non_increasing_in_speed(
+            p in plausible_params(),
+            v1 in 0.0_f64..50.0,
+            dv in 0.0_f64..50.0,
+        ) {
+            let bound = AngularVelocityBound::nominal(p);
+            let v2 = v1 + dv; // v2 >= v1
+            prop_assert!(
+                bound.omega_max(v1) + 1e-9 >= bound.omega_max(v2),
+                "ω_max must not increase with speed: ω({v1})={} < ω({v2})={}",
+                bound.omega_max(v1), bound.omega_max(v2)
+            );
+        }
+
+        /// INVARIANT: below the rollover floor (|v| < ROLLOVER_MIN_LINEAR_
+        /// VELOCITY_MPS = 0.05) the rollover term is masked and ω_max equals
+        /// the constant min(sweep, ftti) — finite, no divide-by-zero. Source:
+        /// SOTIF §3.4 (v→0 singularity handling).
+        #[test]
+        fn prop_below_rollover_floor_returns_constant_ceiling(
+            p in plausible_params(),
+            v in 0.0_f64..ROLLOVER_MIN_LINEAR_VELOCITY_MPS,
+        ) {
+            let sweep = p.v_edge_safe_mps / p.robot_extent_m;
+            let ftti  = p.theta_max_rad / p.ftti_s;
+            let ceiling = sweep.min(ftti);
+            let w = AngularVelocityBound::nominal(p).omega_max(v);
+            prop_assert!(w.is_finite());
+            prop_assert!((w - ceiling).abs() < 1e-9,
+                "below the rollover floor ω_max must equal the constant ceiling {ceiling}, got {w}");
+        }
+
+        /// INVARIANT: the MRC bound is never looser than the Nominal bound at
+        /// the same v (posture_factor ≤ 1 derates sweep + ftti; rollover is
+        /// unchanged). Source: SOTIF §2 (MRC derate). The envelope contracts
+        /// in Degraded — it must never expand.
+        #[test]
+        fn prop_mrc_bound_is_at_or_below_nominal(
+            p in plausible_params(),
+            v in 0.0_f64..50.0,
+        ) {
+            let nom = AngularVelocityBound::nominal(p.clone());
+            let mrc = AngularVelocityBound::mrc(p);
+            prop_assert!(mrc.omega_max(v) <= nom.omega_max(v) + 1e-9,
+                "MRC bound must be ≤ Nominal at v={v}");
+        }
+
+        /// INVARIANT: the conservative default is always tighter than the old
+        /// H1 placeholder (1.5 rad/s nominal) it replaced — an uncharacterised
+        /// platform fails toward safe. Source: lib.rs #136 note + SOTIF §3.1.
+        #[test]
+        fn prop_conservative_default_is_below_old_placeholder(
+            v in -50.0_f64..50.0,
+        ) {
+            const OLD_PLACEHOLDER_RAD_S: f64 = 1.5;
+            let w = AngularVelocityBound::nominal(PlatformParams::conservative_default())
+                .omega_max(v);
+            prop_assert!(w <= OLD_PLACEHOLDER_RAD_S,
+                "conservative default ω_max({v})={w} must be ≤ old placeholder 1.5");
+        }
+    }
 }

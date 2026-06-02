@@ -10,3 +10,6 @@ __pycache__/
 *.profdata
 coverage-report/
 lcov.info
+
+# cargo-mutants output (quality-hardening pass)
+mutants.out/
