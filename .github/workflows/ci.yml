@@ -156,49 +156,55 @@ jobs:
             -C "$HOME/.local/onnxruntime" --strip-components=1
           test -f "$HOME/.local/onnxruntime/lib/libonnxruntime.so" \
             || (echo "libonnxruntime.so missing after install"; exit 1)
-      - name: Install OpenVINO runtime (Intel apt repo, 2024.x)
-        # The `openvino = "0.11"` crate links against OpenVINO 2024.x.
-        # Intel ships a Debian package via their public apt repo —
-        # this is the upstream-supported install path. The
-        # `runtime-linking` feature means the crate dlopens
-        # libopenvino_c.so at backend construction (OvBackend::new)
-        # rather than at build time; the build never needed this,
-        # but the integration tests do.
+      # ======================================================================
+      # ⚠️ DRAFT — UNTESTED. Validate on a machine with OpenVINO before merge.
+      # ----------------------------------------------------------------------
+      # Replaces the apt install with a CLEAN-RELEASE OpenVINO ARCHIVE (.tgz),
+      # the remediation for issue #143: the apt `openvino-2024.5.0` package is a
+      # PR-tagged build (`…-refs/pull/3856/head`) whose version string the
+      # `openvino` 0.11 crate rejects as "version too old" (openvino-rs#167).
+      # A clean release archive carries a normal `2024.x.y` version tag the
+      # crate should accept. The archive layout is fixed and known (unlike the
+      # apt package), so no path discovery is needed.
+      #
+      # WHY THIS IS A DRAFT (cannot be verified in the cloud agent sandbox —
+      # egress-blocked 403 from storage.openvinotoolkit.org). A reviewer with
+      # an OpenVINO-capable runner MUST:
+      #   1. PIN the exact archive URL/build by browsing the storage listing
+      #      https://storage.openvinotoolkit.org/repositories/openvino/packages/
+      #      and picking a clean release for the runner's Ubuntu (ubuntu24 for
+      #      ubuntu-latest) + x86_64. Fill OPENVINO_VERSION / OPENVINO_TARBALL.
+      #   2. CONFIRM the `openvino` 0.11 crate ACCEPTS that version (OvBackend::new
+      #      succeeds — not "too old" again; openvino-rs#167 may also bound the
+      #      UPPER end, so the chosen release must be in the crate's supported
+      #      window, or the crate must be bumped).
+      #   3. NOTE: even with OpenVINO fixed, `ort_ov_output_equivalence_on_mnist`
+      #      still hangs on the ort #144 deadlock until that is resolved — keep
+      #      the timeout-minutes on the test step.
+      # ======================================================================
+      - name: Install OpenVINO runtime (clean-release archive)  # DRAFT — see #143
         run: |
           set -euo pipefail
-          # Intel public GPG key + apt repo (per
-          # https://docs.openvino.ai/2024/get-started/install-openvino/install-openvino-linux.html).
-          wget -qO - https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-            | sudo gpg --dearmor -o /usr/share/keyrings/intel.gpg
-          echo "deb [signed-by=/usr/share/keyrings/intel.gpg] https://apt.repos.intel.com/openvino/2024 ubuntu22 main" \
-            | sudo tee /etc/apt/sources.list.d/intel-openvino-2024.list
-          sudo apt-get update
-          sudo apt-get install -y openvino-2024.5.0
-          # DISCOVER the runtime location instead of ASSUMING it. The Intel
-          # apt package's actual install path has proven not to be the
-          # standalone-archive `/opt/intel/...` layout NOR the distro-DEB
-          # `/usr/lib/x86_64-linux-gnu` FHS path, so we locate libopenvino_c.so
-          # wherever the package placed it and export that dir for the test
-          # step's LD_LIBRARY_PATH (which openvino-finder probes first). If the
-          # library is genuinely absent, fail loudly with package diagnostics
-          # so the real layout is visible in the log.
-          echo "Locating libopenvino_c.so after apt install ..."
-          OPENVINO_LIBDIR="$(dirname "$(find /usr /opt /lib -name 'libopenvino_c.so*' -print 2>/dev/null | head -n1)")"
-          if [ -z "${OPENVINO_LIBDIR}" ] || [ "${OPENVINO_LIBDIR}" = "." ]; then
-            echo "::error::libopenvino_c.so not found under /usr /opt /lib after apt install of openvino-2024.5.0"
-            echo "--- installed openvino packages ---"
-            dpkg -l | grep -i openvino || true
-            echo "--- .so files owned by those packages ---"
-            dpkg -l | awk '/^ii/ && /openvino/ {print $2}' \
-              | while read -r p; do echo "== ${p} =="; dpkg -L "${p}" 2>/dev/null | grep -E '\.so' || true; done
-            echo "--- ldconfig cache (openvino) ---"
-            ldconfig -p | grep -i openvino || true
-            exit 1
-          fi
-          echo "OpenVINO C runtime found in: ${OPENVINO_LIBDIR}"
-          ls -1 "${OPENVINO_LIBDIR}"/libopenvino_c.so*
-          # Export for subsequent steps (GitHub Actions step-to-step env).
-          echo "OPENVINO_LIBDIR=${OPENVINO_LIBDIR}" >> "${GITHUB_ENV}"
+          # TODO(#143): pin these to a real, crate-accepted clean release.
+          OPENVINO_VERSION="2024.6.0"                       # TODO: verify crate accepts it
+          OPENVINO_DIST="ubuntu24"                          # ubuntu-latest == 24.04
+          # The full tarball name includes a build id, e.g.
+          #   l_openvino_toolkit_ubuntu24_2024.6.0.<build>_x86_64.tgz
+          # Pin the exact name from the storage listing (it is NOT derivable):
+          OPENVINO_TARBALL="l_openvino_toolkit_${OPENVINO_DIST}_${OPENVINO_VERSION}.PINME_x86_64.tgz"
+          BASE="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION%.*}/linux"
+          curl -fL -o /tmp/openvino.tgz "${BASE}/${OPENVINO_TARBALL}"
+          mkdir -p "$HOME/.local/openvino"
+          tar -xzf /tmp/openvino.tgz -C "$HOME/.local/openvino" --strip-components=1
+          # Fixed archive layout: runtime libs + bundled TBB.
+          OV_LIB="$HOME/.local/openvino/runtime/lib/intel64"
+          OV_TBB="$HOME/.local/openvino/runtime/3rdparty/tbb/lib"
+          test -f "${OV_LIB}/libopenvino_c.so" \
+            || { echo "::error::libopenvino_c.so missing in archive at ${OV_LIB}"; ls -R "$HOME/.local/openvino" | head -50; exit 1; }
+          echo "OpenVINO C runtime: ${OV_LIB}"; ls -1 "${OV_LIB}"/libopenvino_c.so*
+          # Export both the core lib dir and the TBB dir (libopenvino_c.so
+          # depends on libtbb) for the test step's LD_LIBRARY_PATH.
+          echo "OPENVINO_LIBDIR=${OV_LIB}:${OV_TBB}" >> "${GITHUB_ENV}"
       - name: parko-openvino tests
         # OpenVINO-dependent. Same flakiness disposition as
         # parko-onnx: if this job becomes unreliable in CI (Intel apt
