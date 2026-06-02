@@ -9,10 +9,23 @@ on:
 permissions:
   contents: read
 
+# Auto-cancel superseded runs. Without this, every push to a PR (or main)
+# leaves the prior run churning — they don't share a concurrency group, so
+# nothing cancels them and they pile up holding runners until they finally
+# time out. Group per workflow + ref so each PR/branch keeps only its newest
+# run; `cancel-in-progress` reaps the rest the moment a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Job-level fast-fail guard so a hung run can't linger for hours holding
+    # runners (the parko-onnx/openvino test STEPS already have their own
+    # timeout-minutes; these are the previously-unbounded jobs).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +37,7 @@ jobs:
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -55,6 +69,7 @@ jobs:
   wcet-gate:
     name: WCET Gate (non-instrumented timing)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -67,6 +82,7 @@ jobs:
   parko-safety:
     name: Parko Safety Tests (no ROS, no ORT)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -299,6 +315,7 @@ jobs:
   static-analysis:
     name: Static Analysis (ISO 26262)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
