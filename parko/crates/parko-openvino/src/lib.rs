@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use openvino::{Core, CompiledModel, DeviceType, ElementType, Shape, Tensor};
+use openvino::{Core, CompiledModel, DeviceType, ElementType, RwPropertyKey, Shape, Tensor};
 
 use parko_core::backend::{
     BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend,
@@ -81,6 +81,41 @@ impl OvBackend {
                          (is libopenvino_c.so installed and discoverable? \
                          Try setting OPENVINO_LIB_PATH.)")
             ))?;
+
+        // Deterministic, max-accuracy CPU inference posture, mirroring the
+        // OrtBackend's `with_intra_threads(1)` + `GraphOptimizationLevel::Disable`.
+        //
+        // WHY: ORT was pinned to deterministic single-threaded execution, but
+        // OpenVINO ran with defaults (multi-threaded, perf-optimized, with
+        // possible bf16/f16 downcast on capable CPUs). The two then diverged by
+        // ~2e-3 on MNIST logits AND the diff wobbled run-to-run with the runner
+        // CPU + thread scheduling — the cross-backend equivalence test's
+        // flakiness. These properties bring OpenVINO to ORT's posture:
+        //   EXECUTION_MODE_HINT = ACCURACY  — no accuracy-affecting optimizations
+        //       (the OpenVINO analog of ORT's graph-opt disable); full precision.
+        //   INFERENCE_PRECISION_HINT = f32  — explicit fp32, never bf16/f16.
+        //   PERFORMANCE_HINT = LATENCY      — single-stream, no throughput batching.
+        //   INFERENCE_NUM_THREADS = 1       — deterministic accumulation order
+        //       (matches ORT's single intra-op thread).
+        //
+        // SCOPING (PENDING DECISION — do not treat as permanent): fp32 / ACCURACY
+        // / LATENCY are a sound PRODUCTION precision+latency posture for a safety
+        // perception path. `INFERENCE_NUM_THREADS = 1` trades throughput for
+        // reproducibility — the open production-vs-test question.
+        for (key, value) in [
+            (RwPropertyKey::HintExecutionMode, "ACCURACY"),
+            (RwPropertyKey::HintInferencePrecision, "f32"),
+            (RwPropertyKey::HintPerformanceMode, "LATENCY"),
+            (RwPropertyKey::InferenceNumThreads, "1"),
+        ] {
+            let key_name = key.as_ref().to_string();
+            core.set_property(&DeviceType::CPU, &key, value).map_err(|e| {
+                BackendError::InitializationError(format!(
+                    "openvino set_property({key_name}={value}) failed: {e:?}"
+                ))
+            })?;
+        }
+
         // ONNX files are self-contained — pass an empty weights path.
         // OpenVINO recognises the .onnx extension and uses its ONNX
         // frontend.
