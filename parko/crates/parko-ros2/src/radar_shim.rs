@@ -24,20 +24,13 @@
 // `Some(elevation)`. It does NOT decide 2D-ness — the transform's
 // `ElevationPolicy` owns that interpretation; the shim only moves the field.
 //
-// MIRROR / MERGE NOTE: `RadarDetection` lives on the (unmerged)
-// feat/parko-radar-mapping branch, so it is MIRRORED here (byte-identical) so
-// this shim compiles standalone off `main`. When the radar mapping lands, delete
-// the mirror and `use crate::sensor_mapping::RadarDetection;`.
-
-/// MIRROR of feat/parko-radar-mapping's `RadarDetection` (the transform input).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RadarDetection {
-    pub range: f32,
-    pub azimuth: f32,
-    pub elevation: Option<f32>,
-    pub velocity: f32,
-    pub rcs: f32,
-}
+// PIPELINE CONNECTION: `RadarDetection` is the radar mapping's transform input,
+// in main (radar mapping landed in sensor_mapping.rs). This shim emits that exact
+// type — the prior byte-identical mirror has been collapsed away — so the shim's
+// decode output feeds the mapping's `to_tensor` with no conversion: the radar
+// path (RadarScan → decode → RadarDetection → mapping → tensor) type-checks end
+// to end.
+use crate::sensor_mapping::RadarDetection;
 
 /// Plain mirror of one `radar_msgs/RadarReturn`'s relevant fields — r2r-free.
 #[derive(Debug, Clone, Copy, PartialEq)]

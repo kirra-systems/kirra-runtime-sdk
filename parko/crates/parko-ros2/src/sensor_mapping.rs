@@ -948,6 +948,388 @@ impl LidarMapping {
 }
 
 // ===========================================================================
+// Radar mapping  (sparse polar detections → detection-list tensor)
+// ===========================================================================
+//
+// SAFETY FRAMING. Sensor mapping is UPSTREAM of the governor's guarantee. A
+// radar mapping that mis-places a detection (bad polar→cartesian), drops or
+// corrupts its Doppler velocity, or fabricates a phantom return feeds Parko's
+// model corrupted spatial/velocity data — producing a command that is
+// confidently wrong AND within the envelope the governor passes. Correctness —
+// deterministic, geometrically correct, fail-closed — is the whole point.
+//
+// HOW RADAR DIFFERS FROM LIDAR (each a correctness surface):
+//   1. Sparse DETECTIONS, not a dense cloud — a list, each with range, az,
+//      optional elevation, radial (Doppler) velocity, RCS.
+//   2. Native POLAR — any cartesian output needs an explicit polar→cartesian
+//      conversion, the new place geometry errors hide.
+//   3. DOPPLER (radial velocity) — radar's most valuable signal, which LiDAR
+//      lacks. It MUST be preserved through the mapping, never discarded.
+//   4. Many automotive radars are 2D (azimuth only, no elevation).
+//
+// REPRESENTATION (FLAGGED — architect's call; reversible pending Parko's
+// model, exactly like the LiDAR mapping). This is the PARKO path (Parko's own
+// model), NOT shared with Occy.
+//   - Detection list (N × features, padded to fixed N) — radar-native;
+//     preserves Doppler/RCS per detection with NO discretization loss; the
+//     simplest. Features are polar `[range, az, el, velocity, rcs]` or
+//     cartesian `[x, y, z, velocity, rcs]`. IMPLEMENTED here (recommended
+//     default: lossless on Doppler/RCS, no grid discretization).
+//   - BEV grid (occupancy / radial-velocity / RCS / density) — consistent with
+//     the LiDAR BEV IF Parko fuses sensors into a common BEV, but sparse radar
+//     in a grid is mostly empty and discretizes per-detection precision.
+//     Documented sibling `RadarRepresentation` variant to add then.
+// Re-confirm against Parko's actual model; the enum + exhaustive `to_tensor`
+// match keep switching clean.
+//
+// POLAR→CARTESIAN + ANGLE CONVENTION (FLAGGED — the radar analog of LiDAR's
+// frame concern). For the cartesian feature frame the conversion is
+//     x = range · cos(el) · cos(az)
+//     y = range · cos(el) · sin(az)
+//     z = range · sin(el)
+// with these conventions, stated LOUDLY because a wrong one silently
+// mis-places EVERY detection:
+//   - azimuth: radians, zero-reference along +x, CCW positive (toward +y).
+//   - elevation: radians, zero in the x–y plane, positive toward +z.
+// In the polar feature frame there is NO conversion — the model then receives
+// polar features `[range, az, el, velocity, rcs]` verbatim.
+//
+// 2D RADAR / MISSING ELEVATION (FLAGGED). A detection with `elevation == None`
+// (2D radar) is handled per `ElevationPolicy`: `Assume(angle_rad)` substitutes
+// an EXPLICIT configured elevation (e.g. 0.0 = the sensor's horizontal plane —
+// never a silent z=0), or `Reject` fails closed. The value is always explicit.
+//
+// ROS SHIM — DEFERRED. Parsing `radar_msgs/RadarScan` / `RadarTracks` into
+// `Vec<RadarDetection>`, and the `SensorInputMapping` trait impl, are the
+// ros2-gated integration layer — like the lidar/camera shims. PLANNED, not
+// implemented here.
+
+/// A single radar detection in the radar's native polar frame. NOT the ROS
+/// message — that is the deferred shim's input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadarDetection {
+    /// Range to the detection, metres (`>= 0`).
+    pub range: f32,
+    /// Azimuth, radians: zero along +x, CCW positive (see module docs).
+    pub azimuth: f32,
+    /// Elevation, radians: zero in the x–y plane, positive toward +z. `None`
+    /// for a 2D radar — resolved via `RadarConfig.elevation_policy`.
+    pub elevation: Option<f32>,
+    /// Radial (Doppler) velocity, m/s. Radar's key signal — preserved into the
+    /// output verbatim, never discarded. Producer's sign convention carried
+    /// through unchanged.
+    pub velocity: f32,
+    /// Radar cross-section / detection amplitude (raw units).
+    pub rcs: f32,
+}
+
+/// Which model-input representation the detections map to. Only `DetectionList`
+/// is implemented; `BevGrid` is the documented sibling (added when Parko fuses
+/// to a common BEV).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadarRepresentation {
+    /// `N × F` detection list (radar-native, lossless on Doppler/RCS).
+    DetectionList,
+}
+
+/// The per-detection feature frame for `DetectionList`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectionFeatureFrame {
+    /// `[range, azimuth, elevation, velocity, rcs]` — radar-native polar, no
+    /// conversion.
+    Polar,
+    /// `[x, y, z, velocity, rcs]` — cartesian; applies the documented
+    /// polar→cartesian conversion.
+    Cartesian,
+}
+
+/// How a detection with no elevation (2D radar) is resolved. Explicit — never a
+/// silent z=0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ElevationPolicy {
+    /// Substitute this elevation angle (radians) — e.g. `0.0` = the sensor's
+    /// horizontal plane. The assumed value is explicit in config.
+    Assume(f32),
+    /// A detection with no elevation is a structured error (`MissingElevation`).
+    Reject,
+}
+
+/// Per-feature value scaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadarNormalization {
+    /// Physical units: metres / radians / m·s⁻¹ / raw RCS. Doppler appears
+    /// verbatim in the velocity column.
+    Raw,
+    /// Divide by reference scales (no clamp, so magnitudes — including Doppler —
+    /// are preserved relative to the scale): lengths → `/range_max`, angles →
+    /// `/π`, velocity → `/velocity_max`, rcs → `/rcs_max`.
+    Normalized,
+}
+
+/// Output tensor layout for the `N × F` detection list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadarLayout {
+    /// `[N, F]` — one detection per row (row-major).
+    DetectionMajor,
+    /// `[F, N]` — one feature per row.
+    FeatureMajor,
+}
+
+/// What to do when more than `max_detections` in-FOV detections are present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowPolicy {
+    /// Keep the first `max_detections` (input order), drop the excess. A
+    /// deliberate, documented capacity choice — not a silent accident.
+    DropExcess,
+    /// More than `max_detections` is a structured error (`TooManyDetections`) —
+    /// fail-closed: do not silently discard real returns.
+    Error,
+}
+
+/// Radar detection-list mapping configuration. Everything that affects spatial
+/// or velocity meaning is explicit; no hidden default can move a detection,
+/// drop its Doppler, or rescale it.
+#[derive(Debug, Clone)]
+pub struct RadarConfig {
+    /// Output representation. `DetectionList` is the only implemented value.
+    pub representation: RadarRepresentation,
+    /// Polar vs cartesian per-detection features. See `DetectionFeatureFrame`.
+    pub feature_frame: DetectionFeatureFrame,
+    /// Range gate, metres, `[range_min, range_max]`. `range_min >= 0`,
+    /// `range_max > range_min`. Outside → out-of-FOV.
+    pub range_min: f32,
+    pub range_max: f32,
+    /// Azimuth FOV, radians, `[az_min, az_max]` (`az_max > az_min`). Outside →
+    /// out-of-FOV.
+    pub az_min: f32,
+    pub az_max: f32,
+    /// Elevation FOV, radians, `[el_min, el_max]` (`el_max >= el_min`), applied
+    /// to the resolved elevation. Outside → out-of-FOV.
+    pub el_min: f32,
+    pub el_max: f32,
+    /// Fixed output detection count `N` (rows). Fewer → zero-padded rows; more →
+    /// per `on_overflow`. Must be `> 0`.
+    pub max_detections: usize,
+    /// Behaviour when in-FOV detections exceed `max_detections`.
+    pub on_overflow: OverflowPolicy,
+    /// Resolution of `elevation == None` (2D radar).
+    pub elevation_policy: ElevationPolicy,
+    /// Feature scaling. See `RadarNormalization`.
+    pub normalization: RadarNormalization,
+    /// Under `Normalized`, the velocity (m/s) mapping to `1.0`. Finite, `> 0`.
+    pub velocity_max: f32,
+    /// Under `Normalized`, the RCS mapping to `1.0`. Finite, `> 0`.
+    pub rcs_max: f32,
+    /// Output tensor layout. See `RadarLayout`.
+    pub layout: RadarLayout,
+    /// Handling of out-of-range / out-of-FOV detections. Reuses the LiDAR
+    /// policy: `Drop` (normal — radar sees beyond the gate) or `Error`. There
+    /// is deliberately NO clip — clamping a far detection to the boundary
+    /// fabricates a phantom obstacle (same hazard the LiDAR mapping excluded).
+    pub out_of_bounds: OutOfBoundsPolicy,
+    /// Tensor name inside the produced `TensorBatch`.
+    pub tensor_name: String,
+}
+
+/// Number of feature columns per detection (both feature frames carry 5:
+/// 3 position/polar + velocity + rcs).
+const RADAR_FEATURES: usize = 5;
+
+/// Errors the pure radar transform may return. A dedicated sibling enum (like
+/// `LidarMappingError`), kept disjoint from the camera/lidar errors — the
+/// variants are radar-specific.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RadarMappingError {
+    /// `range_min` is negative/non-finite, or `range_max <= range_min`.
+    InvalidRangeGate,
+    /// Azimuth FOV is non-finite or `az_max <= az_min`.
+    InvalidAzimuthFov,
+    /// Elevation FOV is non-finite, `el_max < el_min`, or the `Assume`
+    /// elevation is non-finite.
+    InvalidElevationFov,
+    /// `max_detections == 0` — the output would have zero rows.
+    InvalidMaxDetections,
+    /// `Normalized` selected with a non-finite or `<= 0` scale
+    /// (`velocity_max` / `rcs_max`).
+    InvalidNormalizationScale,
+    /// The detection list is empty. Returned rather than a silently-zero tensor.
+    EmptyDetectionList,
+    /// Detection `index` has a non-finite (`NaN`/`inf`) field — rejected so one
+    /// bad return can never silently corrupt the output.
+    NonFiniteDetection { index: usize },
+    /// Detection `index` has `elevation == None` and `elevation_policy` is
+    /// `Reject`.
+    MissingElevation { index: usize },
+    /// Detection `index` is outside the range/FOV gate and `out_of_bounds` is
+    /// `Error`.
+    OutOfFovDetection { index: usize },
+    /// More than `max_detections` in-FOV detections and `on_overflow` is
+    /// `Error`.
+    TooManyDetections { found: usize, max: usize },
+}
+
+/// Pure radar-detections → detection-list tensor mapping. Cloning is cheap.
+#[derive(Debug, Clone)]
+pub struct RadarMapping {
+    config: RadarConfig,
+}
+
+impl RadarMapping {
+    #[must_use]
+    pub fn new(config: RadarConfig) -> Self {
+        Self { config }
+    }
+
+    /// Validate the config independently of any detections. Fail-closed;
+    /// returns the first structured violation. Called before any detection is
+    /// processed.
+    fn validate_config(&self) -> Result<(), RadarMappingError> {
+        let c = &self.config;
+        if !c.range_min.is_finite() || !c.range_max.is_finite()
+            || c.range_min < 0.0 || c.range_max <= c.range_min
+        {
+            return Err(RadarMappingError::InvalidRangeGate);
+        }
+        if !c.az_min.is_finite() || !c.az_max.is_finite() || c.az_max <= c.az_min {
+            return Err(RadarMappingError::InvalidAzimuthFov);
+        }
+        if !c.el_min.is_finite() || !c.el_max.is_finite() || c.el_max < c.el_min {
+            return Err(RadarMappingError::InvalidElevationFov);
+        }
+        if let ElevationPolicy::Assume(angle) = c.elevation_policy {
+            if !angle.is_finite() {
+                return Err(RadarMappingError::InvalidElevationFov);
+            }
+        }
+        if c.max_detections == 0 {
+            return Err(RadarMappingError::InvalidMaxDetections);
+        }
+        if c.normalization == RadarNormalization::Normalized
+            && (!c.velocity_max.is_finite() || c.velocity_max <= 0.0
+                || !c.rcs_max.is_finite() || c.rcs_max <= 0.0)
+        {
+            return Err(RadarMappingError::InvalidNormalizationScale);
+        }
+        Ok(())
+    }
+
+    /// Resolve a detection's elevation per the 2D policy.
+    fn resolve_elevation(&self, det: &RadarDetection, index: usize) -> Result<f32, RadarMappingError> {
+        match det.elevation {
+            Some(e) => Ok(e),
+            None => match self.config.elevation_policy {
+                ElevationPolicy::Assume(angle) => Ok(angle),
+                ElevationPolicy::Reject => Err(RadarMappingError::MissingElevation { index }),
+            },
+        }
+    }
+
+    /// The five feature columns for one detection, in the configured frame +
+    /// normalization. `[range/x, az/y, el/z, velocity, rcs]`.
+    fn features(&self, det: &RadarDetection, elevation: f32) -> [f32; RADAR_FEATURES] {
+        let c = &self.config;
+        let (f0, f1, f2) = match c.feature_frame {
+            DetectionFeatureFrame::Polar => (det.range, det.azimuth, elevation),
+            DetectionFeatureFrame::Cartesian => {
+                // x = r·cos(el)·cos(az), y = r·cos(el)·sin(az), z = r·sin(el).
+                let rc = det.range * elevation.cos();
+                (rc * det.azimuth.cos(), rc * det.azimuth.sin(), det.range * elevation.sin())
+            }
+        };
+        match c.normalization {
+            RadarNormalization::Raw => [f0, f1, f2, det.velocity, det.rcs],
+            RadarNormalization::Normalized => {
+                // Lengths → /range_max; angles → /π; velocity → /velocity_max;
+                // rcs → /rcs_max. No clamp: Doppler magnitude is preserved.
+                let pi = std::f32::consts::PI;
+                match c.feature_frame {
+                    DetectionFeatureFrame::Polar => [
+                        f0 / c.range_max, f1 / pi, f2 / pi,
+                        det.velocity / c.velocity_max, det.rcs / c.rcs_max,
+                    ],
+                    DetectionFeatureFrame::Cartesian => [
+                        f0 / c.range_max, f1 / c.range_max, f2 / c.range_max,
+                        det.velocity / c.velocity_max, det.rcs / c.rcs_max,
+                    ],
+                }
+            }
+        }
+    }
+
+    /// The pure transform. Same detections → same tensor, every call, no I/O.
+    pub fn to_tensor(
+        &self,
+        detections: &[RadarDetection],
+    ) -> Result<TensorBatch<'static>, RadarMappingError> {
+        let c = &self.config;
+        // Exhaustive so a future representation can't compile until its
+        // transform is implemented (the config stays explicit, never silent).
+        match c.representation {
+            RadarRepresentation::DetectionList => {}
+        }
+        self.validate_config()?;
+
+        if detections.is_empty() {
+            return Err(RadarMappingError::EmptyDetectionList);
+        }
+
+        // Collect the in-FOV detections' feature rows, preserving input order.
+        let mut rows: Vec<[f32; RADAR_FEATURES]> = Vec::new();
+        for (idx, det) in detections.iter().enumerate() {
+            if !det.range.is_finite() || !det.azimuth.is_finite() || !det.velocity.is_finite()
+                || !det.rcs.is_finite()
+                || det.elevation.map(|e| !e.is_finite()).unwrap_or(false)
+            {
+                return Err(RadarMappingError::NonFiniteDetection { index: idx });
+            }
+            let elevation = self.resolve_elevation(det, idx)?;
+            let in_fov = det.range >= c.range_min && det.range <= c.range_max
+                && det.azimuth >= c.az_min && det.azimuth <= c.az_max
+                && elevation >= c.el_min && elevation <= c.el_max;
+            if !in_fov {
+                match c.out_of_bounds {
+                    OutOfBoundsPolicy::Drop => continue,
+                    OutOfBoundsPolicy::Error => {
+                        return Err(RadarMappingError::OutOfFovDetection { index: idx });
+                    }
+                }
+            }
+            rows.push(self.features(det, elevation));
+        }
+
+        if rows.len() > c.max_detections {
+            match c.on_overflow {
+                OverflowPolicy::DropExcess => rows.truncate(c.max_detections),
+                OverflowPolicy::Error => {
+                    return Err(RadarMappingError::TooManyDetections {
+                        found: rows.len(),
+                        max: c.max_detections,
+                    });
+                }
+            }
+        }
+
+        // Assemble [N, F] / [F, N], zero-padding unused rows.
+        let n = c.max_detections;
+        let f = RADAR_FEATURES;
+        let mut out = vec![0.0_f32; n * f];
+        for (row_idx, feats) in rows.iter().enumerate() {
+            for (fi, &v) in feats.iter().enumerate() {
+                let out_idx = match c.layout {
+                    RadarLayout::DetectionMajor => row_idx * f + fi,
+                    RadarLayout::FeatureMajor => fi * n + row_idx,
+                };
+                out[out_idx] = v;
+            }
+        }
+
+        let mut named = HashMap::new();
+        named.insert(c.tensor_name.clone(), TensorStorage::Owned(out));
+        Ok(TensorBatch { named_tensors: named, metadata: HashMap::new() })
+    }
+}
+
+// ===========================================================================
 // Camera + Odom — tests
 // ===========================================================================
 
@@ -1800,6 +2182,336 @@ mod lidar_tests {
                 let col = (p.x / 2.0).floor() as usize;
                 let row = (p.y / 2.0).floor() as usize;
                 prop_assert!(grid[row * n_cols + col] >= 1.0);
+            }
+        }
+    }
+}
+// ===========================================================================
+// Radar — tests
+// ===========================================================================
+
+#[cfg(test)]
+mod radar_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+
+    /// Range gate [1,50], az ±π/2, el ±π/4, N=8, Raw, DetectionMajor, Drop.
+    fn cfg(
+        frame: DetectionFeatureFrame,
+        elevation_policy: ElevationPolicy,
+        oob: OutOfBoundsPolicy,
+    ) -> RadarConfig {
+        RadarConfig {
+            representation: RadarRepresentation::DetectionList,
+            feature_frame: frame,
+            range_min: 1.0, range_max: 50.0,
+            az_min: -FRAC_PI_2, az_max: FRAC_PI_2,
+            el_min: -FRAC_PI_4, el_max: FRAC_PI_4,
+            max_detections: 8,
+            on_overflow: OverflowPolicy::Error,
+            elevation_policy,
+            normalization: RadarNormalization::Raw,
+            velocity_max: 30.0,
+            rcs_max: 100.0,
+            layout: RadarLayout::DetectionMajor,
+            out_of_bounds: oob,
+            tensor_name: "radar".to_string(),
+        }
+    }
+
+    fn det(range: f32, az: f32, el: Option<f32>, v: f32, rcs: f32) -> RadarDetection {
+        RadarDetection { range, azimuth: az, elevation: el, velocity: v, rcs }
+    }
+
+    fn t<'a>(b: &'a TensorBatch<'static>) -> &'a [f32] {
+        b.named_tensors.get("radar").unwrap().as_slice()
+    }
+
+    /// GEOMETRIC CORRECTNESS: polar→cartesian verified at known angles, not
+    /// assumed. r=5,az=0,el=0 → (5,0,0); az=π/2 → (0,5,0); el=π/4 → z=r·sin(π/4).
+    #[test]
+    fn cartesian_conversion_is_geometrically_correct() {
+        let dets = vec![
+            det(5.0, 0.0, Some(0.0), 3.0, 10.0),        // → (5,0,0)
+            det(5.0, FRAC_PI_2, Some(0.0), -4.0, 20.0), // → (0,5,0)
+            det(10.0, 0.0, Some(FRAC_PI_4), 1.0, 30.0), // → (10·cos45,0,10·sin45)
+        ];
+        let out = cart_tensor(&dets);
+        let r = t(&out);
+        let eps = 1e-4;
+        // row 0: (5,0,0,3,10)
+        assert!((r[0] - 5.0).abs() < eps && r[1].abs() < eps && r[2].abs() < eps);
+        assert_eq!(r[3], 3.0); // Doppler preserved
+        assert_eq!(r[4], 10.0);
+        // row 1 (F=5): (0,5,0,-4,20)
+        assert!(r[5].abs() < eps && (r[6] - 5.0).abs() < eps && r[7].abs() < eps);
+        assert_eq!(r[8], -4.0);
+        // row 2: (10·cos45, 0, 10·sin45, 1, 30)
+        let c45 = (FRAC_PI_4).cos() * 10.0;
+        let s45 = (FRAC_PI_4).sin() * 10.0;
+        assert!((r[10] - c45).abs() < eps && r[11].abs() < eps && (r[12] - s45).abs() < eps);
+        assert_eq!(r[13], 1.0);
+    }
+
+    // Cartesian-frame transform, so the geometry test reads cleanly.
+    fn cart_tensor(dets: &[RadarDetection]) -> TensorBatch<'static> {
+        RadarMapping::new(cfg(
+            DetectionFeatureFrame::Cartesian,
+            ElevationPolicy::Assume(0.0),
+            OutOfBoundsPolicy::Error,
+        ))
+        .to_tensor(dets)
+        .expect("valid")
+    }
+
+    /// DOPPLER PRESERVED verbatim in the velocity column (index 3), both frames.
+    #[test]
+    fn doppler_velocity_is_preserved() {
+        for frame in [DetectionFeatureFrame::Polar, DetectionFeatureFrame::Cartesian] {
+            let out = RadarMapping::new(cfg(frame, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Error))
+                .to_tensor(&[det(10.0, 0.2, Some(0.0), 7.5, 12.0)])
+                .expect("valid");
+            assert_eq!(t(&out)[3], 7.5, "Doppler must pass through unchanged");
+        }
+    }
+
+    /// Polar frame passes [range, az, el, v, rcs] through verbatim (Raw).
+    #[test]
+    fn polar_frame_is_verbatim() {
+        let out = RadarMapping::new(cfg(
+            DetectionFeatureFrame::Polar,
+            ElevationPolicy::Reject,
+            OutOfBoundsPolicy::Error,
+        ))
+        .to_tensor(&[det(12.0, 0.3, Some(0.1), 5.0, 9.0)])
+        .expect("valid");
+        assert_eq!(&t(&out)[0..5], &[12.0, 0.3, 0.1, 5.0, 9.0]);
+    }
+
+    /// Output length == N × F; unused rows zero-padded.
+    #[test]
+    fn output_dims_and_padding() {
+        let out = RadarMapping::new(cfg(
+            DetectionFeatureFrame::Polar,
+            ElevationPolicy::Assume(0.0),
+            OutOfBoundsPolicy::Drop,
+        ))
+        .to_tensor(&[det(10.0, 0.0, Some(0.0), 1.0, 1.0)])
+        .expect("valid");
+        assert_eq!(t(&out).len(), 8 * 5);
+        // only the first row populated; the rest are zero padding.
+        assert!(t(&out)[5..].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn is_deterministic() {
+        let c = cfg(DetectionFeatureFrame::Cartesian, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop);
+        let dets = vec![det(7.0, 0.4, Some(0.1), 2.0, 5.0), det(20.0, -0.5, None, -3.0, 8.0)];
+        let a = RadarMapping::new(c.clone()).to_tensor(&dets).expect("valid");
+        let b = RadarMapping::new(c).to_tensor(&dets).expect("valid");
+        assert_eq!(t(&a), t(&b));
+    }
+
+    /// FeatureMajor lays features down columns: [F, N].
+    #[test]
+    fn feature_major_layout() {
+        let mut c = cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop);
+        c.layout = RadarLayout::FeatureMajor;
+        c.max_detections = 2;
+        let out = RadarMapping::new(c).to_tensor(&[det(10.0, 0.2, Some(0.0), 4.0, 6.0)]).expect("valid");
+        // [F=5, N=2]: feature f of detection 0 is at index f*2 + 0.
+        let r = t(&out);
+        assert_eq!(r.len(), 5 * 2);
+        assert_eq!(r[0 * 2], 10.0); // range
+        assert_eq!(r[1 * 2], 0.2);  // az
+        assert_eq!(r[3 * 2], 4.0);  // velocity (Doppler)
+        // detection-1 slots (odd indices) are padding.
+        assert!((0..5).all(|f| r[f * 2 + 1] == 0.0));
+    }
+
+    // -- 2D radar / elevation policy ------------------------------------
+
+    #[test]
+    fn missing_elevation_assume_substitutes_value() {
+        // 2D detection, Assume(0) → cartesian z == 0.
+        let out = RadarMapping::new(cfg(
+            DetectionFeatureFrame::Cartesian,
+            ElevationPolicy::Assume(0.0),
+            OutOfBoundsPolicy::Error,
+        ))
+        .to_tensor(&[det(10.0, 0.0, None, 1.0, 1.0)])
+        .expect("valid");
+        assert!(t(&out)[2].abs() < 1e-4, "z must be the assumed-ground 0");
+    }
+
+    #[test]
+    fn missing_elevation_reject_fails_closed() {
+        let err = RadarMapping::new(cfg(
+            DetectionFeatureFrame::Cartesian,
+            ElevationPolicy::Reject,
+            OutOfBoundsPolicy::Error,
+        ))
+        .to_tensor(&[det(10.0, 0.0, None, 1.0, 1.0)])
+        .unwrap_err();
+        assert_eq!(err, RadarMappingError::MissingElevation { index: 0 });
+    }
+
+    // -- Fail-closed -----------------------------------------------------
+
+    #[test]
+    fn empty_list_fails_closed() {
+        let err = RadarMapping::new(cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop))
+            .to_tensor(&[])
+            .unwrap_err();
+        assert_eq!(err, RadarMappingError::EmptyDetectionList);
+    }
+
+    #[test]
+    fn non_finite_detection_fails_closed_at_index() {
+        let bads = [
+            det(f32::NAN, 0.0, Some(0.0), 1.0, 1.0),
+            det(10.0, f32::INFINITY, Some(0.0), 1.0, 1.0),
+            det(10.0, 0.0, Some(f32::NAN), 1.0, 1.0),
+            det(10.0, 0.0, Some(0.0), f32::NAN, 1.0),
+            det(10.0, 0.0, Some(0.0), 1.0, f32::INFINITY),
+        ];
+        for bad in bads {
+            let dets = vec![det(10.0, 0.0, Some(0.0), 1.0, 1.0), bad];
+            let err = RadarMapping::new(cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop))
+                .to_tensor(&dets)
+                .unwrap_err();
+            assert_eq!(err, RadarMappingError::NonFiniteDetection { index: 1 });
+        }
+    }
+
+    #[test]
+    fn out_of_fov_detection_errors_under_error_policy() {
+        // 2nd detection beyond range_max.
+        let dets = vec![det(10.0, 0.0, Some(0.0), 1.0, 1.0), det(500.0, 0.0, Some(0.0), 1.0, 1.0)];
+        let err = RadarMapping::new(cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Error))
+            .to_tensor(&dets)
+            .unwrap_err();
+        assert_eq!(err, RadarMappingError::OutOfFovDetection { index: 1 });
+    }
+
+    #[test]
+    fn out_of_fov_detection_dropped_under_drop_policy() {
+        let dets = vec![
+            det(10.0, 0.0, Some(0.0), 1.0, 1.0),
+            det(500.0, 3.0, Some(0.0), 9.0, 9.0), // far + out of az FOV → dropped
+            det(11.0, 0.1, Some(0.0), 2.0, 2.0),
+        ];
+        let out = RadarMapping::new(cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop))
+            .to_tensor(&dets)
+            .expect("valid");
+        // two kept rows in order; row 0 range 10, row 1 range 11; rest padding.
+        assert_eq!(t(&out)[0], 10.0);
+        assert_eq!(t(&out)[5], 11.0);
+        assert!(t(&out)[10..].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn overflow_errors_under_error_policy() {
+        let mut c = cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Error);
+        c.max_detections = 2;
+        let dets: Vec<RadarDetection> = (0..3).map(|i| det(10.0 + i as f32, 0.0, Some(0.0), 1.0, 1.0)).collect();
+        let err = RadarMapping::new(c).to_tensor(&dets).unwrap_err();
+        assert_eq!(err, RadarMappingError::TooManyDetections { found: 3, max: 2 });
+    }
+
+    #[test]
+    fn overflow_drops_excess_under_drop_policy() {
+        let mut c = cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop);
+        c.max_detections = 2;
+        c.on_overflow = OverflowPolicy::DropExcess;
+        let dets: Vec<RadarDetection> = (0..3).map(|i| det(10.0 + i as f32, 0.0, Some(0.0), 1.0, 1.0)).collect();
+        let out = RadarMapping::new(c).to_tensor(&dets).expect("valid");
+        // first two kept (range 10, 11); third dropped.
+        assert_eq!(t(&out).len(), 2 * 5);
+        assert_eq!(t(&out)[0], 10.0);
+        assert_eq!(t(&out)[5], 11.0);
+    }
+
+    #[test]
+    fn malformed_config_fails_closed() {
+        let base = cfg(DetectionFeatureFrame::Polar, ElevationPolicy::Assume(0.0), OutOfBoundsPolicy::Drop);
+        let dets = [det(10.0, 0.0, Some(0.0), 1.0, 1.0)];
+
+        let mut c = base.clone();
+        c.range_min = -1.0;
+        assert_eq!(RadarMapping::new(c).to_tensor(&dets).unwrap_err(), RadarMappingError::InvalidRangeGate);
+
+        let mut c = base.clone();
+        c.az_max = c.az_min; // inverted/empty az FOV
+        assert_eq!(RadarMapping::new(c).to_tensor(&dets).unwrap_err(), RadarMappingError::InvalidAzimuthFov);
+
+        let mut c = base.clone();
+        c.el_max = c.el_min - 1.0;
+        assert_eq!(RadarMapping::new(c).to_tensor(&dets).unwrap_err(), RadarMappingError::InvalidElevationFov);
+
+        let mut c = base.clone();
+        c.max_detections = 0;
+        assert_eq!(RadarMapping::new(c).to_tensor(&dets).unwrap_err(), RadarMappingError::InvalidMaxDetections);
+
+        let mut c = base.clone();
+        c.normalization = RadarNormalization::Normalized;
+        c.velocity_max = 0.0;
+        assert_eq!(RadarMapping::new(c).to_tensor(&dets).unwrap_err(), RadarMappingError::InvalidNormalizationScale);
+    }
+
+    // -- Safety invariant (property) -------------------------------------
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        /// SAFETY INVARIANT — the property the governor CANNOT protect: every
+        /// in-FOV detection is represented EXACTLY ONCE, in order, none lost,
+        /// duplicated, or mis-placed, AND its Doppler is preserved. Polar Raw
+        /// makes each row equal its detection's values verbatim, so we assert
+        /// the 1:1 mapping directly; `out_of_bounds = Error` + `on_overflow =
+        /// Error` make any stray/overflow detection fail loudly.
+        #[test]
+        fn prop_every_in_fov_detection_represented_once(
+            raw in proptest::collection::vec(
+                (1.0_f32..50.0, -FRAC_PI_2..FRAC_PI_2, -FRAC_PI_4..FRAC_PI_4, -30.0_f32..30.0, 0.0_f32..100.0),
+                1..8,
+            ),
+        ) {
+            let c = RadarConfig {
+                representation: RadarRepresentation::DetectionList,
+                feature_frame: DetectionFeatureFrame::Polar,
+                range_min: 1.0, range_max: 50.0,
+                az_min: -FRAC_PI_2, az_max: FRAC_PI_2,
+                el_min: -FRAC_PI_4, el_max: FRAC_PI_4,
+                max_detections: 8,
+                on_overflow: OverflowPolicy::Error,
+                elevation_policy: ElevationPolicy::Reject,
+                normalization: RadarNormalization::Raw,
+                velocity_max: 30.0, rcs_max: 100.0,
+                layout: RadarLayout::DetectionMajor,
+                out_of_bounds: OutOfBoundsPolicy::Error,
+                tensor_name: "radar".to_string(),
+            };
+            let dets: Vec<RadarDetection> = raw.iter()
+                .map(|&(r, az, el, v, rcs)| det(r, az, Some(el), v, rcs))
+                .collect();
+            let k = dets.len();
+            let out = RadarMapping::new(c).to_tensor(&dets).expect("all in-FOV");
+            let grid = out.named_tensors.get("radar").unwrap().as_slice();
+
+            // Each in-FOV detection at its own row, verbatim (Doppler col 3).
+            for (i, d) in dets.iter().enumerate() {
+                let base = i * RADAR_FEATURES;
+                prop_assert_eq!(grid[base], d.range);
+                prop_assert_eq!(grid[base + 1], d.azimuth);
+                prop_assert_eq!(grid[base + 2], d.elevation.unwrap());
+                prop_assert_eq!(grid[base + 3], d.velocity); // Doppler preserved
+                prop_assert_eq!(grid[base + 4], d.rcs);
+            }
+            // Remaining rows are zero padding — no phantom detections.
+            for slot in (k * RADAR_FEATURES)..(8 * RADAR_FEATURES) {
+                prop_assert_eq!(grid[slot], 0.0);
             }
         }
     }
