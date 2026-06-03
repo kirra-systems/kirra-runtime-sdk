@@ -76,7 +76,8 @@ use parko_core::RssState;
 
 use crate::angular_bound::{AngularVelocityBound, PlatformParams};
 use crate::comparator::RssAwareGovernor;
-use crate::MRC_VELOCITY_CEILING_MPS;
+use crate::{degraded_channel_violation, MRC_VELOCITY_CEILING_MPS, STOP_EPSILON_RAD_S};
+use kirra_runtime_sdk::gateway::kinematics_contract::STOP_EPSILON_MPS;
 
 /// Acceleration-space tolerance used by the primary's rate checks
 /// (`max_accel_mps2 + 1e-9`). Mirrored here so the diverse interval test
@@ -210,13 +211,29 @@ impl DiverseKirraGovernor {
         }
     }
 
-    /// Minimum-risk envelope (Degraded / RSS-unsafe). Mirrors the primary's
-    /// `apply_mrc_profile` effect — linear capped at the MRC ceiling, angular
-    /// capped at the MRC ω_max evaluated at the post-cap linear speed — but
+    /// Minimum-risk enforcement (Degraded / RSS-unsafe). Mirrors the primary's
+    /// `apply_mrc_profile`: first the Issue #70 decel-to-stop-and-HOLD gate
+    /// (deny any speed increase / re-initiation on either channel relative to
+    /// `previous`), then — for a converging command — the MRC envelope clamp,
     /// expressed with an explicit over-ceiling guard and `copysign`.
-    fn enforce_minimum_risk(&self, proposed: &ControlCommand) -> EnforcementAction {
+    fn enforce_minimum_risk(
+        &self,
+        proposed: &ControlCommand,
+        previous: Option<&ControlCommand>,
+    ) -> EnforcementAction {
         let v = proposed.linear_velocity;
         let w = proposed.angular_velocity;
+
+        // Issue #70 stop-and-hold gate (both channels) — identical thresholds
+        // and reason tokens as the primary, so the two governors agree.
+        let cur_lin = previous.map(|p| p.linear_velocity).unwrap_or(0.0);
+        let cur_ang = previous.map(|p| p.angular_velocity).unwrap_or(0.0);
+        if let Some(reason) = degraded_channel_violation(cur_lin, v, STOP_EPSILON_MPS) {
+            return EnforcementAction::Deny { reason: reason.to_string() };
+        }
+        if let Some(reason) = degraded_channel_violation(cur_ang, w, STOP_EPSILON_RAD_S) {
+            return EnforcementAction::Deny { reason: reason.to_string() };
+        }
 
         // DIFFERENCE #4 — over-ceiling guard instead of `v.min(MRC)`.
         let capped_linear = if v > MRC_VELOCITY_CEILING_MPS {
@@ -354,7 +371,7 @@ impl SafetyGovernor for DiverseKirraGovernor {
             Regime::HardStop => EnforcementAction::Deny {
                 reason: "DiverseKirraGovernor: locked-out hard stop".to_string(),
             },
-            Regime::MinimumRisk => self.enforce_minimum_risk(proposed),
+            Regime::MinimumRisk => self.enforce_minimum_risk(proposed, previous),
             Regime::Nominal => self.enforce_nominal(proposed, previous, delta_time_s),
         }
     }
@@ -608,9 +625,12 @@ mod tests {
         use crate::comparator::RssAwareGovernor;
         let mut gov = DiverseKirraGovernor::new();
         RssAwareGovernor::set_rss_state(&mut gov, unsafe_rss());
-        // RSS unsafe ⇒ MRC path ⇒ 20 m/s clamped to the MRC ceiling (5.0),
-        // not the ~35 m/s Nominal envelope.
-        let out = gov.evaluate(&twist(20.0, 0.0), None, 0.05, SafetyPosture::Nominal);
+        // RSS unsafe ⇒ MRC path ⇒ a 20 m/s DECELERATING command clamped to the
+        // MRC ceiling (5.0), not the ~35 m/s Nominal envelope. (Issue #70: a
+        // moving `previous` so the decel-to-stop gate passes and the MRC clamp
+        // is what this exercises — a re-initiation from rest would Deny.)
+        let prev = twist(20.0, 0.0);
+        let out = gov.evaluate(&twist(20.0, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
         let v = effective_lin(&out, 20.0);
         assert!((v - MRC_VELOCITY_CEILING_MPS).abs() < 1e-9,
             "set_rss_state(unsafe) must route to MRC ceiling {MRC_VELOCITY_CEILING_MPS}, got {v}");

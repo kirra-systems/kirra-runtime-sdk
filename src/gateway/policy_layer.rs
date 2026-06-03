@@ -16,7 +16,8 @@ use crate::audit_writer::{
     fleet_posture_str, AuditWriteJob, KinematicViolationPayload, ProposedCommandPayload,
 };
 use crate::gateway::kinematics_contract::{
-    validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
+    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction,
+    ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use crate::gateway::policy::{classify_http_command, OperationalCommand};
 use crate::posture_cache::{
@@ -164,9 +165,14 @@ impl EnforcementOutcome {
 /// selects the appropriate VehicleKinematicsContract, and enforces all physical
 /// invariants before the request reaches any downstream handler.
 ///
-/// Posture → Contract mapping:
+/// Posture → enforcement mapping:
 ///   Nominal   → nominal_reference_profile() — full operational envelope
-///   Degraded  → mrc_fallback_profile()      — MRC crawl-speed envelope
+///   Degraded  → controlled decel-to-stop-and-HOLD (Issue #70): the MRC
+///               envelope as the decel-trajectory bound, PLUS a
+///               non-increasing-speed + no-re-initiation gate
+///               (`enforce_degraded_decel_to_stop`). A stopped vehicle is
+///               held at rest; a moving vehicle may only bleed speed toward
+///               zero. Speed increase / re-initiation → DenyBreach → MRC stop.
 ///   LockedOut → immediate 403 FORBIDDEN     — fail-closed, no physics evaluation
 ///
 /// # Invariants
@@ -182,19 +188,17 @@ pub async fn enforce_actuator_safety_envelope(
     let posture = resolve_posture(&svc);
 
     // SAFETY: SG8 | REQ: posture-to-contract-mrc-selection | TEST: test_degraded_posture_selects_mrc_contract,test_degraded_posture_clamps_high_speed_to_mrc_limit,test_locked_out_posture_has_no_contract,test_locked_out_rejects_zero_motion_command
-    // (Nominal → nominal envelope; Degraded → MRC fallback envelope;
-    //  LockedOut → fail-closed 403 with no contract evaluated.)
-    let contract: VehicleKinematicsContract = match posture {
-        FleetPosture::Nominal => VehicleKinematicsContract::nominal_reference_profile(),
-        FleetPosture::Degraded => VehicleKinematicsContract::mrc_fallback_profile(),
-        FleetPosture::LockedOut => {
-            tracing::error!(
-                "Actuator command rejected: fleet posture is LockedOut — \
-                 all actuator mutations are blocked until posture recovers"
-            );
-            return Err(StatusCode::FORBIDDEN);
-        }
-    };
+    // (Nominal → nominal envelope; Degraded → decel-to-stop-and-HOLD gate
+    //  over the MRC envelope (Issue #70); LockedOut → fail-closed 403 with no
+    //  command body even parsed.) LockedOut short-circuits here so the
+    //  fail-closed path never touches the request body.
+    if posture == FleetPosture::LockedOut {
+        tracing::error!(
+            "Actuator command rejected: fleet posture is LockedOut — \
+             all actuator mutations are blocked until posture recovers"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let (mut parts, body) = req.into_parts();
 
@@ -211,7 +215,22 @@ pub async fn enforce_actuator_safety_envelope(
     let proposed_cmd: ProposedVehicleCommand =
         serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    match validate_vehicle_command(&proposed_cmd, &contract) {
+    // Issue #70: Nominal runs the full envelope; Degraded runs the
+    // decel-to-stop-and-HOLD gate (non-increasing speed + no re-initiation)
+    // over the MRC envelope. LockedOut was already short-circuited above.
+    let verdict = match posture {
+        FleetPosture::Nominal => validate_vehicle_command(
+            &proposed_cmd,
+            &VehicleKinematicsContract::nominal_reference_profile(),
+        ),
+        FleetPosture::Degraded => enforce_degraded_decel_to_stop(
+            &proposed_cmd,
+            &VehicleKinematicsContract::mrc_fallback_profile(),
+        ),
+        FleetPosture::LockedOut => unreachable!("LockedOut short-circuited above"),
+    };
+
+    match verdict {
         EnforceAction::Allow => {
             // Thread the verdict to the handler so the response reports it.
             parts.extensions.insert(EnforcementOutcome::allow(&proposed_cmd));

@@ -134,6 +134,9 @@ struct Trajectory {
     deny_count: usize,
     max_enforced_speed: f64,
     max_enforced_steer: f64,
+    /// Speed at the end of the run — distinguishes "held at stop" (Issue #70
+    /// Degraded) from "re-accelerated" (Nominal) when peak speed alone cannot.
+    final_speed: f64,
 }
 
 /// GOVERNED run: each command goes through the REAL gateway; the enforced result
@@ -143,8 +146,20 @@ async fn governed_run(
     wb: f64,
     commands: &[ProposedVehicleCommand],
 ) -> Trajectory {
+    governed_run_seeded(svc, wb, VehicleState::at_rest(), commands).await
+}
+
+/// As `governed_run`, but the vehicle starts from `initial` rather than rest.
+/// Used by the Issue #70 decel-to-stop-and-hold axis, where the safe behavior
+/// (bleed speed to zero, then HOLD) only manifests from a moving start.
+async fn governed_run_seeded(
+    svc: Arc<ServiceState>,
+    wb: f64,
+    initial: VehicleState,
+    commands: &[ProposedVehicleCommand],
+) -> Trajectory {
     let router = gateway_router(svc);
-    let mut state = VehicleState::at_rest();
+    let mut state = initial;
     let mut tr = Trajectory::default();
     for cmd in commands {
         let c = ProposedVehicleCommand {
@@ -172,6 +187,7 @@ async fn governed_run(
         tr.peak_speed = tr.peak_speed.max(state.velocity_mps.abs());
         tr.peak_lateral = tr.peak_lateral.max(state.lateral_accel_mps2(wb));
     }
+    tr.final_speed = state.velocity_mps.abs();
     tr
 }
 
@@ -359,37 +375,111 @@ async fn axis2a_rss_fault_drives_posture_to_degraded() {
         .await;
 }
 
-/// 2b — Degraded posture (the RSS fault's result) makes the gateway clamp the
-///      vehicle to the MRC crawl envelope; Nominal (no fault) does not. The
-///      delta is the fault-driven safe response.
+/// 2b — Degraded posture (the RSS fault's result) makes the gateway drive the
+///      vehicle to a CONTROLLED DECEL-TO-STOP and then HOLD — it does not
+///      sustain a crawl, and it does not re-initiate motion. (Issue #70 —
+///      retires the old "Degraded = 5 m/s MRC crawl" behavior in favor of
+///      decel-to-stop-and-hold; the Cruise Oct-2023 SF pullover-drag is the
+///      motivating incident.) Nominal (no fault) keeps cruising as the
+///      negative control.
 #[tokio::test]
-async fn axis2b_degraded_posture_holds_vehicle_to_mrc_vs_nominal() {
+async fn axis2b_degraded_posture_decels_to_stop_and_holds_vs_nominal() {
     let wb = VehicleKinematicsContract::mrc_fallback_profile().wheelbase_m;
-    let mrc_ceiling = VehicleKinematicsContract::mrc_fallback_profile().effective_max_speed_mps();
-    // Enough steps for the Nominal accel-limiter to ramp the 10 m/s cruise well
-    // past the 5 m/s MRC crawl. Degraded clamps to 5 immediately (P2 ceiling), so
-    // the two plateau apart — the fault-driven delta.
-    let cruise = cruise_commands(10.0, 200);
 
-    // Fault-driven (Degraded): MRC clamp holds the vehicle to the crawl ceiling.
-    let degraded = governed_run(service_state(FleetPosture::Degraded), wb, &cruise).await;
-    assert!(
-        degraded.peak_speed <= mrc_ceiling + TOL,
-        "Degraded must hold the vehicle to the MRC crawl ({} <= {})", degraded.peak_speed, mrc_ceiling
-    );
-    assert!(degraded.clamp_count > 0, "Degraded cruise above MRC must be clamped");
+    // The vehicle is already moving at 1 m/s when the fault drives it Degraded.
+    // The planner cooperatively commands a stop, the vehicle bleeds speed to
+    // zero under the MRC decel bound and HOLDS; then the planner tries to
+    // re-accelerate (the unsafe pullover-from-stop the Cruise incident teaches
+    // us to refuse).
+    let initial = VehicleState::new(0.0, 0.0, 0.0, 1.0);
+    let mut commands: Vec<ProposedVehicleCommand> = Vec::new();
+    for _ in 0..20 {
+        commands.push(cmd(0.0, 0.0));          // cooperative decel + hold at stop
+    }
+    for _ in 0..20 {
+        commands.push(cmd(3.0, 0.0));          // attempt to re-initiate motion
+    }
 
-    // Negative control (Nominal, no fault): the SAME cruise runs at full 10 m/s.
-    let nominal = governed_run(service_state(FleetPosture::Nominal), wb, &cruise).await;
+    // Fault-driven (Degraded): bleeds speed to 0, HOLDS, and DENIES every
+    // re-initiation attempt.
+    let degraded =
+        governed_run_seeded(service_state(FleetPosture::Degraded), wb, initial.clone(), &commands).await;
     assert!(
-        nominal.peak_speed > mrc_ceiling + TOL,
-        "Nominal cruise should exceed the MRC ceiling ({} > {})", nominal.peak_speed, mrc_ceiling
+        degraded.peak_speed <= 1.0 + TOL,
+        "Degraded must never increase speed beyond the initial 1 m/s (got peak {})",
+        degraded.peak_speed
     );
-    // The fault-driven posture is what produced the safe behavior.
     assert!(
-        nominal.peak_speed > degraded.peak_speed + TOL,
-        "the fault-driven Degraded posture must reduce vehicle speed ({} nominal vs {} degraded)",
-        nominal.peak_speed, degraded.peak_speed
+        degraded.final_speed <= TOL,
+        "Degraded must come to rest and HOLD (final speed {})", degraded.final_speed
+    );
+    assert_eq!(
+        degraded.deny_count, 20,
+        "Degraded must DENY all 20 re-initiation-from-stop attempts (Cruise lesson)"
+    );
+
+    // Negative control (Nominal, no fault): the re-acceleration tail is honored
+    // — the vehicle is moving again by the end of the run, and nothing is denied.
+    let nominal =
+        governed_run_seeded(service_state(FleetPosture::Nominal), wb, initial, &commands).await;
+    assert_eq!(nominal.deny_count, 0, "Nominal must not deny any of these commands");
+    assert!(
+        nominal.final_speed > degraded.final_speed + TOL,
+        "the fault-driven Degraded posture must keep the vehicle stopped while \
+         Nominal re-accelerates (nominal final {} vs degraded final {})",
+        nominal.final_speed, degraded.final_speed
+    );
+}
+
+/// 2b″ — THE CRUISE LESSON, per-command. Under Degraded:
+///   - a re-initiation command from a stop is DENIED (the post-stop pullover);
+///   - a speed-increase command while moving is DENIED;
+///   - a decelerating-toward-zero command within the MRC envelope is ALLOWED.
+/// This is the narrow Degraded allow that the old MRC-crawl ceiling would have
+/// wrongly permitted (a 3 m/s pullover from a stop sits *under* the 5 m/s
+/// crawl ceiling, so the old behavior would have let it through).
+#[tokio::test]
+async fn axis2b_degraded_denies_reinitiation_and_speed_increase() {
+    let router = gateway_router(service_state(FleetPosture::Degraded));
+
+    // (1) Re-initiation from a stop — the Cruise pullover. DENIED.
+    let from_stop = ProposedVehicleCommand {
+        linear_velocity_mps: 3.0,
+        current_velocity_mps: 0.0,
+        delta_time_s: DT_S,
+        steering_angle_deg: 0.0,
+        current_steering_angle_deg: 0.0,
+    };
+    assert!(
+        enforce_once(&router, &from_stop).await.denied,
+        "Degraded must deny re-initiation of motion from a stop"
+    );
+
+    // (2) Speed increase while moving — DENIED.
+    let speed_up = ProposedVehicleCommand {
+        linear_velocity_mps: 4.0,
+        current_velocity_mps: 2.0,
+        delta_time_s: DT_S,
+        steering_angle_deg: 0.0,
+        current_steering_angle_deg: 0.0,
+    };
+    assert!(
+        enforce_once(&router, &speed_up).await.denied,
+        "Degraded must deny a speed increase while moving"
+    );
+
+    // (3) Decelerating toward zero within the MRC envelope — ALLOWED.
+    let decel = ProposedVehicleCommand {
+        linear_velocity_mps: 2.0,
+        current_velocity_mps: 3.0,
+        delta_time_s: DT_S,
+        steering_angle_deg: 0.0,
+        current_steering_angle_deg: 0.0,
+    };
+    let e = enforce_once(&router, &decel).await;
+    assert!(
+        !e.denied,
+        "Degraded must ALLOW a decelerating-toward-zero command within the MRC envelope"
     );
 }
 

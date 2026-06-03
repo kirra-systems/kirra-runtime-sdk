@@ -1,7 +1,7 @@
 use crate::fabric::asset::KinematicProfileType;
 use crate::gateway::kinematics_contract::{
-    validate_vehicle_command, DenyCode, EnforceAction, ProposedVehicleCommand,
-    VehicleKinematicsContract,
+    enforce_degraded_decel_to_stop, validate_vehicle_command, DenyCode, EnforceAction,
+    ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use crate::verifier::FleetPosture;
 
@@ -95,9 +95,10 @@ impl AssetGovernor {
         Self { asset_id, profile }
     }
 
-    // SAFETY: SG8 | REQ: fabric-posture-gated-mrc-or-deny | TEST: test_locked_out_denies_all_commands,test_mrc_profile_selected_on_degraded_posture
+    // SAFETY: SG8 | REQ: fabric-posture-gated-mrc-or-deny | TEST: test_locked_out_denies_all_commands,test_mrc_profile_selected_on_degraded_posture,test_degraded_reinitiation_from_stop_is_denied
     // (≅ AEGIS SG-007. LockedOut → DenyCode::AssetLockedOut; Degraded →
-    //  MRC contract; Nominal → full envelope. Posture-driven MRC selection.)
+    //  controlled decel-to-stop-and-HOLD under the MRC envelope (Issue #70);
+    //  Nominal → full envelope.)
     pub fn evaluate_command(
         &self,
         cmd: &ProposedVehicleCommand,
@@ -107,9 +108,12 @@ impl AssetGovernor {
             FleetPosture::LockedOut => {
                 EnforceAction::DenyBreach(DenyCode::AssetLockedOut)
             }
+            // Issue #70: Degraded is decel-to-stop-and-HOLD, not an MRC crawl.
+            // The command must be converging toward zero within the MRC
+            // envelope and must never re-initiate motion from a stop.
             FleetPosture::Degraded => {
                 let contract = self.profile.mrc_contract();
-                validate_vehicle_command(cmd, &contract)
+                enforce_degraded_decel_to_stop(cmd, &contract)
             }
             FleetPosture::Nominal => {
                 let contract = self.profile.nominal_contract();
@@ -149,30 +153,52 @@ mod tests {
         assert_eq!(contract.max_steering_deg, 180.0);
     }
 
+    // Issue #70: Degraded is decel-to-stop-and-HOLD. A re-initiation from a
+    // stop that Nominal would (rate-clamp and) admit is DENIED under Degraded.
     #[test]
     fn test_mrc_profile_selected_on_degraded_posture() {
         let g = AssetGovernor::new("av01".to_string(), KinematicProfileType::AutomotiveNominal);
-        // At nominal profile, max speed is 35 m/s; MRC is much lower.
-        // A 10 m/s command should pass Nominal but be clamped under Degraded.
-        let fast_cmd = ProposedVehicleCommand {
+        // Stopped, commanded to accelerate to 10 m/s.
+        let reinit_cmd = ProposedVehicleCommand {
             linear_velocity_mps: 10.0,
             current_velocity_mps: 0.0,
             delta_time_s: 0.1,
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        let nominal_result = g.evaluate_command(&fast_cmd, &FleetPosture::Nominal);
-        // Should be clamped due to acceleration, but not outright denied
-        let degraded_result = g.evaluate_command(&fast_cmd, &FleetPosture::Degraded);
-        // MRC max speed is 35*0.3 = 10.5 m/s; clamp may or may not fire on speed alone
-        // The key invariant: degraded result must NOT be Allow if command exceeds MRC
+        let nominal_result = g.evaluate_command(&reinit_cmd, &FleetPosture::Nominal);
+        let degraded_result = g.evaluate_command(&reinit_cmd, &FleetPosture::Degraded);
+        // Nominal admits the motion (clamped by accel limits, never denied).
         assert!(
             matches!(nominal_result, EnforceAction::ClampLinear(_) | EnforceAction::Allow),
             "nominal: {nominal_result:?}"
         );
-        assert!(
-            matches!(degraded_result, EnforceAction::ClampLinear(_) | EnforceAction::Allow),
+        // Degraded refuses to re-initiate motion from a stop — fail-closed.
+        assert_eq!(
+            degraded_result,
+            EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied),
             "degraded: {degraded_result:?}"
+        );
+    }
+
+    // Issue #70: under Degraded, a decelerating-toward-zero command from a
+    // moving state is admitted (clamped to the MRC envelope as needed), not
+    // denied — the vehicle is permitted to bleed speed to a controlled stop.
+    #[test]
+    fn test_degraded_reinitiation_from_stop_is_denied() {
+        let g = AssetGovernor::new("av01".to_string(), KinematicProfileType::AutomotiveNominal);
+        // Moving at 8 m/s, commanded down to 4 m/s — decelerating.
+        let decel_cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 4.0,
+            current_velocity_mps: 8.0,
+            delta_time_s: 1.0,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let degraded_result = g.evaluate_command(&decel_cmd, &FleetPosture::Degraded);
+        assert!(
+            !matches!(degraded_result, EnforceAction::DenyBreach(_)),
+            "decelerating command must be admitted under Degraded: {degraded_result:?}"
         );
     }
 

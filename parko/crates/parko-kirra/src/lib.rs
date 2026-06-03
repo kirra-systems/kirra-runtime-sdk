@@ -34,6 +34,7 @@
 
 use kirra_runtime_sdk::gateway::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
+    STOP_EPSILON_MPS,
 };
 // `DenyCode` is reached via `EnforceAction::DenyBreach` — see the Nominal branch below.
 use kirra_runtime_sdk::verifier::FleetPosture;
@@ -49,11 +50,56 @@ pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEA
 pub use comparator::{GovernorComparator, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
 
-/// MRC (Minimum Risk Condition) velocity ceiling.
-/// Applied when posture is Degraded or RSS state is unsafe.
-/// NOT applied to LockedOut — LockedOut is a hard stop (0.0).
+/// MRC (Minimum Risk Condition) velocity ceiling — the decel-trajectory
+/// bound applied to a *decelerating* command under Degraded / RSS-unsafe.
+/// NOT a crawl set-point: as of Issue #70, Degraded is decel-to-stop-and-HOLD
+/// (see `apply_mrc_profile`), so this ceiling bounds how fast a still-moving,
+/// converging-to-zero command may be — it never licenses re-initiation or a
+/// speed increase. NOT applied to LockedOut — LockedOut is a hard stop (0.0).
 /// Single source of truth. Per ADL-001.
 pub const MRC_VELOCITY_CEILING_MPS: f64 = 5.0;
+
+/// Angular-velocity magnitude (rad/s) at or below which the platform is
+/// treated as **not rotating** for the Issue #70 Degraded no-re-initiation
+/// invariant on the angular channel (≈ 1.1 deg/s — above gyro noise, below
+/// any deliberate turn). The angular analogue of `STOP_EPSILON_MPS`.
+///
+/// JUDGMENT-CALL (Issue #70 FLAG #2): differential-drive platforms have an
+/// independent angular-velocity actuator, so the converge-to-zero /
+/// no-re-initiation rule is applied to the angular channel natively here
+/// (unlike the Ackermann bicycle model, where yaw rate `ω = v·tan δ/L`
+/// vanishes with linear speed and needs no separate angular gate).
+pub const STOP_EPSILON_RAD_S: f64 = 0.02;
+
+/// Issue #70 Degraded single-channel gate: returns `Some(reason)` when a
+/// proposed value on one motion channel (linear or angular) violates the
+/// decel-to-stop-and-HOLD invariant relative to the current value, else
+/// `None`. The `reason` tokens match the Kirra-SDK `DenyCode` audit strings
+/// (`DEGRADED_REINITIATION_DENIED` / `DEGRADED_SPEED_INCREASE_DENIED`) so the
+/// cross-crate deny vocabulary stays identical.
+///
+/// `current`/`proposed` are signed; `eps` is the channel's stop floor.
+/// Fails closed on non-finite input.
+fn degraded_channel_violation(current: f64, proposed: f64, eps: f64) -> Option<&'static str> {
+    if !proposed.is_finite() || !current.is_finite() {
+        return Some("DEGRADED_REINITIATION_DENIED");
+    }
+    let cur_mag = current.abs();
+    let prop_mag = proposed.abs();
+    // (c) no re-initiation from a stop / hold.
+    if cur_mag <= eps && prop_mag > eps {
+        return Some("DEGRADED_REINITIATION_DENIED");
+    }
+    // (c') no direction reversal through a stop while moving.
+    if proposed.signum() != current.signum() && cur_mag > eps && prop_mag > eps {
+        return Some("DEGRADED_REINITIATION_DENIED");
+    }
+    // (b) non-increasing magnitude.
+    if prop_mag > cur_mag + 1e-9 {
+        return Some("DEGRADED_SPEED_INCREASE_DENIED");
+    }
+    None
+}
 
 /// **Angular-velocity bound — SOTIF-derived (issue #136).**
 ///
@@ -212,19 +258,50 @@ impl KirraGovernor {
 }
 
 impl KirraGovernor {
-    /// Applies the MRC envelope on BOTH axes — Degraded semantics. Used
-    /// by both the Degraded posture branch and the RSS unsafe gate. NOT
-    /// used for LockedOut (which is a hard stop returning 0.0).
+    /// Applies the Degraded / RSS-unsafe enforcement: **controlled
+    /// decel-to-stop-and-HOLD** (Issue #70) on BOTH axes, with the MRC
+    /// envelope as the decel-trajectory bound. Used by both the Degraded
+    /// posture branch and the RSS unsafe gate. NOT used for LockedOut (which
+    /// is a hard stop returning 0.0).
     ///
-    /// Most-restrictive-wins across the two axes:
-    ///   - linear within cap + angular within cap  → Allow
-    ///   - linear over cap   + angular within cap  → ClampLinearVelocity
-    ///   - linear within cap + angular over cap    → ClampAngularVelocity
-    ///   - both over cap                            → ClampMotion { Some, Some }
-    // SAFETY: SG8 | REQ: mrc-envelope-multiaxis-clamp | TEST: degraded_above_cap_clamps_to_mrc_ceiling,rss_unsafe_above_ceiling_clamps_to_mrc,degraded_angular_above_bound_clamps_to_mrc_angular_ceiling,degraded_both_axes_above_bound_returns_clampmotion
-    // (MRC envelope contraction on Degraded posture — clamps both linear
-    //  and angular axes rather than denying outright. H1 closeout.)
-    fn apply_mrc_profile(&self, proposed: &ControlCommand) -> EnforcementAction {
+    /// Two stages, gate then clamp:
+    ///   1. **Stop-and-hold gate** — per channel (linear and angular,
+    ///      `degraded_channel_violation`): deny any speed increase or
+    ///      re-initiation from a stop. `current` is taken from `previous`
+    ///      (the last commanded value; `None` ⇒ treated as stopped, so a
+    ///      first-cycle motion command fails closed). A violation on either
+    ///      channel → `Deny` (the actuator falls to the controlled stop);
+    ///      the Governor does not author a replacement command.
+    ///   2. **MRC envelope clamp** (unchanged) — for a command that passed
+    ///      the gate (converging toward zero), most-restrictive-wins:
+    ///        - linear within cap + angular within cap  → Allow
+    ///        - linear over cap   + angular within cap  → ClampLinearVelocity
+    ///        - linear within cap + angular over cap    → ClampAngularVelocity
+    ///        - both over cap                            → ClampMotion { Some, Some }
+    // SAFETY: SG8 | REQ: degraded-decel-to-stop-and-hold-multiaxis | TEST: degraded_above_cap_clamps_to_mrc_ceiling,rss_unsafe_above_ceiling_clamps_to_mrc,degraded_angular_above_bound_clamps_to_mrc_angular_ceiling,degraded_both_axes_above_bound_returns_clampmotion,degraded_reinitiation_from_stop_is_denied,degraded_angular_reinitiation_from_stop_is_denied
+    // (Issue #70: Degraded is decel-to-stop-and-HOLD, not an MRC crawl —
+    //  no autonomous re-initiation on either axis; clamps a converging
+    //  command to the MRC envelope.)
+    fn apply_mrc_profile(
+        &self,
+        proposed: &ControlCommand,
+        previous: Option<&ControlCommand>,
+    ) -> EnforcementAction {
+        // Stage 1 — Issue #70 stop-and-hold gate (both channels).
+        let cur_lin = previous.map(|p| p.linear_velocity).unwrap_or(0.0);
+        let cur_ang = previous.map(|p| p.angular_velocity).unwrap_or(0.0);
+        if let Some(reason) =
+            degraded_channel_violation(cur_lin, proposed.linear_velocity, STOP_EPSILON_MPS)
+        {
+            return EnforcementAction::Deny { reason: reason.to_string() };
+        }
+        if let Some(reason) =
+            degraded_channel_violation(cur_ang, proposed.angular_velocity, STOP_EPSILON_RAD_S)
+        {
+            return EnforcementAction::Deny { reason: reason.to_string() };
+        }
+
+        // Stage 2 — MRC envelope clamp (unchanged).
         let safe_linear = proposed.linear_velocity.min(MRC_VELOCITY_CEILING_MPS);
         let linear_clamped = safe_linear < proposed.linear_velocity;
         // SOTIF-derived: ω_max evaluated at the COMMAND's linear
@@ -283,15 +360,16 @@ impl SafetyGovernor for KirraGovernor {
             };
         }
 
-        // RSS gate second — unsafe state applies Degraded semantics (MRC cap).
-        // Per ADL-001: a sensor gap is recoverable; hard stop (0.0) is not.
+        // RSS gate second — unsafe state applies Degraded semantics
+        // (decel-to-stop-and-HOLD, Issue #70). Per ADL-001: a sensor gap is
+        // recoverable; hard stop (0.0) is not.
         if !self.rss_state.safe {
-            return self.apply_mrc_profile(proposed);
+            return self.apply_mrc_profile(proposed, previous);
         }
 
         match posture {
             SafetyPosture::LockedOut => unreachable!("handled above"),
-            SafetyPosture::Degraded => self.apply_mrc_profile(proposed),
+            SafetyPosture::Degraded => self.apply_mrc_profile(proposed, previous),
             SafetyPosture::Nominal => {
                 let current_velocity = previous.map(|p| p.linear_velocity).unwrap_or(0.0);
                 let kirra_input = ProposedVehicleCommand {
@@ -379,26 +457,31 @@ mod tests {
         }
     }
 
-    // Test 2 — Degraded applies the MRC cap.
+    // Test 2 — Degraded applies the MRC cap to a DECELERATING command.
+    // (Issue #70: `previous` is a moving vehicle bleeding speed toward the
+    //  command; without a moving history the gate would deny re-initiation —
+    //  see `degraded_reinitiation_from_stop_is_denied`.)
     #[test]
     fn degraded_above_cap_clamps_to_mrc_ceiling() {
         let gov = KirraGovernor::new();
-        let action = gov.evaluate(&cmd(10.0), None, 0.05, SafetyPosture::Degraded);
+        let prev = cmd(10.0);
+        let action = gov.evaluate(&cmd(10.0), Some(&prev), 0.05, SafetyPosture::Degraded);
         assert_eq!(
             effective_velocity(action, 10.0),
             MRC_VELOCITY_CEILING_MPS,
-            "Degraded: input above MRC ceiling must be capped"
+            "Degraded: a decelerating command above the MRC ceiling must be capped"
         );
     }
 
     #[test]
     fn degraded_below_cap_allows_through() {
         let gov = KirraGovernor::new();
-        let action = gov.evaluate(&cmd(3.0), None, 0.05, SafetyPosture::Degraded);
+        let prev = cmd(3.0);
+        let action = gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Degraded);
         assert_eq!(
             effective_velocity(action, 3.0),
             3.0,
-            "Degraded: input below MRC ceiling must pass through"
+            "Degraded: a non-increasing command below the MRC ceiling must pass through"
         );
     }
 
@@ -406,12 +489,13 @@ mod tests {
     #[test]
     fn locked_out_and_degraded_produce_different_outputs() {
         let gov = KirraGovernor::new();
+        let prev = cmd(3.0);
         let locked_out = effective_velocity(
-            gov.evaluate(&cmd(3.0), None, 0.05, SafetyPosture::LockedOut),
+            gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::LockedOut),
             3.0,
         );
         let degraded = effective_velocity(
-            gov.evaluate(&cmd(3.0), None, 0.05, SafetyPosture::Degraded),
+            gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Degraded),
             3.0,
         );
         assert_ne!(
@@ -453,7 +537,8 @@ mod tests {
         let mut gov = KirraGovernor::new();
         gov.update_rss_state(unsafe_rss());
         let commanded = MRC_VELOCITY_CEILING_MPS + 5.0;
-        let action = gov.evaluate(&cmd(commanded), None, 0.05, SafetyPosture::Nominal);
+        let prev = cmd(commanded);
+        let action = gov.evaluate(&cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
         assert_eq!(
             effective_velocity(action, commanded),
             commanded.min(MRC_VELOCITY_CEILING_MPS),
@@ -481,7 +566,8 @@ mod tests {
         let mut gov = KirraGovernor::new();
         gov.update_rss_state(unsafe_rss());
         let commanded = MRC_VELOCITY_CEILING_MPS - 1.0;
-        let action = gov.evaluate(&cmd(commanded), None, 0.05, SafetyPosture::Nominal);
+        let prev = cmd(commanded);
+        let action = gov.evaluate(&cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
         assert_eq!(
             effective_velocity(action, commanded),
             commanded,
@@ -493,18 +579,19 @@ mod tests {
     #[test]
     fn rss_unsafe_and_degraded_share_mrc_code_path() {
         let mut gov = KirraGovernor::new();
+        let prev = cmd(10.0);
 
         // Degraded with RSS safe
         gov.update_rss_state(safe_rss());
         let output_degraded = effective_velocity(
-            gov.evaluate(&cmd(10.0), None, 0.05, SafetyPosture::Degraded),
+            gov.evaluate(&cmd(10.0), Some(&prev), 0.05, SafetyPosture::Degraded),
             10.0,
         );
 
         // Nominal with RSS unsafe
         gov.update_rss_state(unsafe_rss());
         let output_rss_unsafe = effective_velocity(
-            gov.evaluate(&cmd(10.0), None, 0.05, SafetyPosture::Nominal),
+            gov.evaluate(&cmd(10.0), Some(&prev), 0.05, SafetyPosture::Nominal),
             10.0,
         );
 
@@ -690,7 +777,10 @@ mod tests {
             MRC_VELOCITY_CEILING_MPS - 0.5,
             H1_MRC_RAD_S + 0.3,
         );
-        let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Degraded);
+        // Issue #70: a moving, non-increasing `previous` so the decel-to-stop
+        // gate passes and the angular MRC clamp is what the test exercises.
+        let prev = proposed.clone();
+        let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Degraded);
         match action {
             EnforcementAction::ClampAngularVelocity(a) => {
                 assert!(
@@ -711,7 +801,10 @@ mod tests {
             MRC_VELOCITY_CEILING_MPS + 2.0,
             H1_MRC_RAD_S + 0.4,
         );
-        let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Degraded);
+        // Issue #70: moving, non-increasing `previous` so the gate passes and
+        // the dual-axis MRC clamp is what the test exercises.
+        let prev = proposed.clone();
+        let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Degraded);
         match action {
             EnforcementAction::ClampMotion { linear, angular } => {
                 assert_eq!(linear, Some(MRC_VELOCITY_CEILING_MPS));
@@ -822,7 +915,12 @@ mod tests {
         let gov = KirraGovernor::new()
             .with_platform_params(PlatformParams::urban_service_robot_reference());
         let proposed = cmd_twist(0.0, 1.0);
-        let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Degraded);
+        // Issue #70: already rotating at the commanded rate (non-increasing),
+        // so the angular decel-to-stop gate passes and the MRC sweep clamp is
+        // what this test exercises. Re-initiating rotation from a standstill
+        // under Degraded is denied — see `degraded_angular_reinitiation_from_stop_is_denied`.
+        let prev = proposed.clone();
+        let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Degraded);
         match action {
             EnforcementAction::ClampAngularVelocity(a) => {
                 assert!((a - 0.4167_f64).abs() < 1e-2,
@@ -848,5 +946,87 @@ mod tests {
                 other => panic!("v={v}: expected ClampAngularVelocity, got {other:?}"),
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #70 — Degraded decel-to-stop-and-HOLD (Cruise Oct-2023 SF lesson)
+    // -----------------------------------------------------------------------
+
+    /// A STOPPED platform must not re-initiate LINEAR motion under Degraded.
+    #[test]
+    fn degraded_reinitiation_from_stop_is_denied() {
+        let gov = KirraGovernor::new();
+        let prev = cmd(0.0); // stopped
+        let action = gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "Degraded must deny linear re-initiation from a stop; got {action:?}"
+        );
+    }
+
+    /// `previous = None` (no history / cold start) is treated as stopped —
+    /// a first-cycle Degraded motion command fails closed.
+    #[test]
+    fn degraded_no_history_treated_as_stopped() {
+        let gov = KirraGovernor::new();
+        let action = gov.evaluate(&cmd(3.0), None, 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "Degraded with no history must fail closed (hold); got {action:?}"
+        );
+    }
+
+    /// A LINEAR speed increase while moving is denied under Degraded.
+    #[test]
+    fn degraded_speed_increase_is_denied() {
+        let gov = KirraGovernor::new();
+        let prev = cmd(2.0);
+        let action = gov.evaluate(&cmd(4.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "Degraded must deny a linear speed increase; got {action:?}"
+        );
+    }
+
+    /// A STOPPED platform must not re-initiate ANGULAR motion under Degraded
+    /// (Issue #70 FLAG #2 — angular channel gated natively for diff-drive).
+    #[test]
+    fn degraded_angular_reinitiation_from_stop_is_denied() {
+        let gov = legacy_scalar_gov();
+        let prev = cmd_twist(0.0, 0.0); // stopped, not rotating
+        let proposed = cmd_twist(0.0, 0.3); // re-initiate in-place rotation
+        let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "Degraded must deny angular re-initiation from a standstill; got {action:?}"
+        );
+    }
+
+    /// A decelerating (non-increasing) LINEAR command is admitted under
+    /// Degraded — the vehicle is permitted to bleed speed to a stop.
+    #[test]
+    fn degraded_decel_toward_zero_is_admitted() {
+        let gov = KirraGovernor::new();
+        let prev = cmd(4.0);
+        let action = gov.evaluate(&cmd(2.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            !matches!(action, EnforcementAction::Deny { .. }),
+            "Degraded must admit a decelerating command; got {action:?}"
+        );
+        assert_eq!(effective_velocity(action, 2.0), 2.0,
+            "a within-MRC decelerating command passes through unchanged");
+    }
+
+    /// Holding at a standstill (0 → 0) on both channels is admitted — the
+    /// safe state itself.
+    #[test]
+    fn degraded_hold_at_stop_is_admitted() {
+        let gov = KirraGovernor::new();
+        let prev = cmd_twist(0.0, 0.0);
+        let action = gov.evaluate(&cmd_twist(0.0, 0.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "Degraded must admit holding at a standstill; got {action:?}"
+        );
     }
 }

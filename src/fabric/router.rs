@@ -426,24 +426,41 @@ mod tests {
         assert!(posture.blocked_by.iter().any(|s| s == "UNVERIFIED_PENDING_FIRST_POSTURE"),
             "blocked_by must surface the unverified state, got {:?}", posture.blocked_by);
 
-        // A command that fits the per-profile MRC envelope is allowed.
-        // Robot MRC max_speed = 1.8 * 0.3 = 0.54 m/s, so 0.1 m/s passes.
-        let result = router.route_command("r01", &safe_cmd())
-            .expect("route_command should not error");
-        assert!(matches!(result, EnforceAction::Allow | EnforceAction::ClampLinear { .. } | EnforceAction::ClampSteering { .. }),
-            "MRC-envelope command must not DenyBreach on a freshly registered asset, got {result:?}");
-
-        // A command outside the MRC envelope (full nominal speed) must NOT pass.
-        let over_mrc = ProposedVehicleCommand {
-            linear_velocity_mps: 1.5,
+        // Issue #70: a freshly-registered asset is seeded Degraded =
+        // decel-to-stop-and-HOLD. Holding at a standstill is allowed; the
+        // governor will NOT autonomously re-initiate motion from rest.
+        let hold = ProposedVehicleCommand {
+            linear_velocity_mps: 0.0,
             current_velocity_mps: 0.0,
             delta_time_s: 0.1,
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        let result = router.route_command("r01", &over_mrc).expect("route_command should not error");
-        assert!(!matches!(result, EnforceAction::Allow),
-            "command above MRC envelope must be clamped or denied on a freshly registered asset, got {result:?}");
+        let result = router.route_command("r01", &hold)
+            .expect("route_command should not error");
+        assert!(matches!(result, EnforceAction::Allow),
+            "holding at a standstill must be allowed on a freshly registered (Degraded) asset, got {result:?}");
+
+        // A re-initiation command from rest (the `safe_cmd` 0.1 m/s crawl that
+        // the old MRC-crawl behavior admitted) must now be DENIED — no
+        // autonomous re-initiation of motion under Degraded.
+        let result = router.route_command("r01", &safe_cmd())
+            .expect("route_command should not error");
+        assert!(matches!(result, EnforceAction::DenyBreach(_)),
+            "re-initiation from a stop must be denied on a Degraded asset, got {result:?}");
+
+        // A decelerating command (moving → slower, within the MRC envelope)
+        // IS admitted — the asset may bleed speed to a controlled stop.
+        let decel = ProposedVehicleCommand {
+            linear_velocity_mps: 0.2,
+            current_velocity_mps: 0.4,
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let result = router.route_command("r01", &decel).expect("route_command should not error");
+        assert!(!matches!(result, EnforceAction::DenyBreach(_)),
+            "a decelerating within-MRC command must be admitted on a Degraded asset, got {result:?}");
     }
 
     // FIX 2 — auto-propagation.

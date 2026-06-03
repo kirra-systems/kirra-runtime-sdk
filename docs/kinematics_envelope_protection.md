@@ -146,9 +146,18 @@ the command is *contextually correct for the environment* is the planner's probl
 
 ### MRC Fallback Profile
 
+> **Issue #70 — Degraded is decel-to-stop-and-HOLD, not a crawl.** Under the
+> Degraded posture this profile is the **decel-trajectory bound** — the upper
+> bound on a command that is already *converging toward zero* — NOT a crawl
+> set-point the vehicle is driven up to. The Degraded enforcement
+> (`enforce_degraded_decel_to_stop`) additionally requires non-increasing
+> speed and forbids re-initiation of motion from a stop. The values below are
+> the envelope ceilings for a permitted (decelerating) command; see
+> `docs/safety/SAFE_STATE_SPECIFICATION.md` SS-002.
+
 | Parameter | Value | Rationale |
 | :--- | :--- | :--- |
-| `max_speed_mps` | 5.0 (~11 mph) | Safe, limp-home crawling speed |
+| `max_speed_mps` | 5.0 (~11 mph) | Ceiling for a decelerating command (decel-trajectory bound); never a sustained crawl set-point (issue #70) |
 | `max_accel_mps2` | 1.0 | Highly subdued acceleration curve |
 | `max_brake_mps2` | 3.0 | Gradual slowdown profile |
 | `max_steering_deg` | 15.0 | Restricts high-amplitude maneuvering |

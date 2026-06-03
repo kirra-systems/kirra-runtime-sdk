@@ -361,9 +361,13 @@ async fn test_capstone_degraded_overspeed_clamps_and_hides_original() {
     let ceiling = VehicleKinematicsContract::mrc_fallback_profile().effective_max_speed_mps();
     let original = 100.0;
 
+    // Issue #70: the command must be DECELERATING (current 120 → proposed 100)
+    // to exercise the envelope clamp — a speed *increase* under Degraded is
+    // denied, not clamped (see the decel-to-stop-and-hold gate). 100 m/s is
+    // still far over the 5 m/s MRC ceiling, so the envelope clamps it.
     let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(original, 4.0, 0.1, 0.0, 0.0))).await;
-    assert_eq!(status, StatusCode::OK, "over-speed is clamped, not denied");
+        send_json(build_schema_app(svc), Body::from(cmd_json(original, 120.0, 0.1, 0.0, 0.0))).await;
+    assert_eq!(status, StatusCode::OK, "over-speed (decelerating) is clamped, not denied");
 
     // Clamp is reported (not a hardcoded "Allow") under both key families.
     assert_eq!(v["action"], "ClampLinear");

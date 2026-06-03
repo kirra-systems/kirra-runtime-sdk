@@ -227,6 +227,25 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
 - `Degraded` → allows `ReadTelemetry` only
 - `Nominal` → allows all except `Unknown`
 
+**Degraded = Controlled Decel-to-Stop-and-HOLD** (`enforce_degraded_decel_to_stop`, issue #70):
+- Degraded is NOT a sustained reduced-speed crawl. The kinematic Governor admits a
+  command in Degraded ONLY if all hold: (a) within the MRC envelope (the
+  *decel-trajectory bound*, via `validate_vehicle_command` against the MRC contract);
+  (b) non-increasing speed `|proposed| <= |current|` → else `DenyCode::DegradedSpeedIncreaseDenied`;
+  (c) no re-initiation — if `|current| <= STOP_EPSILON_MPS` (0.05), any `|proposed| > STOP_EPSILON_MPS`
+  → `DenyCode::DegradedReinitiationDenied` (HOLD at zero); a reversal through a stop is also re-initiation.
+- A denied command → MRC controlled stop; the Governor never authors re-acceleration.
+- Wired at ALL four enforcement points: gateway `enforce_actuator_safety_envelope`,
+  fabric `AssetGovernor::evaluate_command`, ros2-adapter `validate_trajectory_slow`,
+  parko-kirra `KirraGovernor::apply_mrc_profile` (the last also gates an independent
+  angular-velocity channel via `STOP_EPSILON_RAD_S` for differential drive).
+- The Nominal WCET-critical `validate_vehicle_command` path is UNCHANGED.
+- "MRC" disambiguation: Degraded MRC = decel-to-stop *envelope* (bounds a converging
+  command); LockedOut MRC fallback = safe-stop *maneuver* (all commands denied).
+- Motivation: Cruise SF Oct-2023 post-stop pullover-drag (~3 m/s, under a 5 m/s crawl
+  ceiling). Recovery is AUTOMATIC on return to Nominal (contrast LockedOut human-reset).
+  See `docs/safety/SAFE_STATE_SPECIFICATION.md` SS-002.
+
 **AV Recovery Hysteresis** (`evaluate_recovery_report`):
 - Node is `Untrusted` after a fault (hw_fault or confidence < floor)
 - Recovery requires `AV_RECOVERY_STREAK_THRESHOLD` (5) consecutive healthy reports

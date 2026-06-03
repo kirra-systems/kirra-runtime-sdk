@@ -21,7 +21,7 @@ use kirra_runtime_sdk::gateway::containment::{
     Point as KernelPoint,
 };
 use kirra_runtime_sdk::gateway::kinematics_contract::{
-    validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
+    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
 };
 use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::rss::{
@@ -152,9 +152,12 @@ pub fn validate_trajectory_slow(
     // Posture-driven kinematics contract:
     //   - Nominal  → integrator's full envelope (`to_kinematics_contract`)
     //   - Degraded → MRC-derated dynamic limits, same integrator geometry
-    //                (`to_mrc_kinematics_contract`)
+    //                (`to_mrc_kinematics_contract`), used as the
+    //                decel-trajectory bound for the Issue #70 stop-and-hold
+    //                gate below.
     // LockedOut was short-circuited above; this match is exhaustive on
     // the remaining variants.
+    let degraded = posture == FleetPosture::Degraded;
     let kinematics = match posture {
         FleetPosture::Nominal  => config.to_kinematics_contract(),
         FleetPosture::Degraded => config.to_mrc_kinematics_contract(),
@@ -173,7 +176,17 @@ pub fn validate_trajectory_slow(
         // Carry the segment's commanded steering forward so the next
         // segment's "current" steering = this segment's commanded steering.
         prev_steering_deg = cmd.steering_angle_deg;
-        match validate_vehicle_command(&cmd, &kinematics) {
+        // Issue #70: in Degraded the trajectory must be a controlled
+        // decel-to-stop — each segment non-increasing in speed and never
+        // re-initiating motion from a stop. A planned re-acceleration or
+        // pullover-from-stop segment → DenyBreach → MRCFallback (the
+        // controlled stop). Nominal uses the full per-pose envelope.
+        let verdict = if degraded {
+            enforce_degraded_decel_to_stop(&cmd, &kinematics)
+        } else {
+            validate_vehicle_command(&cmd, &kinematics)
+        };
+        match verdict {
             EnforceAction::Allow => {}
             EnforceAction::ClampLinear(_) | EnforceAction::ClampSteering(_) => {
                 clamp_seen = true;

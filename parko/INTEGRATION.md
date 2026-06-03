@@ -225,7 +225,7 @@ response per state:
 | Posture | Governor behaviour |
 |---|---|
 | `Nominal` | Full envelope: Kirra kinematics contract on linear, SOTIF bound on angular |
-| `Degraded` | MRC profile: linear clamped to `MRC_VELOCITY_CEILING_MPS = 5.0`, angular derated by `mrc_posture_factor` |
+| `Degraded` | **Controlled decel-to-stop-and-HOLD (issue #70)** — NOT a sustained crawl. A command is admitted only if it is non-increasing in speed AND does not re-initiate motion from a stop (per channel: linear floor `STOP_EPSILON_MPS = 0.05`, angular floor `STOP_EPSILON_RAD_S = 0.02`); a *permitted* (decelerating) command is then clamped to the MRC envelope (linear ≤ `MRC_VELOCITY_CEILING_MPS = 5.0`, angular derated by `mrc_posture_factor`). A speed increase or re-initiation from rest returns `Deny { reason: "DEGRADED_SPEED_INCREASE_DENIED" / "DEGRADED_REINITIATION_DENIED" }` → MRC controlled stop. `previous` (last commanded) supplies the current velocity; `None` ⇒ treated as stopped (fail-closed). |
 | `LockedOut` | Hard stop — every command returns `Deny { reason: "LockedOut: hard stop" }` |
 
 ### 3.5 GovernorComparator (dual-governor lockstep)
@@ -563,7 +563,10 @@ code at branch `feat/parko-integration-spec`, off main `8eadf83`.
 | `ComparatorAsGovernor` newtype | `parko/crates/parko-ros2/src/comparator_adapter.rs` |
 | `PlatformParams` + `conservative_default()` + `urban_service_robot_reference()` + `AngularVelocityBound` | `parko/crates/parko-kirra/src/angular_bound.rs:50`, `:191` |
 | `URBAN_ODD_SPEED_CAP_MPS = 22.35` | `src/gateway/kinematics_contract.rs:43` |
-| `MRC_VELOCITY_CEILING_MPS = 5.0` | `parko/crates/parko-kirra/src/lib.rs:54` |
+| `MRC_VELOCITY_CEILING_MPS = 5.0` (decel-trajectory bound, not a crawl set-point — issue #70) | `parko/crates/parko-kirra/src/lib.rs` |
+| `STOP_EPSILON_MPS = 0.05` (linear stop floor, Degraded no-re-initiation) | `src/gateway/kinematics_contract.rs` |
+| `STOP_EPSILON_RAD_S = 0.02` (angular stop floor, Degraded no-re-initiation) | `parko/crates/parko-kirra/src/lib.rs` |
+| `enforce_degraded_decel_to_stop` (Degraded decel-to-stop-and-hold gate, issue #70) | `src/gateway/kinematics_contract.rs` |
 | `VehicleKinematicsContract` field set (max_speed_mps / odd_speed_cap_mps / max_accel_mps2 / max_brake_mps2 / max_steering_deg / max_steering_rate_deg_s / min_follow_distance_m / max_lateral_accel_mps2 / wheelbase_m / width_m / length_m / overhang_front_m / overhang_rear_m) | `src/gateway/kinematics_contract.rs:54` |
 | `VehicleConfig::default_urban`, `warn_if_missing_odd_cap` | `crates/kirra-ros2-adapter/src/config.rs` |
 | `PostureTracker`, `POSTURE_STALENESS_TIMEOUT_MS = 6_000` | `src/posture_tracker.rs:57` |

@@ -1,10 +1,18 @@
 # Kirra Safe State Specification
 
 Document ID: KIRRA-SSS-001
-Version: 1.0
+Version: 1.1
 Status: Active
 Standard: ISO 26262 ASIL-D
-Date: 2026-05-29
+Date: 2026-06-03
+
+Change log:
+  - v1.1 (2026-06-03, Issue #70): SS-002 Degraded redefined from "MRC
+    reduced-speed crawl" to "controlled decel-to-stop-and-HOLD with no
+    autonomous re-initiation of motion"; added the Cruise Oct-2023
+    pullover-drag rationale; disambiguated Degraded MRC envelope vs LockedOut
+    MRC fallback; folded in the Issue #49 closeout (§7). Behavior change, not
+    docs-only — enforced by `enforce_degraded_decel_to_stop`.
 
 ## 1. Overview
 
@@ -40,12 +48,55 @@ Safety goals covered: SG-001, SG-002, SG-004, SG-005, SG-011
 
 ---
 
-### SS-002: Minimum Risk Condition (PostureState::Degraded)
+### SS-002: Minimum Risk Condition — Controlled Decel-to-Stop and Hold (PostureState::Degraded)
 
-Behavior:
-  `MRC_VELOCITY_CEILING_MPS` (5.0 m/s) cap applied by `KirraGovernor`
-  `apply_mrc_profile()`. System continues operating in reduced-capability
-  mode. Commands forwarded but velocity capped at 5.0 m/s.
+Behavior (Issue #70):
+  Degraded is a **controlled decel-to-stop-and-HOLD**, NOT a sustained
+  reduced-speed crawl. The Governor permits a command in Degraded **only if
+  all** of the following hold; otherwise it is denied and the actuator falls
+  to the MRC controlled stop:
+
+  - **(a) within the MRC kinematic envelope** — the MRC profile
+    (`MRC_VELOCITY_CEILING_MPS` = 5.0 m/s speed cap, plus the MRC
+    accel/brake/steering/lateral limits) acts as the **decel-trajectory
+    bound** for a *still-moving, decelerating* command — it is the upper
+    bound on a command that is already converging toward zero, NOT a crawl
+    set-point the vehicle is driven up to;
+  - **(b) non-increasing speed** — `|proposed| ≤ |current|`. Any speed
+    increase is denied (`DenyCode::DegradedSpeedIncreaseDenied`);
+  - **(c) no autonomous re-initiation of motion** — if the vehicle is
+    stopped (`|current| ≤ STOP_EPSILON_MPS`, 0.05 m/s), any command above
+    the stop floor is denied (`DenyCode::DegradedReinitiationDenied`); the
+    vehicle HOLDS at zero. A direction reversal through a stop is likewise
+    treated as re-initiation and denied.
+
+  Enforced by `enforce_degraded_decel_to_stop` at every Degraded enforcement
+  point (gateway `enforce_actuator_safety_envelope`, fabric
+  `AssetGovernor::evaluate_command`, ros2-adapter `validate_trajectory_slow`,
+  and parko-kirra `KirraGovernor::apply_mrc_profile` — the last also gates an
+  *independent angular-velocity* channel for differential-drive platforms).
+  The net effect: a vehicle that enters Degraded while moving bleeds speed to
+  a standstill under the MRC bound and then holds; a stopped vehicle stays
+  stopped. **The Governor never authors re-acceleration.**
+
+Rationale — **Cruise, San Francisco, October 2023.** After an initial
+  collision, a robotaxi executed an automated pullover **from a stop** and
+  dragged a pedestrian who was pinned under the vehicle roughly 20 ft at
+  ~3 m/s. A 3 m/s pullover-from-stop sits *below* a 5 m/s reduced-speed crawl
+  ceiling — so the prior "Degraded = MRC crawl" behavior would have
+  **permitted** exactly that maneuver. SS-002 is therefore defined as
+  decel-to-stop-and-HOLD with no autonomous re-initiation: under a degraded
+  safety posture the safe action is to stop and stay stopped, not to perform
+  a discretionary low-speed maneuver. (A *legitimate* pullover requires full
+  situational competence and belongs to SS-001 Nominal — by design it is out
+  of scope for Degraded.)
+
+"MRC" disambiguation: the **Degraded MRC** here is the decel-to-stop
+  *envelope* (the bound on a converging command). It is distinct from the
+  **LockedOut MRC fallback** (SS-003), which is the safe-stop *maneuver* the
+  actuator performs when every command is denied. Both drive toward a
+  standstill; Degraded additionally permits a cooperative decelerating
+  command, LockedOut permits none.
 
 Entry conditions (any of):
   - SG-003: Sensor telemetry timeout (`AV_TELEMETRY_TIMEOUT_MS` exceeded)
@@ -54,13 +105,20 @@ Entry conditions (any of):
   - Node trust state `Untrusted` with non-critical dependency impact
   - `Degraded` posture propagated from dependency graph
 
-Recovery:
+Recovery (AUTOMATIC):
   `AV_RECOVERY_STREAK_THRESHOLD` (5) consecutive clean ticks within
-  `AV_RECOVERY_WINDOW_MS` (10,000 ms) → transitions to SS-001 Nominal.
-  A single unhealthy report or gap in the window resets streak to 0.
-  (SG-013)
+  `AV_RECOVERY_WINDOW_MS` (10,000 ms) → transitions to SS-001 Nominal, and
+  only then may motion be (re-)initiated. A single unhealthy report or gap in
+  the window resets streak to 0. (SG-013) This is the key contrast with
+  SS-003: Degraded recovery is automatic on return to Nominal, whereas
+  LockedOut requires an explicit human reset.
 
 Implements: ISO 26262 safe state for recoverable faults.
+
+Issue-#49 closeout: #49 ("Degraded must converge to 0") is realized by this
+  decel-to-stop-and-HOLD behavior — convergence to zero is the (b)+(c)
+  invariant, and "hold at zero" is the no-re-initiation rule. See the
+  loose-ends note in §7.
 
 Safety goals covered: SG-003, SG-005, SG-013
 
@@ -70,8 +128,15 @@ Safety goals covered: SG-003, SG-005, SG-013
 
 Behavior:
   0.0 m/s hard stop. No commands forwarded to actuators under any
-  circumstance. Human intervention required to clear.
+  circumstance — every command is denied and the actuator performs its
+  **MRC fallback** safe-stop maneuver. Human intervention required to clear.
   `LockedOut` dominates all other posture states.
+
+  "MRC" note: the LockedOut **MRC fallback** is the safe-stop *maneuver*
+  executed when all commands are denied (e.g. `mrc_command` / MRC fallback
+  profile → zero velocity, max-decel brake ramp). It is distinct from the
+  SS-002 Degraded MRC *envelope*, which still admits a cooperative
+  decelerating command. LockedOut admits none.
 
 Entry conditions (any of):
   - DAG cycle detected in dependency graph
@@ -149,9 +214,15 @@ The following invariants are enforced in code and must never be
 violated regardless of what upstream AI systems instruct:
 
 1.  `LockedOut` can only be cleared by human reset — never automatic
-2.  `Degraded` recovery requires N consecutive clean ticks — not immediate
+2.  `Degraded` recovery requires N consecutive clean ticks — not immediate;
+    recovery is AUTOMATIC on return to Nominal (contrast invariant 1)
 3.  Governor unreachable → `Degraded` semantics (NOT `LockedOut`)
 4.  RSS unsafe → `Degraded` semantics (NOT `LockedOut`)
+4a. `Degraded` is decel-to-stop-and-HOLD: a command is admitted only if it is
+    non-increasing in speed AND does not re-initiate motion from a stop
+    (`enforce_degraded_decel_to_stop`); a stopped vehicle HOLDS, and the
+    Governor never authors re-acceleration. Motion may be (re-)initiated only
+    after recovery to SS-001 Nominal. (Issue #70 — Cruise 2023 pullover-drag)
 5.  NaN / Inf model output → safe floor applied before governor runs
 6.  DAG `LockedOut` propagates upward — never downgraded by RSS recovery
 7.  `LockedOut` dominates `Degraded` — if both conditions present,
@@ -190,9 +261,56 @@ This section shrinks as CERT-004 implements each test.
 
 ---
 
-## 6. Implementation References
+## 6. Issue #49 Closeout and Loose Ends
+
+Issue #49 (PARK-037) — "Integrate Parko + KirraGovernor with ROS2 cmd_vel
+topics; Governor clamps observable on `filtered_cmd_vel`; closed-loop on
+Hiwonder" — has a **safety-behavior** portion and a **wiring/hardware**
+portion. This change (Issue #70) closes the former; the latter remains.
+
+CLOSED by this change (the Degraded-converge-to-zero safety semantics):
+  - The Degraded posture now provably converges the vehicle to a standstill
+    and holds it there (the SS-002 (b)+(c) invariant), realized uniformly at
+    all four enforcement points via `enforce_degraded_decel_to_stop`. The
+    "Degraded → 0" intent #49 carried is now a tested, fail-closed behavior
+    (decel-to-stop-and-HOLD, no autonomous re-initiation).
+
+LOOSE ENDS — NOT closed here (tracked separately, do not auto-close #49 on
+this change alone):
+  1. **ROS2 topic naming / observability.** The roadmap (PARK-037,
+     `work/roadmap.md`) expects governor clamps to be observable on a
+     dedicated `filtered_cmd_vel` topic. The adapter currently publishes the
+     single gated output to the configurable `~/output/cmd_vel`
+     (`parko/crates/parko-ros2/src/config.rs`,
+     `crates/kirra-ros2-adapter`), not a separate `filtered_cmd_vel`. Whether
+     to add a distinct filtered-output topic (raw vs gated, for observability)
+     vs keep the single gated topic is an integration decision, not a safety
+     one — out of scope for #70.
+  2. **Hiwonder closed-loop hardware verification.** #49's acceptance includes
+     on-hardware closed-loop validation on the Hiwonder platform. This change
+     is verified in-process (unit + the `governor_closes_loop_proof` axis);
+     hardware bring-up is separate.
+  3. **#49 ↔ #92 scope overlap.** Triage (`docs/ISSUE_TRIAGE_2026-06-01.md`)
+     flags overlap between #49 (ROS2 cmd_vel wiring) and #92 (Occy Governor
+     trajectory check). The overlap is unaffected by — and orthogonal to —
+     the Degraded behavior change here.
+
+Recommendation: close the Degraded-converge-to-0 sub-goal of #49 against this
+change and re-scope the remaining #49 work (topic naming, Hiwonder bring-up)
+to its own follow-up issue, rather than auto-closing #49 in full.
+
+---
+
+## 7. Implementation References
 
 - `PostureState` enum: `src/posture_engine.rs` (or `src/verifier.rs`)
+- Degraded decel-to-stop-and-hold gate (Issue #70):
+  `enforce_degraded_decel_to_stop` + `STOP_EPSILON_MPS` in
+  `src/gateway/kinematics_contract.rs`; wired at
+  `src/gateway/policy_layer.rs`, `src/fabric/governor.rs`,
+  `crates/kirra-ros2-adapter/src/validation.rs`, and
+  `parko/crates/parko-kirra/src/lib.rs` (`apply_mrc_profile`,
+  + `STOP_EPSILON_RAD_S` angular gate)
 - `KirraGovernor` authority model: `parko/parko-kirra/src/lib.rs`
 - `startup_sentinel`: `src/bin/kirra_verifier_service.rs`
 - `should_route_command`: `src/posture_cache.rs`

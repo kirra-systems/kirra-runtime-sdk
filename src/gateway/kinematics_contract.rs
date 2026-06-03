@@ -240,6 +240,23 @@ pub enum DenyCode {
     /// OCCY_FAULT_MODEL §3 sensor-availability rule). Issued by
     /// `gateway::containment::validate_trajectory_containment`.
     DrivableSpaceDeparture,
+    /// Safety: SG-007 ≅ SG8. Degraded posture: a stopped vehicle
+    /// (`|current_velocity_mps| <= STOP_EPSILON_MPS`) was commanded to
+    /// re-initiate motion (`|linear_velocity_mps| > STOP_EPSILON_MPS`), or
+    /// to reverse direction through a stop. In Degraded the safe state is
+    /// **decel-to-stop-and-HOLD**: the Governor never authorizes autonomous
+    /// re-initiation of motion from a standstill. Issued by
+    /// `enforce_degraded_decel_to_stop`. (Issue #70 — Cruise Oct-2023 SF
+    /// post-stop pullover-drag lesson: a stopped AV must not re-initiate
+    /// motion under a degraded safety posture.)
+    DegradedReinitiationDenied,
+    /// Safety: SG-007 ≅ SG8. Degraded posture: the proposed speed magnitude
+    /// exceeds the current speed magnitude (`|linear_velocity_mps| >
+    /// |current_velocity_mps|`). Degraded permits only a **non-increasing**
+    /// (decelerating-toward-zero) speed profile; any acceleration is denied
+    /// and the actuator falls to the MRC controlled-stop. Issued by
+    /// `enforce_degraded_decel_to_stop`. (Issue #70.)
+    DegradedSpeedIncreaseDenied,
 }
 
 impl DenyCode {
@@ -257,6 +274,8 @@ impl DenyCode {
             Self::InvalidTimeDelta      => "INVALID_TIME_DELTA",
             Self::AssetLockedOut        => "ASSET_LOCKED_OUT",
             Self::DrivableSpaceDeparture => "DRIVABLE_SPACE_DEPARTURE",
+            Self::DegradedReinitiationDenied  => "DEGRADED_REINITIATION_DENIED",
+            Self::DegradedSpeedIncreaseDenied => "DEGRADED_SPEED_INCREASE_DENIED",
         }
     }
 }
@@ -265,6 +284,114 @@ impl std::fmt::Display for DenyCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.reason())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Degraded-posture stop-and-hold gate (Issue #70)
+// ---------------------------------------------------------------------------
+
+/// Speed magnitude (m/s) at or below which the vehicle is treated as
+/// **stopped** for the Degraded decel-to-stop-and-HOLD invariant.
+///
+/// At a standstill, wheel-odometry / GNSS-velocity estimates carry a few
+/// cm/s of noise; this floor (5 cm/s) sits above that noise band yet far
+/// below any meaningful crawl, so it denies any *commanded* re-initiation of
+/// motion from a stop while not flapping on standstill sensor jitter.
+///
+/// JUDGMENT-CALL (Issue #70 FLAG #1): 0.05 m/s is the recommended value.
+/// Integrators with a noisier velocity estimate may raise it; it must stay
+/// well below the slowest deliberate maneuver speed so a genuine creep is
+/// never silently admitted.
+pub const STOP_EPSILON_MPS: f64 = 0.05;
+
+/// Degraded-posture enforcement: **controlled decel-to-stop-and-HOLD** with
+/// NO autonomous re-initiation of motion.
+///
+/// This is the Issue #70 Degraded behavior. It is a *narrower* allow than the
+/// Nominal envelope and a *wider* allow than LockedOut (which denies
+/// everything): in Degraded the vehicle is permitted to keep moving only so
+/// long as it is converging toward a standstill under the MRC kinematic
+/// envelope, and once stopped it must HOLD. It must never be commanded to
+/// speed up or to re-initiate motion from a stop.
+///
+/// A proposed command is permitted **only if ALL** hold:
+///
+/// - **(a) within the MRC kinematic envelope** — delegated to
+///   [`validate_vehicle_command`] against `mrc_contract`, which is the
+///   decel-trajectory bound (speed ceiling, brake/accel rate, steering,
+///   lateral-accel). A clamp from the envelope is still a permitted
+///   (decelerating) command, returned as `ClampLinear`/`ClampSteering`.
+/// - **(b) non-increasing speed magnitude** — `|proposed| <= |current|`. Any
+///   speed increase → [`DenyCode::DegradedSpeedIncreaseDenied`].
+/// - **(c) no re-initiation from a stop** — if `|current| <= STOP_EPSILON_MPS`,
+///   any `|proposed| > STOP_EPSILON_MPS` → [`DenyCode::DegradedReinitiationDenied`]
+///   (hold at zero). A direction reversal through a stop (sign flip while both
+///   magnitudes exceed the stop floor) is likewise treated as re-initiation of
+///   opposite-direction motion → [`DenyCode::DegradedReinitiationDenied`]
+///   (Issue #70 FLAG #3: converge-toward-zero by magnitude, no reverse
+///   re-initiation).
+///
+/// On a (b)/(c) violation the function returns `DenyBreach(..)`; the caller
+/// drops the command and the actuator falls to the MRC controlled-stop — the
+/// Governor does **not** author a replacement decel command (parallel to the
+/// LockedOut deny→MRC fallback, but with the narrower Degraded allow above).
+///
+/// The angular channel is intentionally NOT gated here for the Ackermann
+/// bicycle model: a vehicle's yaw rate is `ω = v·tan(δ)/L`, so the linear
+/// no-re-initiation / non-increasing invariant already forces `ω → 0` as
+/// `v → 0`. Steering *geometry* at a standstill is not motion and is left to
+/// the envelope's steering-rate/angle clamps. Platforms with an *independent*
+/// angular-velocity actuator (e.g. differential drive in `parko-kirra`) apply
+/// the same converge-to-zero / no-re-initiation rule to the angular channel
+/// natively (Issue #70 FLAG #2).
+///
+/// WCET (Issue #70 STEP 5 / S3): the gate adds only a fixed, branch-bounded
+/// set of finite-checks, `abs`, sign and magnitude comparisons before
+/// delegating to the already-characterized [`validate_vehicle_command`]. It is
+/// O(1), allocation-free, and only on the Degraded path — the Nominal verdict
+/// path is unchanged.
+// SAFETY: SG8 | REQ: degraded-decel-to-stop-and-hold | TEST: test_degraded_reinitiation_from_stop_is_denied,test_degraded_speed_increase_is_denied,test_degraded_decel_toward_zero_is_allowed,test_degraded_hold_at_stop_is_allowed,test_degraded_reverse_through_stop_is_denied
+#[must_use]
+pub fn enforce_degraded_decel_to_stop(
+    cmd: &ProposedVehicleCommand,
+    mrc_contract: &VehicleKinematicsContract,
+) -> EnforceAction {
+    // Priority 0: fail closed on non-finite linear/current velocity before any
+    // magnitude comparison. NaN compares false against every threshold, which
+    // would silently mask a re-initiation; reject explicitly. (The full
+    // NaN/Inf + dt guard is re-run inside validate_vehicle_command for the
+    // envelope check; these two are the fields the gate itself reads.)
+    if !cmd.linear_velocity_mps.is_finite() {
+        return EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity);
+    }
+    if !cmd.current_velocity_mps.is_finite() {
+        return EnforceAction::DenyBreach(DenyCode::NanInfCurrentVelocity);
+    }
+
+    let proposed = cmd.linear_velocity_mps.abs();
+    let current = cmd.current_velocity_mps.abs();
+
+    // (c) No autonomous re-initiation from a stop — HOLD at zero.
+    if current <= STOP_EPSILON_MPS && proposed > STOP_EPSILON_MPS {
+        return EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied);
+    }
+
+    // (c') No direction reversal through a stop while moving — commanding the
+    // opposite sign at a non-trivial magnitude re-initiates motion in reverse.
+    let reversing = cmd.linear_velocity_mps.signum() != cmd.current_velocity_mps.signum();
+    if reversing && current > STOP_EPSILON_MPS && proposed > STOP_EPSILON_MPS {
+        return EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied);
+    }
+
+    // (b) Non-increasing speed magnitude (decelerating-toward-zero only).
+    // A tiny tolerance absorbs float jitter on a steady-state hold; anything
+    // meaningfully above the current magnitude is a speed increase → deny.
+    if proposed > current + 1e-9 {
+        return EnforceAction::DenyBreach(DenyCode::DegradedSpeedIncreaseDenied);
+    }
+
+    // (a) Within the MRC kinematic envelope — the decel-trajectory bound.
+    validate_vehicle_command(cmd, mrc_contract)
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1214,9 @@ mod kinematics_contract_tests {
             // SG2 + GAP 8 means the corridor-departure variant must also
             // pin its Display token for audit-hash stability.
             DenyCode::DrivableSpaceDeparture,
+            // Issue #70 — Degraded decel-to-stop-and-hold reason codes.
+            DenyCode::DegradedReinitiationDenied,
+            DenyCode::DegradedSpeedIncreaseDenied,
         ];
         for code in all {
             assert_eq!(
@@ -1095,5 +1225,102 @@ mod kinematics_contract_tests {
                 "Display for {code:?} must equal reason() token"
             );
         }
+    }
+
+    // --- Issue #70: Degraded decel-to-stop-and-hold gate -------------------
+
+    fn degraded_cmd(current: f64, proposed: f64) -> ProposedVehicleCommand {
+        ProposedVehicleCommand {
+            linear_velocity_mps: proposed,
+            current_velocity_mps: current,
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        }
+    }
+
+    /// Cruise lesson (Cruise Oct-2023 SF): a STOPPED vehicle must not
+    /// re-initiate motion under Degraded posture.
+    #[test]
+    fn test_degraded_reinitiation_from_stop_is_denied() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        // Stopped (0.0), commanded to crawl forward at 3 m/s — the exact
+        // class of maneuver the Cruise pullover-drag executed from a stop.
+        let cmd = degraded_cmd(0.0, 3.0);
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied)
+        );
+    }
+
+    /// A speed INCREASE while moving is denied (only decel-toward-zero allowed).
+    #[test]
+    fn test_degraded_speed_increase_is_denied() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        let cmd = degraded_cmd(2.0, 4.0); // 2 → 4 m/s, accelerating
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::DenyBreach(DenyCode::DegradedSpeedIncreaseDenied)
+        );
+    }
+
+    /// A decelerating-toward-zero command within the MRC envelope is ALLOWED.
+    #[test]
+    fn test_degraded_decel_toward_zero_is_allowed() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        // 3 → 2.9 m/s over 0.1 s: decel of 1 m/s², within MRC max_brake (3.0).
+        let cmd = degraded_cmd(3.0, 2.9);
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::Allow
+        );
+    }
+
+    /// Holding at a standstill (0 → 0) is ALLOWED — that IS the safe state.
+    #[test]
+    fn test_degraded_hold_at_stop_is_allowed() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        let cmd = degraded_cmd(0.0, 0.0);
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::Allow
+        );
+    }
+
+    /// A direction reversal through a stop (forward → reverse) is treated as
+    /// re-initiation of opposite-direction motion and denied.
+    #[test]
+    fn test_degraded_reverse_through_stop_is_denied() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        let cmd = degraded_cmd(2.0, -1.0); // moving forward, commanded reverse
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied)
+        );
+    }
+
+    /// An over-MRC-ceiling but still-decelerating command is clamped by the
+    /// envelope (NOT denied) — the gate defers (a) to validate_vehicle_command.
+    #[test]
+    fn test_degraded_overspeed_but_decelerating_is_clamped_by_envelope() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        // Current 20, proposed 8: decelerating (non-increasing) but 8 > 5.0
+        // MRC ceiling → envelope clamps to 5.0.
+        let cmd = degraded_cmd(20.0, 8.0);
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::ClampLinear(5.0)
+        );
+    }
+
+    /// Non-finite inputs fail closed even on the Degraded gate.
+    #[test]
+    fn test_degraded_gate_rejects_nan_linear() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        let cmd = degraded_cmd(2.0, f64::NAN);
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&cmd, &mrc),
+            EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity)
+        );
     }
 }

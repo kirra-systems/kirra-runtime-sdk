@@ -169,7 +169,8 @@ fn measure_stats<F: FnMut()>(iterations: u32, mut f: F) -> (u128, u128) {
 mod ci_gate_tests {
     use super::*;
     use crate::gateway::kinematics_contract::{
-        validate_vehicle_command, ProposedVehicleCommand, VehicleKinematicsContract,
+        enforce_degraded_decel_to_stop, validate_vehicle_command, ProposedVehicleCommand,
+        VehicleKinematicsContract,
     };
     use crate::gateway::policy::OperationalCommand;
     use crate::posture_cache::{should_route_command, CachedFleetPosture};
@@ -290,6 +291,33 @@ mod ci_gate_tests {
             ));
         });
         assert_under_budget("validate_vehicle_command::P6_ClampSteering", max_ns, p999_ns);
+    }
+
+    #[test]
+    fn wcet_enforce_degraded_decel_to_stop_worst_case() {
+        // Issue #70 (STEP 5): the Degraded gate adds only a fixed set of
+        // finite-checks + magnitude/sign comparisons before delegating to the
+        // already-budgeted validate_vehicle_command. Worst case is the
+        // PASS-the-gate path (a decelerating command), which runs the gate's
+        // O(1) checks AND the full P0..P6 envelope pipeline — strictly more
+        // work than a denied command (which returns at the gate). The Nominal
+        // path is unchanged and benched separately above; this confirms the
+        // Degraded path stays under the same per-verdict budget.
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 4.0,   // decelerating from 4.5 → passes gate
+            current_velocity_mps: 4.5,
+            delta_time_s: 0.05,
+            steering_angle_deg: 5.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let (max_ns, p999_ns) = measure_stats(ITERS, || {
+            let _ = std::hint::black_box(enforce_degraded_decel_to_stop(
+                std::hint::black_box(&cmd),
+                std::hint::black_box(&mrc),
+            ));
+        });
+        assert_under_budget("enforce_degraded_decel_to_stop::pass_then_envelope", max_ns, p999_ns);
     }
 
     #[test]

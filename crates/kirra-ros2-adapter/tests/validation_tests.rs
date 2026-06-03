@@ -240,6 +240,76 @@ fn degraded_posture_caps_kinematics_to_mrc() {
 }
 
 #[test]
+fn degraded_reaccel_from_stop_mrcs() {
+    // Issue #70 (Cruise Oct-2023 SF lesson): under Degraded the trajectory
+    // must be a controlled decel-to-stop. A trajectory that starts stopped
+    // and re-accelerates (a planned pullover-from-stop) must NOT be
+    // admitted under Degraded — the re-initiation segment trips DenyBreach
+    // and the aggregate verdict is MRCFallback (the controlled stop).
+    // Under Nominal the same trajectory is a normal launch and is accepted.
+    let dt = 0.1;
+    let speeds = [0.0_f64, 0.5, 1.2, 2.0, 2.8, 3.5];
+    let mut x = 5.0;
+    let trajectory: Vec<TrajectoryPoint> = speeds
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let p = TrajectoryPoint {
+                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: v,
+                time_from_start_s: (i as f64) * dt,
+            };
+            x += v * dt;
+            p
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let degraded_verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+    );
+    assert_eq!(degraded_verdict, TrajectoryVerdict::MRCFallback,
+        "Degraded must refuse a re-acceleration-from-stop trajectory (no autonomous \
+         re-initiation of motion); got {degraded_verdict:?}");
+}
+
+#[test]
+fn degraded_decel_to_stop_trajectory_is_admitted() {
+    // The complement of the Cruise lesson: a Degraded trajectory that bleeds
+    // speed down toward a stop (monotonically non-increasing, within the MRC
+    // envelope) is admitted — Accept or Clamp, never MRCFallback.
+    let dt = 0.2;
+    let speeds = [4.0_f64, 3.2, 2.4, 1.6, 0.8, 0.0];
+    let mut x = 5.0;
+    let trajectory: Vec<TrajectoryPoint> = speeds
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let p = TrajectoryPoint {
+                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: v,
+                time_from_start_s: (i as f64) * dt,
+            };
+            x += v * dt;
+            p
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "Degraded decel-to-stop trajectory must be admitted (not MRCFallback); got {verdict:?}"
+    );
+}
+
+#[test]
 fn locked_out_short_circuits_to_mrcfallback() {
     // Even a perfectly clean trajectory must produce MRCFallback under
     // LockedOut. The geometry checks are not required to run — the

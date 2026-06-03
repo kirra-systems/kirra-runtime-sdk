@@ -3,11 +3,17 @@
 // Property-based tests for the RSS pre-actuator gate in KirraGovernor.
 // Three posture variants × 10,000 cases each.
 //
-// Authority model (ADL-001, commits 9943aa9/e1ba1a2/21c3a35):
+// Authority model (ADL-001; Issue #70 decel-to-stop-and-hold):
 //   LockedOut → 0.0                             (hard stop)
-//   Degraded  → min(proposed, MRC_VELOCITY_CEILING_MPS)
+//   Degraded  → decel-to-stop-and-HOLD: a non-increasing / non-re-initiating
+//               command is permitted then capped at MRC_VELOCITY_CEILING_MPS;
+//               a speed increase or re-initiation from rest is denied (→ 0.0).
 //   Nominal   → nominal profile
-//   RSS unsafe → Degraded semantics (MRC cap)   (NOT a hard stop)
+//   RSS unsafe → Degraded semantics                (NOT a hard stop)
+//
+// The MRC-cap blocks below pass a non-increasing `previous` (== commanded) so
+// the Issue #70 gate is satisfied and the exact MRC-cap contract is what the
+// property exercises.
 //
 // Input strategy: bounded ranges matching plausible vehicle operating
 // parameters, not arbitrary f64. Avoids NaN/Inf edge cases and focuses
@@ -63,7 +69,10 @@ proptest! {
             lateral_margin: f64::MAX,
         });
 
-        let action  = gov.evaluate(&make_cmd(commanded), None, 0.05, SafetyPosture::Nominal);
+        // Issue #70: non-increasing history so the RSS-unsafe MRC path's
+        // decel-to-stop gate passes and the MRC-cap property is exercised.
+        let prev = make_cmd(commanded);
+        let action  = gov.evaluate(&make_cmd(commanded), Some(&prev), 0.05, SafetyPosture::Nominal);
         let out_vel = effective_linear_velocity(action, commanded);
 
         if !rss_safe {
@@ -103,7 +112,10 @@ proptest! {
             lateral_margin: f64::MAX,
         });
 
-        let action  = gov.evaluate(&make_cmd(commanded), None, 0.05, SafetyPosture::Degraded);
+        // Issue #70: non-increasing history so the Degraded decel-to-stop gate
+        // passes and the MRC-cap property is exercised.
+        let prev = make_cmd(commanded);
+        let action  = gov.evaluate(&make_cmd(commanded), Some(&prev), 0.05, SafetyPosture::Degraded);
         let out_vel = effective_linear_velocity(action, commanded);
         let expected = commanded.min(MRC_VELOCITY_CEILING_MPS);
 
