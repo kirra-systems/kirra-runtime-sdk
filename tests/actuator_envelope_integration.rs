@@ -18,7 +18,9 @@ use axum::{Extension, Json, Router};
 use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
 
-use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
+use kirra_runtime_sdk::gateway::kinematics_contract::{
+    ProposedVehicleCommand, VehicleKinematicsContract,
+};
 use kirra_runtime_sdk::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
@@ -309,4 +311,132 @@ async fn test_posture_gate_fences_diverged_epoch_and_demotes() {
         "diverged epoch on a mutation must be fenced 503; got {status}");
     assert!(!svc.app.mode_active.load(Ordering::SeqCst),
         "fenced mutation must clear mode_active (self-demote)");
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 0 CAPSTONE — actuator response-schema coherence (#151), CI-gating.
+//
+// WHAT THIS GUARDS: the gateway once returned a hardcoded "Allow" carrying the
+// ORIGINAL velocity/steering even when the envelope clamped; the ROS interceptor
+// read the canonical keys, saw no clamp, and forwarded the ORIGINAL unclamped
+// command to the motor topic. #151 threads a typed `EnforcementOutcome` and emits
+// the clamp under BOTH canonical (`action` / `enforced_*`) and legacy keys. These
+// tests FAIL if anyone reintroduces the hardcoded "Allow" or breaks the schema.
+//
+// HANDLER REACHABILITY (flagged): the real `handle_actuator_motion_command` lives
+// in the BINARY crate (src/bin/kirra_verifier_service.rs), which integration tests
+// cannot import — they link only against the lib. Its response path is a PURE
+// delegation: `(StatusCode::OK, Json(outcome.response_body()))` (verified at the
+// handler site). `response_body()` lives in the lib and owns 100% of the wire
+// schema. So the `echo_outcome` probe below — `Json(outcome.response_body())`
+// behind the real `enforce_actuator_safety_envelope` middleware — is the faithful
+// twin of the handler's response, exercised over the full HTTP frame via oneshot.
+// This is the prompt-sanctioned `response_body()` fallback; a bin refactor would
+// add churn for zero added coverage (the lib already owns the schema).
+// ---------------------------------------------------------------------------
+
+/// The keys the ROS interceptor / CARLA client read AS THE COMMAND VALUE — the
+/// ones whose corruption WAS the #151 bug. Asserts every one carries something
+/// other than the original over-ceiling input. (The `original_*` keys, which
+/// intentionally preserve the pre-clamp input for observability, are NOT in this
+/// set and are checked separately.)
+fn assert_axis_keys_hide_original(v: &Value, enforced_key: &str, legacy_key: &str, original: f64) {
+    for key in [enforced_key, legacy_key] {
+        let x = v[key].as_f64().unwrap_or_else(|| panic!("interceptor key `{key}` must be present"));
+        assert!(
+            (x - original).abs() > 1e-9,
+            "interceptor-read key `{key}` carries the ORIGINAL unclamped value {original} — \
+             this is exactly the #151 bug (clamp dropped at the HTTP boundary)"
+        );
+    }
+}
+
+/// THE FIX, tightest case: an over-speed command in DEGRADED posture clamps to the
+/// MRC ceiling (5.0 m/s), and the clamp is visible under both canonical and legacy
+/// keys — never the original 100.0. Priority-2 clamps linear exactly and returns,
+/// so the ceiling is asserted precisely (computed from the contract, not hardcoded).
+#[tokio::test]
+async fn test_capstone_degraded_overspeed_clamps_and_hides_original() {
+    let svc = build_state_with_posture(FleetPosture::Degraded);
+    let ceiling = VehicleKinematicsContract::mrc_fallback_profile().effective_max_speed_mps();
+    let original = 100.0;
+
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(original, 4.0, 0.1, 0.0, 0.0))).await;
+    assert_eq!(status, StatusCode::OK, "over-speed is clamped, not denied");
+
+    // Clamp is reported (not a hardcoded "Allow") under both key families.
+    assert_eq!(v["action"], "ClampLinear");
+    assert_eq!(v["enforcement_action"], "ClampLinear");
+
+    // Canonical + legacy value keys carry the MRC ceiling, not the original.
+    let enforced = v["enforced_linear_velocity_mps"].as_f64().expect("canonical key present");
+    assert!((enforced - ceiling).abs() < 1e-9, "clamped to MRC ceiling {ceiling}, got {enforced}");
+    assert_eq!(v["linear_velocity_mps"], v["enforced_linear_velocity_mps"],
+        "legacy value key must equal the enforced (clamped) value");
+
+    // CRUCIAL: no interceptor-read key carries the original 100.0.
+    assert_axis_keys_hide_original(&v, "enforced_linear_velocity_mps", "linear_velocity_mps", original);
+
+    // Original is preserved ONLY under the observability key (intentional).
+    assert_eq!(v["original_linear_velocity_mps"], original);
+}
+
+/// Over-steer in DEGRADED posture: steering is clamped (sign kept), reflected in
+/// both canonical and legacy keys, never the original 90°. The exact clamped
+/// magnitude is rate-limiter-dependent (P5b), so this asserts clamped-and-bounded
+/// rather than an exact ceiling.
+#[tokio::test]
+async fn test_capstone_degraded_oversteer_clamps_and_hides_original() {
+    let svc = build_state_with_posture(FleetPosture::Degraded);
+    let original = 90.0;
+
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(2.0, 2.0, 0.1, original, 0.0))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["action"], "ClampSteering");
+    assert_eq!(v["enforcement_action"], "ClampSteering");
+
+    let enforced = v["enforced_steering_angle_deg"].as_f64().expect("canonical key present");
+    assert!(enforced > 0.0 && enforced < original,
+        "steering clamped below {original}° with sign kept, got {enforced}");
+    assert_eq!(v["steering_angle_deg"], v["enforced_steering_angle_deg"],
+        "legacy steering key must equal the enforced (clamped) value");
+
+    // CRUCIAL: no interceptor-read steering key carries the original 90°.
+    assert_axis_keys_hide_original(&v, "enforced_steering_angle_deg", "steering_angle_deg", original);
+    assert_eq!(v["original_steering_angle_deg"], original);
+}
+
+/// In-envelope command under the TIGHTER Degraded envelope (3.0 < 5.0 ceiling):
+/// action "Allow", values pass through unchanged — proves the clamp path does not
+/// over-clamp an admissible command even when the envelope is tight.
+#[tokio::test]
+async fn test_capstone_degraded_in_envelope_passes_through_unclamped() {
+    let svc = build_state_with_posture(FleetPosture::Degraded);
+    let (status, v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(3.0, 3.0, 0.1, 1.0, 1.0))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["action"], "Allow");
+    assert_eq!(v["enforcement_action"], "Allow");
+    assert_eq!(v["enforced_linear_velocity_mps"], 3.0);
+    assert_eq!(v["linear_velocity_mps"], 3.0);
+    assert_eq!(v["enforced_steering_angle_deg"], 1.0);
+    assert_eq!(v["steering_angle_deg"], 1.0);
+}
+
+/// FAIL-CLOSED: the handler's signature declares `Extension<EnforcementOutcome>`
+/// (same extractor as the real `handle_actuator_motion_command`). Mounted WITHOUT
+/// the envelope middleware that inserts it, axum's extractor rejects the request
+/// 500 — the handler structurally CANNOT run, so it can never emit a defaulted
+/// "Allow". This is the fail-closed contract the #151 fix relies on.
+#[tokio::test]
+async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let app = Router::new()
+        .route("/actuator/motion/command", post(echo_outcome))
+        .with_state(svc);
+    let status = send(app, Body::from(valid_cmd_json())).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR,
+        "missing EnforcementOutcome extension must fail closed 500, never a defaulted Allow");
 }
