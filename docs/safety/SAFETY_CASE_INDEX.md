@@ -48,6 +48,7 @@ Date: 2026-05-23
 | KIRRA-OCCY-SPEED-VAL-001 | Occy speed-cap validation matrix (S8 #120 Item C; PROVEN/OK-ANALYTICAL/AoU-GAP dispositions for each ADR-0001 assumption; cap unchanged at 50 mph) | 0.1 | Draft | docs/safety/OCCY_SPEED_CAP_VALIDATION.md | 2026-05-31 |
 | KIRRA-OCCY-IDC-RANGES-001 | Occy D1 IDC detection-range specification (S8 #120 Item B; per-sensor spec table + SSD-derate cap-impact + vendor-RFP requirements; closes Item C AoU rows 1+4 in the D1 tier) | 0.1 | Draft | docs/safety/OCCY_IDC_DETECTION_RANGES.md | 2026-05-31 |
 | KIRRA-OCCY-QUANT-001 | Occy quantitative HW safety metrics (S8 #120 Item D; SPFM/LFM/PMHF target-vs-claimed across 5 sub-elements; single-supply PMHF 17.7 FIT FAIL, dual-supply 8.7 FIT PASS; deployment requirement: ASIL-D-class redundant supply) | 0.1 | Draft | docs/safety/OCCY_QUANTITATIVE_METRICS.md | 2026-05-31 |
+| KIRRA-TR5469-001 | ISO/IEC TR 5469 AI-functional-safety alignment (Kirra as the usage-class-2 non-AI safety function over AI-controlled equipment; align/cite — NOT a certification target, TR = guidance) | 0.1 | Draft | docs/safety/ISO_IEC_TR_5469_MAPPING.md | 2026-06-03 |
 
 ---
 

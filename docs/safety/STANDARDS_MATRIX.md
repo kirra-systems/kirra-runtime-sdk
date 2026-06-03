@@ -9,7 +9,7 @@ Date: 2026-05-23
 
 ## 1. Purpose
 
-This matrix identifies 23 safety and security standards relevant to Kirra deployments across five industry verticals. For each standard, it documents Kirra applicability, current compliance status, the SEooC (Safety Element out of Context) model applicability, and the certification priority.
+This matrix identifies 25 safety and security standards relevant to Kirra deployments across five industry verticals plus the cross-cutting layer. For each standard, it documents Kirra applicability, current compliance status, the SEooC (Safety Element out of Context) model applicability, and the certification priority.
 
 Priority levels:
 - P0: Must have — gates primary commercial targets
@@ -27,6 +27,7 @@ Priority levels:
 | 3 | ISO/SAE 21434 | Road Vehicles — Cybersecurity Engineering | P1 | Kirra directly implements several 21434 security controls: constant-time token comparison, HMAC-SHA256 attestation, Ed25519-signed audit chain, nonce-based replay prevention, admin token enforcement, and adversarial input detection in the Action Filter. | Informal compliance. No formal TARA (Threat Analysis and Risk Assessment) yet. | Map existing security invariants to 21434 TARA outputs. Estimated 2–4 months. |
 | 4 | UN ECE WP.29 R155/R156 | Cybersecurity Management System / Software Update Management | P2 | R155 requires a CSMS covering the vehicle's supply chain. Kirra as a software component must be covered under the OEM's CSMS. R156 requires secure OTA update procedures for software on the vehicle. | Not yet addressed. Applies when Kirra is deployed on a type-approved vehicle. | Address during OEM integration. No standalone Kirra action required; document supply chain security claims. |
 | 5 | AUTOSAR Adaptive | AUTOSAR Adaptive Platform (AP) — ARA Safety | P2 | AUTOSAR AP defines the execution environment for ASIL-D software on modern E/E architectures. Kirra would run as an Adaptive Application (AA) in a future automotive integration. The posture engine worker and axum HTTP interface would need to be replaced or wrapped by AUTOSAR communication middleware. | Not applicable until automotive OEM integration. | Track. No action until OEM engagement. |
+| 25 | ISO/PAS 8800 | Road Vehicles — Safety and Artificial Intelligence | P1 | The AI-safety layer ON TOP of the existing ISO 26262 (#1) + SOTIF (#2) entries for the AV path. ISO/PAS 8800 does not replace ISO 26262 — it tailors 26262's methods for AI/ML and extends SOTIF (ISO 21448) to address AI/ML non-determinism, and references ISO/IEC TR 5469 (#24). For Kirra's Occy line, it is the AI-functional-safety tailoring relevant when an AV stack is the certification target; KIRRA itself remains the deterministic non-AI safety function bounding the AI planner (the TR 5469 usage-class-2 pattern — see #24 / KIRRA-TR5469-001). | Gap. PAS (pre-standard; more normative than a TR, not yet a full IS). Relevant once the ISO 26262 (#1) + SOTIF (#2) work matures. | Matrix row now; full mapping deferred — map alongside/after the 26262 + SOTIF work. |
 
 ---
 
@@ -73,6 +74,7 @@ Priority levels:
 | 21 | ISO/IEC 25010 | Systems and Software Quality Models | P2 | Defines software quality characteristics: functional suitability, reliability, security, maintainability, safety. Useful as a quality framework for Kirra but not a certification target. | Not targeted. | Reference for quality attribute definitions. |
 | 22 | NIST SP 800-82 Rev 3 | Guide to Operational Technology Security | P2 | NIST 800-82 provides security guidance for industrial control systems. Relevant when Kirra is deployed in OT environments (power, water, manufacturing). The admin token enforcement, attestation, and audit chain directly implement 800-82 access control and audit requirements. | Informal compliance with relevant controls. | Document alignment with NIST 800-82 controls for US government and critical infrastructure customers. |
 | 23 | ISO/IEC 27001 | Information Security Management Systems | P2 | ISO 27001 ISMS is a process standard for managing information security. Relevant at the organizational level, not the software component level. Applicable when Kirra is commercialized and requires supply chain security attestation. | Not targeted. | Address at commercial entity formation stage. |
+| 24 | ISO/IEC TR 5469 | Artificial Intelligence — Functional Safety and AI Systems | P1 | **The AI-functional-safety methodology + identity anchor.** Industry-agnostic, terminology anchored to IEC 61508; sits ABOVE the whole matrix and references IEC 61508 / ISO 26262 / IEC 62061 / ISO 13849 / IEC 61511. KIRRA is squarely **usage class 2** — a deterministic, non-AI, independently developed safety function that ensures the safety of AI-controlled equipment (the Occy/Parko AI planner/controller). This is the architecturally preferred TR 5469 pattern for AI in safety-critical control: rather than certify a neural net to high integrity (which TR 5469 treats as hard/limited), bound the AI's outputs with a deterministic certifiable safety channel — exactly KIRRA's independent channel (ADR-0003), the WCET-bounded `validate_vehicle_command` kinematic-contract enforcement, fail-closed MRC, and comparator diversity (CERT-006). The integrity burden sits on the certifiable deterministic channel, not the AI. | Gap (alignment). **NOT a certification target** — TR 5469 is a Technical Report (informative guidance), so KIRRA *aligns with and cites* it, it cannot be certified against it. | Alignment + reference mapping (KIRRA-TR5469-001). Connects the cross-domain story to OCCY_DFA (decomposition) + ADR-0003 (two-tier). |
 
 ---
 
@@ -81,7 +83,7 @@ Priority levels:
 | Priority | Standards | Count | Action |
 |----------|-----------|-------|--------|
 | P0 | ISO 26262 ASIL-D (#1), ASTM F3269 (#6), IEC 61508 SIL 3 (#14) | 3 | Active certification tracks |
-| P1 | ISO/SAE 21434 (#3), DO-178C/ED-12C (#7), ISO 10218-1/2 (#10), ISO/TS 15066 (#11), IEC 62061 (#12), IEC 61511 (#15), IEC 62443 (#16), MISRA C/Ferrocene (#20) | 8 | Derivative from P0 or vertical-specific |
+| P1 | ISO/SAE 21434 (#3), DO-178C/ED-12C (#7), ISO 10218-1/2 (#10), ISO/TS 15066 (#11), IEC 62061 (#12), IEC 61511 (#15), IEC 62443 (#16), MISRA C/Ferrocene (#20), ISO/IEC TR 5469 (#24, AI-safety identity anchor — align/cite, not a cert target), ISO/PAS 8800 (#25, AV AI-safety layer) | 10 | Derivative from P0 or vertical-specific |
 | P2 | UN ECE WP.29 (#4), AUTOSAR AP (#5), DO-333 (#8), FAA BVLOS (#9), EN ISO 13849 (#13), IEC 61131-3 (#17), NERC CIP (#18), IEC 62304 (#19), ISO/IEC 25010 (#21), NIST 800-82 (#22), ISO 27001 (#23) | 12 | Track; address when needed |
 
 ---
