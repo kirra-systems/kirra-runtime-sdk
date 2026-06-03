@@ -542,7 +542,11 @@ async fn handle_audit_export(
 
 #[derive(Deserialize)]
 struct RotateSigningKeyRequest {
-    new_public_key_b64: String,
+    /// Base64 of the NEW 32-byte Ed25519 signing seed (the private key). The
+    /// store must hold the private half to sign subsequent rows under the new
+    /// key — a public-key-only rotation can never actually swap signing (#76).
+    /// Admin-gated endpoint; transmit over TLS in production.
+    new_signing_key_b64: String,
     reason: String,
 }
 
@@ -554,13 +558,23 @@ async fn handle_audit_rotate_key(
         return (StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
-    if req.new_public_key_b64.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "new_public_key_b64 is required" }))).into_response();
-    }
+    // Decode the new signing seed → SigningKey (32-byte Ed25519 seed).
+    let new_signing_key = {
+        use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+        match b64e.decode(req.new_signing_key_b64.trim())
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+            .map(|seed| ed25519_dalek::SigningKey::from_bytes(&seed))
+        {
+            Some(sk) => sk,
+            None => return (StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "new_signing_key_b64 must be a base64 32-byte ed25519 seed" }))).into_response(),
+        }
+    };
+    let new_key_id = kirra_runtime_sdk::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
     match svc.app.store.lock() {
-        Ok(mut store) => match store.record_key_rotation(&req.new_public_key_b64, &req.reason, now_ms()) {
-            Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION" })).into_response(),
+        Ok(mut store) => match store.record_key_rotation(new_signing_key, &req.reason, now_ms()) {
+            Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                        Json(json!({ "error": "failed to record key rotation" }))).into_response(),
         },
@@ -1730,9 +1744,23 @@ async fn main() {
                 "audit: hash-v2 migration anchor skipped — store lock poisoned at startup"
             ),
         }
+        // Key-id backfill (#76): assign existing NULL-key_id rows the genesis
+        // key's id so they verify after a future rotation. Idempotent; signed.
+        match svc_state.app.store.lock() {
+            Ok(mut store) => match store.ensure_key_id_backfill_migration(now_ms()) {
+                Ok(()) => tracing::info!("audit: key-id backfill migration ensured"),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "audit: key-id backfill migration FAILED at startup"
+                ),
+            },
+            Err(_) => tracing::error!(
+                "audit: key-id backfill migration skipped — store lock poisoned at startup"
+            ),
+        }
     } else {
         tracing::info!(
-            "audit: hash-v2 migration anchor skipped — passive standby (read-only)"
+            "audit: hash-v2 + key-id migrations skipped — passive standby (read-only)"
         );
     }
 

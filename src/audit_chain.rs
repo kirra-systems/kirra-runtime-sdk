@@ -51,6 +51,18 @@ pub fn canonical_signing_payload_v2(
 
 pub struct AuditChainLinker;
 
+/// Content-addressed key id for an audit signing key: hex SHA-256 of the
+/// 32-byte Ed25519 verifying-key bytes. No DER/SPKI round-trip — matches how
+/// the chain already stores pubkeys (raw 32-byte values), needs no allocator.
+/// A row's `key_id` is derivable from the key that signed it, so the verifier
+/// can select the correct verifying key PER ROW (issue #76).
+#[must_use]
+pub fn verifying_key_id(vk: &ed25519_dalek::VerifyingKey) -> String {
+    let mut h = Sha256::new();
+    h.update(vk.as_bytes());
+    hex::encode(h.finalize())
+}
+
 impl AuditChainLinker {
     /// V1 (legacy) record hash: prev || event_json || created_at_ms.
     /// Does NOT bind `event_type` — retained ONLY to verify pre-migration
@@ -172,11 +184,20 @@ impl AuditChainLinker {
             b64e.encode(sig.to_bytes())
         });
 
+        // Record the content-addressed id of the SIGNING key (#76). The
+        // verifier selects the verifying key per row by this id, so rows signed
+        // under a prior key still verify after rotation. `key_id` is unsigned
+        // metadata: tampering it makes the row verify under the WRONG key and
+        // fail (no need to bind it into the existing signed payload, which keeps
+        // v1/v2 signatures unchanged).
+        let key_id: Option<String> =
+            signing_key.map(|key| verifying_key_id(&key.verifying_key()));
+
         tx.execute(
             "INSERT INTO audit_log_chain
              (event_type, event_json, previous_hash_hex, record_hash_hex,
-              created_at_ms, signature_b64, hash_version, sequence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7)",
+              created_at_ms, signature_b64, hash_version, sequence, key_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7, ?8)",
             params![
                 event_type,
                 event_json_payload,
@@ -185,6 +206,7 @@ impl AuditChainLinker {
                 created_at_ms,
                 signature_b64,
                 sequence as i64,
+                key_id,
             ],
         )?;
 
@@ -210,7 +232,8 @@ mod audit_signing_tests {
                 created_at_ms INTEGER NOT NULL,
                 signature_b64 TEXT,
                 hash_version INTEGER NOT NULL DEFAULT 1,
-                sequence INTEGER
+                sequence INTEGER,
+                key_id TEXT
             );"
         ).unwrap();
         conn

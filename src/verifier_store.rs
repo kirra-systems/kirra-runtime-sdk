@@ -45,6 +45,62 @@ pub struct VerifierStore {
     pub signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
+// --- audit key-rotation helpers (#76) --------------------------------------
+
+/// Decode a base64 32-byte Ed25519 verifying key.
+fn audit_decode_vk(b64: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+    let bytes = b64e.decode(b64).ok()?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()
+}
+
+/// Build the canonical signing payload for a row, dispatched by hash version.
+fn audit_signing_payload(
+    hash_version: i64,
+    prev: &str,
+    rec: &str,
+    event_type: &str,
+    created_at_ms: i64,
+    sequence: Option<i64>,
+) -> String {
+    use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
+    match hash_version {
+        2 => canonical_signing_payload_v2(
+            prev, rec, event_type, created_at_ms,
+            sequence.unwrap_or(0).max(0) as u64,
+        ),
+        _ => canonical_signing_payload(prev, rec, event_type, created_at_ms),
+    }
+}
+
+/// Verify a base64 Ed25519 signature over `payload` under `vk`.
+fn audit_verify_sig(vk: &ed25519_dalek::VerifyingKey, payload: &str, sig_b64: &str) -> bool {
+    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+    use ed25519_dalek::{Signature, Verifier};
+    b64e.decode(sig_b64)
+        .ok()
+        .and_then(|b| <[u8; 64]>::try_from(b.as_slice()).ok())
+        .map(|arr| vk.verify(payload.as_bytes(), &Signature::from_bytes(&arr)).is_ok())
+        .unwrap_or(false)
+}
+
+/// If a (already-signature-verified) `KEY_ROTATION` event's payload announces a
+/// new pubkey + key_id whose fingerprint matches, add it to the keyring.
+/// Content-addressed: a rotation cannot smuggle in a key under a wrong id.
+fn extend_keyring_from_rotation(
+    keyring: &mut std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+    event_json: &str,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(event_json) else { return };
+    let (Some(npk), Some(nkid)) =
+        (v["new_public_key_b64"].as_str(), v["new_key_id"].as_str()) else { return };
+    let Some(nvk) = audit_decode_vk(npk) else { return };
+    if crate::audit_chain::verifying_key_id(&nvk) == nkid {
+        keyring.insert(nkid.to_string(), nvk);
+    }
+}
+
 impl VerifierStore {
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -384,6 +440,18 @@ impl VerifierStore {
                 return Err(e);
             }
         }
+        // Key-rotation support (#76): content-addressed id of the signing key
+        // per row. NULL on pre-upgrade rows (all signed under the genesis key);
+        // backfilled by ensure_key_id_backfill_migration.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE audit_log_chain ADD COLUMN key_id TEXT",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e);
+            }
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS federated_trust_reports (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -564,22 +632,75 @@ impl VerifierStore {
         rows.collect()
     }
 
+    /// Reconstruct the audit-chain keyring (key_id → VerifyingKey) by replaying
+    /// the chain's `KEY_ROTATION` events in id order, bootstrapped from the
+    /// GENESIS verifying key (#76). Each rotation row is signed by the PRIOR
+    /// (already-trusted) key and carries the NEW key's pubkey + key_id; a
+    /// rotation is only honored if it verifies under a key already in the ring
+    /// AND the announced key_id matches the announced pubkey's fingerprint.
+    /// The chain is thus self-describing — no external key-registry table (which
+    /// would be mutable, un-anchored trust state). Genesis is the only anchor.
+    fn build_audit_keyring(
+        &self,
+        genesis_vk: &ed25519_dalek::VerifyingKey,
+    ) -> Result<std::collections::HashMap<String, ed25519_dalek::VerifyingKey>> {
+        let mut keyring = std::collections::HashMap::new();
+        let genesis_id = crate::audit_chain::verifying_key_id(genesis_vk);
+        keyring.insert(genesis_id.clone(), *genesis_vk);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT event_json, previous_hash_hex, record_hash_hex, created_at_ms, \
+             signature_b64, hash_version, sequence, key_id \
+             FROM audit_log_chain WHERE event_type = 'KEY_ROTATION' ORDER BY id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let event_json: String = row.get(0)?;
+            let prev: String = row.get(1)?;
+            let rec: String = row.get(2)?;
+            let ts: i64 = row.get(3)?;
+            let sig_b64: Option<String> = row.get(4)?;
+            let hash_version: i64 = row.get(5)?;
+            let seq: Option<i64> = row.get(6)?;
+            let key_id: Option<String> = row.get(7)?;
+
+            // The rotation must be signed by a key already trusted (the prior
+            // key). A NULL key_id means a legacy/genesis-signed row.
+            let signer_id = key_id.unwrap_or_else(|| genesis_id.clone());
+            let Some(signer_vk) = keyring.get(&signer_id).copied() else { continue };
+            let Some(ref sig) = sig_b64 else { continue };
+            let payload = audit_signing_payload(hash_version, &prev, &rec, "KEY_ROTATION", ts, seq);
+            if !audit_verify_sig(&signer_vk, &payload, sig) {
+                continue; // an unverifiable rotation introduces no new trust
+            }
+            extend_keyring_from_rotation(&mut keyring, &event_json);
+        }
+        Ok(keyring)
+    }
+
     pub fn verify_audit_chain_full(
         &self,
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<AuditChainVerifyResult> {
-        use ed25519_dalek::{Verifier, Signature};
-        use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
-
-        // SELECT now includes event_type + hash_version + sequence so the
-        // verifier can dispatch per hash_version and never has to re-query
-        // event_type inside the loop (fragile, dropped to "UNKNOWN" on
-        // failure — gone now).
+        // SELECT now includes event_type + hash_version + sequence + key_id so
+        // the verifier can dispatch per hash_version and select the verifying
+        // key PER ROW (#76).
         let mut stmt = self.conn.prepare(
             "SELECT id, event_type, event_json, previous_hash_hex, record_hash_hex, \
-             created_at_ms, signature_b64, hash_version, sequence \
+             created_at_ms, signature_b64, hash_version, sequence, key_id \
              FROM audit_log_chain ORDER BY id ASC",
         )?;
+
+        // Keyring bootstrapped from the genesis verifying key; extended in id
+        // order as verified KEY_ROTATION rows are encountered. A signed row is
+        // verified under the key its key_id names — old rows under their
+        // ORIGINAL key, never re-signed.
+        let genesis_id = verifying_key.map(crate::audit_chain::verifying_key_id);
+        let mut keyring: std::collections::HashMap<String, ed25519_dalek::VerifyingKey> =
+            std::collections::HashMap::new();
+        if let (Some(gvk), Some(gid)) = (verifying_key, genesis_id.as_ref()) {
+            keyring.insert(gid.clone(), *gvk);
+        }
 
         let mut chain_intact = true;
         let mut total_entries: u64 = 0;
@@ -605,6 +726,7 @@ impl VerifierStore {
             let sig_b64: Option<String> = row.get(6)?;
             let hash_version: i64 = row.get(7)?;
             let sequence_opt: Option<i64> = row.get(8)?;
+            let key_id_opt: Option<String> = row.get(9)?;
 
             // Chain linkage check applies to every row regardless of version.
             if previous_hash_hex != expected_previous_hash {
@@ -653,8 +775,9 @@ impl VerifierStore {
             expected_previous_hash = record_hash_hex.clone();
             latest_hash = record_hash_hex.clone();
 
-            // Signature verification — payload builder dispatches per version.
-            // Cross-key rotation is a separate follow-up (issue #76).
+            // Signature verification — select the verifying key PER ROW by its
+            // key_id from the keyring (#76). Old rows verify under their ORIGINAL
+            // key; a verified KEY_ROTATION extends the keyring for later rows.
             match &sig_b64 {
                 None => {
                     unsigned_entries += 1;
@@ -664,39 +787,30 @@ impl VerifierStore {
                     if first_signed_at_ms.is_none() {
                         first_signed_at_ms = Some(created_at_ms as u64);
                     }
-                    if let Some(vk) = verifying_key {
-                        let payload = match hash_version {
-                            2 => canonical_signing_payload_v2(
-                                &previous_hash_hex,
-                                &record_hash_hex,
-                                &event_type,
-                                created_at_ms,
-                                sequence_opt.unwrap_or(0).max(0) as u64,
-                            ),
-                            _ => canonical_signing_payload(
-                                &previous_hash_hex,
-                                &record_hash_hex,
-                                &event_type,
-                                created_at_ms,
-                            ),
+                    if verifying_key.is_some() {
+                        // NULL key_id = a pre-backfill row, signed under genesis.
+                        let signer_id = key_id_opt
+                            .clone()
+                            .or_else(|| genesis_id.clone())
+                            .unwrap_or_default();
+                        let ok = match keyring.get(&signer_id) {
+                            Some(vk) => {
+                                let payload = audit_signing_payload(
+                                    hash_version, &previous_hash_hex, &record_hash_hex,
+                                    &event_type, created_at_ms, sequence_opt,
+                                );
+                                audit_verify_sig(vk, &payload, s)
+                            }
+                            // Unknown key_id → FAIL-CLOSED (not a skip).
+                            None => false,
                         };
-                        let sig_result = b64e.decode(s)
-                            .ok()
-                            .and_then(|bytes| {
-                                if bytes.len() == 64 {
-                                    let mut arr = [0u8; 64];
-                                    arr.copy_from_slice(&bytes);
-                                    Some(Signature::from_bytes(&arr))
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|sig| vk.verify(payload.as_bytes(), &sig).is_ok())
-                            .unwrap_or(false);
-
-                        if !sig_result && first_invalid_signature_index.is_none() {
+                        if !ok && first_invalid_signature_index.is_none() {
                             first_invalid_signature_index = Some(total_entries);
                             signature_valid = false;
+                        }
+                        // Extend trust only via a row that itself verified.
+                        if ok && event_type == "KEY_ROTATION" {
+                            extend_keyring_from_rotation(&mut keyring, &event_json);
                         }
                     }
                 }
@@ -730,18 +844,24 @@ impl VerifierStore {
         offset: u64,
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<AuditExportPage> {
-        use ed25519_dalek::{Verifier, Signature};
-        use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
-
         let total: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM audit_log_chain",
             [],
             |row| row.get::<_, i64>(0),
         ).map(|n| n as u64)?;
 
+        // Reconstruct the full keyring once (the page is DESC/paginated, so we
+        // can't replay rotations within a page) — then annotate each row's
+        // signature status under the key its key_id names (#76).
+        let genesis_id = verifying_key.map(crate::audit_chain::verifying_key_id);
+        let keyring = match verifying_key {
+            Some(g) => self.build_audit_keyring(g)?,
+            None => std::collections::HashMap::new(),
+        };
+
         let mut stmt = self.conn.prepare(
             "SELECT id, event_type, event_json, previous_hash_hex, record_hash_hex, \
-             created_at_ms, signature_b64, hash_version, sequence \
+             created_at_ms, signature_b64, hash_version, sequence, key_id \
              FROM audit_log_chain ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
 
@@ -757,48 +877,36 @@ impl VerifierStore {
             let sig_b64: Option<String> = row.get(6)?;
             let hash_version: i64 = row.get(7)?;
             let sequence_opt: Option<i64> = row.get(8)?;
+            let key_id: Option<String> = row.get(9)?;
 
             Ok((id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
-                sig_b64, hash_version, sequence_opt))
+                sig_b64, hash_version, sequence_opt, key_id))
         })?;
 
         let mut entries = Vec::new();
         for row_result in rows {
             let (id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
-                 sig_b64, hash_version, sequence_opt) = row_result?;
+                 sig_b64, hash_version, sequence_opt, key_id) = row_result?;
 
             let signature_status = match &sig_b64 {
                 None => "unsigned".to_string(),
                 Some(s) => {
-                    if let Some(vk) = verifying_key {
-                        let payload = match hash_version {
-                            2 => canonical_signing_payload_v2(
-                                &prev_hash,
-                                &entry_hash,
-                                &event_type,
-                                timestamp_ms,
-                                sequence_opt.unwrap_or(0).max(0) as u64,
-                            ),
-                            _ => canonical_signing_payload(
-                                &prev_hash,
-                                &entry_hash,
-                                &event_type,
-                                timestamp_ms,
-                            ),
+                    if verifying_key.is_some() {
+                        // NULL key_id = pre-backfill row signed under genesis.
+                        let signer_id = key_id
+                            .clone()
+                            .or_else(|| genesis_id.clone())
+                            .unwrap_or_default();
+                        let verified = match keyring.get(&signer_id) {
+                            Some(vk) => {
+                                let payload = audit_signing_payload(
+                                    hash_version, &prev_hash, &entry_hash,
+                                    &event_type, timestamp_ms, sequence_opt,
+                                );
+                                audit_verify_sig(vk, &payload, s)
+                            }
+                            None => false, // unknown key_id → fail-closed
                         };
-                        let verified = b64e.decode(s)
-                            .ok()
-                            .and_then(|bytes| {
-                                if bytes.len() == 64 {
-                                    let mut arr = [0u8; 64];
-                                    arr.copy_from_slice(&bytes);
-                                    Some(Signature::from_bytes(&arr))
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|sig| vk.verify(payload.as_bytes(), &sig).is_ok())
-                            .unwrap_or(false);
                         if verified { "valid".to_string() } else { "invalid".to_string() }
                     } else {
                         "invalid".to_string()
@@ -829,17 +937,35 @@ impl VerifierStore {
         })
     }
 
+    /// Rotate the audit signing key (#76). The KEY_ROTATION row is signed by the
+    /// OLD key (so it verifies under the prior, trusted key) and records the NEW
+    /// key's pubkey + content-addressed key_id in its payload. The in-memory
+    /// signing key is then swapped to the NEW key, so subsequent rows sign under
+    /// it. The whole operation runs under the store mutex (callers hold the lock)
+    /// and the append+swap is one critical section — atomic w.r.t. concurrent
+    /// appends, and never a cosmetic rotation.
+    ///
+    /// Receives the new `SigningKey` (not just the pubkey): the store cannot sign
+    /// future rows under a key it does not hold the private half of, so the
+    /// public-key-only flow could never actually swap signing.
     pub fn record_key_rotation(
         &mut self,
-        new_public_key_b64: &str,
+        new_signing_key: ed25519_dalek::SigningKey,
         reason: &str,
         now_ms: u64,
     ) -> Result<()> {
+        let new_vk = new_signing_key.verifying_key();
+        let new_public_key_b64 = b64e.encode(new_vk.as_bytes());
+        let new_key_id = crate::audit_chain::verifying_key_id(&new_vk);
+
         let payload = serde_json::json!({
             "new_public_key_b64": new_public_key_b64,
+            "new_key_id": new_key_id,
             "reason": reason,
             "rotated_at_ms": now_ms,
         });
+
+        // (a) sign+append the KEY_ROTATION row with the OLD key, committed first.
         let tx = self.conn.transaction()?;
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
             &tx,
@@ -849,7 +975,64 @@ impl VerifierStore {
             self.signing_key.as_ref(),
         )?;
         tx.commit()?;
-        self.save_engine_state("audit_signing_public_key", new_public_key_b64)?;
+
+        // (b) swap the in-memory signing key to the NEW key (atomic under the
+        //     store lock the caller holds — no append can interleave).
+        self.signing_key = Some(new_signing_key);
+
+        // (c) advisory engine-state pubkey (not a trust anchor; the chain's
+        //     KEY_ROTATION events are authoritative).
+        self.save_engine_state("audit_signing_public_key", &new_public_key_b64)?;
+        Ok(())
+    }
+
+    /// One-time, idempotent backfill (#76): existing rows have a NULL `key_id`
+    /// (they were all signed under the genesis key, since rotation was
+    /// previously cosmetic). Assign them the genesis key's id and anchor the
+    /// migration with a signed `KEY_ID_BACKFILL` event. NO signatures are
+    /// rewritten — only the new `key_id` column is populated. Rides the same
+    /// boot-time pattern as `ensure_hash_v2_migration_anchor`.
+    pub fn ensure_key_id_backfill_migration(&mut self, now_ms: u64) -> Result<()> {
+        // Genesis id from the current signing key (the only key the chain has
+        // ever been signed under, pre-rotation). No signing key → nothing to do.
+        let genesis_id = match self.signing_key.as_ref() {
+            Some(sk) => crate::audit_chain::verifying_key_id(&sk.verifying_key()),
+            None => return Ok(()),
+        };
+        // Idempotent: already anchored?
+        let existing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'",
+            [],
+            |r| r.get(0),
+        )?;
+        if existing > 0 {
+            return Ok(());
+        }
+        let null_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE key_id IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        if null_count == 0 {
+            // Brand-new chain (rows already carry key_id) — nothing to backfill.
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE audit_log_chain SET key_id = ?1 WHERE key_id IS NULL",
+            params![genesis_id],
+        )?;
+        let payload = format!(
+            "{{\"genesis_key_id\":\"{genesis_id}\",\"backfilled_rows\":{null_count},\"migrated_at_ms\":{now_ms}}}"
+        );
+        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            &tx,
+            "KEY_ID_BACKFILL",
+            &payload,
+            now_ms as i64,
+            self.signing_key.as_ref(),
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1701,5 +1884,169 @@ mod audit_hash_v2_tests {
             )
             .unwrap();
         assert_eq!(count_idem, 1, "anchor is idempotent — second call no-ops");
+    }
+}
+
+/// Issue #76 — audit key-rotation: cross-rotation verify, the sign-side swap
+/// proof, the on-vs-off negative control, tamper-evidence, migration, and the
+/// fail-closed unknown-key-id case.
+#[cfg(test)]
+mod audit_key_rotation_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use crate::audit_chain::{AuditChainLinker, verifying_key_id};
+
+    fn store_with_key(seed: u8) -> (VerifierStore, SigningKey) {
+        let mut s = VerifierStore::new(":memory:").expect("store");
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        s.set_signing_key(sk.clone());
+        (s, sk)
+    }
+
+    fn append(s: &mut VerifierStore, event_type: &str, ts: i64) {
+        let sk = s.signing_key.clone();
+        let tx = s.conn.transaction().unwrap();
+        AuditChainLinker::append_audit_event_tx(&tx, event_type, "{}", ts, sk.as_ref()).unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn max_id(s: &VerifierStore) -> i64 {
+        s.conn.query_row("SELECT MAX(id) FROM audit_log_chain", [], |r| r.get(0)).unwrap()
+    }
+
+    /// (payload, signature_b64, key_id) for a row, for direct sig checks.
+    fn row_payload_sig(s: &VerifierStore, id: i64) -> (String, String, String) {
+        s.conn.query_row(
+            "SELECT event_type, previous_hash_hex, record_hash_hex, created_at_ms, \
+             signature_b64, hash_version, sequence, key_id \
+             FROM audit_log_chain WHERE id = ?1",
+            [id],
+            |r| {
+                let et: String = r.get(0)?; let prev: String = r.get(1)?; let rec: String = r.get(2)?;
+                let ts: i64 = r.get(3)?; let sig: String = r.get(4)?; let hv: i64 = r.get(5)?;
+                let seq: Option<i64> = r.get(6)?; let kid: String = r.get(7)?;
+                Ok((audit_signing_payload(hv, &prev, &rec, &et, ts, seq), sig, kid))
+            },
+        ).unwrap()
+    }
+
+    /// CROSS-ROTATION VERIFY: sign under A → rotate to B → append under B →
+    /// verify_audit_chain_full asserts ALL rows (A and B) verify.
+    #[test]
+    fn cross_rotation_all_rows_verify() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        append(&mut s, "E2", 200);
+        let b = SigningKey::from_bytes(&[2; 32]);
+        s.record_key_rotation(b.clone(), "scheduled", 300).unwrap();
+        append(&mut s, "E3", 400);
+        append(&mut s, "E4", 500);
+
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(r.chain_intact, "hash chain intact across rotation");
+        assert!(r.signature_valid, "all A-rows AND B-rows must verify");
+        assert_eq!(r.first_invalid_signature_index, None);
+        assert!(r.signed_entries >= 5);
+    }
+
+    /// SIGN-SIDE PROOF: the signing key actually swapped — a post-rotation row
+    /// is signed by B (verifies under B, FAILS under A), and the store's
+    /// in-memory key is now B. Directly kills the old cosmetic-rotation bug.
+    #[test]
+    fn rotation_actually_swaps_signing_key() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        let b = SigningKey::from_bytes(&[2; 32]);
+        s.record_key_rotation(b.clone(), "swap", 200).unwrap();
+        // In-memory key swapped to B.
+        assert_eq!(
+            s.signing_key.as_ref().unwrap().verifying_key(),
+            b.verifying_key(),
+            "record_key_rotation must swap self.signing_key (not cosmetic)"
+        );
+        append(&mut s, "E2", 300);
+        let id = max_id(&s);
+        let (payload, sig, kid) = row_payload_sig(&s, id);
+        assert_eq!(kid, verifying_key_id(&b.verifying_key()), "post-rotation row's key_id is B");
+        assert!(audit_verify_sig(&b.verifying_key(), &payload, &sig), "verifies under B");
+        assert!(!audit_verify_sig(&a.verifying_key(), &payload, &sig), "FAILS under A — signing swapped");
+    }
+
+    /// NEGATIVE CONTROL: the OLD single-key verify (one vk = A for every row)
+    /// WOULD fail the post-rotation B-row; the new per-row keyring verify passes.
+    /// The delta is the evidence the fix changed the outcome.
+    #[test]
+    fn negative_control_old_single_key_would_fail() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        let b = SigningKey::from_bytes(&[2; 32]);
+        s.record_key_rotation(b.clone(), "rot", 200).unwrap();
+        append(&mut s, "E2", 300);
+        let id = max_id(&s);
+        let (payload, sig, _kid) = row_payload_sig(&s, id);
+
+        // OLD behavior: verify the B-row under the single key A → fails.
+        assert!(!audit_verify_sig(&a.verifying_key(), &payload, &sig),
+            "old single-key(A) verify WOULD have failed the B-row (false tamper alarm)");
+        // NEW behavior: full per-row keyring verify passes.
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(r.signature_valid, "new keyring verify passes for the same chain");
+    }
+
+    /// TAMPER: mutating a row's payload is detected (tamper-evidence intact).
+    #[test]
+    fn tamper_is_detected() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        append(&mut s, "E2", 200);
+        s.conn.execute("UPDATE audit_log_chain SET event_json = '{\"x\":1}' WHERE id = 1", []).unwrap();
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(!r.chain_intact || !r.signature_valid, "tamper must be detected");
+    }
+
+    /// MIGRATION: existing rows with NULL key_id are backfilled with the genesis
+    /// key's id by ensure_key_id_backfill_migration, and still verify.
+    #[test]
+    fn migration_backfills_genesis_key_id() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        append(&mut s, "E2", 200);
+        // Simulate a pre-upgrade chain: drop the key_id the new append recorded.
+        s.conn.execute("UPDATE audit_log_chain SET key_id = NULL", []).unwrap();
+
+        s.ensure_key_id_backfill_migration(999).unwrap();
+        let gid = verifying_key_id(&a.verifying_key());
+        let nulls: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE key_id IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(nulls, 0, "all rows backfilled");
+        let backfilled: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE key_id = ?1", [&gid], |r| r.get(0)).unwrap();
+        assert!(backfilled >= 2, "rows carry the genesis key_id");
+        // A signed KEY_ID_BACKFILL anchor exists, and the chain still verifies.
+        let anchors: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'", [], |r| r.get(0)).unwrap();
+        assert_eq!(anchors, 1, "migration anchored by a signed event");
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(r.chain_intact && r.signature_valid, "backfilled rows still verify under genesis");
+        // Idempotent.
+        s.ensure_key_id_backfill_migration(1000).unwrap();
+        let anchors2: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ID_BACKFILL'", [], |r| r.get(0)).unwrap();
+        assert_eq!(anchors2, 1, "migration is idempotent");
+    }
+
+    /// UNKNOWN KEY-ID: a row whose key_id isn't in the keyring fails closed
+    /// (not skipped).
+    #[test]
+    fn unknown_key_id_fails_closed() {
+        let (mut s, a) = store_with_key(1);
+        append(&mut s, "E1", 100);
+        s.conn.execute(
+            "UPDATE audit_log_chain SET key_id = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' WHERE id = 1",
+            [],
+        ).unwrap();
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(!r.signature_valid, "unknown key_id must fail closed, not skip");
+        assert_eq!(r.first_invalid_signature_index, Some(0));
     }
 }
