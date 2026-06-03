@@ -136,6 +136,15 @@ For each of the four scenarios:
 
 ## E. Contrast run — "why you need an independent Governor"
 
+> **Asserted, CI-gated counterpart:** the governed-vs-bypassed contrast is also a
+> deterministic headless proof — `tests/governor_closes_loop_proof.rs` (root
+> `cargo test`). It drives deliberate envelope violations + a fault through the
+> **real** `/actuator/motion/command` gateway, integrates the vehicle
+> kinematically, and asserts the on-vs-off delta (governed trajectory in-envelope;
+> bypassed trajectory violates; the governor reduces peak speed/lateral). That
+> test is the centerpiece a pilot brief shows; the CARLA table below adds
+> physics/perception fidelity as a follow-on.
+
 Run each scenario **with the Governor bypassed** — restore the original
 vehicle_cmd_gate remap so the vehicle interface listens to Autoware's
 output directly:
