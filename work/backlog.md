@@ -1270,8 +1270,9 @@ alternative simulation environment.
 **Integrate Parko + KirraGovernor with ROS2 cmd_vel topics**
 
 Wire the Parko control loop and KirraGovernor into ROS2 cmd_vel topics:
-`cmd_vel` → governor → `filtered_cmd_vel`. The governor's hard-veto on
-Degraded/LockedOut must be observable on the filtered topic. Depends on PARK-036.
+`cmd_vel` → governor → `cmd_vel_safe` (gated output; `/filtered_cmd_vel` was
+never implemented — retired per #171). The governor's hard-veto on
+Degraded/LockedOut must be observable on the gated output topic. Depends on PARK-036.
 KirraGovernor authority model: hard-veto on Degraded/LockedOut, clamp on Nominal,
 conservative fallback if unreachable.
 
@@ -1306,7 +1307,7 @@ REQUIREMENTS:
    a. Query FleetPosture from kirra-runtime-sdk (KIRRA_VERIFIER_ADDR).
    b. Map to PostureState: Nominal/Degraded/LockedOut.
    c. Call <actual governor struct>.enforce(commanded_vel, posture).
-   d. Publish result directly to /filtered_cmd_vel. No post-processing.
+   d. Publish result directly to /cmd_vel_safe. No post-processing.
       Comment: "Output is governor output — governor is single source of truth"
 3. Unreachable: drop to Degraded, call enforce(vel, Degraded), log
    "governor_unreachable — applying local Degraded posture".

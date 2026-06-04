@@ -183,7 +183,7 @@ TIME-SENSITIVE (30-day license in progress).
 | Task | What | Done When |
 |------|------|-----------|
 | PARK-036 (GitHub Issue #48) | Bring up ROS2 Jazzy on Ubuntu 24.04. Configure colcon workspace; verify basic pub/sub. | `ros2 topic echo` works; workspace builds cleanly. |
-| PARK-037 (GitHub Issue #49) | Integrate Parko + KirraGovernor with ROS2 cmd_vel topics. Governor clamps observable on `filtered_cmd_vel`. | Closed-loop behavior on Hiwonder; governor clamps verified on filtered topic. |
+| PARK-037 (GitHub Issue #49 → follow-up #171) | Integrate Parko + KirraGovernor with ROS2 cmd_vel topics. Governor clamps observable on the gated output topic — `/cmd_vel_safe` (robotics) / `~/output/cmd_vel` (AV adapter); `/filtered_cmd_vel` was never implemented and is retired. | Topic naming RESOLVED (#171); closed-loop behavior on Hiwonder remains open; governor clamps verified on the gated output topic + Ed25519 audit chain. |
 | PARK-038 (GitHub Issue #50) | Build full reference robot stack: Parko + KirraGovernor + ROS2 + kirra_safety interlock + CARLA alternative. | BLOCKED: depends on Hiwonder hardware + ROS2 Jazzy setup. |
 
 ### Safety Case (all NEW WORK)

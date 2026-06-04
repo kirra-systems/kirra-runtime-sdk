@@ -275,29 +275,43 @@ CLOSED by this change (the Degraded-converge-to-zero safety semantics):
     "Degraded → 0" intent #49 carried is now a tested, fail-closed behavior
     (decel-to-stop-and-HOLD, no autonomous re-initiation).
 
-LOOSE ENDS — NOT closed here (tracked separately, do not auto-close #49 on
-this change alone):
-  1. **ROS2 topic naming / observability.** The roadmap (PARK-037,
-     `work/roadmap.md`) expects governor clamps to be observable on a
-     dedicated `filtered_cmd_vel` topic. The adapter currently publishes the
-     single gated output to the configurable `~/output/cmd_vel`
-     (`parko/crates/parko-ros2/src/config.rs`,
-     `crates/kirra-ros2-adapter`), not a separate `filtered_cmd_vel`. Whether
-     to add a distinct filtered-output topic (raw vs gated, for observability)
-     vs keep the single gated topic is an integration decision, not a safety
-     one — out of scope for #70.
-  2. **Hiwonder closed-loop hardware verification.** #49's acceptance includes
-     on-hardware closed-loop validation on the Hiwonder platform. This change
-     is verified in-process (unit + the `governor_closes_loop_proof` axis);
-     hardware bring-up is separate.
+LOOSE ENDS — split to the follow-up issue #171; the topic-naming half is now
+RESOLVED (below), the Hiwonder half remains open:
+  1. **ROS2 topic naming / observability — RESOLVED (#171).** The phantom
+     `/filtered_cmd_vel` from the original PARK-037 planning text was **never
+     implemented** in either component; it existed only in planning docs. The
+     canonical, implemented safe-output topics are:
+       - **`/cmd_vel_safe`** — the robotics stack (`kirra_safety`
+         `cmd_vel_interceptor` → enforced command; `posture_subscriber` zero-Twist
+         on LockedOut; the C++ bridge `/kirra/cmd_vel_safe`; `kirra_params.yaml`);
+       - **`~/output/cmd_vel`** — the AV adapter
+         (`crates/kirra-ros2-adapter`, `parko/crates/parko-ros2/src/config.rs`),
+         which has published on it all along.
+     The dedicated-filtered-topic question is resolved as **no new topic**: the
+     raw-vs-gated observability a `/filtered_cmd_vel` would have provided already
+     exists via the **input/output split** — raw = the input topic (`/cmd_vel`),
+     gated = the output topic (`/cmd_vel_safe` / `~/output/cmd_vel`) — and the
+     governor's clamp is independently observable on the enforcement/action topic
+     and the Ed25519 audit chain. A dedicated topic would be redundant. The stale
+     `/filtered_cmd_vel` references in the planning docs are retired in favor of
+     these real names; do not rename working code to match a stale spec.
+     OPTIONAL consistency follow-up (flagged, NOT done here): unify the AV
+     adapter's `~/output/cmd_vel` to `/cmd_vel_safe` for one cross-component name
+     — an integration nicety, not a safety change.
+  2. **Hiwonder closed-loop hardware verification — OPEN (#171).** #49's
+     acceptance includes on-hardware closed-loop validation on the Hiwonder
+     platform. This is verified in-process today (unit + the
+     `governor_closes_loop_proof` axis); hardware bring-up is separate and
+     remains blocked on the hardware.
   3. **#49 ↔ #92 scope overlap.** Triage (`docs/ISSUE_TRIAGE_2026-06-01.md`)
      flags overlap between #49 (ROS2 cmd_vel wiring) and #92 (Occy Governor
      trajectory check). The overlap is unaffected by — and orthogonal to —
      the Degraded behavior change here.
 
-Recommendation: close the Degraded-converge-to-0 sub-goal of #49 against this
-change and re-scope the remaining #49 work (topic naming, Hiwonder bring-up)
-to its own follow-up issue, rather than auto-closing #49 in full.
+Status: the Degraded-converge-to-0 sub-goal of #49 closed against the Issue #70
+change, and the remainder was re-homed to follow-up issue **#171**. Of that
+remainder, the **topic-naming half is now resolved** (loose-end 1 above);
+**only the Hiwonder closed-loop hardware validation remains open** under #171.
 
 ---
 

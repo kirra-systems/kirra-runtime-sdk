@@ -634,9 +634,9 @@ Requirements:
 2. For each message:
    a. Query current FleetPosture from kirra-runtime-sdk.
    b. Call KirraGovernor.enforce(commanded_vel, posture).
-   c. Publish result to /filtered_cmd_vel.
+   c. Publish result to /cmd_vel_safe.
 3. If posture is Degraded or LockedOut: output velocity == 0.0 (hard veto).
 4. If posture is Nominal: apply kinematic clamp; publish clamped value.
-5. Test: inject Degraded posture via set_state_for_test; assert /filtered_cmd_vel == 0.
+5. Test: inject Degraded posture via set_state_for_test; assert /cmd_vel_safe == 0.
 6. Use Kirra naming in all comments and docs.
 ```
