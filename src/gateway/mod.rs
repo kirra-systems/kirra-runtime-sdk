@@ -6,6 +6,7 @@ pub mod policy_layer;
 pub mod cmd_vel;
 pub mod kinematics_contract;
 pub mod containment;
+pub mod perception_monitor;
 
 #[cfg(test)]
 mod kinematics_proptest;

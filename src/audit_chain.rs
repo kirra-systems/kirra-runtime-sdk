@@ -16,11 +16,24 @@ pub struct RssViolationEvent {
     pub timestamp_ms: u64,
 }
 
+/// Event payload written to the audit chain when the Track-C perception
+/// monitor (KIRRA-OCCY-PMON-001) applies a derate. `reason` is the byte-stable
+/// `DerateCode` token (SCREAMING_SNAKE_CASE) and is used as the chain
+/// `event_type`; `cap_mps` is the resulting permitted-speed cap (`0.0` =
+/// controlled stop). All fields are included in the SHA-256 hash.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PerceptionDerateEvent {
+    pub reason: String,
+    pub cap_mps: f64,
+    pub timestamp_ms: u64,
+}
+
 /// Typed audit entries for the hash-chained ledger.
 /// Each variant is serialised to JSON and becomes the `event_json` column value.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AuditEntry {
     RssViolation(RssViolationEvent),
+    PerceptionDerate(PerceptionDerateEvent),
 }
 
 /// V1 canonical signing payload — kept ONLY for verifying pre-migration
@@ -136,6 +149,21 @@ impl AuditChainLinker {
         let json = serde_json::to_string(event)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         Self::append_audit_event_tx(tx, "RSS_VIOLATION", &json, event.timestamp_ms as i64, signing_key)
+    }
+
+    /// Appends a Track-C perception-monitor derate event to the hash-chained
+    /// audit ledger (KIRRA-OCCY-PMON-001). The chain `event_type` is the
+    /// byte-stable `DerateCode` token carried in `event.reason`; the event is
+    /// serialised to JSON and bound into the SHA-256 chain hash, exactly as
+    /// `append_rss_violation`.
+    pub fn append_perception_derate(
+        tx: &Transaction,
+        event: &PerceptionDerateEvent,
+        signing_key: Option<&ed25519_dalek::SigningKey>,
+    ) -> Result<()> {
+        let json = serde_json::to_string(event)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        Self::append_audit_event_tx(tx, &event.reason, &json, event.timestamp_ms as i64, signing_key)
     }
 
     pub fn append_audit_event_tx(
@@ -284,6 +312,39 @@ mod audit_signing_tests {
         ).unwrap();
 
         assert!(sig_b64.is_none(), "signature_b64 should be NULL when no key is configured");
+    }
+
+    #[test]
+    fn test_perception_derate_feeds_chain_with_reason_as_event_type() {
+        // A Track-C DerateDecision (KIRRA-OCCY-PMON-001) feeds the Ed25519
+        // chain via append_perception_derate: the byte-stable DerateCode token
+        // becomes the row's event_type, the cap rides in the JSON, and a
+        // signature is produced when a key is configured.
+        let conn = setup_db();
+        let key = test_signing_key();
+        let decision = crate::gateway::perception_monitor::DerateDecision {
+            cap_mps: 0.0,
+            reason: crate::gateway::perception_monitor::DerateCode::DetectionRangeUntrusted,
+        };
+        let event = decision.to_audit_event(4242);
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            AuditChainLinker::append_perception_derate(&tx, &event, Some(&key)).unwrap();
+            tx.commit().unwrap();
+        }
+
+        let (event_type, event_json, sig_b64): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT event_type, event_json, signature_b64 FROM audit_log_chain \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(event_type, "DETECTION_RANGE_UNTRUSTED");
+        assert!(event_json.contains("\"cap_mps\":0.0"));
+        assert!(sig_b64.is_some(), "perception-derate row must be signed when key configured");
     }
 
     #[test]
