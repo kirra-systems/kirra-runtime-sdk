@@ -8,7 +8,6 @@ pub mod ros2_adapter;
 pub mod action_filter;
 pub mod action_policy;
 pub mod security;
-pub mod audit_log;
 pub mod telemetry;
 pub mod metrics;
 pub mod health;
