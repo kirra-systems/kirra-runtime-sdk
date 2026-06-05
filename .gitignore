@@ -13,3 +13,8 @@ lcov.info
 
 # cargo-mutants output (quality-hardening pass)
 mutants.out/
+
+# colcon build artifacts (ros2_ws)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

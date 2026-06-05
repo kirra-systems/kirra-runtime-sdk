@@ -39,7 +39,8 @@ the verification passes for the target deployment.
 | AoU ID | Title | Owner | Status | Gates |
 |--------|-------|-------|--------|-------|
 | AOU-PERCEPTION-FRAME-001 | Upstream object velocity is absolute, map/world-frame | Integrator (perception) | **OPEN** | `KIRRA_PERCEPTION_DERATE_ENABLED` (PMON-003 D4 pre-enable gate) |
-| AOU-MSG-TOOLCHAIN-001 | ROS message toolchain codegens the full Autoware message set (no trimmed packages) | Integrator (build / toolchain) | **OPEN** | bench/vehicle ROS 2 build (KIRRA-OCCY-PMON-004 §8 constraint 1) |
+| AOU-MSG-TOOLCHAIN-001 | ROS message toolchain codegens the full Autoware message set (no trimmed packages) | Integrator (build / toolchain) | **SUPERSEDED** (owner decision 2026-06-05, option C) | superseded by the curated-interface resolution — see below / KIRRA-OCCY-MSGSYNC-001; residual → AOU-MSG-TOOLCHAIN-002 |
+| AOU-MSG-TOOLCHAIN-002 | r2r codegen of the FULL Autoware message set on a host co-resident with full Autoware | Integrator (build / toolchain) | **OPEN** | any co-resident-with-full-Autoware deployment topology |
 
 ---
 
@@ -179,16 +180,14 @@ not** be carried into a real integration.
 - This is a **build/toolchain** precondition, not a runtime assumption — it is discharged at
   integration/build time, not per-cycle.
 
-### Verification status — **OPEN** (vehicle-tier precondition)
-A real bench/vehicle integration must build against the **full, untrimmed** message set.
-Resolution options (any one suffices; choose at integration time):
-- bump `r2r` off `=0.9.5` to a version that codegens these messages;
-- an upstream `r2r` / `r2r_msg_gen` fix (nested-dependency-aware filtering);
-- a **sanctioned** minimal-interface package agreed with the integrator (a deliberate,
-  reviewed interface contract — distinct from the ad-hoc bench trim).
-
-**The trimmed package is explicitly NOT an acceptable deployment artifact.** This item stays
-OPEN until the deployment builds against the genuine message set.
+### Verification status — **SUPERSEDED** (owner decision 2026-06-05)
+Resolved by **option C — SUPERSEDE** (see the Resolution below). The original OPEN condition
+("the toolchain codegens the **full** Autoware message set") is replaced by the reframed,
+satisfiable condition realized by the **sanctioned** curated-interface package — which is
+exactly the third resolution option this AoU originally listed ("a sanctioned minimal-
+interface package … distinct from the ad-hoc bench trim"). Discharged for the isolated-
+governor topology; the co-resident-codegen residual is tracked as AOU-MSG-TOOLCHAIN-002.
+The trimmed bench overlay is retired (it was never an acceptable deployment artifact).
 
 ### Consequence if violated
 The adapter is integrated against a **reduced** interface — messages/fields the real
@@ -201,3 +200,80 @@ trimmed-package bench does not transfer to a full-interface deployment.
 - KIRRA-OCCY-DEPLOY-001 — the Pacifica deployment architecture (bench/vehicle tiers this
   precondition gates).
 - The adapter `README.md` — the `ros2` vs `lanelet2` build matrix and the dev-only trim note.
+- KIRRA-OCCY-MSGSYNC-001 (`MSG_INTERFACE_VERSION_SYNC.md`) — the curated-interface SRAC (see
+  the relationship below).
+
+### Resolution — option C (SUPERSEDE), owner decision 2026-06-05
+**Owner decision (2026-06-05): OPTION C — SUPERSEDE.** The reframed condition is adopted:
+
+> *the governor runs **ISOLATED** (its build/runtime host carries **no** full Autoware
+> message set) against a **hash-verified curated subset** that uses the **real** Autoware
+> package names + **verbatim** message closures, **version-synced** to the deployed Autoware.*
+
+This is the right condition for an *independent* governor (ADR-0004): a small, audited
+interface surface, kept wire-compatible by byte-diff + RIHS hash, replaces a dependency on a
+third-party toolchain codegen-ing a large message set — and it retires the un-versioned trim
+entirely.
+
+**DISCHARGED for the isolated-governor topology** (KIRRA-OCCY-MSGSYNC-001 TOPO-1). Phase 2 is
+complete:
+- `scripts/curated_interface/verify_hashes.sh` = **PASS** (2026-06-05, ROS 2 Jazzy) — all 8
+  curated `.msg` byte-identical to the apt reference
+  `ros-jazzy-autoware-{perception,planning,common}-msgs` **1.11.0-1noble.20260412**. Wire
+  compatibility (RIHS type hash) holds by construction.
+- `cargo build/test -p kirra-ros2-adapter --features ros2` = **GREEN** against the curated
+  overlay with **NO full Autoware present** (no apt Autoware, no trim). Verdict path unchanged.
+
+**Going-forward governance — a standing obligation, not a one-time discharge:**
+KIRRA-OCCY-MSGSYNC-001 (version pin + byte-diff re-verify on any Autoware version change;
+per-target re-verification under TOPO-1 interface isolation / TOPO-2). The deployment-topology
+commitment that satisfies TOPO-1 is KIRRA-OCCY-DEPLOY-001 (container-isolation on the
+single-Orin bench; dedicated/container on the Pacifica).
+
+**Residual NOT covered by this discharge — tracked as AOU-MSG-TOOLCHAIN-002 (OPEN):** r2r
+0.9.5 still cannot codegen the full message set, so a topology in which the governor must
+co-reside with full Autoware on the same r2r codegen path is **out of scope** here. The
+curated package **avoids** the codegen panic by topology; it does **not fix** r2r.
+
+---
+
+## AOU-MSG-TOOLCHAIN-002 — r2r cannot codegen the full Autoware message set (co-resident topology)
+
+### Assumption (OPEN)
+The curated-interface discharge of AOU-MSG-TOOLCHAIN-001 holds **only** where the governor's
+r2r build/codegen host carries the **curated subset alone**. A deployment topology in which
+the governor must share an r2r codegen path with a **full** Autoware install is **NOT**
+covered: r2r 0.9.5 (`r2r_msg_gen`) still panics on Jazzy's full `autoware_planning_msgs`
+(route messages `LaneletPrimitive` / `ClearRoute`, `autoware_common_msgs/ResponseStatus`), and
+one un-generatable type aborts the entire binding run.
+
+### Why load-bearing / resolution options
+Such a co-resident topology needs an **r2r bump off `=0.9.5`**, or an upstream
+**nested-dependency-aware filter fix** in `r2r_msg_gen`. Until then, **only the
+isolated-governor topology is supported** (KIRRA-OCCY-DEPLOY-001: container-isolation on the
+single-Orin bench; dedicated / container on the Pacifica). This item makes that residual
+explicit so the AOU-MSG-TOOLCHAIN-001 discharge is not an overclaim.
+
+### Scope
+- **In scope:** any deployment whose r2r codegen host also carries the full Autoware message
+  set (co-resident).
+- **Out of scope:** the isolated-governor deployments — covered by the AOU-MSG-TOOLCHAIN-001
+  / KIRRA-OCCY-MSGSYNC-001 discharge.
+
+### Verification status — **OPEN** (tracked, deferred)
+Resolved only by an r2r codegen fix/bump (the original AOU-MSG-TOOLCHAIN-001 options 1–2). Not
+required for the intended isolated-governor deployments; tracked here so the residual is
+visible to a certifier and revisited if a co-resident topology is ever adopted.
+
+### Consequence if violated
+A co-resident codegen build fails (the r2r panic), or — if forced through with a trim — falls
+back to the un-versioned trim that the safety case prohibits. Either way the governor is not
+built against a verified genuine interface.
+
+### Cross-references
+- AOU-MSG-TOOLCHAIN-001 — the superseded parent; this is its named residual.
+- KIRRA-OCCY-MSGSYNC-001 — the SRAC whose TOPO-1 isolation precondition keeps this case out
+  of the intended deployments.
+- KIRRA-OCCY-DEPLOY-001 — the deployment-topology commitment (isolation).
+- KIRRA-OCCY-PMON-004 §8 — where the r2r-on-Jazzy panic was first recorded; the r2r-version
+  track.

@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <!--
+    CURATED INTERFACE PACKAGE — real Autoware package name, VERBATIM subset.
+
+    This is the Kirra-curated `autoware_planning_msgs` carrying ONLY the message
+    closure the governor consumes (the Trajectory tree). The package NAME is the
+    real Autoware name and the msg/*.msg are BYTE-IDENTICAL copies of the
+    deployed Autoware version, so the RIHS type hash matches and DDS delivers
+    genuine Autoware messages to the governor.
+
+    Curating only Trajectory (+ TrajectoryPoint) is also what sidesteps the
+    r2r-0.9.5-on-Jazzy codegen panic: the full autoware_planning_msgs carries
+    route messages (LaneletPrimitive, the ClearRoute service) and pulls in
+    autoware_common_msgs/ResponseStatus, which r2r_msg_gen cannot codegen — and
+    a single un-generatable type aborts the whole binding run. The curated
+    subset contains none of those, so r2r generates the Trajectory bindings the
+    adapter needs. (AOU-MSG-TOOLCHAIN-001 / KIRRA-OCCY-PMON-004 §8.)
+
+    The msg/ directory is populated by
+    scripts/curated_interface/extract_closures.sh — NEVER hand-edited.
+    <version> is metadata only; wire compatibility is by message-closure hash
+    (the SRAC: docs/safety/MSG_INTERFACE_VERSION_SYNC.md, KIRRA-OCCY-MSGSYNC-001).
+  -->
+  <name>autoware_planning_msgs</name>
+  <version>0.0.0</version>
+  <description>
+    Kirra-curated subset of autoware_planning_msgs (Trajectory closure only),
+    verbatim/hash-verified for the independent governor's isolated interface
+    surface. See docs/safety/MSG_INTERFACE_VERSION_SYNC.md.
+  </description>
+  <maintainer email="safety@kirra.systems">Kirra Safety</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>builtin_interfaces</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
