@@ -245,6 +245,42 @@ pub async fn enforce_actuator_safety_envelope(
         FleetPosture::LockedOut => unreachable!("LockedOut short-circuited above"),
     };
 
+    // Learning-loop capture (Phase 1, #190) — ADDITIVE, gated, wait-free.
+    // Reads the already-computed `verdict` and records the correction half of
+    // the corrective-supervision triple on a non-safety side channel. It NEVER
+    // gates/delays/alters the verdict, the EnforcementOutcome, or the response
+    // (INV-2) — note it sits BEFORE the response dispatch and only borrows the
+    // outcome. Default OFF (INV-3): with no writer installed this is a no-op.
+    // `try_send` drops on Full/Closed with a loud log (INV-4) — safety never
+    // waits. A single site here captures EVERY arm (passes included, to avoid
+    // downstream selection bias); it sits beside the Deny-arm audit `try_send`,
+    // not replacing it. Gated SOLELY by writer presence (mirrors the audit
+    // emit): the `KIRRA_CAPTURE_ENABLED` env decides INSTALLATION at startup, so
+    // default-off / tests → `get()` is `None` → pure no-op (INV-3).
+    if let Some(tx) = svc.app.capture_writer_tx.get() {
+        let rec = crate::capture::CaptureRecord::from_verdict(
+            svc.app
+                .capture_decision_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            now_ms(),
+            &verdict,
+            posture.clone(),
+            &proposed_cmd,
+            svc.perception_monitor_enabled,
+        );
+        match tx.try_send(rec) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "capture queue FULL — dropping verdict record (best-effort; safety never waits)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("capture writer task GONE — verdict record dropped");
+            }
+        }
+    }
+
     match verdict {
         EnforceAction::Allow => {
             // Thread the verdict to the handler so the response reports it.

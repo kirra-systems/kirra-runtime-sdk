@@ -1617,6 +1617,17 @@ async fn main() {
         kirra_runtime_sdk::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
     app_state.install_audit_writer(audit_tx);
 
+    // Learning-loop capture writer (Phase 1, #190) — DEFAULT OFF. Only spawned +
+    // installed when KIRRA_CAPTURE_ENABLED is set; unset → no writer, and the
+    // gateway emit is a pure no-op (capture_writer_tx stays None). Non-safety
+    // side channel; mirrors the audit writer wiring above.
+    if kirra_runtime_sdk::capture::capture_enabled() {
+        let capture_tx =
+            kirra_runtime_sdk::capture::spawn_capture_writer(Arc::clone(&app_state));
+        app_state.install_capture_writer(capture_tx);
+        tracing::info!("learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink");
+    }
+
     {
         let guard = app_state.store.lock()
             .expect("verifier store lock poisoned during boot hydration");

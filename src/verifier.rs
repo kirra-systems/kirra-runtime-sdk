@@ -210,6 +210,17 @@ pub struct AppState {
     /// `install_audit_writer` once to install.
     pub audit_writer_tx:
         std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>>,
+    /// Learning-loop capture channel (Phase 1, #190) — sibling of
+    /// `audit_writer_tx`. The actuator gateway `try_send`s a small
+    /// `CaptureRecord` here off the verdict path. `None` (writer not installed,
+    /// e.g. capture disabled or tests) → the gateway emit is a pure no-op.
+    /// Installed once via `install_capture_writer` at startup, only when
+    /// `capture::capture_enabled()`.
+    pub capture_writer_tx:
+        std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>>,
+    /// Monotonic per-decision sequence for the capture join key. Incremented at
+    /// the gateway emit; non-safety (capture only).
+    pub capture_decision_seq: Arc<AtomicU64>,
     /// Bounded broadcast channel for real-time posture stream subscribers.
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
@@ -236,6 +247,8 @@ impl AppState {
             held_epoch: Arc::new(AtomicU64::new(0)),
             cached_db_epoch: Arc::new(AtomicU64::new(initial_db_epoch)),
             audit_writer_tx: std::sync::OnceLock::new(),
+            capture_writer_tx: std::sync::OnceLock::new(),
+            capture_decision_seq: Arc::new(AtomicU64::new(0)),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
@@ -260,6 +273,20 @@ impl AppState {
         if self.audit_writer_tx.set(tx).is_err() {
             tracing::warn!(
                 "audit writer Sender already installed — ignoring duplicate install"
+            );
+        }
+    }
+
+    /// Install the capture-writer mpsc Sender (learning-loop Phase 1, #190).
+    /// Called once at startup, after `capture::spawn_capture_writer`, and only
+    /// when `capture::capture_enabled()`. Mirrors `install_audit_writer`.
+    pub fn install_capture_writer(
+        &self,
+        tx: tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>,
+    ) {
+        if self.capture_writer_tx.set(tx).is_err() {
+            tracing::warn!(
+                "capture writer Sender already installed — ignoring duplicate install"
             );
         }
     }

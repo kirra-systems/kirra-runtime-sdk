@@ -32,6 +32,9 @@ pub mod clock;
 pub mod scenario_runner;
 pub mod audit_chain;
 pub mod audit_writer;
+// Learning-loop capture channel (Phase 1, #190) — sibling of audit_writer;
+// non-blocking, default-OFF side channel recording the verdict/correction.
+pub mod capture;
 pub mod wcet_gate;
 pub mod traceability_gate;
 pub mod federation;

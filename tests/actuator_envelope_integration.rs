@@ -546,3 +546,85 @@ async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR,
         "missing EnforcementOutcome extension must fail closed 500, never a defaulted Allow");
 }
+
+// ---------------------------------------------------------------------------
+// Learning-loop capture (Phase 1, #190): INV-2 on-vs-off equivalence +
+// per-arm record emission. Capture is installed by handing AppState a writer
+// Sender (no env mutation); default-off elsewhere keeps the verdict path inert.
+// ---------------------------------------------------------------------------
+
+/// Build a Nominal state with a capture writer installed; return (svc, rx) so the
+/// test can both drive the gateway and observe the emitted records.
+fn build_state_with_capture()
+    -> (Arc<ServiceState>, tokio::sync::mpsc::Receiver<kirra_runtime_sdk::capture::CaptureRecord>)
+{
+    use kirra_runtime_sdk::verifier::{AppState, VerifierOperationMode};
+    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    let store = VerifierStore::new(":memory:").expect("in-memory store");
+    let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    app.install_capture_writer(tx);
+    let posture_cache: SharedPostureCache =
+        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let svc = Arc::new(ServiceState {
+        app,
+        posture_cache,
+        audit_verifying_key: None,
+        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new(None)),
+        posture_engine_tx: std::sync::OnceLock::new(),
+        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_monitor_enabled: false,
+    });
+    (svc, rx)
+}
+
+/// INV-2: with capture ON (writer installed), the verdict/response for a set of
+/// commands is byte-identical to capture OFF. Capture changes only the side channel.
+#[tokio::test]
+async fn test_capture_on_vs_off_responses_identical() {
+    let cases = [
+        cmd_json(20.0, 20.0, 0.1, 0.0, 0.0), // Allow (steady, under the 35 vehicle max)
+        cmd_json(40.0, 40.0, 0.1, 0.0, 0.0), // ClampLinear (40 > 35)
+    ];
+    for body in cases {
+        let off = build_state_with_posture(FleetPosture::Nominal);
+        let (off_status, off_v) = send_json(build_schema_app(off), Body::from(body.clone())).await;
+
+        let (on_svc, _rx) = build_state_with_capture();
+        let (on_status, on_v) = send_json(build_schema_app(on_svc), Body::from(body)).await;
+
+        assert_eq!(on_status, off_status, "capture must not change the status");
+        assert_eq!(on_v, off_v, "capture must not change the response body");
+    }
+}
+
+/// A capture record is emitted for EVERY arm (Allow + Clamp), with the correct
+/// outcome + the substituted safe value — passes included (selection-bias).
+#[tokio::test]
+async fn test_capture_emits_a_record_per_arm() {
+    use kirra_runtime_sdk::capture::CaptureOutcome;
+
+    // Allow.
+    let (svc, mut rx) = build_state_with_capture();
+    let (status, _v) =
+        send_json(build_schema_app(svc), Body::from(cmd_json(20.0, 20.0, 0.1, 0.0, 0.0))).await;
+    assert_eq!(status, StatusCode::OK);
+    let rec = rx.try_recv().expect("a capture record for the Allow");
+    assert_eq!(rec.outcome, CaptureOutcome::Allow);
+    assert_eq!(rec.safe_value, None);
+    assert_eq!(rec.posture, "NOMINAL");
+    assert_eq!(rec.decision_seq, 0);
+    assert!(rx.try_recv().is_err(), "exactly one record per request");
+
+    // ClampLinear → records the substituted safe value (the correction).
+    let (svc2, mut rx2) = build_state_with_capture();
+    let (status2, _v2) =
+        send_json(build_schema_app(svc2), Body::from(cmd_json(40.0, 40.0, 0.1, 0.0, 0.0))).await;
+    assert_eq!(status2, StatusCode::OK);
+    let rec2 = rx2.try_recv().expect("a capture record for the ClampLinear");
+    assert_eq!(rec2.outcome, CaptureOutcome::ClampLinear);
+    assert_eq!(rec2.safe_value, Some(35.0), "the correction Kirra imposed");
+}
+
