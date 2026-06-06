@@ -1622,8 +1622,7 @@ async fn main() {
     // gateway emit is a pure no-op (capture_writer_tx stays None). Non-safety
     // side channel; mirrors the audit writer wiring above.
     if kirra_runtime_sdk::capture::capture_enabled() {
-        let capture_tx =
-            kirra_runtime_sdk::capture::spawn_capture_writer(Arc::clone(&app_state));
+        let capture_tx = kirra_runtime_sdk::capture::spawn_capture_writer();
         app_state.install_capture_writer(capture_tx);
         tracing::info!("learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink");
     }

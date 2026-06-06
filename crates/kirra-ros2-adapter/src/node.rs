@@ -40,7 +40,8 @@ use tokio::sync::mpsc;
 
 use crate::corridor::CorridorSource;
 use crate::state::{
-    AdaptorState, EgoOdom, TrajectoryPoint, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+    AdaptorState, EgoOdom, TrajectoryPoint, TrajectoryVerdict,
+    SUBSCRIPTION_STALENESS_TIMEOUT_MS,
 };
 use crate::validation::{
     check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
@@ -51,6 +52,14 @@ use crate::perception_ingest::{perception_derate_enabled, publish_perception_tic
 use kirra_runtime_sdk::gateway::perception_monitor::{
     empty_perception_cap, resolve_perception_cap, KinematicPlausibilityContract,
     PerceptionCapPublisher,
+};
+// Learning-loop capture (Phase 1.5, docs/CAPTURE_PIPELINE_SPEC.md §3) — the
+// slow-loop trajectory emit point. Reuses the SDK's Phase-1 machinery
+// (bounded mpsc + spawn_blocking JSONL drain); DEFAULT OFF via
+// `KIRRA_CAPTURE_ENABLED`. Additive only — never on / altering the verdict.
+use kirra_runtime_sdk::capture::{
+    capture_enabled, spawn_capture_writer, CaptureRecord, PoseSnapshot,
+    TrajectoryCaptureExt, TrajectoryDecision,
 };
 
 /// Read the subscription staleness timeout (ms) from
@@ -348,6 +357,16 @@ pub async fn run_adapter(
         KinematicPlausibilityContract::urban_reference(),
         subscription_staleness_timeout_ms(), // ttl reuses the subscription staleness budget
     );
+    // Learning-loop capture — the slow-loop trajectory emit point (Phase 1.5).
+    // DEFAULT OFF: only when `KIRRA_CAPTURE_ENABLED` is truthy do we spawn the
+    // SDK's bounded JSONL writer; otherwise `capture_tx` is `None` and the emit
+    // below is a pure no-op. The writer takes no state (the SDK refactored the
+    // unused `Arc<AppState>` out), so the adapter spawns its own. The seq is an
+    // adapter-local monotonic decision counter (the slow loop's analogue of the
+    // gateway's `capture_decision_seq`).
+    let capture_tx: Option<mpsc::Sender<CaptureRecord>> =
+        capture_enabled().then(spawn_capture_writer);
+    let capture_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
     tokio::spawn(async move {
         let mut rx = trajectory_rx;
         while let Some(traj) = rx.recv().await {
@@ -411,6 +430,56 @@ pub async fn run_adapter(
                     elapsed_us = elapsed_us,
                     "trajectory_validation_wcet_exceeded"
                 );
+            }
+
+            // Learning-loop capture (Phase 1.5) — emit the slow-loop verdict as
+            // a BOUNDED record AFTER the WCET measurement (so it never counts
+            // against the slow-loop budget) and beside update_trajectory. The
+            // record is O(1): counts + endpoint poses + join keys, NEVER a fresh
+            // clone of the full points/objects vectors. Wait-free try_send;
+            // drop-on-full/closed with a loud log — capture never blocks or
+            // alters the verdict. No-op when capture is disabled (capture_tx None).
+            if let Some(tx) = capture_tx.as_ref() {
+                let decision = match verdict {
+                    TrajectoryVerdict::Accept => TrajectoryDecision::Accept,
+                    TrajectoryVerdict::Clamp => TrajectoryDecision::Clamp,
+                    TrajectoryVerdict::MRCFallback | TrajectoryVerdict::Pending => {
+                        TrajectoryDecision::MrcFallback
+                    }
+                };
+                let pose_snap = |p: &TrajectoryPoint| PoseSnapshot {
+                    x_m: p.pose.x_m,
+                    y_m: p.pose.y_m,
+                    heading_rad: p.pose.heading_rad,
+                };
+                let ext = TrajectoryCaptureExt {
+                    asset_id: traj.asset_id.clone(),
+                    trajectory_id: traj.trajectory_id,
+                    objects_ms,
+                    point_count: traj.points.len(),
+                    object_count: objects.len(),
+                    first_pose: traj.points.first().map(pose_snap),
+                    last_pose: traj.points.last().map(pose_snap),
+                    target_speed_mps: traj.points.last().map(|p| p.velocity_mps),
+                };
+                let rec = CaptureRecord::from_trajectory_verdict(
+                    capture_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    now_ms,
+                    decision,
+                    posture,
+                    ext,
+                    perception_derate_enabled(),
+                );
+                match tx.try_send(rec) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => tracing::warn!(
+                        asset_id = %traj.asset_id,
+                        "capture channel FULL — dropping slow-loop record (off the verdict path)"
+                    ),
+                    Err(mpsc::error::TrySendError::Closed(_)) => tracing::warn!(
+                        "capture channel CLOSED — capture writer gone; slow-loop record dropped"
+                    ),
+                }
             }
         }
     });
