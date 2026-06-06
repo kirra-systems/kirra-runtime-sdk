@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use kirra_collector::bag::InMemoryBag;
-use kirra_collector::{read_jsonl, run, CollectorConfig, CollectorError};
+use kirra_collector::{read_jsonl_with_digests, run, CollectorConfig, CollectorError, Lineage};
 
 struct Args {
     captures: Vec<PathBuf>,
@@ -121,7 +121,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let records = match read_jsonl(&args.captures) {
+    let (records, input_digests) = match read_jsonl_with_digests(&args.captures) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: reading capture JSONL: {e}");
@@ -129,6 +129,10 @@ fn main() -> ExitCode {
         }
     };
 
+    let lineage = Lineage {
+        inputs: input_digests,
+        bag_backend: "bag-json".to_string(),
+    };
     let cfg = CollectorConfig {
         pass_rate: args.pass_rate,
         window_ms: args.window_ms,
@@ -136,18 +140,19 @@ fn main() -> ExitCode {
         out_dir: args.out.unwrap(),
     };
 
-    match run(records, &bag, &cfg) {
-        Ok(recon) => {
-            println!("{}", recon.summary());
-            println!("{}", serde_json::to_string(&recon).unwrap());
+    match run(records, &bag, &lineage, &cfg) {
+        Ok(manifest) => {
+            println!("{}", manifest.quality.summary());
+            println!("dataset_id = {}", manifest.dataset_id);
             ExitCode::SUCCESS
         }
-        Err(CollectorError::OrphanRateExceeded { recon, max }) => {
-            println!("{}", recon.summary());
+        Err(CollectorError::OrphanRateExceeded { manifest, max }) => {
+            println!("{}", manifest.quality.summary());
+            println!("dataset_id = {}", manifest.dataset_id);
             eprintln!(
-                "error: orphan rate {:.3} exceeds --max-orphan-rate {:.3} — dataset written but \
-                 flagged for review",
-                recon.orphan_rate, max
+                "error: orphan rate {:.3} exceeds --max-orphan-rate {:.3} — dataset + manifest \
+                 written but flagged for review",
+                manifest.quality.orphan_rate, max
             );
             ExitCode::FAILURE
         }

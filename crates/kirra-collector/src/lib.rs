@@ -3,30 +3,35 @@
 // kirra-collector — the OFFLINE learning-loop collector (docs/COLLECTOR_DESIGN.md).
 // It reads the two dark capture JSONL streams, keeps every intervention while
 // sampling passes [D5], joins each kept record to a bus recording [D2], attaches
-// the doer's model version [D3], and writes a training-ready Parquet dataset [D4]
-// with a reconciliation report.
+// the doer's model version [D3], writes a training-ready Parquet dataset [D4],
+// and (Phase 2) emits a `manifest.json` with lineage + a reproducible
+// `dataset_id` so a model trained on it can point back at exactly this data.
 //
 // §0 SAFETY BOUNDARY: this crate depends on `kirra-capture-schema` ONLY (plus
-// serde / arrow / parquet) — NEVER on `kirra-runtime-sdk`. It is offline,
-// out-of-vehicle, produces only a dataset, and is mechanically incapable of
-// linking or reaching the verdict path. `cargo tree -p kirra-collector` is the
-// enforced check.
+// serde / serde_json / arrow / parquet / sha2) — NEVER on `kirra-runtime-sdk`.
+// It is offline, out-of-vehicle, produces only a dataset, and is mechanically
+// incapable of linking or reaching the verdict path. `cargo tree -p
+// kirra-collector` is the enforced check.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use kirra_capture_schema::{CaptureOutcome, CaptureRecord, CaptureSource};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub mod bag;
 pub mod dataset;
 pub mod join;
+pub mod manifest;
 pub mod reconcile;
 pub mod sample;
 
 use bag::BagReader;
 use join::JoinOutcome;
+use manifest::Manifest;
 use reconcile::Reconciliation;
 
 /// Stable string token for a capture source — the partition value and join key.
@@ -50,7 +55,47 @@ pub fn outcome_token(o: CaptureOutcome) -> &'static str {
     }
 }
 
-/// Collector run configuration (the CLI flags, or a test's choices).
+/// Lowercase hex of a byte slice.
+#[must_use]
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// SHA-256 of a byte slice, lowercase hex.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex(&h.finalize())
+}
+
+/// Per-input-file provenance (manifest `inputs[]`). The `sha256` is over the raw
+/// file bytes; `record_count` and the per-source counts are this file's
+/// contribution.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InputDigest {
+    pub name: String,
+    pub sha256: String,
+    pub record_count: usize,
+    pub command_gateway: usize,
+    pub slow_loop_trajectory: usize,
+}
+
+/// Provenance fed into `run` alongside the records — kept separate from
+/// `CollectorConfig` (which is pure algorithm params).
+#[derive(Debug, Clone)]
+pub struct Lineage {
+    /// Per-capture-file digests (sha256 + counts).
+    pub inputs: Vec<InputDigest>,
+    /// Which bag backend produced the join (`bag-json`, `db3`, `mcap`).
+    pub bag_backend: String,
+}
+
+/// Collector run configuration (the algorithm/run params — NOT provenance).
 #[derive(Debug, Clone)]
 pub struct CollectorConfig {
     /// Pass-sampling rate in [0, 1]; 1.0 keeps every pass [D5].
@@ -59,7 +104,7 @@ pub struct CollectorConfig {
     pub window_ms: u64,
     /// Fail the run if the orphan rate exceeds this (data-quality gate).
     pub max_orphan_rate: f64,
-    /// Output dataset root; partitions are written beneath it.
+    /// Output dataset root; partitions + `manifest.json` are written beneath it.
     pub out_dir: PathBuf,
 }
 
@@ -69,9 +114,10 @@ pub enum CollectorError {
     Io(std::io::Error),
     Arrow(arrow::error::ArrowError),
     Parquet(parquet::errors::ParquetError),
-    /// The orphan rate exceeded `max_orphan_rate`. The dataset was still written;
-    /// the reconciliation is carried so the caller can report it.
-    OrphanRateExceeded { recon: Box<Reconciliation>, max: f64 },
+    /// The orphan rate exceeded `max_orphan_rate`. The dataset + manifest were
+    /// still written; the manifest is carried so the caller can report the
+    /// `dataset_id` + quality of the flagged dataset.
+    OrphanRateExceeded { manifest: Box<Manifest>, max: f64 },
 }
 
 impl std::fmt::Display for CollectorError {
@@ -80,10 +126,13 @@ impl std::fmt::Display for CollectorError {
             CollectorError::Io(e) => write!(f, "io error: {e}"),
             CollectorError::Arrow(e) => write!(f, "arrow error: {e}"),
             CollectorError::Parquet(e) => write!(f, "parquet error: {e}"),
-            CollectorError::OrphanRateExceeded { recon, max } => write!(
+            CollectorError::OrphanRateExceeded { manifest, max } => write!(
                 f,
                 "orphan rate {:.3} exceeds ceiling {:.3} ({} of {} kept records unjoined)",
-                recon.orphan_rate, max, recon.orphans, recon.kept_after_sampling
+                manifest.quality.orphan_rate,
+                max,
+                manifest.quality.orphans,
+                manifest.quality.kept_after_sampling
             ),
         }
     }
@@ -91,29 +140,58 @@ impl std::fmt::Display for CollectorError {
 
 impl std::error::Error for CollectorError {}
 
-/// Read capture records from one or more JSONL files. Blank lines are skipped;
-/// malformed lines are logged to stderr and skipped (a single bad line never
-/// aborts a whole session's ingest).
-pub fn read_jsonl(paths: &[PathBuf]) -> std::io::Result<Vec<CaptureRecord>> {
-    let mut out = Vec::new();
+/// Read capture records from one or more JSONL files AND compute per-file
+/// provenance (sha256 over the raw bytes + record / per-source counts). Blank
+/// lines are skipped; malformed lines are logged to stderr and skipped (a single
+/// bad line never aborts a session's ingest).
+pub fn read_jsonl_with_digests(
+    paths: &[PathBuf],
+) -> std::io::Result<(Vec<CaptureRecord>, Vec<InputDigest>)> {
+    let mut all = Vec::new();
+    let mut digests = Vec::new();
     for path in paths {
-        let file = File::open(path)?;
-        for (lineno, line) in BufReader::new(file).lines().enumerate() {
-            let line = line?;
-            if line.trim().is_empty() {
+        let bytes = fs::read(path)?;
+        let sha256 = sha256_hex(&bytes);
+        let (mut record_count, mut command_gateway, mut slow_loop_trajectory) = (0, 0, 0);
+        for (idx, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+            let line = std::str::from_utf8(raw).unwrap_or("").trim();
+            if line.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<CaptureRecord>(&line) {
-                Ok(rec) => out.push(rec),
+            match serde_json::from_str::<CaptureRecord>(line) {
+                Ok(rec) => {
+                    record_count += 1;
+                    match rec.source {
+                        CaptureSource::CommandGateway => command_gateway += 1,
+                        CaptureSource::SlowLoopTrajectory => slow_loop_trajectory += 1,
+                    }
+                    all.push(rec);
+                }
                 Err(e) => eprintln!(
                     "warn: skipping malformed capture line {}:{}: {e}",
                     path.display(),
-                    lineno + 1
+                    idx + 1
                 ),
             }
         }
+        digests.push(InputDigest {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            sha256,
+            record_count,
+            command_gateway,
+            slow_loop_trajectory,
+        });
     }
-    Ok(out)
+    Ok((all, digests))
+}
+
+/// Read capture records only (provenance discarded). Thin wrapper over
+/// `read_jsonl_with_digests` so existing callers are unchanged.
+pub fn read_jsonl(paths: &[PathBuf]) -> std::io::Result<Vec<CaptureRecord>> {
+    Ok(read_jsonl_with_digests(paths)?.0)
 }
 
 /// Deduplicate by `(source, decision_seq)` (the primary key [D2]) and return a
@@ -135,14 +213,17 @@ pub fn index_dedup(records: Vec<CaptureRecord>) -> (Vec<CaptureRecord>, usize) {
     (map.into_values().collect(), duplicates)
 }
 
-/// The whole pipeline: dedup → stratified sample → join → write Parquet →
-/// reconcile. Writes the dataset under `cfg.out_dir` and returns the
-/// reconciliation. Fails (after writing) if the orphan rate exceeds the ceiling.
+/// The whole pipeline: dedup → stratified sample → join → write Parquet → write
+/// manifest → reconcile. Writes the dataset + `manifest.json` under
+/// `cfg.out_dir` and returns the `Manifest` (which embeds the `Reconciliation` as
+/// `quality` and the reproducible `dataset_id`). Fails (after writing both) if
+/// the orphan rate exceeds the ceiling — the error still carries the manifest.
 pub fn run(
     records: Vec<CaptureRecord>,
     bag: &dyn BagReader,
+    lineage: &Lineage,
     cfg: &CollectorConfig,
-) -> Result<Reconciliation, CollectorError> {
+) -> Result<Manifest, CollectorError> {
     let (deduped, duplicates_dropped) = index_dedup(records);
 
     let mut recon = Reconciliation {
@@ -193,16 +274,23 @@ pub fn run(
         }
     }
 
-    dataset::write_dataset(&rows, &cfg.out_dir)?;
+    // Canonical order for a reproducible content digest [M2] (already the
+    // dedup order; explicit for robustness).
+    rows.sort_by(|a, b| (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq)));
+
+    let partitions = dataset::write_dataset(&rows, &cfg.out_dir)?;
     recon.orphan_rate = recon.orphan_rate();
+
+    let manifest = manifest::build_manifest(lineage, bag.bag_uri(), cfg, &recon, &rows, &partitions);
+    manifest::write_manifest(&manifest, &cfg.out_dir)?;
 
     if recon.orphan_rate > cfg.max_orphan_rate {
         return Err(CollectorError::OrphanRateExceeded {
-            recon: Box::new(recon),
+            manifest: Box::new(manifest),
             max: cfg.max_orphan_rate,
         });
     }
-    Ok(recon)
+    Ok(manifest)
 }
 
 /// Convenience: list the part files under a dataset root (sorted), for callers

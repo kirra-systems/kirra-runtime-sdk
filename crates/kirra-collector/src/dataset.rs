@@ -24,9 +24,22 @@ use kirra_capture_schema::CaptureRecord;
 use crate::bag::BusMatch;
 use crate::{outcome_token, source_token, CollectorError};
 
+/// Provenance for one written partition (recorded in the dataset manifest).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PartitionInfo {
+    pub doer_version: String,
+    pub source: String,
+    pub row_count: usize,
+    /// Parquet path RELATIVE to the dataset root (e.g.
+    /// `doer_version=v1/source=COMMAND_GATEWAY/part-000.parquet`).
+    pub relative_path: String,
+}
+
 /// One row of the training dataset — the joined summary. Flat (one nullable
 /// column per source-specific field) so it maps directly onto an Arrow batch.
-#[derive(Debug, Clone, PartialEq)]
+/// `Serialize` is used only for the canonical content digest (Phase 2), never on
+/// the verdict/wire path.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DatasetRow {
     // --- common (every record) ---
     pub decision_seq: u64,
@@ -217,9 +230,13 @@ fn sanitize(value: &str) -> String {
 }
 
 /// Write the rows as Parquet, partitioned `doer_version=<v>/source=<s>/`. Returns
-/// the list of part files written. Heavy frames are never materialized — only the
-/// summary columns + `bulk_ref` are.
-pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<PathBuf>, CollectorError> {
+/// one `PartitionInfo` per partition written (deterministic order). Heavy frames
+/// are never materialized — only the summary columns + `bulk_ref` are.
+///
+/// Rows within each partition are sorted by `(source, decision_seq)` so the
+/// output is reproducible regardless of the caller's input order — the basis for
+/// the manifest's stable `content_digest` [M2].
+pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<PartitionInfo>, CollectorError> {
     let schema = dataset_schema();
     // Group by (doer_version, source); BTreeMap → deterministic partition order.
     let mut groups: BTreeMap<(String, String), Vec<&DatasetRow>> = BTreeMap::new();
@@ -227,16 +244,20 @@ pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<PathBuf>
         groups.entry((r.doer_version.clone(), r.source.clone())).or_default().push(r);
     }
     let mut written = Vec::new();
-    for ((doer_version, source), group) in &groups {
-        let dir = out_dir
-            .join(format!("doer_version={}", sanitize(doer_version)))
-            .join(format!("source={}", sanitize(source)));
-        fs::create_dir_all(&dir).map_err(CollectorError::Io)?;
-        let path = dir.join("part-000.parquet");
-        let batch = build_batch(&schema, group)?;
+    for ((doer_version, source), mut group) in groups {
+        group.sort_by(|a, b| (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq)));
+        let rel = format!(
+            "doer_version={}/source={}/part-000.parquet",
+            sanitize(&doer_version),
+            sanitize(&source)
+        );
+        let path = out_dir.join(&rel);
+        fs::create_dir_all(path.parent().expect("partition path has a parent"))
+            .map_err(CollectorError::Io)?;
+        let batch = build_batch(&schema, &group)?;
         let file = fs::File::create(&path).map_err(CollectorError::Io)?;
-        // UNCOMPRESSED keeps Phase 1 codec-independent + byte-deterministic;
-        // compression is a Phase-2 tuning knob.
+        // UNCOMPRESSED keeps the output codec-independent + byte-deterministic;
+        // compression is a later tuning knob.
         let props = WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
             .build();
@@ -244,7 +265,12 @@ pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<PathBuf>
             ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).map_err(CollectorError::Parquet)?;
         writer.write(&batch).map_err(CollectorError::Parquet)?;
         writer.close().map_err(CollectorError::Parquet)?;
-        written.push(path);
+        written.push(PartitionInfo {
+            doer_version,
+            source,
+            row_count: group.len(),
+            relative_path: rel,
+        });
     }
     Ok(written)
 }
