@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, StringArray, UInt64Array};
