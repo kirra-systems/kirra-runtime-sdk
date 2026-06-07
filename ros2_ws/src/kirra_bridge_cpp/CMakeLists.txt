@@ -12,13 +12,13 @@ find_package(std_msgs REQUIRED)
 
 add_executable(kirra_bridge_node src/kirra_bridge_node.cpp)
 
-target_include_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../include")
-target_link_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../target/release")
+target_include_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
+target_link_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/release")
 
 ament_target_dependencies(kirra_bridge_node rclcpp geometry_msgs std_msgs)
 target_link_libraries(kirra_bridge_node kirra_runtime_sdk)
 
-set_target_properties(kirra_bridge_node PROPERTIES INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../../target/release")
+set_target_properties(kirra_bridge_node PROPERTIES INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/release")
 
 install(TARGETS kirra_bridge_node DESTINATION lib/${PROJECT_NAME})
 ament_package()
