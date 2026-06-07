@@ -176,6 +176,10 @@ impl FabricRouter {
 
     /// Cross-asset trust propagation rules.
     /// Returns a list of (asset_id, forced_posture) pairs to apply.
+    ///
+    // Verifies: SG-007 — a LockedOut leader degrades dependent followers within
+    // one synchronous fabric pass (tests/fault_injection.rs
+    // test_safety_goal_sg_007_cross_asset_lockout_propagation).
     pub fn propagate_cross_asset_trust(&self) -> Vec<(String, FleetPosture)> {
         let mut changes: Vec<(String, FleetPosture)> = Vec::new();
 

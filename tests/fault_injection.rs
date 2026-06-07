@@ -209,3 +209,111 @@ fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
          was intentionally removed, update this test."
     );
 }
+
+// ============================================================================
+// SG-007 (ASIL D) — Cross-asset fleet lockout propagation
+//
+// Property: when a convoy LEADER transitions to LockedOut, every Nominal
+// convoy FOLLOWER is degraded within a single synchronous fabric pass
+// (`FabricRouter::update_asset_posture_and_propagate`). The "≤ 500 ms one
+// fabric tick" budget holds BY CONSTRUCTION — propagation runs inline within
+// the call, with no async hop to time — so the bound is argued structurally
+// rather than by sleeping.
+//
+// Mechanism: src/fabric/router.rs — register_asset / update_asset_posture /
+// update_asset_posture_and_propagate / fabric_state, driven by
+// propagate_cross_asset_trust Rule 2 (the `convoy_role` metadata key).
+// Safe state: dependent assets fail toward Degraded when a depended-upon
+// asset is lost.
+//
+// SCOPE NOTE (honest gap): the RTM also names
+// `test_causal_log_records_propagation_event`, but the current FabricRouter
+// does NOT record propagation events to any causal log — the FabricCausalLog
+// lives on ServiceState and is not wired into propagate_cross_asset_trust.
+// That assertion is therefore intentionally NOT made here (a green test must
+// reflect the mechanism as it exists); it remains an explicit stub in
+// tests/cert_003_rtm_gap_stubs.rs pending propagation→causal-log wiring.
+// ============================================================================
+
+#[test]
+fn test_safety_goal_sg_007_cross_asset_lockout_propagation() {
+    use std::collections::HashMap;
+    use kirra_runtime_sdk::fabric::asset::{
+        AssetPosture, AssetType, FabricAsset, KinematicProfileType,
+    };
+    use kirra_runtime_sdk::fabric::router::FabricRouter;
+
+    fn convoy_asset(id: &str, role: &str) -> FabricAsset {
+        let mut metadata = HashMap::new();
+        metadata.insert("convoy_role".to_string(), role.to_string());
+        FabricAsset {
+            asset_id: id.to_string(),
+            asset_type: AssetType::AutonomousVehicle,
+            display_name: id.to_string(),
+            kinematic_profile: KinematicProfileType::AutomotiveNominal,
+            registered_at_ms: 1_000,
+            last_seen_ms: 1_000,
+            metadata,
+        }
+    }
+    fn posture_at(id: &str, p: FleetPosture, generation: u64) -> AssetPosture {
+        AssetPosture {
+            asset_id: id.to_string(),
+            posture: p,
+            generation,
+            computed_at_ms: 2_000,
+            contributing_nodes: vec![],
+            blocked_by: vec![],
+        }
+    }
+
+    let router = FabricRouter::new();
+    router.register_asset(&convoy_asset("leader01", "leader"));
+    router.register_asset(&convoy_asset("follower01", "follower"));
+    router.register_asset(&convoy_asset("follower02", "follower"));
+
+    // register_asset seeds Degraded; force every asset Nominal so the
+    // degrade TRANSITION produced by propagation is observable.
+    for id in ["leader01", "follower01", "follower02"] {
+        router.update_asset_posture(id, posture_at(id, FleetPosture::Nominal, 1));
+    }
+
+    // Precondition cross-check: a non-LockedOut (Nominal) leader must NOT
+    // propagate — Rule 2 fires ONLY from a LockedOut leader.
+    router.update_asset_posture_and_propagate(
+        "leader01",
+        posture_at("leader01", FleetPosture::Nominal, 2),
+    );
+    for a in router.fabric_state().assets {
+        if a.asset_id.starts_with("follower") {
+            assert_eq!(
+                a.posture, FleetPosture::Nominal,
+                "SG-007 precondition: follower {} must stay Nominal while the leader is not LockedOut",
+                a.asset_id
+            );
+        }
+    }
+
+    // Leader → LockedOut: one synchronous propagation pass must degrade every
+    // Nominal follower (the safety property).
+    router.update_asset_posture_and_propagate(
+        "leader01",
+        posture_at("leader01", FleetPosture::LockedOut, 3),
+    );
+
+    let followers: Vec<(String, FleetPosture)> = router
+        .fabric_state()
+        .assets
+        .into_iter()
+        .filter(|a| a.asset_id.starts_with("follower"))
+        .map(|a| (a.asset_id, a.posture))
+        .collect();
+    assert_eq!(followers.len(), 2, "SG-007: both followers must be present");
+    for (id, posture) in followers {
+        assert_eq!(
+            posture,
+            FleetPosture::Degraded,
+            "SG-007: convoy follower {id} must degrade when the leader is LockedOut"
+        );
+    }
+}

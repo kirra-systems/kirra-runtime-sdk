@@ -166,6 +166,11 @@ pub fn spawn_telemetry_watchdog_with_clock(
 /// `spawn_telemetry_watchdog_with_clock` calls this once per
 /// `sweep_interval.tick()` — production behavior is byte-for-byte the
 /// same as the previous in-loop body.
+///
+// Verifies: SG-003 — Sensor Timeout Fault Detection. A node silent for
+// ≥ AV_TELEMETRY_TIMEOUT_MS is marked Untrusted(TELEMETRY_TIMEOUT) and a
+// PostureRecalcTrigger::WatchdogTimeout is sent within one sweep
+// (sg_003_cert_tests + watchdog_di_tests).
 pub(crate) fn watchdog_sweep_once(
     app: &Arc<AppState>,
     posture_engine_tx: &PostureEngineSender,
@@ -628,5 +633,146 @@ mod watchdog_di_tests {
         // (3) refresh stamp advanced to `now`.
         assert_eq!(observed_last_refresh, now,
             "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CERT-003 — SG-003 RTM-named coverage (ASIL D)
+//
+// Verifies: SG-003 — Sensor Timeout Fault Detection. The behaviour is also
+// exercised by `watchdog_di_tests` (the dead-man's switch); these tests carry
+// the RTM-named function names so `docs/safety/REQUIREMENTS_TRACEABILITY.md`
+// reconciles against the source tree and `grep -rn "SG-0"` returns real hits
+// (closes the SG-003 zero-coverage finding in RTM_GAP_REPORT.md B1). They drive
+// the deterministic `watchdog_sweep_once` (pub(crate)) under a VirtualClock —
+// no real time, no spawned-task timing.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod sg_003_cert_tests {
+    use super::*;
+    use crate::clock::VirtualClock;
+    use crate::posture_engine_v2::PostureRecalcTrigger;
+    use crate::verifier::{AppState, RegisteredNode, VerifierOperationMode};
+    use crate::verifier_store::VerifierStore;
+    use tokio::sync::mpsc;
+
+    fn app_with_trusted_node(node_id: &str, last_seen_ms: u64) -> Arc<AppState> {
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        app.nodes.insert(
+            node_id.to_string(),
+            RegisteredNode {
+                node_id: node_id.to_string(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms: last_seen_ms,
+                last_trust_update_ms: last_seen_ms,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+            },
+        );
+        app
+    }
+
+    fn health(node_id: &str, last_seen_ms: u64) -> HashMap<String, WatchdogNodeEntry> {
+        let mut m = HashMap::new();
+        m.insert(
+            node_id.to_string(),
+            WatchdogNodeEntry {
+                node_id: node_id.to_string(),
+                last_seen_ms,
+                warn_logged: false,
+            },
+        );
+        m
+    }
+
+    /// Verifies: SG-003 — a node silent for ≥ `AV_TELEMETRY_TIMEOUT_MS` is
+    /// marked `Untrusted("TELEMETRY_TIMEOUT")` on the sweep that observes it.
+    #[test]
+    fn test_watchdog_marks_node_untrusted_after_timeout() {
+        let anchor: u64 = 1_000_000;
+        // Exactly at the timeout boundary (silence == AV_TELEMETRY_TIMEOUT_MS).
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS;
+        let clock = VirtualClock::starting_at(now);
+        let app = app_with_trusted_node("lidar_front", anchor);
+        let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut nh = health("lidar_front", anchor);
+        let mut last_refresh = now; // bypass the SQLite refresh arm
+
+        watchdog_sweep_once(&app, &tx, clock.as_ref(), &mut nh, &mut last_refresh);
+
+        assert_eq!(
+            app.nodes.get("lidar_front").unwrap().status.clone(),
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "SG-003: a node silent ≥ AV_TELEMETRY_TIMEOUT_MS must be marked Untrusted(TELEMETRY_TIMEOUT)"
+        );
+    }
+
+    /// Verifies: SG-003 — detection happens within `AV_TELEMETRY_TIMEOUT_MS +
+    /// AV_WATCHDOG_SWEEP_MS`: nothing fires just below the timeout, and the
+    /// first sweep at/after the boundary fires.
+    #[test]
+    fn test_watchdog_detection_latency_within_bound() {
+        let anchor: u64 = 2_000_000;
+        let app = app_with_trusted_node("imu_main", anchor);
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut nh = health("imu_main", anchor);
+        // Keep a recent (non-zero) refresh stamp so the SQLite refresh arm is
+        // skipped on both sweeps below.
+        let mut last_refresh = anchor + AV_TELEMETRY_TIMEOUT_MS;
+
+        // Just below the timeout → no detection.
+        let below = VirtualClock::starting_at(anchor + AV_TELEMETRY_TIMEOUT_MS - 1);
+        watchdog_sweep_once(&app, &tx, below.as_ref(), &mut nh, &mut last_refresh);
+        assert!(
+            matches!(
+                app.nodes.get("imu_main").map(|n| n.status.clone()),
+                Some(NodeTrustState::Trusted)
+            ),
+            "SG-003: must NOT detect a timeout before AV_TELEMETRY_TIMEOUT_MS of silence"
+        );
+        assert!(rx.try_recv().is_err(), "SG-003: no trigger may fire before the timeout");
+
+        // Within one sweep after the boundary → detected.
+        let detect_now = anchor + AV_TELEMETRY_TIMEOUT_MS + AV_WATCHDOG_SWEEP_MS;
+        let at = VirtualClock::starting_at(detect_now);
+        watchdog_sweep_once(&app, &tx, at.as_ref(), &mut nh, &mut last_refresh);
+
+        let detection_latency_ms = detect_now - anchor;
+        assert!(
+            detection_latency_ms <= AV_TELEMETRY_TIMEOUT_MS + AV_WATCHDOG_SWEEP_MS,
+            "SG-003: worst-case detection latency must be ≤ TIMEOUT + one SWEEP"
+        );
+        assert_eq!(
+            app.nodes.get("imu_main").unwrap().status.clone(),
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "SG-003: node must be detected within TIMEOUT + one sweep"
+        );
+    }
+
+    /// Verifies: SG-003 — a detected timeout sends a
+    /// `PostureRecalcTrigger::WatchdogTimeout` on the engine channel (so the
+    /// loss of a sensor drives a posture recalculation).
+    #[test]
+    fn test_watchdog_triggers_posture_recalculation() {
+        let anchor: u64 = 3_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 250;
+        let clock = VirtualClock::starting_at(now);
+        let app = app_with_trusted_node("radar_left", anchor);
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut nh = health("radar_left", anchor);
+        let mut last_refresh = now;
+
+        watchdog_sweep_once(&app, &tx, clock.as_ref(), &mut nh, &mut last_refresh);
+
+        match rx
+            .try_recv()
+            .expect("SG-003: watchdog must send PostureRecalcTrigger::WatchdogTimeout")
+        {
+            PostureRecalcTrigger::WatchdogTimeout { node_id, .. } => {
+                assert_eq!(node_id, "radar_left", "SG-003: trigger must name the silent node");
+            }
+            other => panic!("SG-003: expected WatchdogTimeout, got {other:?}"),
+        }
     }
 }
