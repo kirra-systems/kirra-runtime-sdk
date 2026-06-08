@@ -22,8 +22,6 @@
 // latency), a sub-100µs verdict WCET fits with multiple orders of magnitude
 // of headroom.
 
-use std::time::Instant;
-
 // ---------------------------------------------------------------------------
 // Structural boundedness argument (Pass A + B1 + B2 + B3 evidence)
 // ---------------------------------------------------------------------------
