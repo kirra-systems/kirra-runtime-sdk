@@ -267,6 +267,7 @@ pub async fn run_adapter(
         while let Some(msg) = s.next().await {
             let now = now_ms_wall();
             traj_state.touch_trajectory(now);
+            tracing::debug!(points = msg.points.len(), "trajectory_msg_received");
             let parsed = crate::parsing::parse_trajectory(&msg, now);
             if parsed.points.is_empty() {
                 tracing::debug!("trajectory message had zero points — skipping forward");
