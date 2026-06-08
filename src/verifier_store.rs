@@ -412,6 +412,17 @@ impl VerifierStore {
         self.signing_key = Some(key);
     }
 
+    /// TEST-ONLY tamper seam (SG-010): hands a test the raw rusqlite connection
+    /// so it can mutate a previously-written `audit_log_chain` row out of band —
+    /// exactly what a tamperer with disk access would do. Used to prove
+    /// `verify_audit_chain_full` detects the tamper. `#[cfg(test)]` so it never
+    /// exists in a release build, and `pub(crate)` so only in-crate tests reach
+    /// it (an external integration crate cannot, by design).
+    #[cfg(test)]
+    pub(crate) fn raw_conn(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     // --- #165 durable audit-key trust map -----------------------------------
 
     /// The durable trust anchor's genesis key-id, if an anchor has been written.
@@ -3069,5 +3080,148 @@ mod key_durability_165_tests {
             current_steering_angle_deg: 1.0, // zero steering rate
         };
         assert_eq!(validate_vehicle_command(&cmd, &contract), EnforceAction::Allow);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SG-010 (ASIL B) — Audit Chain Tamper Detection
+// ---------------------------------------------------------------------------
+//
+// Verifies: SG-010. `verify_audit_chain_full` is the mechanism: every row binds
+// to its predecessor through a recomputed hash AND (when signing is enabled) an
+// Ed25519 signature over that hash, so any out-of-band edit to a stored row is
+// detected — `chain_intact` goes false and `first_invalid_signature_index`
+// pinpoints the first tampered row.
+//
+// These tests use a FILE-BACKED DB (tempfile): a SQLite `:memory:` database is
+// per-connection, so to model a real tamperer we open a SECOND connection to the
+// same file and mutate a row the FIRST connection wrote (via the `raw_conn`
+// test seam), then verify through the original connection.
+//
+// SCOPE / HONEST GAP: SG-010's full statement also requires that audit-chain
+// verification runs AUTOMATICALLY on service startup BEFORE the listener binds.
+// That mechanism does NOT exist today: `src/bin/kirra_verifier_service.rs` runs
+// only `check_startup_invariants` (admin-token / WAL / watchdog / posture-engine)
+// before `TcpListener::bind`, and verifies the chain only on demand via the
+// `/system/audit/verify` endpoint (plus a durable checkpoint on shutdown). Wiring
+// a verify-and-abort into startup is a BEHAVIOR change, out of scope for a
+// test-only change, so it is reported as a mechanism gap rather than asserted
+// here. See RTM_GAP_REPORT.md (SG-010).
+#[cfg(test)]
+mod sg_010_audit_tamper_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    /// Writes three signed audit rows to a file-backed store, returning the
+    /// store, its verifying key, and the DB path string. The `TempDir` is
+    /// returned so the caller keeps it alive (drop = cleanup of db + -wal/-shm).
+    fn signed_chain_on_disk() -> (tempfile::TempDir, String, ed25519_dalek::VerifyingKey) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.sqlite");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key();
+
+        let mut writer = VerifierStore::new(&path_str).expect("writer store");
+        writer.set_signing_key(sk);
+        writer.save_posture_event_chained("n1", "E1", "{}", None, 100).unwrap();
+        writer.save_posture_event_chained("n1", "E2", "{}", None, 200).unwrap();
+        writer.save_posture_event_chained("n1", "E3", "{}", None, 300).unwrap();
+
+        // Control: the untampered chain verifies clean. This proves the tamper —
+        // not some pre-existing breakage — is what trips the later assertions.
+        let clean = writer.verify_audit_chain_full(Some(&vk)).unwrap();
+        assert!(clean.chain_intact, "freshly written chain must be intact");
+        assert!(clean.signature_valid, "freshly written rows must all verify");
+        assert_eq!(clean.first_invalid_signature_index, None,
+            "no tampered index in a clean chain");
+        assert_eq!(clean.total_entries, 3, "exactly the three rows we wrote");
+
+        (dir, path_str, vk)
+    }
+
+    /// Tampering a previously-written row (out of band, via a SECOND connection)
+    /// is detected: chain_intact == false AND the first tampered index is named.
+    #[test]
+    fn test_tamper_via_second_connection_detected_with_first_index() {
+        let (_dir, path_str, vk) = signed_chain_on_disk();
+
+        // A separate connection to the SAME file — the "attacker with disk
+        // access". On :memory: this row would be invisible to it; file-backed,
+        // it sees and can mutate what the writer committed.
+        let mut tamperer = VerifierStore::new(&path_str).expect("tamperer store");
+        let (tampered_id, ordinal): (i64, u64) = {
+            let conn = tamperer.raw_conn();
+            // Target the MIDDLE row (E2) so we assert the index points at it,
+            // not trivially at row 0.
+            let id: i64 = conn
+                .query_row(
+                    "SELECT id FROM audit_log_chain ORDER BY id ASC LIMIT 1 OFFSET 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            // 0-based position in id order = the index verify_audit_chain_full reports.
+            let ord: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log_chain WHERE id < ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            // Back-date the event: created_at_ms is bound into BOTH the record
+            // hash and the signature payload, so this single edit breaks the
+            // hash chain and invalidates the signature on exactly this row.
+            conn.execute(
+                "UPDATE audit_log_chain SET created_at_ms = created_at_ms + 99999 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+            (id, ord as u64)
+        };
+
+        // Verify through a FRESH store on the same file (independent of the
+        // tamperer) to prove the tamper is durable, not connection-local.
+        let reader = VerifierStore::new(&path_str).expect("reader store");
+        let r = reader.verify_audit_chain_full(Some(&vk)).unwrap();
+
+        assert!(!r.chain_intact,
+            "back-dating row id={tampered_id} must break the hash chain");
+        assert!(!r.signature_valid,
+            "the tampered row's signature must no longer verify");
+        assert_eq!(r.first_invalid_signature_index, Some(ordinal),
+            "verify must pinpoint the FIRST tampered row's index ({ordinal})");
+    }
+
+    /// Even an unsigned chain detects tampering via the hash linkage alone
+    /// (chain_intact), independent of signatures.
+    #[test]
+    fn test_hash_linkage_detects_tamper_without_signing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit_unsigned.sqlite");
+        let path_str = path.to_str().unwrap().to_string();
+
+        // No signing key set ⇒ unsigned rows.
+        let mut store = VerifierStore::new(&path_str).expect("store");
+        store.save_posture_event_chained("n1", "E1", "{}", None, 100).unwrap();
+        store.save_posture_event_chained("n1", "E2", "{}", None, 200).unwrap();
+
+        let clean = store.verify_audit_chain_full(None).unwrap();
+        assert!(clean.chain_intact, "unsigned chain still hash-links");
+
+        // Tamper the payload of the first row via the raw connection.
+        store
+            .raw_conn()
+            .execute(
+                "UPDATE audit_log_chain SET event_json = '{\"x\":1}' WHERE id = \
+                 (SELECT id FROM audit_log_chain ORDER BY id ASC LIMIT 1)",
+                [],
+            )
+            .unwrap();
+
+        let r = store.verify_audit_chain_full(None).unwrap();
+        assert!(!r.chain_intact,
+            "tampering event_json must break the recomputed hash even with no signatures");
     }
 }

@@ -223,6 +223,25 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-poll promotion decision (pure)
+// ---------------------------------------------------------------------------
+
+/// The per-poll promotion DECISION the monitor loop acts on: a standby promotes
+/// when the primary's last heartbeat is at least `timeout_ms` old. Extracted so
+/// the real decision the spawned task calls (the task uses wall-clock time and
+/// is otherwise untestable) can be exercised deterministically with injected
+/// `now_ms` / heartbeat timestamps. `saturating_sub` makes clock skew
+/// (heartbeat in the future) read as age 0 → no promotion, never an underflow.
+///
+/// Boundary is `>=` (exactly `timeout_ms` old promotes), matching the original
+/// inline check. This is the SOLE gate on `perform_promotion`.
+//
+// Verifies: SG-009
+pub(crate) fn promotion_decision(now_ms: u64, last_heartbeat_ms: u64, timeout_ms: u64) -> bool {
+    now_ms.saturating_sub(last_heartbeat_ms) >= timeout_ms
+}
+
+// ---------------------------------------------------------------------------
 // Promotion monitor (Standby / PassiveStandby)
 // ---------------------------------------------------------------------------
 
@@ -283,12 +302,12 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
             tick.tick().await;
             let now = now_ms();
 
-            let heartbeat_age = match app.store.lock() {
+            let last_heartbeat_ms = match app.store.lock() {
                 Ok(store) => {
                     match store.load_engine_state(HEARTBEAT_KEY) {
                         Ok(Some(ts_str)) => {
                             match ts_str.parse::<u64>() {
-                                Ok(ts) => now.saturating_sub(ts),
+                                Ok(ts) => ts,
                                 Err(_) => {
                                     tracing::warn!("Promotion monitor: malformed heartbeat value");
                                     continue;
@@ -311,10 +330,12 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                 }
             };
 
-            if heartbeat_age >= timeout_ms {
+            // The promotion gate is `promotion_decision` (unit-tested in
+            // `sg_009_promotion_act_tests`) — the loop just acts on its verdict.
+            if promotion_decision(now, last_heartbeat_ms, timeout_ms) {
                 tracing::error!(
                     instance_id   = %id,
-                    heartbeat_age = heartbeat_age,
+                    heartbeat_age = now.saturating_sub(last_heartbeat_ms),
                     timeout_ms    = timeout_ms,
                     "Primary heartbeat stale — promoting to Active"
                 );
@@ -322,7 +343,7 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                 return;
             } else {
                 tracing::debug!(
-                    heartbeat_age = heartbeat_age,
+                    heartbeat_age = now.saturating_sub(last_heartbeat_ms),
                     timeout_ms    = timeout_ms,
                     "Promotion monitor: primary alive"
                 );
@@ -753,5 +774,115 @@ mod ha_epoch_fence_tests {
             "startup must defer to a live holder rather than steal the epoch");
 
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SG-009 (ASIL B) — HA standby promotion: the ACT, not just the math
+// ---------------------------------------------------------------------------
+//
+// The existing `standby_monitor_tests` cover the age/threshold arithmetic.
+// These tests cover the two things the RTM names that the math tests do not:
+//   1. The real per-poll DECISION the spawned task gates on
+//      (`promotion_decision`) — stale promotes, fresh does not, with the
+//      `>=`-at-boundary and clock-skew semantics the loop relied on inline.
+//   2. The promotion ACT (`perform_promotion`): `mode_active` actually
+//      transitions false→true (the standby becomes Active), the promoted path
+//      writes its durable promotion record + audit event (disk-first), and it
+//      recalculates posture (cache populated — only an Active instance writes
+//      the cache, so a populated cache proves the flip happened before recalc).
+//
+// `perform_promotion` is `async` + module-private, so this MUST be an in-crate
+// test (an external integration crate cannot see it). The matching external
+// stub is an #[ignore] pointer here.
+
+#[cfg(test)]
+mod sg_009_promotion_act_tests {
+    use super::*;
+    use crate::verifier::{AppState, VerifierOperationMode};
+    use crate::verifier_store::VerifierStore;
+    use std::sync::atomic::Ordering;
+
+    /// Stale heartbeat (older than the timeout) → promote.
+    #[test]
+    fn test_stale_heartbeat_decides_promote() {
+        // 15s-old heartbeat at a 10s timeout.
+        assert!(promotion_decision(25_000, 10_000, PROMOTION_TIMEOUT_MS),
+            "a heartbeat older than PROMOTION_TIMEOUT_MS must decide promote");
+    }
+
+    /// Fresh heartbeat (within the timeout) → no promotion.
+    #[test]
+    fn test_fresh_heartbeat_decides_no_promote() {
+        // 1s-old heartbeat at a 10s timeout.
+        assert!(!promotion_decision(10_000, 9_000, PROMOTION_TIMEOUT_MS),
+            "a heartbeat within PROMOTION_TIMEOUT_MS must NOT promote");
+    }
+
+    /// Boundary is inclusive (`>=`): exactly `timeout_ms` old promotes.
+    #[test]
+    fn test_decision_boundary_is_inclusive() {
+        assert!(promotion_decision(PROMOTION_TIMEOUT_MS, 0, PROMOTION_TIMEOUT_MS),
+            "exactly PROMOTION_TIMEOUT_MS old must promote (>=, matching the inline check)");
+        assert!(!promotion_decision(PROMOTION_TIMEOUT_MS - 1, 0, PROMOTION_TIMEOUT_MS),
+            "one ms below the timeout must not promote");
+    }
+
+    /// Clock skew (heartbeat timestamped in the future) saturates to age 0 —
+    /// never an underflow, never a spurious promotion.
+    #[test]
+    fn test_decision_clock_skew_does_not_promote() {
+        assert!(!promotion_decision(100, 5_000, PROMOTION_TIMEOUT_MS),
+            "future-dated heartbeat must read as age 0 (saturating) → no promotion");
+    }
+
+    /// THE ACT: a PassiveStandby that calls `perform_promotion` becomes Active,
+    /// records the promotion durably, and recalculates posture.
+    #[test]
+    fn test_perform_promotion_flips_mode_records_and_recalcs() {
+        // PassiveStandby instance on a fresh in-memory store. (Single store ⇒
+        // one connection ⇒ epoch reads/writes are self-consistent; the durable
+        // connection falls back to `conn` for :memory:.)
+        let store = VerifierStore::new(":memory:").expect("store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Precondition: standby (mode_active == false), empty cache.
+        assert!(!app.is_active(), "must start as PassiveStandby");
+        assert!(cache.read().unwrap().is_none(), "cache empty before promotion");
+
+        // Drive the real promotion path. `perform_promotion` is async but has no
+        // .await suspension points that need the reactor; a current-thread
+        // runtime executes it deterministically.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(perform_promotion(&app, &cache, "standby-under-test", "HEARTBEAT_TIMEOUT"));
+
+        // 1. mode_active transitioned false → true (the compare_exchange ACT).
+        assert!(app.is_active(), "promotion must flip mode_active false→true (now Active)");
+
+        // 2. Durable promotion record written (disk-first bookkeeping).
+        let recorded = app.store.lock().unwrap()
+            .load_engine_state(PROMOTION_RECORD_KEY).unwrap();
+        assert_eq!(recorded.as_deref(), Some("standby-under-test"),
+            "promoted instance must persist its id to the promotion record");
+
+        // 3. An epoch was durably claimed (the split-brain fence advanced).
+        assert_eq!(app.held_epoch.load(Ordering::SeqCst), 1,
+            "first promotion on a clean DB must claim epoch 1");
+
+        // 4. Posture was recalculated as Active — the cache is populated. Only an
+        //    Active instance writes the cache, so a populated cache is proof the
+        //    mode flip happened BEFORE the recalc (ordering invariant).
+        assert!(cache.read().unwrap().is_some(),
+            "promoted (Active) instance must recalculate posture and populate the cache");
+
+        // 5. The promotion is recorded in the tamper-evident audit chain.
+        let audit = app.store.lock().unwrap()
+            .verify_audit_chain_full(None).unwrap();
+        assert!(audit.total_entries >= 1,
+            "promotion must append a STANDBY_PROMOTED_TO_ACTIVE audit event");
     }
 }

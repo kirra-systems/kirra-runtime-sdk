@@ -38,6 +38,36 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     bitwise_accumulator.load(Ordering::SeqCst) == 0
 }
 
+/// SG-015 (ASIL B) — admin-token authorization decision, fail-closed.
+///
+/// Returns `true` (allow) only when a non-empty admin token is configured AND a
+/// token was provided AND the two match under `constant_time_compare`. Every
+/// other case denies:
+///   - `configured` absent or empty  → deny (fail-closed; the caller maps this
+///     to HTTP 503 per CRITICAL SECURITY INVARIANT #1/#6 — never fail-open),
+///   - `provided` absent             → deny (no bearer credential),
+///   - mismatch                      → deny.
+///
+/// The comparison goes through `constant_time_compare` (INVARIANT #2) — `==` is
+/// never used on the secret. This is `pub` (not `pub(crate)`) because the
+/// `require_admin_token` axum middleware lives in the `kirra_verifier_service`
+/// BINARY crate, which links this library crate and must call it — exactly like
+/// the sibling `pub fn constant_time_compare`. Unit-tested in-crate below.
+//
+// Verifies: SG-015
+pub fn admin_token_ok(provided: Option<&str>, configured: Option<&str>) -> bool {
+    // Fail-closed: a missing or empty configured token authorizes nothing.
+    let configured = match configured {
+        Some(c) if !c.is_empty() => c,
+        _ => return false,
+    };
+    let provided = match provided {
+        Some(p) => p,
+        None => return false,
+    };
+    constant_time_compare(provided.as_bytes(), configured.as_bytes())
+}
+
 pub struct AdministrativeKeyContainer {
     private_auth_key: Vec<u8>,
 }
@@ -62,5 +92,61 @@ impl AdministrativeKeyContainer {
 impl Drop for AdministrativeKeyContainer {
     fn drop(&mut self) {
         VolatileZeroizer::zeroize(&mut self.private_auth_key);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SG-015 (ASIL B) — admin token absent fail-closed
+// ---------------------------------------------------------------------------
+//
+// Verifies: SG-015. `admin_token_ok` is the decision `require_admin_token`
+// gates on; the middleware keeps mapping "configured absent/empty" to HTTP 503
+// and "provided absent / mismatch" to 401, but the comparison itself now goes
+// through this single constant-time predicate. These tests pin the fail-closed
+// truth table without touching process env vars (forbidden in the multithreaded
+// test runner — CRITICAL SECURITY INVARIANT #13), which is exactly why the env
+// indirection was factored out into a pure function.
+#[cfg(test)]
+mod sg_015_admin_token_tests {
+    use super::admin_token_ok;
+
+    #[test]
+    fn test_absent_configured_token_denies() {
+        // Mirrors KIRRA_ADMIN_TOKEN unset → fail-closed (caller → 503).
+        assert!(!admin_token_ok(Some("anything"), None),
+            "no configured admin token must deny (fail-closed)");
+    }
+
+    #[test]
+    fn test_empty_configured_token_denies() {
+        // Mirrors KIRRA_ADMIN_TOKEN="" → fail-closed (caller → 503).
+        assert!(!admin_token_ok(Some("anything"), Some("")),
+            "empty configured admin token must deny (fail-closed)");
+        // Empty configured denies even an empty provided token (no fail-open).
+        assert!(!admin_token_ok(Some(""), Some("")),
+            "empty==empty must NOT authorize");
+        assert!(!admin_token_ok(None, Some("")),
+            "empty configured denies regardless of provided");
+    }
+
+    #[test]
+    fn test_absent_provided_token_denies() {
+        assert!(!admin_token_ok(None, Some("s3cret-admin-token")),
+            "a request with no bearer token must deny");
+    }
+
+    #[test]
+    fn test_wrong_provided_token_denies() {
+        assert!(!admin_token_ok(Some("wrong"), Some("s3cret-admin-token")),
+            "a mismatched token must deny");
+        // Length-mismatch path of constant_time_compare also denies.
+        assert!(!admin_token_ok(Some("s3cret-admin-token-extra"), Some("s3cret-admin-token")),
+            "a longer-but-prefix-matching token must deny");
+    }
+
+    #[test]
+    fn test_correct_token_allows() {
+        assert!(admin_token_ok(Some("s3cret-admin-token"), Some("s3cret-admin-token")),
+            "the exact configured token must authorize");
     }
 }

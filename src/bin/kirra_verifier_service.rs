@@ -26,7 +26,7 @@ use kirra_runtime_sdk::verifier::{
 use kirra_runtime_sdk::verifier_store::VerifierStore;
 use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_runtime_sdk::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
-use kirra_runtime_sdk::security::constant_time_compare;
+use kirra_runtime_sdk::security::admin_token_ok;
 use kirra_runtime_sdk::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_runtime_sdk::protocol_adapter::{
     evaluate_unified_industrial_request, UnifiedIndustrialRequest,
@@ -61,6 +61,9 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
     let expected = std::env::var("KIRRA_ADMIN_TOKEN")
         .unwrap_or_default();
 
+    // Fail-closed: absent or empty admin token → 503 (CRITICAL INVARIANT #1/#6).
+    // Kept distinct from the 401 below so an unconfigured server is never
+    // mistaken for a bad credential.
     if expected.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -72,7 +75,10 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
+    // Single constant-time authorization decision (SG-015). `expected` is
+    // non-empty here, so this reduces to a constant_time_compare of the two
+    // tokens — behavior identical to the prior inline check, never `==`.
+    if !admin_token_ok(Some(provided), Some(&expected)) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

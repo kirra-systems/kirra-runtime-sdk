@@ -57,6 +57,26 @@ still quoting it — REQUIREMENTS_TRACEABILITY.md, SAFETY_CASE_INDEX.md,
 ROADMAP_TO_ASIL_D.md, IEC_61508_MAPPING.md, ASTM_F3269_MAPPING.md — are a
 separate reconciliation pass.)
 
+## Update — CERT-003 ASIL-B increment (2026-06-08)
+
+The ASIL-B zero-coverage goals were worked next. Real, deterministic test
+evidence was added where a real mechanism exists; two are reported as honest
+mechanism gaps rather than faked.
+
+| Goal | ASIL | Status after this increment | Tests / finding |
+|---|---|---|---|
+| SG-009 | B | **CLOSED** | `src/standby_monitor.rs` mod `sg_009_promotion_act_tests`: the per-poll gate is extracted into `pub(crate) promotion_decision` (the real decision the `spawn_promotion_monitor` loop calls; runtime behavior unchanged) — stale→promote / fresh→hold / inclusive boundary / clock-skew-safe; and the ACT, `perform_promotion`, is driven directly — `mode_active` false→true, durable promotion record + audit event, epoch claim, posture recalc populates the cache. In-crate because `perform_promotion` is async + module-private. |
+| SG-010 | B | **tamper-detection CLOSED**; startup-verify sub-gap OPEN | `src/verifier_store.rs` mod `sg_010_audit_tamper_tests` (file-backed tempfile DB + `#[cfg(test)] pub(crate) raw_conn` seam): a second connection back-dates a written row and `verify_audit_chain_full` reports `chain_intact == false` with `first_invalid_signature_index == Some(<first tampered index>)`; hash linkage catches tampering even unsigned. **OPEN sub-gap:** SG-010 also requires audit verification to run automatically at startup before the listener binds — that mechanism does not exist (the bin runs only `check_startup_invariants` before bind; the chain is verified on demand via `/system/audit/verify` + a shutdown checkpoint). Wiring verify-and-abort into startup is a behavior change, out of scope for a test-only increment. |
+| SG-012 | B | **MECHANISM GAP (OPEN)** | Investigated: `src/adapters/dnp3.rs::Dnp3Adapter::evaluate` is a pure classifier — no audit-chain write, no control-output application, hence no audit-before-control ordering and no fail-closed "block control on audit-write failure" path to assert. Closing SG-012 requires ADDING the mandatory-audit-before-control mechanism (a behavior change), not a test. Reported, not faked. |
+| SG-013 | B | **CLOSED** | `tests/cert_003_rtm_gap_stubs.rs::test_safety_goal_sg_013_recovery_hysteresis_streak_and_window` (external — the whole closure is public): 4 healthy reports → `StreakBuilding{4}`; 5th in-window → `RecoveryConfirmed{5}`; >10s gap → `WindowExpired` then rebuild-to-4 (no confirm); injected unhealthy report (the production `reset_recovery_streak` path) → reset, rebuild-to-4 (no confirm). Time injected via explicit `now_ms`. |
+| SG-015 | B | **CLOSED** | `src/security.rs` mod `sg_015_admin_token_tests`: the env-check is factored into pure `admin_token_ok(provided, configured)` (uses `constant_time_compare`, never `==`); `require_admin_token` calls it while preserving the 503 (configured absent/empty) vs 401 (provided absent/mismatch) mapping. Truth table tested in-crate without env-var mutation (INVARIANT #13). |
+
+Net: SG-009, SG-013, SG-015 fully CLOSED; SG-010 tamper-detection CLOSED with an
+explicit startup-verification sub-gap; SG-012 is an open mechanism gap. Each
+non-pointer mechanism carries a `// Verifies: SG-NNN` tag. The two open items
+are mechanism (behavior) changes, deliberately excluded from this test-only,
+no-behavior-change increment.
+
 ## Gaps — goals without any test coverage
 
 After CERT-004 these **8** safety goals (down from 11) still have no real test in the codebase. SG-006, SG-014, and SG-016 were closed and now live in `tests/fault_injection.rs`. The remaining 8 stubs are in `tests/cert_003_rtm_gap_stubs.rs`, with infrastructure-required notes added for SG-010, SG-013, and SG-015.
