@@ -1,0 +1,25 @@
+# crates/kirra-governor-service/Cargo.toml
+#
+# Minimal over-the-wire (UDP) KIRRA governor for the two-box governed-car
+# prototype (docs/adr/KIRRA_BRINGUP_RUNBOOK.md, Prompt A).
+#
+# DEPENDENCY DISCIPLINE (ADR-0001): this target depends ONLY on serde + bincode
+# + std. It deliberately does NOT depend on the parent `kirra-runtime-sdk` crate
+# (which pulls tokio/axum/rusqlite/reqwest) — instead it compiles the EXISTING
+# verdict core (src/gateway/kinematics_contract.rs) in verbatim via `#[path]`
+# (see src/main.rs), so the verdict logic is the real, unmodified one while the
+# dependency tree stays minimal and ROS/async-free for the QNX cert target.
+[package]
+name = "kirra-governor-service"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal UDP KIRRA governor (two-box prototype); wraps the verdict core verbatim. serde + bincode + std only — no ROS/async."
+license = "Apache-2.0"
+
+[[bin]]
+name = "kirra-governor-service"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
