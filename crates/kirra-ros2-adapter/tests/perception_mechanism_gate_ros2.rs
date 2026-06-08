@@ -241,6 +241,7 @@ async fn drive_until(
         // drain stamps that asset id). `current_verdict` collapses a stale slot
         // to MRCFallback, so we publish fast enough (<200 ms) to keep it fresh.
         last = state.current_verdict("ego", now_ms());
+        tracing::debug!(label, observed = ?last, t_ms = now_ms(), "drive_until poll");
         if last == want {
             return;
         }
@@ -282,9 +283,22 @@ async fn drive_until(
 fn run_full_node_integration() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(run_full_node_integration_async());
+    // run_adapter has no shutdown channel (Phase 4) and r2r's spin is a blocking
+    // thread tokio abort can't cancel; force teardown instead of hanging at drop.
+    rt.shutdown_timeout(std::time::Duration::from_millis(200));
 }
 
 async fn run_full_node_integration_async() {
+    // Phase I observability: install a tracing subscriber so node.rs's existing
+    // `trajectory_verdict` INFO install events + drain warn/error events become
+    // visible. try_init avoids a panic on repeated runs; with_test_writer routes to
+    // captured test output (shown with --nocapture). Default INFO; RUST_LOG overrides.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
     // INV-4: the derate is enabled ONLY by the process env (the run recipe
     // exports it); we READ it here, never `set_var`. The node reads the same env
     // internally, so the harness expectation and the node behaviour agree.
@@ -298,7 +312,10 @@ async fn run_full_node_integration_async() {
         Arc::new(MockCorridorSource::straight_5m_half_width(100.0));
     let adapter_state = Arc::clone(&state);
     let adapter = tokio::spawn(async move {
-        let _ = run_adapter(adapter_state, corridor, NODE_NAME).await;
+        match run_adapter(adapter_state, corridor, NODE_NAME).await {
+            Ok(()) => eprintln!("[harness] run_adapter returned Ok (it should spin forever)"),
+            Err(e) => eprintln!("[harness] run_adapter ERROR at startup: {e:?}"),
+        }
     });
 
     // 2) Harness publisher node (its own r2r context → real DDS to the adapter).
@@ -346,6 +363,13 @@ async fn run_full_node_integration_async() {
         // NEGATIVE CONTROL (#159-style): derate OFF → the cap is never applied, so
         // every scenario — plausible OR implausible — accepts at 20 m/s. The
         // ON-vs-OFF delta is the evidence the mechanism is what changed the verdict.
+        // Baseline: trajectory + odom only, NO objects. With derate OFF the perception
+        // cap is never applied, so a clean in-corridor 20 m/s trajectory MUST Accept.
+        // If THIS times out on MRCFallback, the failure is delivery/install (Branch A),
+        // not perception — and the trace above says which.
+        drive_until(&state, &traj_pub, &odom_pub, &obj_pub, None,
+            TrajectoryVerdict::Accept, 0, "baseline: traj+odom only -> Accept").await;
+
         for (objs, label) in [
             (&objs_b, "b (derate OFF) → Accept"),
             (&objs_c1, "c1 (derate OFF) → Accept"),
@@ -360,6 +384,5 @@ async fn run_full_node_integration_async() {
     // no shutdown channel yet, Phase 4 — so abort is the clean exit), then drop
     // the harness node.
     adapter.abort();
-    let _ = adapter.await;
 }
 
