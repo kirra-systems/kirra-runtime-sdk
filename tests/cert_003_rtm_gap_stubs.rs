@@ -57,17 +57,18 @@ fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
 // immediately before `TcpListener::bind` and aborts on Err, so the listener
 // never binds before invariants pass. The predicate carries `// Verifies: SG-008`.
 
+// SG-009 — HA Standby Promotion Within PROMOTION_TIMEOUT_MS (ASIL B): IMPLEMENTED.
+// `spawn_promotion_monitor`'s spawned task uses wall-clock time, so the per-poll
+// promotion DECISION is extracted into `promotion_decision` (the real gate the
+// loop calls) and the promotion ACT is `perform_promotion` — both module-private
+// in `src/standby_monitor.rs`, hence tested IN-CRATE in mod `sg_009_promotion_act_tests`
+// (decision: stale→promote / fresh→hold / inclusive boundary / clock-skew-safe;
+// ACT: mode_active false→true, durable promotion record + audit event, posture
+// recalc populates the cache). `promotion_decision` carries `// Verifies: SG-009`.
 #[test]
-#[ignore = "TODO(CERT-003): implement test for SG-009"]
+#[ignore = "Implemented in src/standby_monitor.rs — mod sg_009_promotion_act_tests"]
 fn test_safety_goal_sg_009_ha_standby_promotion_within_timeout() {
-    // Safety Goal: SG-009 — HA Standby Promotion Within PROMOTION_TIMEOUT_MS (ASIL B)
-    // This test must verify: spawn_promotion_monitor promotes the standby
-    // (mode_active.compare_exchange(false, true, ...)) within
-    // PROMOTION_TIMEOUT_MS (10000 ms) of last heartbeat from the primary,
-    // and the promoted instance begins writing heartbeats and recalculating
-    // posture immediately.
-    // Currently unimplemented — tracked in CERT-003
-    todo!("implement SG-009 verification")
+    // See src/standby_monitor.rs mod sg_009_promotion_act_tests (CERT-003).
 }
 
 #[test]
