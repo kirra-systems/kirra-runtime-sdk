@@ -46,44 +46,42 @@ cargo test  -p kirra-governor-service     # service logic + the verdict core's o
 
 ## QNX x86-64 cross-compile (dev host only — NOT run in CI)
 
-The cert target is QNX Neutrino; this build runs on the QNX SDP dev host, not in
-CI (no QNX SDP toolchain there). The **prototype** uses standard Rust for the
-QNX target — the Ferrocene / `no_std` / ASIL-D factoring is a later stage per
-ADR-0001 and does not block the demo.
+The full step-by-step is the authoritative recipe in
+**`docs/adr/KIRRA_QNX_CROSSCOMPILE.md`**. Summary:
 
-1. Install QNX SDP 8.0 and source its environment (puts `qcc`/`q++` and the
-   target sysroot on `PATH` / `QNX_TARGET`):
+- **Prototype target: `x86_64-pc-nto-qnx800`** (QNX SDP 8.0 = QNX OS 8.0), built
+  on an x86-64 Ubuntu dev host (not in CI — no QNX SDP there). The AArch64
+  sibling for DRIVE Orin later is `aarch64-unknown-nto-qnx800`.
+- **Use the Rust toolchain bundled with / documented by QNX SDP 8.0**, which
+  ships a working `std` for `qnx800`. Do **not** rely on
+  `rustup target add x86_64-pc-nto-qnx800`: upstream ships **no prebuilt `std`**
+  for the `nto` targets (you'd need nightly `-Z build-std`, slow and unsupported
+  for `qnx800`).
+- Source the SDP env (`source ~/qnx800/qnxsdp-env.sh`), set the `qcc` linker via
+  a `[target.x86_64-pc-nto-qnx800]` cargo stanza
+  (`linker = "qcc"`, `rustflags = ["-C", "link-args=-Vgcc_ntox86_64"]` — match
+  the variant `qcc -V` prints), then:
 
-   ```sh
-   source ~/qnx800/qnxsdp-env.sh
-   ```
+  ```sh
+  cargo build --release --target x86_64-pc-nto-qnx800 -p kirra-governor-service
+  ```
 
-2. Provide a Rust QNX target — either rustup's QNX target or the **Ferrocene**
-   toolchain, whose qualified targets include QNX Neutrino 7.1.0 (x86-64 +
-   Armv8-A):
+- Deploy and run on the QNX target, then validate from the PC by pointing
+  `kirra-proposal-bench` at it
+  (`KIRRA_GOVERNOR_ADDR=<qnx-ip>:9760 cargo run -p kirra-proposal-bench`) — the
+  same verdict table as localhost closes M2-on-QNX.
 
-   ```sh
-   rustup target add x86_64-pc-nto-qnx710        # rustup's QNX Neutrino 7.1 target
-   ```
+This works because the crate's dependency tree is serde + bincode + std only
+(no C deps, no ROS/async): the only QNX-specific machinery is the `qcc` linker
+and the target's `std`.
 
-3. Point Cargo's linker at the QNX compiler driver and build **only this crate**
-   (its dep tree is serde + bincode, so nothing ROS/async obstructs the QNX
-   build):
-
-   ```sh
-   export CARGO_TARGET_X86_64_PC_NTO_QNX710_LINKER=qcc
-   export CARGO_TARGET_X86_64_PC_NTO_QNX710_RUSTFLAGS="-Clink-arg=-Vgcc_ntox86_64"
-   cargo build -p kirra-governor-service --target x86_64-pc-nto-qnx710 --release
-   ```
-
-4. Copy the binary to the QNX target and run it; point the car's bridge node
-   (runbook Prompt B) at `host:port`.
-
-> The exact target triple and `qcc -V<variant>` argument depend on the installed
-> QNX SDP and Rust/Ferrocene release — confirm against the QNX SDP and Ferrocene
-> QNX-target docs at build time. What this crate **guarantees** is the part that
-> matters for portability: its dependency tree is serde + bincode only, so there
-> is nothing ROS/async to stand in the way of the QNX build.
+> **Cert-stage caveat (later, not the prototype):** Ferrocene's *qualified* QNX
+> target is **`x86_64-pc-nto-qnx710` (QNX 7.1.0)**, not `qnx800`. The ASIL-D Rust
+> build is therefore a separate decision — QNX 7.1.0 + Ferrocene (qualified
+> today) or a future Ferrocene `qnx800` qualification once QNX OS for Safety 8.0
+> is the locked cert target. The prototype here is SDP 8.0 / `qnx800` with QM
+> Rust: fine for the demo, **not** the certified artifact. See ADR-0001 and
+> `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`.
 
 ## What this is not
 
