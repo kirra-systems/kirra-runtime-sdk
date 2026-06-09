@@ -50,6 +50,7 @@
 //   KIRRA_PROMOTION_TIMEOUT  — override PROMOTION_TIMEOUT_MS (ms, default: 10000)
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::time::{interval, Duration};
 
 use crate::verifier::AppState;
@@ -144,6 +145,11 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
 
         loop {
             tick.tick().await;
+            // #80: this `now_ms()` is written as a freshness TOKEN, not a clock
+            // the standby trusts. The standby treats it as an opaque
+            // change-detector (it advances each tick) and times staleness on its
+            // OWN monotonic clock — see `HeartbeatFreshness`. Any value that
+            // strictly changes each tick would do; `now_ms()` is convenient.
             let ts = now_ms();
 
             match app.store.lock() {
@@ -223,22 +229,76 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-poll promotion decision (pure)
+// Per-poll promotion decision (pure) + monotonic heartbeat-freshness tracker
 // ---------------------------------------------------------------------------
 
 /// The per-poll promotion DECISION the monitor loop acts on: a standby promotes
-/// when the primary's last heartbeat is at least `timeout_ms` old. Extracted so
-/// the real decision the spawned task calls (the task uses wall-clock time and
-/// is otherwise untestable) can be exercised deterministically with injected
-/// `now_ms` / heartbeat timestamps. `saturating_sub` makes clock skew
-/// (heartbeat in the future) read as age 0 → no promotion, never an underflow.
+/// when the primary's heartbeat token has gone UNCHANGED for at least
+/// `timeout_ms`, where that elapsed time is measured on the standby's OWN
+/// monotonic clock (`Instant`), not by differencing two wall-clock stamps.
 ///
-/// Boundary is `>=` (exactly `timeout_ms` old promotes), matching the original
-/// inline check. This is the SOLE gate on `perform_promotion`.
+/// `elapsed_since_heartbeat` comes from [`HeartbeatFreshness`] (an `Instant`
+/// delta), so it is immune to wall-clock skew / NTP steps on EITHER machine
+/// (#80). It can never be negative — that structurally subsumes the old
+/// `saturating_sub` clock-skew guard (a future-dated heartbeat could previously
+/// read as a huge or zero age). Boundary stays `>=` (exactly `timeout_ms`
+/// elapsed promotes), matching the original inline check. Sole gate on
+/// `perform_promotion`.
 //
 // Verifies: SG-009
-pub(crate) fn promotion_decision(now_ms: u64, last_heartbeat_ms: u64, timeout_ms: u64) -> bool {
-    now_ms.saturating_sub(last_heartbeat_ms) >= timeout_ms
+pub(crate) fn promotion_decision(elapsed_since_heartbeat: Duration, timeout_ms: u64) -> bool {
+    elapsed_since_heartbeat >= Duration::from_millis(timeout_ms)
+}
+
+/// Monotonic heartbeat-freshness tracker (#80).
+///
+/// THE CROSS-MACHINE TRAP: the primary writes its own `now_ms()` to the shared
+/// heartbeat key; the standby cannot difference that against its own wall clock,
+/// because the two machines' clocks are independent and may skew or NTP-step
+/// relative to each other. A naive `Instant::now()` swap is also wrong —
+/// monotonic clocks are per-machine and not comparable across machines.
+///
+/// CORRECT MODEL: treat the stored heartbeat as an opaque change-TOKEN, not a
+/// comparable timestamp. The standby remembers the last token it saw and the
+/// monotonic `Instant` at which it last CHANGED. Staleness is "how long has the
+/// token been unchanged", timed entirely on the standby's own monotonic clock —
+/// using only one machine's `Instant`, so wall-clock skew/steps on either
+/// machine cannot affect it.
+pub(crate) struct HeartbeatFreshness {
+    /// The last heartbeat token observed (opaque string; the primary writes
+    /// `now_ms().to_string()`, but its NUMERIC value is never interpreted — only
+    /// equality/change matters).
+    last_token: Option<String>,
+    /// Monotonic instant at which `last_token` last changed (the freshness
+    /// anchor). Elapsed time since this point is the heartbeat staleness.
+    anchor: Instant,
+}
+
+impl HeartbeatFreshness {
+    /// Starts a tracker anchored at `now` with no token observed yet.
+    pub(crate) fn new(now: Instant) -> Self {
+        Self { last_token: None, anchor: now }
+    }
+
+    /// Records an observation of `token` at monotonic instant `now`. Returns
+    /// `true` if the token ADVANCED (changed, or was seen for the first time) —
+    /// i.e. the primary is alive — in which case the anchor is reset to `now`.
+    /// Returns `false` if the token is unchanged (the primary may be stalled);
+    /// the anchor is left where it was so [`Self::elapsed`] keeps growing.
+    pub(crate) fn observe(&mut self, token: &str, now: Instant) -> bool {
+        if self.last_token.as_deref() != Some(token) {
+            self.last_token = Some(token.to_string());
+            self.anchor = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Monotonic elapsed time since the token last changed.
+    pub(crate) fn elapsed(&self, now: Instant) -> Duration {
+        now.duration_since(self.anchor)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +351,12 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
 
         let mut tick = interval(Duration::from_millis(poll_ms));
 
+        // #80: monotonic heartbeat-freshness tracker. Staleness is measured as
+        // "how long the heartbeat TOKEN has gone unchanged", on this standby's
+        // own monotonic clock — NOT by differencing the primary's wall-clock
+        // timestamp against ours (which is skew-vulnerable across machines).
+        let mut freshness = HeartbeatFreshness::new(Instant::now());
+
         tracing::info!(
             instance_id = %id,
             poll_ms     = poll_ms,
@@ -300,20 +366,15 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
 
         loop {
             tick.tick().await;
-            let now = now_ms();
 
-            let last_heartbeat_ms = match app.store.lock() {
+            // Read the heartbeat TOKEN. It is treated as an opaque change-detector
+            // (the primary writes now_ms(), but we never interpret its value as a
+            // clock). On any read failure we skip this tick without disturbing the
+            // anchor — we only ever decide on a successful read.
+            let token = match app.store.lock() {
                 Ok(store) => {
                     match store.load_engine_state(HEARTBEAT_KEY) {
-                        Ok(Some(ts_str)) => {
-                            match ts_str.parse::<u64>() {
-                                Ok(ts) => ts,
-                                Err(_) => {
-                                    tracing::warn!("Promotion monitor: malformed heartbeat value");
-                                    continue;
-                                }
-                            }
-                        }
+                        Ok(Some(token)) => token,
                         Ok(None) => {
                             tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
                             continue;
@@ -330,22 +391,39 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                 }
             };
 
+            let now = Instant::now();
+
+            // Token advanced (changed, or first ever seen) → primary is alive →
+            // re-anchor and wait. A CHANGED token re-anchors even if its numeric
+            // value moved backward (e.g. a primary NTP step), so a primary clock
+            // skew can never trigger a spurious failover.
+            if freshness.observe(&token, now) {
+                tracing::debug!(
+                    instance_id = %id,
+                    "Promotion monitor: heartbeat token advanced — primary alive"
+                );
+                continue;
+            }
+
+            // Token unchanged: how long (monotonic) has it been stale?
+            let elapsed = freshness.elapsed(now);
+
             // The promotion gate is `promotion_decision` (unit-tested in
             // `sg_009_promotion_act_tests`) — the loop just acts on its verdict.
-            if promotion_decision(now, last_heartbeat_ms, timeout_ms) {
+            if promotion_decision(elapsed, timeout_ms) {
                 tracing::error!(
-                    instance_id   = %id,
-                    heartbeat_age = now.saturating_sub(last_heartbeat_ms),
-                    timeout_ms    = timeout_ms,
-                    "Primary heartbeat stale — promoting to Active"
+                    instance_id = %id,
+                    stale_ms    = elapsed.as_millis() as u64,
+                    timeout_ms  = timeout_ms,
+                    "Primary heartbeat token unchanged past timeout — promoting to Active"
                 );
                 perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await;
                 return;
             } else {
                 tracing::debug!(
-                    heartbeat_age = now.saturating_sub(last_heartbeat_ms),
-                    timeout_ms    = timeout_ms,
-                    "Promotion monitor: primary alive"
+                    stale_ms   = elapsed.as_millis() as u64,
+                    timeout_ms = timeout_ms,
+                    "Promotion monitor: primary alive (heartbeat token fresh)"
                 );
             }
         }
@@ -499,40 +577,16 @@ async fn perform_promotion(
 mod standby_monitor_tests {
     use super::*;
 
-    #[test]
-    fn test_heartbeat_within_timeout_does_not_trigger_promotion() {
-        let now: u64 = 10_000;
-        let last_heartbeat: u64 = 9_000;
-        let age = now.saturating_sub(last_heartbeat);
-        assert!(age < PROMOTION_TIMEOUT_MS,
-            "1s old heartbeat must not trigger promotion at {}ms timeout", PROMOTION_TIMEOUT_MS);
-    }
-
-    #[test]
-    fn test_heartbeat_beyond_timeout_triggers_promotion() {
-        let now: u64 = 25_000;
-        let last_heartbeat: u64 = 10_000;
-        let age = now.saturating_sub(last_heartbeat);
-        assert!(age >= PROMOTION_TIMEOUT_MS,
-            "15s old heartbeat must trigger promotion at {}ms timeout", PROMOTION_TIMEOUT_MS);
-    }
-
-    #[test]
-    fn test_heartbeat_exactly_at_timeout_boundary_triggers_promotion() {
-        let now: u64 = PROMOTION_TIMEOUT_MS;
-        let last_heartbeat: u64 = 0;
-        let age = now.saturating_sub(last_heartbeat);
-        assert!(age >= PROMOTION_TIMEOUT_MS, "boundary must trigger (>=, not >)");
-    }
-
-    #[test]
-    fn test_heartbeat_age_saturates_on_clock_skew() {
-        let now: u64 = 100;
-        let last_heartbeat: u64 = 5_000;
-        let age = now.saturating_sub(last_heartbeat);
-        assert_eq!(age, 0, "clock skew must produce zero age, not underflow");
-        assert!(age < PROMOTION_TIMEOUT_MS, "clock skew must not trigger promotion");
-    }
+    // NOTE (#80): the former wall-clock-age arithmetic tests
+    // (`now.saturating_sub(last_heartbeat)` vs the timeout) modeled the OLD
+    // cross-machine wall-clock decision. That model is replaced by the monotonic
+    // token tracker, so those tests were superseded by — and their intent is
+    // covered more strongly in — `sg_009_promotion_act_tests`:
+    //   - boundary/fresh/stale → `test_decision_boundary_is_inclusive`,
+    //     `test_fresh_heartbeat_decides_no_promote`, `test_stale_heartbeat_decides_promote`;
+    //   - clock-skew immunity → `test_primary_clock_step_back_does_not_spuriously_promote`,
+    //     `test_standby_wall_clock_jump_does_not_change_decision`.
+    // The constant-relationship and absent-key tests below remain valid as-is.
 
     #[test]
     fn test_absent_heartbeat_key_does_not_auto_promote() {
@@ -803,37 +857,123 @@ mod sg_009_promotion_act_tests {
     use crate::verifier_store::VerifierStore;
     use std::sync::atomic::Ordering;
 
-    /// Stale heartbeat (older than the timeout) → promote.
+    /// Stale token (unchanged for longer than the timeout, monotonic) → promote.
     #[test]
     fn test_stale_heartbeat_decides_promote() {
-        // 15s-old heartbeat at a 10s timeout.
-        assert!(promotion_decision(25_000, 10_000, PROMOTION_TIMEOUT_MS),
-            "a heartbeat older than PROMOTION_TIMEOUT_MS must decide promote");
+        // Token unchanged for 15s at a 10s timeout.
+        assert!(promotion_decision(Duration::from_millis(15_000), PROMOTION_TIMEOUT_MS),
+            "a heartbeat token unchanged longer than PROMOTION_TIMEOUT_MS must decide promote");
     }
 
-    /// Fresh heartbeat (within the timeout) → no promotion.
+    /// Fresh token (unchanged for less than the timeout) → no promotion.
     #[test]
     fn test_fresh_heartbeat_decides_no_promote() {
-        // 1s-old heartbeat at a 10s timeout.
-        assert!(!promotion_decision(10_000, 9_000, PROMOTION_TIMEOUT_MS),
-            "a heartbeat within PROMOTION_TIMEOUT_MS must NOT promote");
+        // Token unchanged for only 1s at a 10s timeout.
+        assert!(!promotion_decision(Duration::from_millis(1_000), PROMOTION_TIMEOUT_MS),
+            "a heartbeat token unchanged less than PROMOTION_TIMEOUT_MS must NOT promote");
     }
 
-    /// Boundary is inclusive (`>=`): exactly `timeout_ms` old promotes.
+    /// Boundary is inclusive (`>=`): exactly `timeout_ms` of monotonic staleness promotes.
     #[test]
     fn test_decision_boundary_is_inclusive() {
-        assert!(promotion_decision(PROMOTION_TIMEOUT_MS, 0, PROMOTION_TIMEOUT_MS),
-            "exactly PROMOTION_TIMEOUT_MS old must promote (>=, matching the inline check)");
-        assert!(!promotion_decision(PROMOTION_TIMEOUT_MS - 1, 0, PROMOTION_TIMEOUT_MS),
+        assert!(promotion_decision(Duration::from_millis(PROMOTION_TIMEOUT_MS), PROMOTION_TIMEOUT_MS),
+            "exactly PROMOTION_TIMEOUT_MS of staleness must promote (>=, matching the inline check)");
+        assert!(!promotion_decision(Duration::from_millis(PROMOTION_TIMEOUT_MS - 1), PROMOTION_TIMEOUT_MS),
             "one ms below the timeout must not promote");
     }
 
-    /// Clock skew (heartbeat timestamped in the future) saturates to age 0 —
-    /// never an underflow, never a spurious promotion.
+    /// A just-anchored token (zero monotonic elapsed) never promotes — the
+    /// monotonic elapsed can never be negative, so the old future-dated /
+    /// saturating clock-skew underflow case is structurally impossible.
     #[test]
-    fn test_decision_clock_skew_does_not_promote() {
-        assert!(!promotion_decision(100, 5_000, PROMOTION_TIMEOUT_MS),
-            "future-dated heartbeat must read as age 0 (saturating) → no promotion");
+    fn test_decision_zero_elapsed_does_not_promote() {
+        assert!(!promotion_decision(Duration::ZERO, PROMOTION_TIMEOUT_MS),
+            "a freshly-anchored token (0 elapsed) must never promote");
+    }
+
+    // -----------------------------------------------------------------------
+    // #80 — wall-clock-skew immunity via the monotonic token tracker.
+    // -----------------------------------------------------------------------
+
+    /// Heartbeat token STOPS advancing → promotion fires once monotonic elapsed
+    /// reaches the timeout (and not before). Uses only `Instant` deltas.
+    #[test]
+    fn test_token_unchanged_promotes_after_monotonic_timeout() {
+        let t0 = Instant::now();
+        let mut hb = HeartbeatFreshness::new(t0);
+        assert!(hb.observe("1000", t0), "first observation anchors (token advanced)");
+
+        // Token never changes again. Just under the timeout: no promotion.
+        let t_under = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS - 1);
+        assert!(!hb.observe("1000", t_under), "unchanged token does not re-anchor");
+        assert!(!promotion_decision(hb.elapsed(t_under), PROMOTION_TIMEOUT_MS),
+            "just under timeout → no promotion");
+
+        // At the timeout: promote (inclusive boundary).
+        let t_at = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS);
+        assert!(!hb.observe("1000", t_at), "still unchanged");
+        assert!(promotion_decision(hb.elapsed(t_at), PROMOTION_TIMEOUT_MS),
+            "token unchanged for the full timeout → promote");
+    }
+
+    /// Heartbeat token KEEPS advancing → never promotes, even across a span far
+    /// larger than the timeout, because each change re-anchors the monotonic
+    /// clock. Models a healthy primary observed under realistic poll spacing.
+    #[test]
+    fn test_advancing_token_never_promotes() {
+        let t0 = Instant::now();
+        let mut hb = HeartbeatFreshness::new(t0);
+        // 30 polls, 1s apart (> timeout total), token advances each poll.
+        for i in 0..30u64 {
+            let now = t0 + Duration::from_millis(1_000 * i);
+            let token = (1_000 + i).to_string();
+            let advanced = hb.observe(&token, now);
+            assert!(advanced, "an advancing token must always re-anchor (primary alive)");
+            assert!(!promotion_decision(hb.elapsed(now), PROMOTION_TIMEOUT_MS),
+                "a re-anchored (advancing) token must never promote");
+        }
+    }
+
+    /// PRIMARY clock skew (NTP step BACKWARD): the token's numeric value
+    /// DECREASES but still CHANGES, so it re-anchors and does NOT promote. The
+    /// old `now − last_heartbeat` design would have seen a smaller last_heartbeat
+    /// → larger age → spurious failover. The token model is immune.
+    #[test]
+    fn test_primary_clock_step_back_does_not_spuriously_promote() {
+        let t0 = Instant::now();
+        let mut hb = HeartbeatFreshness::new(t0);
+        assert!(hb.observe("5000", t0), "anchor on first token (primary ts=5000)");
+
+        // One poll (1s) later the primary's clock steps BACK to 3000 — a smaller,
+        // but still different, token.
+        let t1 = t0 + Duration::from_millis(1_000);
+        assert!(hb.observe("3000", t1),
+            "a changed token (even decreasing) re-anchors — primary is alive");
+        assert!(!promotion_decision(hb.elapsed(t1), PROMOTION_TIMEOUT_MS),
+            "a primary clock step-back must NOT cause spurious failover");
+    }
+
+    /// STANDBY wall-clock jump immunity: the decision consults only `Instant`
+    /// deltas, never `now_ms()`/`SystemTime`, so a standby wall-clock jump
+    /// (forward or backward) cannot change the verdict. We prove it by driving
+    /// the SAME monotonic timeline with an unchanged token and asserting the
+    /// promotion timing is governed purely by the monotonic anchor — there is no
+    /// wall-clock input to perturb.
+    #[test]
+    fn test_standby_wall_clock_jump_does_not_change_decision() {
+        let t0 = Instant::now();
+        let mut hb = HeartbeatFreshness::new(t0);
+        hb.observe("1000", t0);
+
+        // Whatever the standby's wall clock does between these monotonic
+        // instants (a forward NTP step, a backward correction), the inputs below
+        // are pure `Instant` deltas — the decision is a function of those alone.
+        let before = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS - 1);
+        let at = t0 + Duration::from_millis(PROMOTION_TIMEOUT_MS);
+        assert!(!promotion_decision(hb.elapsed(before), PROMOTION_TIMEOUT_MS),
+            "no wall-clock value can promote before the monotonic timeout");
+        assert!(promotion_decision(hb.elapsed(at), PROMOTION_TIMEOUT_MS),
+            "promotion is governed by the monotonic anchor, not the wall clock");
     }
 
     /// THE ACT: a PassiveStandby that calls `perform_promotion` becomes Active,
