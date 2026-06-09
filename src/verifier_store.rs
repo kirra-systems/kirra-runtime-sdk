@@ -40,6 +40,65 @@ pub struct AuditExportPage {
     pub chain_intact: bool,
 }
 
+// --- HA epoch fence — fail-closed outcomes (issue #79) ----------------------
+
+/// Why the in-transaction HA epoch fence rejected a top-tier durable write.
+///
+/// Returned by [`VerifierStore::assert_epoch_held`], which re-reads the durable
+/// `ha_state.epoch` INSIDE the write transaction and compares it to the
+/// instance's in-memory `held_epoch`. Every variant is fail-closed: the
+/// enclosing transaction is dropped WITHOUT commit, so no partial write lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FenceError {
+    /// The instance's `held_epoch` no longer matches the durable epoch — it has
+    /// been superseded by another instance's `try_claim_epoch` (any divergence,
+    /// including `durable < held`, fences), OR `held == 0` (the node never made
+    /// a legitimate claim). Active nodes always claim an epoch at startup before
+    /// serving, so `held == 0` at a top-tier write is anomalous → reject.
+    EpochSuperseded { held: u64, durable: u64 },
+    /// The durable epoch could not be read (SELECT failed / `ha_state` row
+    /// absent). A top-tier write never proceeds blind → reject.
+    EpochUnreadable,
+}
+
+/// Error from a top-tier (durable, `synchronous=FULL`) state mutation: either
+/// the HA epoch fence fired (`Fenced`) or the underlying SQLite write failed
+/// (`Db`). Callers self-demote on `Fenced`; both are denials (no partial write).
+#[derive(Debug)]
+pub enum DurableWriteError {
+    Fenced(FenceError),
+    Db(rusqlite::Error),
+}
+
+impl From<FenceError> for DurableWriteError {
+    fn from(e: FenceError) -> Self {
+        DurableWriteError::Fenced(e)
+    }
+}
+
+impl From<rusqlite::Error> for DurableWriteError {
+    fn from(e: rusqlite::Error) -> Self {
+        DurableWriteError::Db(e)
+    }
+}
+
+impl std::fmt::Display for DurableWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DurableWriteError::Fenced(FenceError::EpochSuperseded { held, durable }) => write!(
+                f,
+                "durable write fenced: held epoch {held} != durable epoch {durable} (superseded)"
+            ),
+            DurableWriteError::Fenced(FenceError::EpochUnreadable) => {
+                write!(f, "durable write fenced: HA epoch unreadable (fail-closed)")
+            }
+            DurableWriteError::Db(e) => write!(f, "durable write failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DurableWriteError {}
+
 pub struct VerifierStore {
     /// Hot/read connection — `synchronous=NORMAL`. Carries the verdict-adjacent
     /// per-command audit (no fsync; throughput-safe at 20 Hz+).
@@ -603,6 +662,14 @@ impl VerifierStore {
         pinned_genesis: Option<&str>,
         now_ms: u64,
     ) -> Result<KeyAdmission> {
+        // #79 fence exemption (NARROW, deliberate): this is a BOOTSTRAP write.
+        // It runs once during startup signing-key admission — BEFORE the Active
+        // epoch arbitration in `main()` claims an epoch — so `held_epoch` is
+        // legitimately 0 here and no fence applies. It is not reachable on the
+        // Active request path (its only production caller is startup), so a
+        // superseded node cannot reach it. The two REQUEST-PATH durable writes
+        // (`save_federated_report_chained`, `record_key_rotation`) ARE fenced
+        // via `assert_epoch_held`. Do not broaden this exemption.
         use ed25519_dalek::Signer;
         let env_vk = env_key.verifying_key();
         let k_env = crate::audit_chain::verifying_key_id(&env_vk);
@@ -1074,14 +1141,23 @@ impl VerifierStore {
         &mut self,
         report: &FederatedTrustReport,
         received_at_ms: u64,
-    ) -> Result<()> {
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
         // #74: route the whole federation commit — report + NONCE BURN + audit —
         // through the FULL (force-synced) connection. A burned nonce must survive
         // power-loss or anti-replay is defeated (the 5 s freshness window only
         // partially bounds replay). Federation reports are rare, so the per-commit
         // fsync is off the hot path and inconsequential to throughput.
         let signing_key = self.signing_key.clone(); // durable_mut() borrows self
-        let tx = self.durable_mut().transaction()?;
+        // #79: IMMEDIATE so the durable write lock is held before the epoch
+        // re-check below — no concurrent `try_claim_epoch` can interleave
+        // between the fence read and this commit.
+        let tx = self
+            .durable_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // #79 HA epoch fence — FIRST statement, before any mutation. A node
+        // fenced after the request-path gate check cannot land a stale report.
+        Self::assert_epoch_held(&tx, held_epoch)?;
 
         let posture_json = serde_json::to_string(&report.posture)
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -1119,7 +1195,8 @@ impl VerifierStore {
             signing_key.as_ref(),
         )?;
 
-        tx.commit()
+        tx.commit()?;
+        Ok(())
     }
 
     // --- v1.1 trusted federation controller registry ------------------------
@@ -1509,7 +1586,8 @@ impl VerifierStore {
         new_signing_key: ed25519_dalek::SigningKey,
         reason: &str,
         now_ms: u64,
-    ) -> Result<()> {
+        held_epoch: u64,
+    ) -> std::result::Result<(), DurableWriteError> {
         use ed25519_dalek::Signer;
         let new_vk = new_signing_key.verifying_key();
         let new_public_key_b64 = b64e.encode(new_vk.as_bytes());
@@ -1553,7 +1631,14 @@ impl VerifierStore {
         // this rare, security-critical event rides FULL; the per-command audit
         // path stays on the NORMAL connection.
         {
-            let tx = self.durable_mut().transaction()?;
+            // #79: IMMEDIATE so the durable write lock is held before the epoch
+            // re-check — no concurrent claim can interleave before this commit.
+            let tx = self
+                .durable_mut()
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // #79 HA epoch fence — FIRST statement, before any mutation. A node
+            // fenced after the request-path gate cannot land a stale rotation.
+            Self::assert_epoch_held(&tx, held_epoch)?;
             crate::audit_chain::AuditChainLinker::append_audit_event_tx(
                 &tx,
                 "KEY_ROTATION",
@@ -1893,6 +1978,47 @@ impl VerifierStore {
     // commit time and only one of them will see `rows_affected == 1`.
     // The atomic on AppState is per-process and CANNOT do this — that is
     // why we keep the durable epoch as source of truth.
+
+    /// In-transaction HA epoch fence (issue #79). Closes the residual TOCTOU in
+    /// the request-path gate (`enforce_posture_routing`): that gate compares a
+    /// CACHED epoch, but the durable epoch can advance (another instance's
+    /// `try_claim_epoch`) in the window between the gate check and the write
+    /// commit. By re-reading `ha_state.epoch` on the SAME serialized write
+    /// transaction handle and comparing it to this instance's `held_epoch`
+    /// BEFORE any mutation, a superseded node cannot land even one stale write:
+    /// on any mismatch this returns `Err` and the caller drops the transaction
+    /// without committing.
+    ///
+    /// MUST be called as the FIRST statement inside a top-tier durable
+    /// transaction (the callers begin the transaction with
+    /// `TransactionBehavior::Immediate`, so the write lock is held before this
+    /// read — the durable epoch we observe here cannot change before we commit).
+    ///
+    /// Fail-closed on every non-match:
+    ///   - `held == 0` → never legitimately claimed an epoch → reject.
+    ///   - `durable != held` (including `durable < held`) → superseded → reject.
+    ///   - SELECT error / row absent → [`FenceError::EpochUnreadable`] → reject.
+    fn assert_epoch_held(
+        tx: &rusqlite::Transaction,
+        held_epoch: u64,
+    ) -> std::result::Result<(), FenceError> {
+        let durable: u64 = match tx.query_row(
+            "SELECT epoch FROM ha_state WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(e) => e as u64,
+            // SELECT failed or the singleton row is absent — never write blind.
+            Err(_) => return Err(FenceError::EpochUnreadable),
+        };
+        // `held == 0` is fenced explicitly: it must reject even when the durable
+        // epoch is also 0 (genesis, no claim anywhere) — a node that never
+        // claimed must not perform a top-tier write.
+        if held_epoch == 0 || durable != held_epoch {
+            return Err(FenceError::EpochSuperseded { held: held_epoch, durable });
+        }
+        Ok(())
+    }
 
     /// Current durable HA epoch. Source of truth for "who owns writes."
     pub fn current_epoch(&self) -> Result<u64> {
@@ -2500,6 +2626,16 @@ mod audit_key_rotation_tests {
         (s, sk)
     }
 
+    /// Claim the first HA epoch on a fresh store and return the held fencing
+    /// token an Active node holds — the only legitimate context for the fenced
+    /// top-tier writes (`record_key_rotation`, `save_federated_report_chained`).
+    /// (#79: those methods re-check this token inside their write transaction.)
+    fn claim_epoch(s: &mut VerifierStore) -> u64 {
+        s.try_claim_epoch(0, "test-node", 0)
+            .unwrap()
+            .expect("first epoch claim must win on a fresh store")
+    }
+
     fn append(s: &mut VerifierStore, event_type: &str, ts: i64) {
         let sk = s.signing_key.clone();
         let tx = s.conn.transaction().unwrap();
@@ -2532,10 +2668,11 @@ mod audit_key_rotation_tests {
     #[test]
     fn cross_rotation_all_rows_verify() {
         let (mut s, a) = store_with_key(1);
+        let held = claim_epoch(&mut s);
         append(&mut s, "E1", 100);
         append(&mut s, "E2", 200);
         let b = SigningKey::from_bytes(&[2; 32]);
-        s.record_key_rotation(b.clone(), "scheduled", 300).unwrap();
+        s.record_key_rotation(b.clone(), "scheduled", 300, held).unwrap();
         append(&mut s, "E3", 400);
         append(&mut s, "E4", 500);
 
@@ -2552,9 +2689,10 @@ mod audit_key_rotation_tests {
     #[test]
     fn rotation_actually_swaps_signing_key() {
         let (mut s, a) = store_with_key(1);
+        let held = claim_epoch(&mut s);
         append(&mut s, "E1", 100);
         let b = SigningKey::from_bytes(&[2; 32]);
-        s.record_key_rotation(b.clone(), "swap", 200).unwrap();
+        s.record_key_rotation(b.clone(), "swap", 200, held).unwrap();
         // In-memory key swapped to B.
         assert_eq!(
             s.signing_key.as_ref().unwrap().verifying_key(),
@@ -2575,9 +2713,10 @@ mod audit_key_rotation_tests {
     #[test]
     fn negative_control_old_single_key_would_fail() {
         let (mut s, a) = store_with_key(1);
+        let held = claim_epoch(&mut s);
         append(&mut s, "E1", 100);
         let b = SigningKey::from_bytes(&[2; 32]);
-        s.record_key_rotation(b.clone(), "rot", 200).unwrap();
+        s.record_key_rotation(b.clone(), "rot", 200, held).unwrap();
         append(&mut s, "E2", 300);
         let id = max_id(&s);
         let (payload, sig, _kid) = row_payload_sig(&s, id);
@@ -2711,7 +2850,8 @@ mod durability_tests {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert!(s.durable_conn.is_none(), ":memory: must fall back to the main conn");
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("aa"), 2_000).unwrap();
+        // #79: held == durable epoch (1) → the fence admits the legitimate write.
+        s.save_federated_report_chained(&report("aa"), 2_000, 1).unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
     }
 
@@ -2741,7 +2881,8 @@ mod durability_tests {
         let db = TmpDb::new("nonce");
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
-            s.save_federated_report_chained(&report("deadbeef"), 2_000).unwrap();
+            let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
+            s.save_federated_report_chained(&report("deadbeef"), 2_000, held).unwrap();
             assert!(s.has_seen_federation_nonce("deadbeef").unwrap(), "burned before reopen");
         } // drop → simulate process loss.
         let s2 = VerifierStore::new(db.path()).unwrap();
@@ -2820,7 +2961,10 @@ mod key_durability_165_tests {
                 KeyAdmission::BackfilledGenesis
             );
             assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&a).as_str()));
-            s.record_key_rotation(b.clone(), "scheduled", 2_000).unwrap();
+            // #79: an Active node holds the epoch it claimed; the rotation fence
+            // re-checks it inside the write transaction.
+            let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
+            s.record_key_rotation(b.clone(), "scheduled", 2_000, held).unwrap();
             assert_eq!(s.audit_key_ledger_active_id().unwrap().as_deref(), Some(kid(&b).as_str()));
         }
         // Reopen with env reverted to A (the retired key) → FAIL CLOSED.
@@ -3021,7 +3165,8 @@ mod key_durability_165_tests {
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
             s.admit_signing_key(a.clone(), false, None, 1).unwrap();
-            s.record_key_rotation(b.clone(), "r", 2).unwrap();
+            let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
+            s.record_key_rotation(b.clone(), "r", 2, held).unwrap();
         }
         let s = VerifierStore::new(db.path()).unwrap();
         let chain_rot: i64 = s.conn.query_row(
@@ -3040,6 +3185,7 @@ mod key_durability_165_tests {
         let (a, b) = (key(1), key(2));
         let mut s = VerifierStore::new(db.path()).unwrap();
         s.admit_signing_key(a.clone(), false, None, 1).unwrap();
+        let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
         // a signed row under A, rotate to B, a signed row under B.
         {
             let sk = s.signing_key.clone();
@@ -3047,7 +3193,7 @@ mod key_durability_165_tests {
             AuditChainLinker::append_audit_event_tx(&tx, "TEST", "{}", 10, sk.as_ref()).unwrap();
             tx.commit().unwrap();
         }
-        s.record_key_rotation(b.clone(), "r", 20).unwrap();
+        s.record_key_rotation(b.clone(), "r", 20, held).unwrap();
         {
             let sk = s.signing_key.clone();
             let tx = s.conn.transaction().unwrap();
@@ -3223,5 +3369,166 @@ mod sg_010_audit_tamper_tests {
         let r = store.verify_audit_chain_full(None).unwrap();
         assert!(!r.chain_intact,
             "tampering event_json must break the recomputed hash even with no signatures");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #79 — in-transaction HA epoch fence (closes the residual gate TOCTOU).
+//
+// These tests prove that a node SUPERSEDED between the request-path gate check
+// and the durable commit cannot land even one stale top-tier write: the fence
+// re-reads `ha_state.epoch` inside the write transaction and rejects on any
+// mismatch, dropping the transaction with NO partial mutation. The legitimate
+// path (held == durable) still commits — so the fence is demonstrably the only
+// thing rejecting in the race case.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod epoch_fence_79_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn report(nonce: &str) -> FederatedTrustReport {
+        FederatedTrustReport {
+            source_controller_id: "ctrl-A".to_string(),
+            asset_id: "asset-1".to_string(),
+            posture: crate::verifier::FleetPosture::Nominal,
+            issued_at_ms: 1_000,
+            expires_at_ms: 9_000,
+            nonce_hex: nonce.to_string(),
+            signature_b64: "sig".to_string(),
+        }
+    }
+
+    /// Claim the first epoch (held == durable == 1) — what an Active node holds.
+    fn claimed(s: &mut VerifierStore) -> u64 {
+        s.try_claim_epoch(0, "self", 0)
+            .unwrap()
+            .expect("first epoch claim wins on a fresh store")
+    }
+
+    /// CORE PROOF — race closure: held == 1 (the request-path gate would pass),
+    /// then a concurrent instance claims and the durable epoch advances to 2.
+    /// A top-tier durable write with the now-stale held == 1 is REJECTED with
+    /// `EpochSuperseded`, and NOTHING partial lands (nonce not burned, no report
+    /// row, `ha_state` untouched). Contrast with the legitimate-path test below,
+    /// where the identical write commits because held == durable — so the fence
+    /// is the sole reason for rejection here; the TOCTOU window is closed.
+    #[test]
+    fn fenced_federation_write_superseded_lands_no_partial() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = claimed(&mut s); // held == durable == 1
+        assert_eq!(held, 1);
+
+        // Concurrent claim advances the durable epoch to 2 — we are now stale.
+        assert_eq!(s.try_claim_epoch(1, "other", 5).unwrap(), Some(2));
+        assert_eq!(s.current_epoch().unwrap(), 2);
+
+        let err = s
+            .save_federated_report_chained(&report("cafe"), 9_000, held)
+            .unwrap_err();
+        match err {
+            DurableWriteError::Fenced(FenceError::EpochSuperseded { held: h, durable: d }) => {
+                assert_eq!((h, d), (1, 2), "fence reports stale-held vs durable epoch");
+            }
+            other => panic!("expected EpochSuperseded, got {other:?}"),
+        }
+
+        assert!(
+            !s.has_seen_federation_nonce("cafe").unwrap(),
+            "fenced write must NOT burn the nonce"
+        );
+        assert!(
+            s.load_federated_reports_for_asset("asset-1").unwrap().is_empty(),
+            "fenced write must NOT persist the report row"
+        );
+        assert_eq!(s.current_epoch().unwrap(), 2, "fenced attempt must not touch ha_state");
+    }
+
+    /// LEGITIMATE PATH: held == durable → the identical write commits. The only
+    /// delta from the race test is the matching epoch, isolating the fence as
+    /// the cause of the rejection there.
+    #[test]
+    fn legitimate_federation_write_commits_when_held_matches_durable() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = claimed(&mut s);
+        s.save_federated_report_chained(&report("beef"), 9_000, held)
+            .unwrap();
+        assert!(
+            s.has_seen_federation_nonce("beef").unwrap(),
+            "held == durable must commit and burn the nonce"
+        );
+    }
+
+    /// FAIL-CLOSED when the durable epoch is unreadable (ha_state row absent):
+    /// the fence returns `EpochUnreadable` and the write never proceeds blind.
+    #[test]
+    fn fenced_fail_closed_when_epoch_unreadable() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = claimed(&mut s);
+        s.conn.execute("DELETE FROM ha_state WHERE id = 1", []).unwrap();
+
+        let err = s
+            .save_federated_report_chained(&report("f00d"), 9_000, held)
+            .unwrap_err();
+        assert!(
+            matches!(err, DurableWriteError::Fenced(FenceError::EpochUnreadable)),
+            "absent ha_state row must fail closed (EpochUnreadable), not write blind"
+        );
+        assert!(!s.has_seen_federation_nonce("f00d").unwrap());
+    }
+
+    /// NEVER-CLAIMED (held == 0) is fenced even at genesis (durable == 0): a node
+    /// that never legitimately claimed an epoch must not perform a top-tier write.
+    #[test]
+    fn fenced_when_never_claimed_held_zero() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.current_epoch().unwrap(), 0, "genesis durable epoch is 0");
+
+        let err = s
+            .save_federated_report_chained(&report("0000"), 9_000, 0)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DurableWriteError::Fenced(FenceError::EpochSuperseded { held: 0, durable: 0 })
+            ),
+            "held == 0 must be fenced even when durable == 0"
+        );
+        assert!(!s.has_seen_federation_nonce("0000").unwrap());
+    }
+
+    /// The SECOND fenced site — `record_key_rotation` — is covered too: a
+    /// superseded rotation is rejected and swaps NOTHING (no KEY_ROTATION chain
+    /// row, in-memory signing key unchanged).
+    #[test]
+    fn fenced_key_rotation_superseded_lands_no_partial() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let a = SigningKey::from_bytes(&[1; 32]);
+        s.set_signing_key(a.clone());
+        let held = claimed(&mut s); // held == durable == 1
+
+        assert_eq!(s.try_claim_epoch(1, "other", 5).unwrap(), Some(2)); // superseded
+        let b = SigningKey::from_bytes(&[2; 32]);
+
+        let err = s.record_key_rotation(b.clone(), "fenced", 9, held).unwrap_err();
+        assert!(matches!(
+            err,
+            DurableWriteError::Fenced(FenceError::EpochSuperseded { held: 1, durable: 2 })
+        ));
+
+        let rotations: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'KEY_ROTATION'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rotations, 0, "fenced rotation must not append a KEY_ROTATION row");
+        assert_eq!(
+            s.signing_key.as_ref().unwrap().verifying_key(),
+            a.verifying_key(),
+            "fenced rotation must NOT swap the in-memory signing key"
+        );
     }
 }

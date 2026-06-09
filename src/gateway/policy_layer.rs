@@ -462,13 +462,16 @@ pub async fn enforce_posture_routing(
     // with the same 503 shape as other transient gate denials. Reads stay
     // exempt so a self-demoted node still serves health/metrics/reads.
     //
-    // RESIDUAL TOCTOU (documented + filed as follow-up): the epoch is read
-    // here and the actual write lands a moment later in the handler. A
-    // promotion that lands in that window allows ONE stale mutation
-    // before the next request is fenced. Closing this fully requires
-    // re-checking the epoch INSIDE the write transaction for top-tier
-    // writes (actuator admittance, trust-state changes). Tracked
-    // separately — promotion is rare and the window is small but not zero.
+    // TOCTOU NOTE (closed for top-tier writes — issue #79): this gate reads a
+    // CACHED epoch, and the actual write lands a moment later in the handler, so
+    // a promotion that lands in that window could otherwise let ONE stale
+    // mutation slip past this check. That window is now closed at the durable
+    // layer: the top-tier durable writes (`save_federated_report_chained`,
+    // `record_key_rotation`) re-check the held epoch INSIDE their write
+    // transaction via `VerifierStore::assert_epoch_held`, so a superseded node's
+    // commit is rejected (and the handler self-demotes) even if it passed this
+    // gate. This gate remains the fast first-line fence; the in-transaction
+    // re-check is the authoritative one.
     let is_mutation = matches!(
         cmd,
         OperationalCommand::WriteState | OperationalCommand::SystemMutation

@@ -23,7 +23,7 @@ use kirra_runtime_sdk::verifier::{
     validate_client_identity_headers, AppState, BackupExport, FlapStatus, FleetNodePosture,
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_runtime_sdk::verifier_store::{DurableWriteError, VerifierStore};
 use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_runtime_sdk::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
 use kirra_runtime_sdk::security::admin_token_ok;
@@ -653,10 +653,27 @@ async fn handle_audit_rotate_key(
         }
     };
     let new_key_id = kirra_runtime_sdk::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
+    // #79: pass our held fencing token so the durable write re-checks it INSIDE
+    // the transaction, closing the gate→commit TOCTOU.
+    let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
     match svc.app.store.lock() {
-        Ok(mut store) => match store.record_key_rotation(new_signing_key, &req.reason, now_ms()) {
+        Ok(mut store) => match store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch) {
             Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+            Err(DurableWriteError::Fenced(reason)) => {
+                // Superseded between the request-path gate and this commit.
+                // Mirror the gate: self-demote and reject fail-closed (no write
+                // landed). Subsequent mutations hit the standby check above.
+                drop(store);
+                svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    path = "/system/audit/rotate-signing-key",
+                    fence = ?reason,
+                    "FENCED at top-tier write (in-transaction epoch re-check) — self-demoting to PassiveStandby and rejecting"
+                );
+                (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
+            }
+            Err(DurableWriteError::Db(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
                        Json(json!({ "error": "failed to record key rotation" }))).into_response(),
         },
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
@@ -1107,6 +1124,10 @@ async fn submit_federated_report(
         return Json(evaluation).into_response();
     }
 
+    // #79: held fencing token, read before locking the store. The durable commit
+    // re-checks it INSIDE the transaction, closing the gate→commit TOCTOU.
+    let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+
     let mut store = match svc.app.store.lock() {
         Ok(s) => s,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
@@ -1163,9 +1184,23 @@ async fn submit_federated_report(
                           Json(json!({ "error": "nonce lookup failed" }))).into_response(),
     }
 
-    match store.save_federated_report_chained(&report, received_at_ms) {
+    match store.save_federated_report_chained(&report, received_at_ms, held_epoch) {
         Ok(()) => Json(evaluation).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        Err(DurableWriteError::Fenced(reason)) => {
+            // Superseded between the request-path gate and this commit. Mirror
+            // the gate: self-demote and reject fail-closed — the report was NOT
+            // persisted and the nonce was NOT burned (transaction dropped).
+            drop(store);
+            svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                path = "/federation/reports/submit",
+                fence = ?reason,
+                "FENCED at top-tier write (in-transaction epoch re-check) — self-demoting to PassiveStandby and rejecting"
+            );
+            (StatusCode::SERVICE_UNAVAILABLE,
+             Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
+        }
+        Err(DurableWriteError::Db(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to persist federated report" }))).into_response(),
     }
 }
