@@ -1,0 +1,112 @@
+# deploy/docker/Dockerfile.parko-ort-cpu
+#
+# #44 (PARK-032) — Parko inference runtime as a PER-TARGET backend image.
+# Scope = ort-cpu PRODUCTION (the only ready-now target). This is a NEW
+# per-target base image; the gateway `Dockerfile` / `docker-compose.yml` are
+# NOT forked (see INSTALL.md "Container vs host"). TensorRT (L4T/Jetson) and
+# OpenVINO (Intel) are per-target follow-ons.
+#
+# Base: ros:jazzy-ros-base (Ubuntu 24.04, glibc) — matches the ONNX Runtime
+# glibc .so and the project's ROS 2 distro (Jazzy). The node is built with
+# `--features ros2,onnx-backend` (ros2 → r2r, required by the [[bin]];
+# onnx-backend → the real OrtBackend instead of MockBackend).
+#
+# POSTURE: the ort-cpu posture (single-thread + GraphOptimizationLevel::Disable,
+# bitwise-reproducible) is parko-onnx's CODE DEFAULT — there is nothing to
+# configure and no posture config file is added.
+
+# =============================== BUILD STAGE ===============================
+FROM ros:jazzy-ros-base AS build
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Build toolchain + native deps. clang/libclang → r2r bindgen; cmake → msg
+#    build; colcon + rosidl generators → build the curated autoware_*_msgs
+#    overlay so r2r_msg_gen can generate bindings against them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates build-essential pkg-config \
+      clang libclang-dev cmake git \
+      python3-colcon-common-extensions \
+      ros-jazzy-rosidl-default-generators \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain. No in-repo rust-toolchain.toml → stable (the crates are
+# edition 2021); honor a rust-toolchain.toml automatically if one is added.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# 2. ONNX Runtime CPU = EXACTLY v1.23.2 (linux-x64). NOT 1.24.x: rc.12 / ORT
+#    1.24.2 DEADLOCKS at OrtBackend::new (#144). v1.23.2 matches the pinned
+#    `ort = "=2.0.0-rc.11"` (ORT_API_VERSION 23). Installed at the exact path
+#    parko/.cargo/config.toml expects so cargo resolves ORT_DYLIB_PATH without
+#    an override. (Reuses the .github/workflows/ci.yml install step.)
+RUN set -euo pipefail; \
+    curl -L -o /tmp/onnxruntime-1.23.2.tgz \
+      https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz; \
+    mkdir -p /root/.local/onnxruntime; \
+    tar -xzf /tmp/onnxruntime-1.23.2.tgz -C /root/.local/onnxruntime --strip-components=1; \
+    test -f /root/.local/onnxruntime/lib/libonnxruntime.so
+ENV ORT_DYLIB_PATH=/root/.local/onnxruntime/lib/libonnxruntime.so
+
+# 3. Repo.
+WORKDIR /build
+COPY . .
+
+# 4. Build the curated ROS 2 msgs overlay (autoware_*_msgs + kirra_safety),
+#    source it so AMENT_PREFIX_PATH exposes the curated msgs to r2r_msg_gen,
+#    then 5. cargo build the node + the fail-closed probe with the real ORT
+#    backend.
+#
+#    §7 note: a FRESH docker build has no stale r2r_msg_gen, so the usual
+#    `cargo clean -p r2r -p r2r_msg_gen` is NOT needed here — BUT if the build
+#    fails with `undefined symbol: ...autoware_*_msgs...` (MapProjectorInfo /
+#    AreaInfo / ControlHorizon / ... — types removed when the msgs were
+#    trimmed), that IS the §7 stale-codegen signature: uncomment the
+#    `cargo clean` below (fall back to a full `cargo clean`) and rebuild.
+RUN set -euo pipefail; \
+    source /opt/ros/jazzy/setup.bash; \
+    cd /build/ros2_ws && colcon build --merge-install && cd /build; \
+    source /build/ros2_ws/install/setup.bash; \
+    cd /build/parko; \
+    # cargo clean -p r2r -p r2r_msg_gen   # §7: enable only on the undefined-symbol signature above \
+    cargo build --release -p parko-ros2 --bin parko_ros2_node --features ros2,onnx-backend; \
+    cargo build --release -p parko-onnx --example backend_load_probe
+
+# ============================== RUNTIME STAGE ==============================
+# ros:jazzy-ros-base again — r2r needs rcl/rmw/typesupport at runtime.
+FROM ros:jazzy-ros-base AS runtime
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Artifacts: the v1.23.2 ORT .so, the node, the fail-closed probe, the curated
+# msgs overlay (for r2r typesupport at runtime), and a known-good sample model
+# the probe loads by default.
+COPY --from=build /root/.local/onnxruntime/lib/libonnxruntime.so /opt/parko/onnxruntime/lib/libonnxruntime.so
+COPY --from=build /build/parko/target/release/parko_ros2_node            /opt/parko/bin/parko_ros2_node
+COPY --from=build /build/parko/target/release/examples/backend_load_probe /opt/parko/bin/backend_load_probe
+COPY --from=build /build/ros2_ws/install                                  /opt/parko/ros2_ws/install
+COPY --from=build /build/parko/crates/parko-onnx/tests/data/mnist-12.onnx /opt/parko/models/mnist-12.onnx
+COPY --from=build /build/deploy/docker/parko-ort-cpu-entrypoint.sh        /usr/local/bin/parko-ort-cpu-entrypoint.sh
+
+# ORT_DYLIB_PATH ends in .../onnxruntime/lib/libonnxruntime.so — the layout
+# parko/.cargo/config.toml expects (the runtime user is non-root, so the .so
+# lives under /opt rather than the build stage's /root/.local). PARKO_MODEL_PATH
+# defaults to the baked sample so the fail-closed probe always has a model;
+# operators override it (volume/env) for real models. PARKO_OCCY_TOPOLOGY
+# selects the parallel-paths topology — see docs/safety/PARKO_OCCY_TOPOLOGY.md
+# (KIRRA-OCCY-TOPOLOGY-001).
+ENV ORT_DYLIB_PATH=/opt/parko/onnxruntime/lib/libonnxruntime.so \
+    PARKO_MODEL_PATH=/opt/parko/models/mnist-12.onnx \
+    PARKO_OCCY_TOPOLOGY=parallel
+
+# Non-root runtime user.
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin parko \
+    && chown -R parko:parko /opt/parko
+USER parko
+WORKDIR /opt/parko
+
+# The entrypoint sources ROS + the overlay, runs the FAIL-CLOSED backend-load
+# probe (refuses to start if the ORT CPU runtime didn't load), then execs the
+# node.
+ENTRYPOINT ["/usr/local/bin/parko-ort-cpu-entrypoint.sh"]

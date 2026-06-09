@@ -424,7 +424,8 @@ Every target has a real, ready-to-run procedure — not a "requires-SDK" refusal
 - **Container vs host.** Target-parameterized installer driving both, with
   per-target **base images** (CPU / Intel / L4T-Jetson / vendor) for the
   reproducible/pilot path. The gateway `Dockerfile`/`docker-compose.yml` are
-  **not forked**.
+  **not forked**. The ort-cpu (CPU) per-target image is
+  `deploy/docker/Dockerfile.parko-ort-cpu` (ROS 2 Jazzy + ONNX Runtime 1.23.2).
 
 ### Common safety gates (chipset-independent, NON-skippable)
 
