@@ -8,6 +8,20 @@ Date: 2026-05-23
 
 ---
 
+## Canonical Identifier Scheme
+
+- **`AEGIS-SG-001`** is the document ID of this document (immutable
+  cert-configuration lineage; retained across the Aegis→Kirra product
+  rename). It is a *document* identifier, never a goal identifier.
+- **Kernel/governor safety goals** are `SG-001`…`SG-016`, defined herein.
+- **Occy planner safety goals** are `SG1`…`SG9`, defined in
+  `OCCY_SAFETY_GOALS.md` (document ID `KIRRA-OCCY-SG-001`); the kernel↔Occy
+  cross-mapping is authoritative in `OCCY_SAFETY_GOALS.md` §6.2.
+- **Rule:** reference a goal as `SG-NNN` (kernel) or `SGN` (Occy). Do not
+  write `AEGIS-SG-NNN` for a goal; that prefix denotes the document only.
+
+---
+
 ## 1. Overview
 
 This document defines the Safety Goals (SG) derived from the Hazard Analysis and Risk Assessment (AEGIS-HARA-001). Each safety goal is assigned an ASIL level, a precise and testable goal statement, a safe state, a Fault Tolerant Time Interval (FTTI), and a verification method.

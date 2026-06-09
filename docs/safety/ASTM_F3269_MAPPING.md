@@ -141,8 +141,8 @@ These invariants are verified by proptest properties in `src/gateway/kinematics_
 | RTA.2: The RTA monitor shall switch to the backup control law within the fault tolerant time interval | Posture transition to Degraded applies MRC profile to next command (synchronous, per-command FTTI) | FTTI for kinematic enforcement: per-command (< 1ms); FTTI for posture: AV_TELEMETRY_TIMEOUT_MS = 2000ms |
 | RTA.3: The backup control law shall keep the system within the recovery region | MRC Fallback Profile max_speed = 5.0 m/s is within the proven-safe region for all vehicle types | VehicleKinematicsContract::mrc_fallback_profile() |
 | RTA.4: The RTA monitor shall be independent of the primary function | Kirra is a separate process; primary function has no write access to Kirra state; admin token required for all mutations | Architectural separation; require_admin_token on all mutation routes |
-| RTA.5: The RTA monitor shall fail to a safe state | Stale posture cache → LockedOut (all commands denied). Absent env token → 503 fail-closed. Empty posture cache → LockedOut. Poisoned RwLock → LockedOut. | src/posture_cache.rs:should_route_command, AEGIS-SG-005 |
-| RTA.6: The RTA monitor shall record evidence of monitoring decisions | Every command evaluation generates an audit entry in the SHA-256 hash-chained audit log with Ed25519 signature | src/audit_chain.rs, AEGIS-SG-010 |
+| RTA.5: The RTA monitor shall fail to a safe state | Stale posture cache → LockedOut (all commands denied). Absent env token → 503 fail-closed. Empty posture cache → LockedOut. Poisoned RwLock → LockedOut. | src/posture_cache.rs:should_route_command, SG-005 |
+| RTA.6: The RTA monitor shall record evidence of monitoring decisions | Every command evaluation generates an audit entry in the SHA-256 hash-chained audit log with Ed25519 signature | src/audit_chain.rs, SG-010 |
 
 ---
 

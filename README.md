@@ -105,7 +105,7 @@ Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 
 | Document | Doc ID | Status |
 |----------|--------|--------|
 | Hazard Analysis and Risk Assessment (HARA) | KIRRA-HARA-001 | Draft |
-| Safety Goals | KIRRA-SG-001 | Draft |
+| Safety Goals | AEGIS-SG-001 | Draft |
 | Safety Architecture | KIRRA-SA-001 | Draft |
 | Requirements Traceability Matrix | KIRRA-RTM-001 | Draft |
 | Coding Guidelines | KIRRA-CG-001 | Draft |

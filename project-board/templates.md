@@ -116,7 +116,7 @@
 ### Traceability
 | Requirement | Source | Test |
 |-------------|--------|------|
-| <!-- KIRRA-SG-001 §X --> | <!-- src/kirra_core.rs:NN --> | <!-- test_rss_property --> |
+| <!-- AEGIS-SG-001 §X --> | <!-- src/kirra_core.rs:NN --> | <!-- test_rss_property --> |
 
 ### Notes
 <!-- Reference IEEE 2846 sections, ISO 26262 clauses, or HARA entries. -->
