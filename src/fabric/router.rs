@@ -71,19 +71,22 @@ impl FabricRouter {
         self.governors.insert(asset.asset_id.clone(), governor);
         self.assets.insert(asset.asset_id.clone(), asset.clone());
 
-        // INTERIM seed: Degraded.
+        // INTERIM seed: Degraded — the PEER default.
         //
-        // The strict fail-closed default would be LockedOut — but the
-        // verifier→fabric posture feed (#88) only feeds the ONE locally
-        // governed asset named by `KIRRA_FABRIC_ASSET_ID`. Every OTHER
-        // registered asset is still unfed, so a LockedOut seed would brick
-        // them until an operator manually pushed a posture (cross-asset
-        // propagation only DEGRADES followers — it never lifts an asset out
-        // of LockedOut). The registration route (/fabric/assets/register) is
-        // admin-token gated, so the registrant is a trusted operator:
-        // Degraded grants limited, MRC-envelope motion until a real posture
-        // lands. `evaluate_command` already dispatches Degraded to the
-        // asset's per-profile `mrc_contract()` (RobotNominal→robot MRC,
+        // The strict fail-closed default would be LockedOut. The verifier→fabric
+        // posture feed (#88) feeds only the ONE locally governed asset named by
+        // `KIRRA_FABRIC_ASSET_ID`, and the binary now seeds THAT asset
+        // fail-closed LockedOut at registration/startup (see
+        // `seed_local_asset_lockedout` in `kirra_verifier_service.rs`), relying
+        // on its feed to lift it on the first Active recalc. Every OTHER
+        // registered asset is still unfed, so a LockedOut seed would brick it
+        // until an operator manually pushed a posture (cross-asset propagation
+        // only DEGRADES followers — it never lifts an asset out of LockedOut).
+        // Hence PEERS keep this Degraded seed. The registration route
+        // (/fabric/assets/register) is admin-token gated, so the registrant is a
+        // trusted operator: Degraded grants limited, MRC-envelope motion until a
+        // real posture lands. `evaluate_command` already dispatches Degraded to
+        // the asset's per-profile `mrc_contract()` (RobotNominal→robot MRC,
         // DroneNominal→drone MRC, etc.) — no flat 5 m/s cap is imposed here.
         //
         // generation: 0 is the never-yet-computed sentinel (identical
@@ -91,12 +94,14 @@ impl FabricRouter {
         // The first real update (engine-driven, or the #88 feed for the
         // local asset) supersedes it. NOTE: `.or_insert` below means a
         // posture already pushed by the feed before registration is NOT
-        // clobbered by this seed.
+        // clobbered by this seed; the binary's LocalOut override likewise
+        // runs AFTER `register_asset` via `update_asset_posture`.
         //
-        // END STATE: once a per-asset feed exists for ALL assets, seed
-        // LockedOut and rely on the feed to lift verified assets to Nominal.
-        // Until then, do NOT make LockedOut the seed — and do NOT make
-        // Degraded the permanent default.
+        // END STATE: once a per-asset feed exists for ALL assets, seed every
+        // asset LockedOut and rely on the feeds to lift verified assets. Until
+        // then, the LOCAL fed asset is LockedOut-seeded (in the binary) and
+        // PEERS keep this Degraded seed — do NOT make LockedOut the seed for
+        // unfed peers, and do NOT make Degraded the permanent default.
         let initial_posture = AssetPosture {
             asset_id: asset.asset_id.clone(),
             posture: FleetPosture::Degraded,

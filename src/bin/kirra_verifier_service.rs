@@ -278,6 +278,51 @@ fn spawn_local_asset_posture_feed(svc: Arc<ServiceState>) {
 /// good posture in place is correct — we never write a stale or
 /// not-yet-computed posture forward. Compare-before-write avoids churn (and a
 /// generation bump / propagation pass) when the posture is unchanged.
+/// #88 tightening: seed the LOCAL fabric asset fail-closed `LockedOut`.
+///
+/// `register_asset` seeds every asset `Degraded` (the documented interim) —
+/// correct for PEERS, which have no lifting feed (cross-asset propagation only
+/// degrades, never lifts, so a `LockedOut` peer would be bricked). But the ONE
+/// locally governed asset named by `KIRRA_FABRIC_ASSET_ID` DOES have a lifting
+/// feed (`sync_local_asset_posture`), so it can be fail-closed: it starts
+/// `LockedOut` and the feed lifts it to a real posture on the first Active
+/// recalc. On `PassiveStandby` (no recalc) it correctly stays `LockedOut` until
+/// promotion. Call this right after each `register_asset` for the just-
+/// registered asset id; it only acts when that id IS the configured local asset.
+fn seed_local_asset_lockedout(svc: &ServiceState, registered_id: &str) {
+    let local = std::env::var("KIRRA_FABRIC_ASSET_ID").ok();
+    let local = local.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    seed_local_asset_lockedout_inner(svc, registered_id, local);
+}
+
+/// Env-free core of [`seed_local_asset_lockedout`] (testable). Overrides the
+/// `Degraded` registration seed with fail-closed `LockedOut` IFF `registered_id`
+/// is the configured local asset. A peer (or an unset `local_id`) is left at its
+/// `Degraded` seed — peers rely on it.
+fn seed_local_asset_lockedout_inner(svc: &ServiceState, registered_id: &str, local_id: Option<&str>) {
+    let Some(local_id) = local_id else { return };
+    if local_id != registered_id {
+        return;
+    }
+    svc.fabric_router.update_asset_posture(
+        local_id,
+        AssetPosture {
+            asset_id: local_id.to_string(),
+            posture: FleetPosture::LockedOut,
+            // generation 0 = never-computed sentinel; the feed's first push
+            // (>= generation 1) supersedes it, exactly like the register seed.
+            generation: 0,
+            computed_at_ms: now_ms(),
+            contributing_nodes: vec![],
+            blocked_by: vec!["LOCAL_ASSET_FAILCLOSED_PENDING_FEED".to_string()],
+        },
+    );
+    tracing::info!(
+        asset_id = %local_id,
+        "local fabric asset seeded fail-closed LockedOut; the verifier→fabric feed lifts it on the first Active recalc"
+    );
+}
+
 fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
     let now = now_ms();
     let fleet = {
@@ -1701,6 +1746,9 @@ async fn handle_register_fabric_asset(
         metadata: req.metadata.unwrap_or_default(),
     };
     svc.fabric_router.register_asset(&asset);
+    // #88: if this IS the configured local asset, override the Degraded seed
+    // with fail-closed LockedOut (the feed lifts it); a no-op for peers.
+    seed_local_asset_lockedout(&svc, &req.asset_id);
     if let Ok(store) = svc.app.store.lock() {
         let _ = store.save_fabric_asset(&asset);
     }
@@ -2088,6 +2136,9 @@ async fn main() {
                 assets_loaded = assets.len();
                 for asset in assets {
                     svc_state.fabric_router.register_asset(&asset);
+                    // #88: the local fed asset is fail-closed LockedOut (peers
+                    // keep the Degraded seed); a no-op for every peer.
+                    seed_local_asset_lockedout(&svc_state, &asset.asset_id);
                 }
             } else {
                 assets_loaded = 0;
@@ -3190,5 +3241,114 @@ mod attestation_nonce_handler_tests {
         // 3) Single-use: the nonce is now consumed; a replay is a 409 conflict.
         let replay = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
         assert_eq!(replay, StatusCode::CONFLICT, "the consumed nonce cannot be replayed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #88 tightening — the LOCAL fed asset is seeded fail-closed LockedOut; PEERS
+// keep the Degraded interim seed; the feed lifts the local asset on recalc.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod local_asset_lockedout_seed_tests {
+    use super::{seed_local_asset_lockedout_inner, sync_local_asset_posture};
+
+    use std::sync::Arc;
+
+    use kirra_runtime_sdk::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+    use kirra_runtime_sdk::fabric::router::FabricRouter;
+    use kirra_runtime_sdk::posture_cache::{
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
+    };
+    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_runtime_sdk::verifier_store::VerifierStore;
+
+    const LOCAL: &str = "av-local";
+    const PEER: &str = "av-peer";
+
+    fn asset(id: &str) -> FabricAsset {
+        let now = now_ms();
+        FabricAsset {
+            asset_id: id.to_string(),
+            asset_type: AssetType::AutonomousVehicle,
+            display_name: id.to_string(),
+            kinematic_profile: KinematicProfileType::RobotNominal,
+            registered_at_ms: now,
+            last_seen_ms: now,
+            metadata: Default::default(),
+        }
+    }
+
+    /// ServiceState with LOCAL and PEER registered (both seeded Degraded by
+    /// `register_asset`), and `cached` as the fleet posture cache.
+    fn state(cached: Option<CachedFleetPosture>) -> Arc<ServiceState> {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(cached));
+        let fabric_router = Arc::new(FabricRouter::new());
+        fabric_router.register_asset(&asset(LOCAL));
+        fabric_router.register_asset(&asset(PEER));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            audit_verifying_key: None,
+            fabric_router,
+            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    fn posture_of(svc: &ServiceState, id: &str) -> FleetPosture {
+        svc.fabric_router.asset_posture(id).expect("asset registered").posture
+    }
+
+    #[test]
+    fn local_asset_seeded_lockedout_peer_stays_degraded() {
+        let svc = state(None);
+        // register_asset seeds BOTH Degraded.
+        assert_eq!(posture_of(&svc, LOCAL), FleetPosture::Degraded);
+        assert_eq!(posture_of(&svc, PEER), FleetPosture::Degraded);
+
+        // The seed runs once per registered id with LOCAL configured.
+        seed_local_asset_lockedout_inner(&svc, LOCAL, Some(LOCAL));
+        seed_local_asset_lockedout_inner(&svc, PEER, Some(LOCAL));
+
+        assert_eq!(
+            posture_of(&svc, LOCAL),
+            FleetPosture::LockedOut,
+            "the configured local asset is fail-closed LockedOut"
+        );
+        assert_eq!(
+            posture_of(&svc, PEER),
+            FleetPosture::Degraded,
+            "peers keep the documented Degraded interim seed"
+        );
+    }
+
+    #[test]
+    fn unset_local_id_leaves_degraded_seed_unchanged() {
+        let svc = state(None);
+        seed_local_asset_lockedout_inner(&svc, LOCAL, None);
+        seed_local_asset_lockedout_inner(&svc, PEER, None);
+        assert_eq!(posture_of(&svc, LOCAL), FleetPosture::Degraded, "unset → no local asset to special-case");
+        assert_eq!(posture_of(&svc, PEER), FleetPosture::Degraded);
+    }
+
+    #[test]
+    fn feed_lifts_lockedout_local_asset_on_recalc() {
+        // Fresh Nominal fleet posture in the cache (as after the first Active recalc).
+        let svc = state(Some(CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, now_ms())));
+        seed_local_asset_lockedout_inner(&svc, LOCAL, Some(LOCAL));
+        assert_eq!(posture_of(&svc, LOCAL), FleetPosture::LockedOut, "starts fail-closed LockedOut");
+
+        // The feed lifts it to the real fleet posture.
+        sync_local_asset_posture(&svc, LOCAL);
+        assert_eq!(
+            posture_of(&svc, LOCAL),
+            FleetPosture::Nominal,
+            "the feed lifts the local asset out of LockedOut on recalc"
+        );
     }
 }
