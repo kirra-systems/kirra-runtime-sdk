@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
@@ -499,10 +498,11 @@ async fn issue_challenge(
         return (StatusCode::NOT_FOUND,
                 Json(json!({ "error": "node not registered" }))).into_response();
     }
-    let nonce: u64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
+    // #147: the challenge nonce comes from a CSPRNG (OsRng), NEVER the wall
+    // clock. A `SystemTime`-derived nonce is predictable and can collide within
+    // a single nanosecond; single-use + TTL + node-binding are enforced by the
+    // challenge store and the verify-then-consume order in `verify_attestation`.
+    let nonce = kirra_runtime_sdk::verifier::generate_challenge_nonce();
     svc.app.issue_challenge(&node_id, nonce, now_ms());
     (StatusCode::OK, Json(json!({ "node_id": node_id, "nonce": nonce }))).into_response()
 }
@@ -3077,5 +3077,118 @@ mod fabric_command_authoritative_tests {
         assert_eq!(v["allowed"], false, "LockedOut denies the command");
         assert!(v.get("command").is_none(), "a denied command carries no enforced command");
         assert!(v["denial_reason"].is_string(), "denial is recorded with a reason");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #147 — attestation nonce lifecycle: VERIFY-THEN-CONSUME at the handler.
+//
+// The crypto (verify_attestation_proof) and the store invariants (single-use,
+// TTL, node-binding, CSPRNG) are tested in attestation.rs / verifier.rs. This
+// proves the remaining handler-level invariant: a FAILED proof must NOT burn
+// the pending nonce, so an attacker cannot force nonce exhaustion — the
+// legitimate node can still attest with the same outstanding nonce.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod attestation_nonce_handler_tests {
+    use super::{verify_attestation, VerifyAttestationRequest};
+
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+
+    use kirra_runtime_sdk::attestation::attestation_signing_payload;
+    use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, SharedPostureCache};
+    use kirra_runtime_sdk::verifier::{
+        AppState, NodeTrustState, RegisteredNode, VerifierOperationMode,
+    };
+    use kirra_runtime_sdk::verifier_store::VerifierStore;
+
+    const NODE: &str = "edge-node-1";
+
+    /// Test-only Ed25519 SubjectPublicKeyInfo PEM (RFC 8410 prefix; public key only).
+    fn public_key_to_pem(vk: &VerifyingKey) -> String {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        const ED25519_SPKI_PREFIX: [u8; 12] =
+            [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let mut der = ED25519_SPKI_PREFIX.to_vec();
+        der.extend_from_slice(vk.as_bytes());
+        format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", B64.encode(&der))
+    }
+
+    fn sign_proof(sk: &SigningKey, node_id: &str, nonce: u64) -> String {
+        hex::encode(sk.sign(&attestation_signing_payload(node_id, nonce)).to_bytes())
+    }
+
+    fn svc_with_registered_node(ak_pem: String) -> Arc<ServiceState> {
+        let app = Arc::new(AppState::new(
+            VerifierStore::new(":memory:").expect("in-memory store"),
+            VerifierOperationMode::Active,
+        ));
+        app.persist_and_insert_node(RegisteredNode {
+            node_id: NODE.to_string(),
+            status: NodeTrustState::Unknown,
+            registered_at_ms: 1,
+            last_trust_update_ms: 0,
+            ak_public_pem: Some(ak_pem),
+            expected_pcr16_digest_hex: None,
+        })
+        .expect("register node");
+
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            audit_verifying_key: None,
+            fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    async fn verify(svc: Arc<ServiceState>, nonce: u64, proof_hex: String) -> StatusCode {
+        let req: VerifyAttestationRequest = serde_json::from_value(serde_json::json!({
+            "node_id": NODE, "nonce": nonce, "proof_hex": proof_hex,
+        }))
+        .expect("build request");
+        verify_attestation(State(svc), Json(req)).await.into_response().status()
+    }
+
+    #[tokio::test]
+    async fn failed_proof_does_not_burn_the_nonce_then_valid_proof_succeeds() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let attacker_key = SigningKey::from_bytes(&[9u8; 32]); // not the registered AK
+        let svc = svc_with_registered_node(public_key_to_pem(&node_key.verifying_key()));
+
+        let nonce = 0xABCD_1234_5678_9F01;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        // 1) A bad proof (signed by the wrong key) is rejected 401 — and the
+        //    pending nonce is NOT consumed (verify-then-consume).
+        let bad = verify(Arc::clone(&svc), nonce, sign_proof(&attacker_key, NODE, nonce)).await;
+        assert_eq!(bad, StatusCode::UNAUTHORIZED, "a bad proof is refused");
+        assert!(
+            svc.app.pending_challenges.contains_key(NODE),
+            "a FAILED proof must not burn the pending nonce"
+        );
+
+        // 2) The legitimate node, with the SAME outstanding nonce, now succeeds.
+        let good = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
+        assert_eq!(good, StatusCode::OK, "valid proof over the still-outstanding nonce attests");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            "node becomes Trusted after a valid proof"
+        );
+
+        // 3) Single-use: the nonce is now consumed; a replay is a 409 conflict.
+        let replay = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
+        assert_eq!(replay, StatusCode::CONFLICT, "the consumed nonce cannot be replayed");
     }
 }

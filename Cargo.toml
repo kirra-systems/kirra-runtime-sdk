@@ -67,6 +67,10 @@ http = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+# OS CSPRNG primitive for attestation challenge nonces (#147). Already in the
+# tree transitively via ed25519-dalek's rand_core; declared directly so the
+# library can source unpredictable nonces (no weak/time-based RNG).
+getrandom = "0.2"
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
