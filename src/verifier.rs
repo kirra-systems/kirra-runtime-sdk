@@ -436,11 +436,36 @@ impl AppState {
 
     /// Issue a fresh challenge nonce for the given node. Overwrites any prior pending challenge.
     pub fn issue_challenge(&self, node_id: &str, nonce: u64, now_ms: u64) {
+        // Store hygiene (#147): prune expired pending challenges so stale
+        // entries for nodes that never re-attested do not linger. The map is
+        // already bounded (keyed by node_id, per-node overwrite); this only
+        // drops timed-out entries — it never introduces unbounded growth.
+        self.pending_challenges.retain(|_, e| now_ms <= e.expires_at_ms);
         self.pending_challenges.insert(node_id.to_string(), ChallengeEntry {
             nonce,
             expires_at_ms: now_ms + CHALLENGE_TTL_MS,
         });
     }
+}
+
+/// Generate a fresh, unpredictable attestation challenge nonce (#147).
+///
+/// Sourced from the operating-system CSPRNG (`getrandom`, the same OS entropy
+/// source that backs `OsRng`) — NOT from the wall clock. A `SystemTime`-derived
+/// nonce is predictable (an attacker who knows the issue time knows the nonce)
+/// and can collide for two challenges issued within the same nanosecond. The
+/// remaining nonce-lifecycle invariants — single-use, TTL-bounded, node-bound —
+/// are enforced by the challenge store (`issue_challenge` / `consume_challenge`);
+/// this function supplies the *unpredictability* half.
+///
+/// Fail-closed: if the OS CSPRNG is unavailable we panic rather than fall back
+/// to a weak/predictable source — no secure nonce can be issued without entropy.
+#[must_use]
+pub fn generate_challenge_nonce() -> u64 {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes)
+        .expect("OS CSPRNG (getrandom) unavailable — cannot issue a secure attestation nonce");
+    u64::from_le_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -537,5 +562,71 @@ mod mark_node_untrusted_tests {
     fn marking_unknown_node_returns_false() {
         let app = app();
         assert!(!app.mark_node_untrusted("ghost", "CANOPEN_NMT_OFFLINE", 1).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod nonce_lifecycle_tests {
+    use super::*;
+    use crate::verifier_store::VerifierStore;
+
+    fn app() -> AppState {
+        AppState::new(VerifierStore::new(":memory:").expect("in-memory store"), VerifierOperationMode::Active)
+    }
+
+    // #147 HEADLINE: nonces are CSPRNG-sourced, not wall-clock-derived.
+    #[test]
+    fn nonce_is_csprng_unpredictable_not_time_derived() {
+        let a = generate_challenge_nonce();
+        let b = generate_challenge_nonce();
+        let c = generate_challenge_nonce();
+        assert!(!(a == b && b == c), "successive CSPRNG nonces must not all be identical");
+
+        // A wall-clock-nanos nonce would land within ~1s of `now`; a CSPRNG u64
+        // landing that close to a ~1.8e18 timestamp has probability ~5e-11/value.
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        for n in [a, b, c] {
+            assert!(n.abs_diff(now_nanos) > 1_000_000_000,
+                "nonce {n} is suspiciously close to the wall clock — not CSPRNG-sourced?");
+        }
+    }
+
+    // SINGLE-USE: replay of a consumed nonce is rejected.
+    #[test]
+    fn replay_of_consumed_nonce_is_rejected() {
+        let app = app();
+        app.issue_challenge("n1", 42, 1_000);
+        assert!(app.consume_challenge("n1", 42, 1_100), "first consume succeeds");
+        assert!(!app.consume_challenge("n1", 42, 1_100), "replay of a consumed nonce is rejected");
+    }
+
+    // TTL-BOUNDED: an expired nonce is rejected.
+    #[test]
+    fn expired_nonce_is_rejected() {
+        let app = app();
+        app.issue_challenge("n1", 7, 1_000); // expires at 1_000 + CHALLENGE_TTL_MS
+        let after_expiry = 1_000 + CHALLENGE_TTL_MS + 1;
+        assert!(!app.consume_challenge("n1", 7, after_expiry), "expired nonce is rejected");
+    }
+
+    // NODE-BOUND: a nonce issued for node A cannot be consumed for node B.
+    #[test]
+    fn nonce_is_bound_to_its_node() {
+        let app = app();
+        app.issue_challenge("node-a", 99, 1_000);
+        assert!(!app.consume_challenge("node-b", 99, 1_100), "another node cannot consume A's nonce");
+        assert!(app.consume_challenge("node-a", 99, 1_100), "A's own nonce remains consumable");
+    }
+
+    // STORE HYGIENE: issuing prunes expired entries (bounded, no lingering stale nonces).
+    #[test]
+    fn issue_prunes_expired_entries() {
+        let app = app();
+        app.issue_challenge("stale", 1, 1_000);
+        let later = 1_000 + CHALLENGE_TTL_MS + 1;
+        app.issue_challenge("fresh", 2, later);
+        assert!(!app.pending_challenges.contains_key("stale"), "expired entry pruned on issue");
+        assert!(app.pending_challenges.contains_key("fresh"), "fresh entry retained");
     }
 }
