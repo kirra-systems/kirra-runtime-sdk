@@ -152,6 +152,35 @@ Recovery:
   under any circumstances. Human must verify system state before
   issuing reset.
 
+Liveness/observability exemption (path-class distinction):
+  "LockedOut admits no commands" (and fail-closed posture gating generally)
+  governs the **command** and **mutation** path classes — actuator/control
+  routes and state-mutating routes. It does NOT govern read-only
+  liveness/observability probes, which carry NO command, mutation, or actuator
+  authority. The two statements describe **different path classes** and are not
+  in tension.
+
+  The following read-only paths are DELIBERATELY exempt from posture gating
+  AND from the HA epoch fence, and remain reachable under `LockedOut` and on a
+  self-demoted / fenced node — exactly the set enforced by `is_posture_exempt`
+  (`src/gateway/policy_layer.rs`):
+
+      "/health" | "/health/live" | "/ready" | "/metrics"
+
+  Rationale — keeping liveness reachable under `LockedOut` is itself a safety
+  property: an operator / orchestrator MUST be able to observe that a node is
+  `LockedOut`. A node that goes dark is indistinguishable from a crash and can
+  trigger incorrect failover (e.g. a standby promoting against a node that is
+  in fact alive and correctly `LockedOut`).
+
+  Source of truth + enforcing test: the authoritative allowlist is
+  `is_posture_exempt` in `src/gateway/policy_layer.rs`; the real-router test
+  `health_exempt_under_lockedout_on_real_router`
+  (`src/bin/kirra_verifier_service.rs`, issue #72 / PR #226) proves `/health`
+  stays HTTP 200 under `LockedOut` on the assembled production router. This doc
+  list and `is_posture_exempt` MUST be kept in sync — a change to one requires
+  updating the other.
+
 Implements: ISO 26262 safe state for non-recoverable faults.
 
 Safety goals covered: SG-007, SG-011 (partial)
@@ -236,6 +265,17 @@ violated regardless of what upstream AI systems instruct:
     calls `save_node` then `nodes.insert`, never reversed
 12. `KIRRA_ADMIN_TOKEN` compared with `constant_time_compare` only —
     standard `==` forbidden on security-critical byte sequences
+13. Liveness/observability probes are EXEMPT from posture gating and the HA
+    epoch fence, and stay reachable under `LockedOut` and on a fenced /
+    self-demoted node — `is_posture_exempt` allowlists exactly
+    `/health`, `/health/live`, `/ready`, `/metrics`. This does NOT contradict
+    invariants 7–9: "`LockedOut` admits no commands" governs the COMMAND and
+    MUTATION path classes; read-only liveness probes carry no command or
+    actuator authority and are a different path class. Keeping liveness
+    observable under `LockedOut` is itself a safety property (a dark node is
+    indistinguishable from a crash and can trigger incorrect failover). The
+    doc list (SS-003) and `is_posture_exempt`
+    (`src/gateway/policy_layer.rs`) must be kept in sync. (Issue #70)
 
 ---
 
