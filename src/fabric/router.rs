@@ -73,25 +73,30 @@ impl FabricRouter {
 
         // INTERIM seed: Degraded.
         //
-        // The strict fail-closed default would be LockedOut — but with no
-        // production feed from the verifier's real FleetPosture into fabric
-        // asset postures (follow-up #3), LockedOut would brick every
-        // registered asset until an operator manually pushed a posture.
-        // The registration route (/fabric/assets/register) is admin-token
-        // gated, so the registrant is a trusted operator: Degraded grants
-        // limited, MRC-envelope motion until the first real posture lands.
-        // `evaluate_command` already dispatches Degraded to the asset's
-        // per-profile `mrc_contract()` (RobotNominal→robot MRC,
-        // DroneNominal→drone MRC, etc.) — no flat 5 m/s cap is imposed
-        // here.
+        // The strict fail-closed default would be LockedOut — but the
+        // verifier→fabric posture feed (#88) only feeds the ONE locally
+        // governed asset named by `KIRRA_FABRIC_ASSET_ID`. Every OTHER
+        // registered asset is still unfed, so a LockedOut seed would brick
+        // them until an operator manually pushed a posture (cross-asset
+        // propagation only DEGRADES followers — it never lifts an asset out
+        // of LockedOut). The registration route (/fabric/assets/register) is
+        // admin-token gated, so the registrant is a trusted operator:
+        // Degraded grants limited, MRC-envelope motion until a real posture
+        // lands. `evaluate_command` already dispatches Degraded to the
+        // asset's per-profile `mrc_contract()` (RobotNominal→robot MRC,
+        // DroneNominal→drone MRC, etc.) — no flat 5 m/s cap is imposed here.
         //
         // generation: 0 is the never-yet-computed sentinel (identical
         // convention to `CachedFleetPosture::new` for fleet posture).
-        // The first real engine-driven update supersedes it.
+        // The first real update (engine-driven, or the #88 feed for the
+        // local asset) supersedes it. NOTE: `.or_insert` below means a
+        // posture already pushed by the feed before registration is NOT
+        // clobbered by this seed.
         //
-        // END STATE (follow-up #3): seed LockedOut and rely on the
-        // verifier→fabric posture feed to lift verified assets to
-        // Nominal. Do NOT make Degraded the permanent default.
+        // END STATE: once a per-asset feed exists for ALL assets, seed
+        // LockedOut and rely on the feed to lift verified assets to Nominal.
+        // Until then, do NOT make LockedOut the seed — and do NOT make
+        // Degraded the permanent default.
         let initial_posture = AssetPosture {
             asset_id: asset.asset_id.clone(),
             posture: FleetPosture::Degraded,
@@ -133,6 +138,14 @@ impl FabricRouter {
     pub fn update_asset_posture(&self, asset_id: &str, posture: AssetPosture) {
         self.asset_postures.insert(asset_id.to_string(), posture);
         self.fabric_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Current recorded posture for a single asset, if it has one.
+    /// Used by the verifier→fabric posture feed to compare-before-write
+    /// (avoid churn on unchanged postures) and to derive the next
+    /// per-asset generation counter.
+    pub fn asset_posture(&self, asset_id: &str) -> Option<AssetPosture> {
+        self.asset_postures.get(asset_id).map(|r| r.clone())
     }
 
     /// External-entry posture update with one bounded propagation pass.

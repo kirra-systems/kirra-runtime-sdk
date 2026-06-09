@@ -205,6 +205,136 @@ fn gate_posture(svc: &ServiceState) -> (FleetPosture, Option<LockoutReason>) {
     resolve_posture_with_reason(&svc.posture_cache, POSTURE_CACHE_TTL_MS)
 }
 
+/// Verifier→fabric posture feed (#88, single-local-asset model).
+///
+/// Mirrors THIS controller's aggregate `FleetPosture` into the fabric
+/// posture of the one locally governed asset named by `KIRRA_FABRIC_ASSET_ID`,
+/// so fabric command enforcement for that asset reflects real verified trust
+/// rather than the interim `Degraded` registration seed.
+///
+/// Seam: `recalculate_and_broadcast` lives in the lib and cannot see the
+/// `FabricRouter` (it is on `ServiceState`, here in the binary). The posture
+/// broadcast (`app.posture_tx`) fires on every fleet-posture transition,
+/// including those produced by the lib-side posture-engine worker, so a
+/// broadcast subscriber catches all transitions from one place.
+///
+/// Inert (logs once, no task spawned) when `KIRRA_FABRIC_ASSET_ID` is
+/// unset/empty: the asset then keeps its registration seed. This is the
+/// single-asset model — other registered assets are intentionally NOT fed
+/// here, which is why the registration seed stays `Degraded` rather than
+/// `LockedOut` (an unfed asset must not be bricked).
+fn spawn_local_asset_posture_feed(svc: Arc<ServiceState>) {
+    let asset_id = match std::env::var("KIRRA_FABRIC_ASSET_ID") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => {
+            tracing::info!(
+                "verifier→fabric posture feed: KIRRA_FABRIC_ASSET_ID unset — \
+                 feed inert (local fabric asset keeps its registration seed)"
+            );
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        // Subscribe BEFORE the initial sync so a transition occurring in the
+        // window between the initial cache read and entering recv() is
+        // buffered by the broadcast channel rather than lost.
+        let mut rx = svc.app.posture_tx.subscribe();
+        tracing::info!(
+            asset_id = %asset_id,
+            "verifier→fabric posture feed: started (single-local-asset model)"
+        );
+
+        // Initial sync: the synchronous startup recalc already populated the
+        // cache before this task subscribed, so reflect it once now.
+        sync_local_asset_posture(&svc, &asset_id);
+
+        loop {
+            match rx.recv().await {
+                Ok(_event) => sync_local_asset_posture(&svc, &asset_id),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // A lag only means we may have missed a transition; the
+                    // cache is authoritative, so re-sync from it.
+                    tracing::warn!(
+                        skipped = n,
+                        "verifier→fabric posture feed lagged; re-syncing from cache"
+                    );
+                    sync_local_asset_posture(&svc, &asset_id);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::warn!(
+                        "verifier→fabric posture feed: broadcast channel closed; feed stopping"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// One idempotent push of the cached fleet posture into the local asset.
+///
+/// Fail-closed: a poisoned OR stale cache yields NO push. The actuator gate
+/// already fail-closes on a stale fleet posture, so leaving the asset's last
+/// good posture in place is correct — we never write a stale or
+/// not-yet-computed posture forward. Compare-before-write avoids churn (and a
+/// generation bump / propagation pass) when the posture is unchanged.
+fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
+    let now = now_ms();
+    let fleet = {
+        let guard = match svc.posture_cache.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!(
+                    "verifier→fabric feed: posture cache poisoned — skipping push (fail-closed)"
+                );
+                return;
+            }
+        };
+        match guard.as_ref() {
+            Some(c) if !c.is_stale(now) => c.posture.clone(),
+            Some(_) => return, // stale → do not propagate a stale posture
+            None => return,    // not yet computed
+        }
+    };
+
+    let current = svc.fabric_router.asset_posture(asset_id);
+    if let Some(ref existing) = current {
+        if existing.posture == fleet {
+            return; // unchanged — nothing to do
+        }
+    }
+    let next_gen = current
+        .as_ref()
+        .map(|p| p.generation.saturating_add(1))
+        .unwrap_or(1);
+
+    let blocked_by = match fleet {
+        FleetPosture::Nominal => vec![],
+        FleetPosture::Degraded => vec!["VERIFIER_FLEET_POSTURE_DEGRADED".to_string()],
+        FleetPosture::LockedOut => vec!["VERIFIER_FLEET_POSTURE_LOCKED_OUT".to_string()],
+    };
+
+    let updated = AssetPosture {
+        asset_id: asset_id.to_string(),
+        posture: fleet.clone(),
+        generation: next_gen,
+        computed_at_ms: now,
+        contributing_nodes: vec![],
+        blocked_by,
+    };
+    // External-entry update: runs one bounded cross-asset propagation pass so
+    // a LockedOut local asset degrades its dependents in the same fabric pass.
+    svc.fabric_router
+        .update_asset_posture_and_propagate(asset_id, updated);
+    tracing::info!(
+        asset_id = %asset_id,
+        posture = ?fleet,
+        generation = next_gen,
+        "verifier→fabric posture feed: local asset posture updated"
+    );
+}
+
 fn emit_posture_event(state: &AppState, event_type: &str, node_id: Option<String>) {
     let posture = node_id.as_ref().map(|id| state.calculate_posture(id));
     let _ = state.posture_tx.send(PostureStreamEvent {
@@ -2172,6 +2302,14 @@ async fn main() {
             ttl_ms = kirra_runtime_sdk::posture_cache::POSTURE_CACHE_TTL_MS,
             "posture: periodic refresh loop started"
         );
+
+        // #88: verifier→fabric posture feed (single-local-asset model).
+        // Mirrors this controller's aggregate FleetPosture into the fabric
+        // posture for the one locally governed asset, so fabric command
+        // enforcement reflects real verified trust instead of the interim
+        // registration seed. Spawned AFTER the initial recalc so the cache
+        // is populated for the feed's initial sync.
+        spawn_local_asset_posture_feed(Arc::clone(&svc_state));
     } else {
         tracing::info!(
             "posture: freshness wiring skipped — passive standby (no recalc/worker/refresh)"
@@ -2606,6 +2744,148 @@ mod posture_gate_real_router_tests {
             status,
             StatusCode::OK,
             "/health must remain reachable under LockedOut on the real router (exempt); got {status}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #88: verifier→fabric posture feed (single-local-asset model).
+//
+// Exercises `sync_local_asset_posture` directly (the env-gated spawn wrapper
+// is thin): a registered local asset's fabric posture must track the cached
+// fleet posture, fail closed on a stale cache, avoid churn when unchanged,
+// and run the bounded cross-asset propagation pass.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod fabric_posture_feed_tests {
+    use super::sync_local_asset_posture;
+
+    use std::sync::Arc;
+
+    use kirra_runtime_sdk::fabric::asset::{
+        AssetType, FabricAsset, KinematicProfileType,
+    };
+    use kirra_runtime_sdk::fabric::router::FabricRouter;
+    use kirra_runtime_sdk::posture_cache::{
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
+    };
+    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_runtime_sdk::verifier_store::VerifierStore;
+
+    const LOCAL: &str = "local-asset";
+
+    fn asset(id: &str) -> FabricAsset {
+        let now = now_ms();
+        FabricAsset {
+            asset_id: id.to_string(),
+            asset_type: AssetType::AutonomousVehicle,
+            display_name: id.to_string(),
+            kinematic_profile: KinematicProfileType::RobotNominal,
+            registered_at_ms: now,
+            last_seen_ms: now,
+            metadata: Default::default(),
+        }
+    }
+
+    /// Builds an Active `ServiceState` whose cache holds `cached` and whose
+    /// fabric router has `LOCAL` registered (seeded Degraded).
+    fn state(cached: Option<CachedFleetPosture>) -> Arc<ServiceState> {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(cached));
+        let fabric_router = Arc::new(FabricRouter::new());
+        fabric_router.register_asset(&asset(LOCAL));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            audit_verifying_key: None,
+            fabric_router,
+            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    /// A FRESH cache entry (generated now) carrying `posture`.
+    fn fresh(posture: FleetPosture) -> CachedFleetPosture {
+        CachedFleetPosture::new_with_generation(posture, 1, now_ms())
+    }
+
+    #[test]
+    fn fresh_cache_pushes_fleet_posture_to_local_asset() {
+        let svc = state(Some(fresh(FleetPosture::Nominal)));
+        // Seeded Degraded by register_asset.
+        assert_eq!(
+            svc.fabric_router.asset_posture(LOCAL).unwrap().posture,
+            FleetPosture::Degraded
+        );
+
+        sync_local_asset_posture(&svc, LOCAL);
+
+        let after = svc.fabric_router.asset_posture(LOCAL).unwrap();
+        assert_eq!(after.posture, FleetPosture::Nominal, "feed must mirror the fleet posture");
+        assert!(after.blocked_by.is_empty(), "Nominal carries no blocked_by reason");
+        assert_eq!(after.generation, 1, "seed gen 0 → first feed write gen 1");
+    }
+
+    #[test]
+    fn stale_cache_does_not_push_keeps_last_good() {
+        // generated_at far in the past → is_stale(now) == true.
+        let stale = CachedFleetPosture::new_with_generation(
+            FleetPosture::Nominal,
+            7,
+            now_ms().saturating_sub(60_000),
+        );
+        let svc = state(Some(stale));
+
+        sync_local_asset_posture(&svc, LOCAL);
+
+        assert_eq!(
+            svc.fabric_router.asset_posture(LOCAL).unwrap().posture,
+            FleetPosture::Degraded,
+            "a stale cache must NOT propagate forward (fail-closed): seed is kept"
+        );
+    }
+
+    #[test]
+    fn empty_cache_does_not_push() {
+        let svc = state(None);
+        sync_local_asset_posture(&svc, LOCAL);
+        assert_eq!(
+            svc.fabric_router.asset_posture(LOCAL).unwrap().posture,
+            FleetPosture::Degraded,
+            "a not-yet-computed cache must not overwrite the seed"
+        );
+    }
+
+    #[test]
+    fn unchanged_posture_does_not_bump_generation() {
+        // Seed is Degraded; feeding Degraded again must be a no-op.
+        let svc = state(Some(fresh(FleetPosture::Degraded)));
+        let gen_before = svc.fabric_router.asset_posture(LOCAL).unwrap().generation;
+
+        sync_local_asset_posture(&svc, LOCAL);
+
+        let after = svc.fabric_router.asset_posture(LOCAL).unwrap();
+        assert_eq!(after.posture, FleetPosture::Degraded);
+        assert_eq!(
+            after.generation, gen_before,
+            "an unchanged posture must not bump the generation (no churn)"
+        );
+    }
+
+    #[test]
+    fn lockedout_fleet_posture_locks_the_local_asset() {
+        let svc = state(Some(fresh(FleetPosture::LockedOut)));
+        sync_local_asset_posture(&svc, LOCAL);
+        let after = svc.fabric_router.asset_posture(LOCAL).unwrap();
+        assert_eq!(after.posture, FleetPosture::LockedOut);
+        assert_eq!(
+            after.blocked_by,
+            vec!["VERIFIER_FLEET_POSTURE_LOCKED_OUT".to_string()],
+            "LockedOut feed must tag the reason for operators"
         );
     }
 }

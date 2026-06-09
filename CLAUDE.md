@@ -315,6 +315,7 @@ proptest = "1"  # dev-dependency
 | `KIRRA_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent this long (ms) |
 | `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |
+| `KIRRA_FABRIC_ASSET_ID` | No | — | Local fabric asset id fed by the verifier→fabric posture feed (#88). Unset/empty → feed inert (asset keeps its `Degraded` registration seed) |
 
 ---
 
