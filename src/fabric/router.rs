@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use crate::fabric::asset::{AssetPosture, AssetType, FabricAsset, FabricState};
 use crate::fabric::governor::AssetGovernor;
+use crate::fabric::causal_log::FabricCausalLog;
 use crate::gateway::kinematics_contract::{EnforceAction, ProposedVehicleCommand};
 use crate::verifier::FleetPosture;
 use crate::posture_cache::now_ms;
@@ -19,6 +20,28 @@ impl std::fmt::Display for FabricError {
             Self::AssetNotFound(id) => write!(f, "Asset not found: {id}"),
             Self::GovernorError(msg) => write!(f, "Governor error: {msg}"),
             Self::PostureUnavailable(id) => write!(f, "Posture unavailable for: {id}"),
+        }
+    }
+}
+
+/// One trigger-tagged cross-asset trust propagation (SG-007): the LockedOut
+/// `trigger_asset` degraded `follower` to `new_posture`. Internal — the public
+/// `propagate_cross_asset_trust` exposes only `(follower, new_posture)`; the
+/// trigger tag is what lets `propagate_and_record` attribute the causal event.
+struct TrustPropagation {
+    trigger_asset: String,
+    follower: String,
+    new_posture: FleetPosture,
+}
+
+impl TrustPropagation {
+    /// A follower degraded to `Degraded` by a LockedOut trigger (the only
+    /// transition the propagation rules produce).
+    fn degrade(trigger: &str, follower: &str) -> Self {
+        Self {
+            trigger_asset: trigger.to_string(),
+            follower: follower.to_string(),
+            new_posture: FleetPosture::Degraded,
         }
     }
 }
@@ -177,11 +200,82 @@ impl FabricRouter {
     /// Cross-asset trust propagation rules.
     /// Returns a list of (asset_id, forced_posture) pairs to apply.
     ///
+    /// Thin map over [`FabricRouter::evaluate_cross_asset_trust`] — the returned
+    /// `(follower, posture)` pairs (and their order) are byte-identical to the
+    /// pre-SG-007-recording behavior. The richer trigger-tagged result is used
+    /// only by [`FabricRouter::propagate_and_record`] for causal-log recording.
+    ///
     // Verifies: SG-007 — a LockedOut leader degrades dependent followers within
     // one synchronous fabric pass (tests/fault_injection.rs
     // test_safety_goal_sg_007_cross_asset_lockout_propagation).
     pub fn propagate_cross_asset_trust(&self) -> Vec<(String, FleetPosture)> {
-        let mut changes: Vec<(String, FleetPosture)> = Vec::new();
+        self.evaluate_cross_asset_trust()
+            .into_iter()
+            .map(|p| (p.follower, p.new_posture))
+            .collect()
+    }
+
+    /// Cross-asset trust propagation + causal-log recording (SG-007).
+    ///
+    /// Runs the SAME evaluation as [`FabricRouter::propagate_cross_asset_trust`]
+    /// (the propagation DECISIONS are unchanged) and additionally records one
+    /// causal event per rule-firing (per LockedOut trigger asset) into `log`,
+    /// tagging the followers it degraded as `affects_assets`. Returns the same
+    /// flat `(follower, posture)` Vec the public fn returns.
+    ///
+    // Verifies: SG-007 (causal-log sub-gap) — propagation events are recorded to
+    // the FabricCausalLog, not just applied.
+    pub fn propagate_and_record(
+        &self,
+        log: &FabricCausalLog,
+        fabric_generation: u64,
+    ) -> Vec<(String, FleetPosture)> {
+        let propagations = self.evaluate_cross_asset_trust();
+
+        // Group followers by their triggering LockedOut asset, preserving
+        // first-seen trigger order (one causal event per rule-firing/trigger).
+        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
+        for p in &propagations {
+            if let Some(entry) = grouped.iter_mut().find(|(t, _)| *t == p.trigger_asset) {
+                entry.1.push(p.follower.clone());
+            } else {
+                grouped.push((p.trigger_asset.clone(), vec![p.follower.clone()]));
+            }
+        }
+        for (trigger, followers) in &grouped {
+            let payload = format!(
+                "LockedOut asset '{trigger}' degraded {} dependent follower(s) to Degraded \
+                 (SG-007 cross-asset trust propagation)",
+                followers.len()
+            );
+            // caused_by empty (the lockout is the root cause); affects_assets =
+            // the followers this trigger degraded. Mirrors the record(...) usage
+            // in kirra_verifier_service.rs.
+            log.record(
+                trigger,
+                "cross_asset_trust_degrade",
+                &payload,
+                vec![],
+                followers.clone(),
+                fabric_generation,
+            );
+        }
+
+        propagations
+            .into_iter()
+            .map(|p| (p.follower, p.new_posture))
+            .collect()
+    }
+
+    /// Internal: evaluate the 4 cross-asset trust rules into trigger-tagged
+    /// propagations (one entry per degraded follower, tagged with the LockedOut
+    /// asset that triggered it). Single source of truth for both
+    /// `propagate_cross_asset_trust` (decision only) and `propagate_and_record`
+    /// (decision + causal-log recording). The rule conditions and the set/order
+    /// of degraded followers are identical to the original inline logic; the
+    /// only addition is capturing the trigger asset id per firing.
+    fn evaluate_cross_asset_trust(&self) -> Vec<TrustPropagation> {
+        let mut out: Vec<TrustPropagation> = Vec::new();
 
         // Collect current postures and asset metadata
         let all_assets: Vec<(String, AssetType, AssetPosture, std::collections::HashMap<String, String>)> =
@@ -195,48 +289,55 @@ impl FabricRouter {
                 ))
             }).collect();
 
-        // Rule 1: Drone depends on ground control station (IndustrialController)
-        let ground_stations_locked: bool = all_assets.iter().any(|(_, at, ap, _)|
-            *at == AssetType::IndustrialController && ap.posture == FleetPosture::LockedOut
-        );
-        if ground_stations_locked {
+        // Rule 1: Drone depends on ground control station (IndustrialController).
+        // Trigger = a LockedOut ground station (deterministic representative: the
+        // lexicographically-smallest locked id). `Some` iff the original `any`.
+        let locked_ground = all_assets.iter()
+            .filter(|(_, at, ap, _)| *at == AssetType::IndustrialController && ap.posture == FleetPosture::LockedOut)
+            .map(|(id, _, _, _)| id.clone())
+            .min();
+        if let Some(trigger) = locked_ground {
             for (id, at, ap, _) in &all_assets {
                 if *at == AssetType::Drone && ap.posture == FleetPosture::Nominal {
-                    changes.push((id.clone(), FleetPosture::Degraded));
+                    out.push(TrustPropagation::degrade(&trigger, id));
                 }
             }
         }
 
-        // Rule 2: Convoy follower degrades when leader is LockedOut
-        let leader_locked: bool = all_assets.iter().any(|(_, _, ap, meta)|
-            meta.get("convoy_role").map(|r| r == "leader").unwrap_or(false)
-                && ap.posture == FleetPosture::LockedOut
-        );
-        if leader_locked {
+        // Rule 2: Convoy follower degrades when leader is LockedOut.
+        let locked_leader = all_assets.iter()
+            .filter(|(_, _, ap, meta)|
+                meta.get("convoy_role").map(|r| r == "leader").unwrap_or(false)
+                    && ap.posture == FleetPosture::LockedOut)
+            .map(|(id, _, _, _)| id.clone())
+            .min();
+        if let Some(trigger) = locked_leader {
             for (id, _, ap, meta) in &all_assets {
                 if meta.get("convoy_role").map(|r| r == "follower").unwrap_or(false)
                     && ap.posture == FleetPosture::Nominal
                 {
-                    changes.push((id.clone(), FleetPosture::Degraded));
+                    out.push(TrustPropagation::degrade(&trigger, id));
                 }
             }
         }
 
-        // Rule 3: Infrastructure lockout degrades dependents
-        let infra_locked: bool = all_assets.iter().any(|(_, at, ap, _)|
-            *at == AssetType::Infrastructure && ap.posture == FleetPosture::LockedOut
-        );
-        if infra_locked {
+        // Rule 3: Infrastructure lockout degrades dependents.
+        let locked_infra = all_assets.iter()
+            .filter(|(_, at, ap, _)| *at == AssetType::Infrastructure && ap.posture == FleetPosture::LockedOut)
+            .map(|(id, _, _, _)| id.clone())
+            .min();
+        if let Some(trigger) = locked_infra {
             for (id, _, ap, meta) in &all_assets {
                 if meta.get("depends_on_infrastructure").map(|v| v == "true").unwrap_or(false)
                     && ap.posture == FleetPosture::Nominal
                 {
-                    changes.push((id.clone(), FleetPosture::Degraded));
+                    out.push(TrustPropagation::degrade(&trigger, id));
                 }
             }
         }
 
-        // Rule 4: Warehouse lockout degrades all registered robots
+        // Rule 4: Warehouse lockout degrades registered robots in that warehouse.
+        // Trigger is per-follower (the robot's own locked warehouse).
         let locked_warehouses: Vec<String> = all_assets.iter()
             .filter(|(_, at, ap, _)| *at == AssetType::Warehouse && ap.posture == FleetPosture::LockedOut)
             .map(|(id, _, _, _)| id.clone())
@@ -245,14 +346,14 @@ impl FabricRouter {
             for (id, at, ap, meta) in &all_assets {
                 if *at == AssetType::Robot && ap.posture == FleetPosture::Nominal {
                     let robot_warehouse = meta.get("warehouse_id").map(|s| s.as_str()).unwrap_or("");
-                    if locked_warehouses.iter().any(|w| w == robot_warehouse) {
-                        changes.push((id.clone(), FleetPosture::Degraded));
+                    if let Some(w) = locked_warehouses.iter().find(|w| w.as_str() == robot_warehouse) {
+                        out.push(TrustPropagation::degrade(w, id));
                     }
                 }
             }
         }
 
-        changes
+        out
     }
 
     pub fn asset_count(&self) -> usize {

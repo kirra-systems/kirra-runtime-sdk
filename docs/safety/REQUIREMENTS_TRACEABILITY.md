@@ -86,7 +86,7 @@ Traceability flows in both directions:
 |-------|-----------------------|----------------|---------|
 | TR-007 | `propagate_cross_asset_trust` shall set the posture of all follower assets registered to a leader asset to `Degraded` when the leader asset's posture is `LockedOut` | `src/fabric/router.rs:propagate_cross_asset_trust` (Rule 1) | `test_convoy_leader_lockout_degrades_followers` ✗ |
 | TR-007a | `propagate_cross_asset_trust` shall set follower asset postures to `Degraded` when the leader asset posture is `Degraded` and all followers are currently `Nominal` | `src/fabric/router.rs:propagate_cross_asset_trust` (Rule 2) | `test_convoy_leader_degraded_degrades_nominal_followers` ✗ |
-| TR-007b | The fabric causal log (`src/fabric/causal_log.rs`) shall record every cross-asset trust propagation event with a causal timestamp | `src/fabric/causal_log.rs` | `test_causal_log_records_propagation_event` ✗ |
+| TR-007b | The fabric causal log (`src/fabric/causal_log.rs`) shall record every cross-asset trust propagation event with a causal timestamp | `src/fabric/router.rs::propagate_and_record` → `src/fabric/causal_log.rs::record` | `tests/cert_003_rtm_gap_stubs.rs::test_safety_goal_sg_007_causal_log_records_propagation_event` ✓. *Conscious deferral:* fan-in rules record a single deterministic representative trigger (lexicographically-smallest LockedOut source) — the degrade decision is unchanged; multi-trigger fan-out (one event per trigger→follower, or all sources in `caused_by`) is the eventual refinement for multi-source-lockout forensic completeness. |
 
 ---
 

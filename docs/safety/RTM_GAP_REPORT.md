@@ -38,13 +38,14 @@ test evidence:
 | Goal | ASIL | Status after this increment | Tests (actual fn names / locations) |
 |---|---|---|---|
 | SG-003 | D | **CLOSED** | `src/telemetry_watchdog.rs` mod `sg_003_cert_tests`: `test_watchdog_marks_node_untrusted_after_timeout`, `test_watchdog_detection_latency_within_bound`, `test_watchdog_triggers_posture_recalculation` (RTM-named; in-crate because `watchdog_sweep_once` is `pub(crate)`) |
-| SG-007 | D | **propagation CLOSED**; causal-log sub-gap OPEN | `tests/fault_injection.rs::test_safety_goal_sg_007_cross_asset_lockout_propagation` (leader LockedOut → followers Degraded in one synchronous fabric pass, + precondition cross-check). The RTM-named `test_causal_log_records_propagation_event` remains OPEN: `FabricRouter::propagate_cross_asset_trust` does not record to any causal log — closing it needs propagation→causal-log wiring (a mechanism change), kept as an explicit stub. |
+| SG-007 | D | **CLOSED** (propagation + causal-log) | `tests/fault_injection.rs::test_safety_goal_sg_007_cross_asset_lockout_propagation` (leader LockedOut → followers Degraded in one synchronous fabric pass, + precondition cross-check) AND `tests/cert_003_rtm_gap_stubs.rs::test_safety_goal_sg_007_causal_log_records_propagation_event` (the causal-log sub-gap, now closed): `FabricRouter::propagate_and_record` records a `cross_asset_trust_degrade` event per rule-firing to the `FabricCausalLog` while the propagation decisions stay byte-identical to `propagate_cross_asset_trust`. **Conscious deferral:** fan-in rules (an "any LockedOut source of type X degrades dependents" rule — drone↔ground-station, infrastructure) record a single *deterministic representative* trigger (the lexicographically-smallest LockedOut source); the degrade *decision* is unchanged. Multi-trigger fan-out (one event per trigger→follower, or all sources in `caused_by`) is the eventual refinement for forensic completeness on multi-source lockouts — not yet required. The convoy and warehouse rules already attribute the exact trigger. |
 | SG-008 | D | **CLOSED** | `src/bin/kirra_verifier_service.rs`: pure `check_startup_invariants` predicate + mod `sg_008_cert_tests` (admin-token / WAL / watchdog / posture-engine violations, all-present Ok, Active-vs-PassiveStandby distinction, check-order stability). `main` evaluates it immediately before `TcpListener::bind` and aborts on `Err` (fail-closed; bind never reached on violation). |
 
 Resulting goal-level coverage: **11 / 16 (68.75%)**. Every **ASIL-D** goal
 (SG-001, SG-002, SG-003, SG-005, SG-006, SG-007, SG-008) now has at least one
 real test. The remaining zero-coverage goals are all ASIL-B/C — **SG-009,
-SG-010, SG-012, SG-013, SG-015** — plus the SG-007 causal-log sub-gap noted above.
+SG-010, SG-012, SG-013, SG-015**. (The SG-007 causal-log sub-gap noted above is
+now CLOSED — see the SG-007 row.)
 
 Code-side traceability: `grep -rn "SG-0" src/` now returns **68** hits
 (mechanisms carry `// Verifies: SG-NNN` tags), up from ~0 in the canonical form.

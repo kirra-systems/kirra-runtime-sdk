@@ -1489,7 +1489,10 @@ async fn handle_list_fabric_assets(
 async fn handle_fabric_state(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
-    let changes = svc.fabric_router.propagate_cross_asset_trust();
+    // SG-007: propagate AND record each rule-firing to the causal log (decisions
+    // unchanged). Use the current fabric generation for the recorded events.
+    let fabric_generation = svc.fabric_router.fabric_state().fabric_generation;
+    let changes = svc.fabric_router.propagate_and_record(&svc.fabric_causal_log, fabric_generation);
     for (asset_id, new_posture) in changes {
         let gen = svc.fabric_router.fabric_state().fabric_generation + 1;
         svc.fabric_router.update_asset_posture(&asset_id, AssetPosture {

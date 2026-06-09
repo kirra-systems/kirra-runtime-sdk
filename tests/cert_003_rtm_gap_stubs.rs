@@ -28,22 +28,77 @@ fn test_safety_goal_sg_006_unknown_command_denial() {
     // See tests/fault_injection.rs for full implementation (CERT-004).
 }
 
-// SG-007 — Cross-Asset Fleet Lockout Propagation (ASIL D): the propagation
-// SAFETY PROPERTY (leader LockedOut → all Nominal followers Degraded within one
-// synchronous fabric pass) is IMPLEMENTED in tests/fault_injection.rs
-// (test_safety_goal_sg_007_cross_asset_lockout_propagation); the mechanism
-// (FabricRouter::propagate_cross_asset_trust) carries a `// Verifies: SG-007` tag.
-//
-// REMAINING SUB-GAP — the RTM also names a causal-log assertion, but
-// propagate_cross_asset_trust does NOT record propagation events to any causal
-// log (FabricCausalLog lives on ServiceState and is not wired into the router).
-// Satisfying it requires adding audit/causal-log wiring to the propagation
-// mechanism (a code change, not just a test). Kept as an explicit ignored stub
-// so the gap stays visible and honest.
+// SG-007 — Cross-Asset Fleet Lockout Propagation (ASIL D): CLOSED.
+// The propagation SAFETY PROPERTY (leader LockedOut → all Nominal followers
+// Degraded within one synchronous fabric pass) is in tests/fault_injection.rs
+// (test_safety_goal_sg_007_cross_asset_lockout_propagation). The previously-open
+// causal-log sub-gap is now closed: FabricRouter::propagate_and_record records a
+// `cross_asset_trust_degrade` event per rule-firing into the FabricCausalLog
+// (the propagation DECISIONS are byte-identical to propagate_cross_asset_trust).
+// The test below asserts BOTH the decision and the recorded causal event.
 #[test]
-#[ignore = "TODO(CERT-003): SG-007 propagation→causal-log recording not yet wired (see note above)"]
 fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
-    todo!("wire propagate_cross_asset_trust to FabricCausalLog, then assert the leader→follower event")
+    use std::collections::HashMap;
+    use kirra_runtime_sdk::fabric::router::FabricRouter;
+    use kirra_runtime_sdk::fabric::causal_log::FabricCausalLog;
+    use kirra_runtime_sdk::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+    use kirra_runtime_sdk::verifier::FleetPosture;
+
+    fn convoy_av(id: &str, role: &str) -> FabricAsset {
+        let mut metadata = HashMap::new();
+        metadata.insert("convoy_role".to_string(), role.to_string());
+        FabricAsset {
+            asset_id: id.to_string(),
+            asset_type: AssetType::AutonomousVehicle,
+            display_name: id.to_string(),
+            kinematic_profile: KinematicProfileType::AutomotiveNominal,
+            registered_at_ms: 1000,
+            last_seen_ms: 1000,
+            metadata,
+        }
+    }
+    fn posture(id: &str, p: FleetPosture, gen: u64) -> AssetPosture {
+        AssetPosture {
+            asset_id: id.to_string(),
+            posture: p,
+            generation: gen,
+            computed_at_ms: 1000,
+            contributing_nodes: vec![],
+            blocked_by: vec![],
+        }
+    }
+
+    let router = FabricRouter::new();
+    router.register_asset(&convoy_av("leader01", "leader"));
+    router.register_asset(&convoy_av("follower01", "follower"));
+    // Registration seeds Degraded; lift the follower to Nominal so the rule has
+    // a transition to make, then lock out the leader.
+    router.update_asset_posture("follower01", posture("follower01", FleetPosture::Nominal, 1));
+    router.update_asset_posture("leader01", posture("leader01", FleetPosture::LockedOut, 2));
+
+    let log = FabricCausalLog::new(None);
+    let fabric_generation = router.fabric_state().fabric_generation;
+    let changes = router.propagate_and_record(&log, fabric_generation);
+
+    // (a) decision unchanged: the LockedOut leader degrades the Nominal follower.
+    assert!(
+        changes.iter().any(|(id, p)| id == "follower01" && *p == FleetPosture::Degraded),
+        "leader LockedOut must degrade the Nominal follower (propagation decision); changes={changes:?}"
+    );
+
+    // (b) the causal log recorded the propagation: asset_id = the LockedOut
+    // leader, affects_assets containing the degraded follower.
+    let entries = log.export(0, u64::MAX);
+    assert!(
+        entries.iter().any(|e|
+            e.asset_id == "leader01"
+            && e.event_type == "cross_asset_trust_degrade"
+            && e.affects_assets.iter().any(|a| a == "follower01")
+            && e.fabric_generation == fabric_generation
+        ),
+        "FabricCausalLog must record the leader→follower propagation event \
+         (asset_id=leader01, affects=follower01); entries={entries:?}"
+    );
 }
 
 // SG-008 — Process Fail-Closed on Startup (ASIL D): IMPLEMENTED (CERT-003).
