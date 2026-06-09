@@ -94,3 +94,58 @@ AOU-MSG-TOOLCHAIN-001 is marked **SUPERSEDED — discharged for the isolated-gov
 under the TOPO-1/TOPO-2 conditions. The precise **residual** — a co-resident-with-full-Autoware
 r2r codegen topology, which the curated package avoids by topology but does not fix — is carried
 by the new **AOU-MSG-TOOLCHAIN-002 (OPEN)**, cross-referenced to the r2r-codegen track.
+
+## 7. Rebuilding the ROS 2 adapter after a curated message-set change
+
+When the vendored/curated message set changes (e.g. trimming `autoware_map_msgs` to
+`{LaneletMapBin}` or `autoware_control_msgs` to `{Control, Lateral, Longitudinal}`), a
+plain `cargo build -p kirra-ros2-adapter --features ros2` can fail at link time with
+undefined-symbol errors for the *removed* types, e.g.:
+
+```
+undefined symbol: rosidl_typesupport_introspection_c__get_message_type_support_handle__autoware_map_msgs__msg__MapProjectorInfo
+undefined symbol: rosidl_typesupport_introspection_c__get_message_type_support_handle__autoware_map_msgs__msg__AreaInfo
+undefined symbol: rosidl_typesupport_introspection_c__get_message_type_support_handle__autoware_control_msgs__msg__ControlHorizon
+undefined symbol: rosidl_typesupport_c__get_service_type_support_handle__autoware_map_msgs__srv__GetPartialPointCloudMap
+```
+
+These name *exactly* the messages/services that were removed from the curated set — not
+the ones that remain.
+
+**Rule (SRAC-MSGSYNC build commitment).** Any change to the curated `.msg`/`.srv`
+set — a trim, an addition, or an Autoware version-bump — MUST force the r2r message
+binding generator to regenerate. Rebuilding the colcon overlay alone is **not**
+sufficient.
+
+**Why.** r2r emits its generated message bindings into the separate **`r2r_msg_gen`**
+crate's rlib (not the `r2r` crate). Cargo does not invalidate that codegen when only
+the *contents* of `AMENT_PREFIX_PATH` change — it tracks its own declared inputs, not
+the message files discovered at build time. So `cargo clean -p r2r` cleans the wrong
+crate: the stale `r2r_msg_gen` rlib (generated against the *previous* message set) is
+reused and then linked against the freshly rebuilt — and now differently-shaped —
+typesupport `.so` libraries. The stale bindings still reference the removed types; the
+rebuilt `.so` no longer exports them; the link fails with the undefined symbols above.
+
+**Required procedure when the curated set changes:**
+
+1. Rebuild the overlay against the new set:
+   `rm -rf ros2_ws/build ros2_ws/install && colcon build --packages-up-to <curated pkgs>`
+2. **Force binding regeneration:** `cargo clean -p r2r -p r2r_msg_gen`
+   (if any removed-message symbol still appears, fall back to a full `cargo clean`).
+3. Rebuild and re-run the live-DDS integration test
+   (`perception_mechanism_gate_ros2 -- --ignored`) to re-verify the closure.
+
+**Case that surfaced this — PMON-004 sub-gate-1 trim (2026-06-08).** Trimming the
+vendored `autoware_map_msgs` / `autoware_control_msgs` to their used closure
+(`LaneletMapBin`; `Control`+`Lateral`+`Longitudinal`) with only `cargo clean -p r2r`
+produced undefined symbols for every removed message (`MapProjectorInfo`, `AreaInfo`,
+the `PointCloudMap*` metas, the four `Get*PointCloudMap` srv Request/Response pairs,
+`ControlHorizon`). Root-caused to the stale `r2r_msg_gen` rlib above; remedy is the
+`cargo clean -p r2r_msg_gen` step in this section. _[Stamp bench-confirmed PASS here
+once the rebuild + live test re-pass on the Jazzy bench — not yet verified in this env
+(no ROS 2 present).]_
+
+**Relationship to TOPO-2 / SRAC-MSGSYNC-2.** This is the build-procedure half of
+per-target re-verification: changing the curated set is a re-integration, and the
+binding regen + re-verify in this section is mandatory before the §5 PASS may be
+re-claimed for the new set.
