@@ -2042,6 +2042,94 @@ async fn handle_fabric_causal_chain(
     Json(json!({"entry_id": entry_id, "chain": chain, "depth": depth})).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// #46 — systemd `Type=notify` integration: READY notification + watchdog.
+//
+// READY=1 is sent once the listener is bound (the service is ready to accept);
+// WATCHDOG=1 is pinged from the posture-engine liveness signal so a hung-but-
+// alive process (dead posture worker → stale cache) misses the ping and systemd
+// restarts it (fail-closed). No new dependency — sd_notify is a single line
+// written to the `$NOTIFY_SOCKET` datagram socket. Every path is a best-effort
+// no-op when not run under systemd (env vars unset).
+// ---------------------------------------------------------------------------
+
+/// Send one sd_notify message (e.g. `"READY=1"`, `"WATCHDOG=1"`) to the socket
+/// at `socket` (a filesystem path, or an abstract socket when it begins with
+/// `@`). Separated from [`sd_notify`] so it is testable without mutating
+/// `NOTIFY_SOCKET` in-process (INVARIANT #13).
+fn sd_notify_to(socket: &std::ffi::OsStr, message: &str) -> std::io::Result<()> {
+    use std::os::unix::net::UnixDatagram;
+    let sock = UnixDatagram::unbound()?;
+    let path_str = socket.to_string_lossy();
+    if let Some(name) = path_str.strip_prefix('@') {
+        // Linux abstract namespace socket (leading NUL).
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::SocketAddr;
+        let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
+        sock.connect_addr(&addr)?;
+    } else {
+        sock.connect(std::path::Path::new(socket))?;
+    }
+    sock.send(message.as_bytes())?;
+    Ok(())
+}
+
+/// Best-effort sd_notify. No-op when `NOTIFY_SOCKET` is unset (not run under
+/// `Type=notify`); a send failure is logged, never fatal.
+fn sd_notify(message: &str) {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    if let Err(e) = sd_notify_to(&socket, message) {
+        tracing::warn!(error = %e, message, "sd_notify: send failed");
+    }
+}
+
+/// Whether the watchdog should ping this tick. On the Active node the ping is
+/// GATED on posture-engine liveness (a fresh cache — the refresh loop restamps
+/// it each interval; a hung worker lets it go stale → ping withheld → systemd
+/// restarts, fail-closed). PassiveStandby has no posture engine by design, so
+/// it pings as a plain keepalive (its liveness is the promotion monitor).
+fn watchdog_should_ping(is_active: bool, cache_fresh: bool) -> bool {
+    if is_active {
+        cache_fresh
+    } else {
+        true
+    }
+}
+
+/// Spawn the systemd watchdog keepalive (#46). No-op unless `WATCHDOG_USEC` is
+/// set (i.e. the unit declares `WatchdogSec=`). Pings `WATCHDOG=1` at half the
+/// configured interval, gated by [`watchdog_should_ping`].
+fn spawn_systemd_watchdog(svc: Arc<ServiceState>) {
+    let usec: u64 = match std::env::var("WATCHDOG_USEC").ok().and_then(|v| v.parse().ok()) {
+        Some(u) if u > 0 => u,
+        _ => return, // no WatchdogSec configured → nothing to feed
+    };
+    let period = std::time::Duration::from_micros(usec / 2); // systemd-recommended margin
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(period);
+        tracing::info!(watchdog_usec = usec, "systemd watchdog keepalive started");
+        loop {
+            tick.tick().await;
+            let cache_fresh = svc
+                .posture_cache
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|c| !c.is_stale(now_ms())))
+                .unwrap_or(false);
+            if watchdog_should_ping(svc.app.is_active(), cache_fresh) {
+                sd_notify("WATCHDOG=1");
+            } else {
+                tracing::error!(
+                    "systemd watchdog: Active posture engine appears stalled (cache stale) — \
+                     withholding WATCHDOG ping; systemd will restart (SG-003 / SG9 fail-closed)"
+                );
+            }
+        }
+    });
+}
+
 // --- Entry point ------------------------------------------------------------
 
 #[tokio::main]
@@ -2511,6 +2599,13 @@ async fn main() {
     println!("Kirra Verifier Service listening on {listen_addr} (db: {db_path})");
     let listener = tokio::net::TcpListener::bind(&listen_addr).await
         .expect("failed to bind listener");
+
+    // #46: the listener is bound and startup invariants passed (SG-008) — tell
+    // systemd we are READY (Type=notify) and start the watchdog keepalive
+    // (gated on posture-engine liveness; fail-closed on a stalled engine). Both
+    // are no-ops outside a `Type=notify` / `WatchdogSec=` unit.
+    sd_notify("READY=1");
+    spawn_systemd_watchdog(Arc::clone(&svc_state));
 
     // #74: on safe-stop / shutdown, force a durable checkpoint so the audit chain
     // (and any NORMAL-connection writes) are fsync'd to disk — durable at the
@@ -3514,5 +3609,35 @@ mod dnp3_mandatory_audit_tests {
             "TR-012b: a unicast command is NOT blocked by an audit-write failure"
         );
         assert_eq!(v["adapter_details"]["is_broadcast"], false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #46 — systemd sd_notify / watchdog wiring.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod systemd_notify_tests {
+    use super::{sd_notify_to, watchdog_should_ping};
+    use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn watchdog_pings_active_only_when_cache_fresh() {
+        // Active liveness is gated on a fresh posture cache (engine-liveness).
+        assert!(watchdog_should_ping(true, true), "Active + fresh cache → ping");
+        assert!(!watchdog_should_ping(true, false), "Active + STALE cache → withhold (fail-closed)");
+        // PassiveStandby has no posture engine by design → plain keepalive.
+        assert!(watchdog_should_ping(false, false), "PassiveStandby → keepalive ping");
+        assert!(watchdog_should_ping(false, true), "PassiveStandby → keepalive ping");
+    }
+
+    #[test]
+    fn sd_notify_to_delivers_the_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notify.sock");
+        let listener = UnixDatagram::bind(&path).expect("bind notify socket");
+        sd_notify_to(path.as_os_str(), "READY=1").expect("sd_notify_to send");
+        let mut buf = [0u8; 64];
+        let n = listener.recv(&mut buf).expect("recv");
+        assert_eq!(&buf[..n], b"READY=1", "the exact sd_notify datagram must be delivered");
     }
 }

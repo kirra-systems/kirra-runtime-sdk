@@ -1,0 +1,60 @@
+# deploy/systemd/kirra-verifier.service  (#46)
+#
+# systemd unit for the Kirra runtime safety verifier, with a liveness watchdog.
+# The binary speaks sd_notify (Type=notify): it sends READY=1 once the listener
+# is bound + startup invariants pass (SG-008), and pings WATCHDOG=1 from the
+# posture-engine liveness signal. A hung-but-alive process (a dead posture
+# worker → stale posture cache) misses the ping, so systemd restarts it —
+# fail-closed, the same direction the in-process gate already fails.
+#
+# Install: cp to /etc/systemd/system/, `systemctl daemon-reload`, `enable --now`.
+
+[Unit]
+Description=Kirra runtime safety verifier (fail-closed governor)
+Documentation=https://github.com/justinlooney/kirra-runtime-sdk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/opt/kirra/kirra_verifier_service
+
+# Watchdog. A healthy Active node pings every WatchdogSec/2 (~5s) from the
+# posture refresh loop (POSTURE_REFRESH_INTERVAL_MS ~ 2.5s, so the cache is
+# always fresh within the window); a stalled posture engine misses the ping and
+# systemd restarts the process. WatchdogSec must exceed 2x the refresh interval.
+WatchdogSec=10s
+
+# Fail-closed restart: process death is already safe (panic=abort, DDS Volatile
+# durability, HA heartbeat absence within PROMOTION_TIMEOUT_MS); systemd brings
+# it back. A watchdog miss counts as a failure → restart. StartLimitIntervalSec=0
+# disables start-rate limiting so a safety service is always brought back.
+Restart=on-failure
+RestartSec=2s
+StartLimitIntervalSec=0
+
+# Secrets/config (KIRRA_ADMIN_TOKEN, KIRRA_SUPERVISOR_RESET_KEY, KIRRA_DB_PATH,
+# KIRRA_VERIFIER_ADDR, ...) via an operator-provided file. '-' makes it optional.
+EnvironmentFile=-/etc/kirra/kirra.env
+
+# Persistent state (the WAL-mode SQLite store). Point KIRRA_DB_PATH here, e.g.
+# /var/lib/kirra/kirra_verifier.sqlite.
+StateDirectory=kirra
+WorkingDirectory=/var/lib/kirra
+
+# Least privilege.
+User=kirra
+Group=kirra
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/kirra
+
+[Install]
+WantedBy=multi-user.target
