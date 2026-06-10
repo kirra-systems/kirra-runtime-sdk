@@ -639,7 +639,7 @@ mod kinematics_sim_tests {
             let target = (i as f64 * 0.5).min(30.0);
             ProposedVehicleCommand {
                 linear_velocity_mps: target,
-                current_velocity_mps: ((i as f64 - 1.0) * 0.5).max(0.0).min(30.0),
+                current_velocity_mps: ((i as f64 - 1.0) * 0.5).clamp(0.0, 30.0),
                 delta_time_s: DT,
                 steering_angle_deg: 0.0,
                 current_steering_angle_deg: 0.0,

@@ -110,9 +110,9 @@ impl CachedFleetPosture {
     /// Uses generation=0 (sentinel for "no engine recalculation has landed
     /// yet") and the current system time. `next_generation()` always returns
     /// >= 1, so a generation=0 seed is guaranteed to be superseded by the
-    /// first real engine write — required for the monotonic-replace check
-    /// in `replace_cache_if_newer` to accept the first recalc result.
-    /// For production engine writes, use `new_with_generation` instead.
+    /// > first real engine write — required for the monotonic-replace check
+    /// > in `replace_cache_if_newer` to accept the first recalc result.
+    /// > For production engine writes, use `new_with_generation` instead.
     pub fn new(posture: FleetPosture) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()

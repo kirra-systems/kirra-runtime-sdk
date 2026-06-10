@@ -4240,7 +4240,7 @@ mod audit_anchor_head_77_tests {
     use super::*;
     use rusqlite::params;
     use ed25519_dalek::SigningKey;
-    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+    use base64::engine::general_purpose::STANDARD as b64e;
 
     fn signed_store() -> (VerifierStore, ed25519_dalek::VerifyingKey) {
         let mut s = VerifierStore::new(":memory:").expect("store");
@@ -4459,7 +4459,7 @@ mod causal_chain_87_tests {
         }, sk.as_ref()).unwrap();
         s.append_causal_event(&CausalEventInput {
             entry_id: "entry-2", asset_id: "follower", event_type: "DEGRADE", payload: "{}",
-            caused_by: &[id1.clone()], affects_assets: &[],
+            caused_by: std::slice::from_ref(&id1), affects_assets: &[],
             fabric_generation: 1, timestamp_ms: 200,
         }, sk.as_ref()).unwrap();
         s.append_causal_event(&CausalEventInput {
@@ -4577,7 +4577,7 @@ mod causal_chain_87_tests {
             entry_id = e.entry_id.clone();
             s.append_causal_event(&CausalEventInput {
                 entry_id: "persist-2", asset_id: "b", event_type: "EVT2", payload: "{}",
-                caused_by: &[entry_id.clone()], affects_assets: &[],
+                caused_by: std::slice::from_ref(&entry_id), affects_assets: &[],
                 fabric_generation: 3, timestamp_ms: 2000,
             }, None).unwrap();
         } // drop closes the connection

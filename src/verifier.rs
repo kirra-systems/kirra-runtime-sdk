@@ -316,6 +316,9 @@ impl AppState {
     }
 
     /// Persist node to SQLite then update in-memory map (fail-closed: disk before memory).
+    // `Result<_, ()>` is intentional: the caller fail-closes on ANY error without
+    // needing a typed reason (the detail is logged at the store layer).
+    #[allow(clippy::result_unit_err)]
     pub fn persist_and_insert_node(&self, node: RegisteredNode) -> Result<(), ()> {
         self.store.lock()
             .map_err(|_| ())?
@@ -332,6 +335,7 @@ impl AppState {
     /// Returns `Ok(true)` if the node existed and was updated, `Ok(false)` if
     /// no such node is registered (the caller fail-closes on this), `Err(())`
     /// on a store failure.
+    #[allow(clippy::result_unit_err)] // intentional fail-closed `()` error; see persist_and_insert_node.
     pub fn mark_node_untrusted(
         &self,
         node_id: &str,
@@ -351,6 +355,7 @@ impl AppState {
     }
 
     /// Persist dependency list to SQLite then update in-memory graph (fail-closed).
+    #[allow(clippy::result_unit_err)] // intentional fail-closed `()` error; see persist_and_insert_node.
     pub fn persist_and_insert_deps(&self, node_id: &str, deps: Vec<String>) -> Result<(), ()> {
         self.store.lock()
             .map_err(|_| ())?

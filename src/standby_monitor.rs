@@ -641,6 +641,9 @@ async fn perform_promotion(
 
 #[cfg(test)]
 mod standby_monitor_tests {
+    // These tests assert COMPILE-TIME-CONSTANT invariants between config
+    // constants (e.g. TIMEOUT > WARN) — that they are constant is the point.
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     // NOTE (#80): the former wall-clock-age arithmetic tests

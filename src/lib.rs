@@ -1,5 +1,13 @@
 // src/lib.rs
 
+// These two doc lints fire on intentionally column-aligned ASCII derivation
+// tables in safety doc-comments (e.g. the SG2 lateral-margin budget in
+// `gateway/containment.rs`, the perception kinematic-ceiling budget in
+// `gateway/perception_monitor.rs`). Satisfying them would misalign those tables,
+// which are read as evidence — so the alignment wins over the markdown-nesting
+// pedantry.
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+
 pub mod kirra_core;
 pub mod modbus_adapter;
 pub mod config;

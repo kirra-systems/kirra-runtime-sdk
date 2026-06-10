@@ -140,7 +140,7 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             .payload
             .named_tensors
             .values()
-            .map(|s| s.as_slice().len() * std::mem::size_of::<f32>())
+            .map(|s| std::mem::size_of_val(s.as_slice()))
             .sum();
 
         let backend_ref = Arc::clone(&self.backend);

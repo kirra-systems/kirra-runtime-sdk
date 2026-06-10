@@ -212,18 +212,15 @@ proptest! {
     #[test]
     fn prop_clamp_linear_value_within_speed_contract(cmd in valid_dt_command()) {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
-        match validate_vehicle_command(&cmd, &contract) {
-            EnforceAction::ClampLinear(v) => {
-                prop_assert!(
-                    v.is_finite(),
-                    "ClampLinear value must be finite, got {v}"
-                );
-                prop_assert!(
-                    v.abs() <= contract.max_speed_mps + 1e-9,
-                    "ClampLinear value {v} must be <= max_speed {}", contract.max_speed_mps
-                );
-            }
-            _ => {}
+        if let EnforceAction::ClampLinear(v) = validate_vehicle_command(&cmd, &contract) {
+            prop_assert!(
+                v.is_finite(),
+                "ClampLinear value must be finite, got {v}"
+            );
+            prop_assert!(
+                v.abs() <= contract.max_speed_mps + 1e-9,
+                "ClampLinear value {v} must be <= max_speed {}", contract.max_speed_mps
+            );
         }
     }
 }
@@ -232,19 +229,16 @@ proptest! {
     #[test]
     fn prop_clamp_steering_value_is_finite(cmd in valid_dt_command()) {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
-        match validate_vehicle_command(&cmd, &contract) {
-            EnforceAction::ClampSteering(delta) => {
-                prop_assert!(
-                    delta.is_finite(),
-                    "ClampSteering value must be finite, got {delta}"
-                );
-                prop_assert!(
-                    delta.abs() <= contract.max_steering_deg + 1e-9,
-                    "ClampSteering value {delta} must be <= max_steering_deg {}",
-                    contract.max_steering_deg
-                );
-            }
-            _ => {}
+        if let EnforceAction::ClampSteering(delta) = validate_vehicle_command(&cmd, &contract) {
+            prop_assert!(
+                delta.is_finite(),
+                "ClampSteering value must be finite, got {delta}"
+            );
+            prop_assert!(
+                delta.abs() <= contract.max_steering_deg + 1e-9,
+                "ClampSteering value {delta} must be <= max_steering_deg {}",
+                contract.max_steering_deg
+            );
         }
     }
 }

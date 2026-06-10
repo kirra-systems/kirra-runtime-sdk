@@ -11,6 +11,11 @@
 // (linear_velocity_mps, steering_angle_deg) — semantically different
 // control representations.
 //
+// (clippy doc-list lints are allowed below: `angular_bound.rs` carries
+// column-aligned ASCII parameter-derivation tables in its doc-comments that the
+// markdown-nesting lints would misalign.)
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+//
 //   - Linear axis is bridged through Kirra's vehicle kinematics contract
 //     (acceleration, deceleration, lateral-accel; see
 //     `validate_vehicle_command`).
@@ -109,25 +114,24 @@ fn degraded_channel_violation(current: f64, proposed: f64, eps: f64) -> Option<&
     None
 }
 
-/// **Angular-velocity bound — SOTIF-derived (issue #136).**
-///
-/// The H1 placeholder constants (`MAX_ANGULAR_VELOCITY_RAD_S_PLACEHOLDER
-/// = 1.5`, `MRC_ANGULAR_VELOCITY_CEILING_RAD_S = 0.5`) are removed.
-/// The bound is now computed by
-/// `crate::angular_bound::AngularVelocityBound::omega_max(v)` from
-/// platform parameters (`PlatformParams`):
-///
-///   ω_max(v) = min(rollover(v), sweep, ftti)
-///
-/// with rollover masked below `ROLLOVER_MIN_LINEAR_VELOCITY_MPS` to
-/// handle the v=0 singularity. See `crate::angular_bound` and
-/// `docs/safety/ANGULAR_VELOCITY_SOTIF.md` for the derivation,
-/// assumptions, and worked reference numbers.
-///
-/// **Status:** DRAFT — pending formal safety-engineer review. The
-/// improvement over the H1 placeholders is real (reasoning + defensible
-/// values where there were none), but treating these numbers as a
-/// validated safety claim requires sign-off.
+// Angular-velocity bound — SOTIF-derived (issue #136).
+//
+// The H1 placeholder constants (`MAX_ANGULAR_VELOCITY_RAD_S_PLACEHOLDER = 1.5`,
+// `MRC_ANGULAR_VELOCITY_CEILING_RAD_S = 0.5`) are removed. The bound is now
+// computed by `crate::angular_bound::AngularVelocityBound::omega_max(v)` from
+// platform parameters (`PlatformParams`):
+//
+//   ω_max(v) = min(rollover(v), sweep, ftti)
+//
+// with rollover masked below `ROLLOVER_MIN_LINEAR_VELOCITY_MPS` to handle the
+// v=0 singularity. See `crate::angular_bound` and
+// `docs/safety/ANGULAR_VELOCITY_SOTIF.md` for the derivation, assumptions, and
+// worked reference numbers.
+//
+// Status: DRAFT — pending formal safety-engineer review. The improvement over
+// the H1 placeholders is real (reasoning + defensible values where there were
+// none), but treating these numbers as a validated safety claim requires
+// sign-off.
 
 /// CHECKER-OVER-DOER pairwise RSS evaluation (issue #92).
 ///
@@ -282,6 +286,12 @@ pub struct KirraGovernor {
     mrc_angular_bound: AngularVelocityBound,
 }
 
+impl Default for KirraGovernor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KirraGovernor {
     /// Construct a governor that holds both nominal and MRC fallback
     /// contract profiles and selects between them per-call based on
@@ -379,7 +389,7 @@ impl KirraGovernor {
     pub fn nominal() -> Self {
         let profile = VehicleKinematicsContract::nominal_reference_profile();
         Self {
-            nominal_contract: profile.clone(),
+            nominal_contract: profile,
             fallback_contract: profile,
             rss_state: RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX },
             nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
@@ -393,7 +403,7 @@ impl KirraGovernor {
     pub fn mrc_fallback() -> Self {
         let profile = VehicleKinematicsContract::mrc_fallback_profile();
         Self {
-            nominal_contract: profile.clone(),
+            nominal_contract: profile,
             fallback_contract: profile,
             rss_state: RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX },
             nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),

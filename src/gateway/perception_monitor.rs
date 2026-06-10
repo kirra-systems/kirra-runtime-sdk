@@ -635,7 +635,7 @@ pub fn apply_perception_cap(
     contract: &VehicleKinematicsContract,
     effective_cap: Option<f64>,
 ) -> VehicleKinematicsContract {
-    let mut out = contract.clone();
+    let mut out = *contract;
     if let Some(cap) = effective_cap {
         let existing = out.effective_max_speed_mps();
         out.odd_speed_cap_mps = Some(existing.min(cap));

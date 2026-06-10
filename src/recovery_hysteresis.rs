@@ -381,6 +381,9 @@ pub async fn handle_sensor_fault_report(
 
 #[cfg(test)]
 mod hysteresis_tests {
+    // These tests assert COMPILE-TIME-CONSTANT invariants between config
+    // constants (e.g. TIMEOUT > WARN) — that they are constant is the point.
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]

@@ -319,6 +319,9 @@ pub(crate) fn watchdog_sweep_once(
 
 #[cfg(test)]
 mod watchdog_tests {
+    // These tests assert COMPILE-TIME-CONSTANT invariants between config
+    // constants (e.g. TIMEOUT > WARN) — that they are constant is the point.
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]

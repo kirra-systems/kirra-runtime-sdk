@@ -1898,7 +1898,7 @@ mod camera_tests {
         let bytes = [10u8, 20, 30, 40]; // 2×2 mono
         let cfg = cfg_2x2_unit01_nchw(CameraEncoding::Mono8);
         let out = CameraMapping::new(cfg).to_tensor(&CameraSample { bytes: &bytes, src_width: 2, src_height: 2 }).expect("mono");
-        assert_eq!(get(&out).len(), 2 * 2 * 1, "mono8 produces H*W*1 floats");
+        assert_eq!(get(&out).len(), (2 * 2), "mono8 produces H*W*1 floats");
     }
 
     /// Resize nearest-neighbour to a larger target.
@@ -2879,7 +2879,7 @@ mod radar_tests {
         let r = t(&out);
         assert_eq!(r.len(), 5 * 2);
         assert_eq!(r[0 * 2], 10.0); // range
-        assert_eq!(r[1 * 2], 0.2);  // az
+        assert_eq!(r[2], 0.2);  // az
         assert_eq!(r[3 * 2], 4.0);  // velocity (Doppler)
         // detection-1 slots (odd indices) are padding.
         assert!((0..5).all(|f| r[f * 2 + 1] == 0.0));
@@ -3065,8 +3065,8 @@ mod radar_tests {
                 prop_assert_eq!(grid[base + 4], d.rcs);
             }
             // Remaining rows are zero padding — no phantom detections.
-            for slot in (k * RADAR_FEATURES)..(8 * RADAR_FEATURES) {
-                prop_assert_eq!(grid[slot], 0.0);
+            for &cell in &grid[(k * RADAR_FEATURES)..(8 * RADAR_FEATURES)] {
+                prop_assert_eq!(cell, 0.0);
             }
         }
     }

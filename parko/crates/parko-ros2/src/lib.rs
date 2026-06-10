@@ -20,6 +20,10 @@
 // (KIRRA-OCCY-TOPOLOGY-001) — the parallel-paths L1 decision Parko +
 // Occy run side by side, sharing safety primitives, never chained.
 
+// clippy doc-list lints allowed: `command_mapping.rs` documents the Twist 2D
+// subset as an aligned list the markdown-nesting lint would reformat.
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
