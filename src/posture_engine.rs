@@ -84,11 +84,17 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Step 2: Derive aggregate posture — pure function, no I/O.
     let dag_posture = derive_fleet_posture(&node_postures);
 
-    // RSS escalation: active violation elevates Nominal to Degraded.
-    // LockedOut (from DAG) is never downgraded by this check.
-    let new_posture = if app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
-        && dag_posture == FleetPosture::Nominal
-    {
+    // RSS / flood escalation: an active RSS violation OR active flood condition
+    // elevates Nominal to Degraded. The Nominal-only guard means LockedOut /
+    // Degraded (from the DAG) are NEVER downgraded by this check; the two
+    // conditions compose (either → Degraded); and recovery is automatic — when
+    // both flags clear and the DAG is Nominal, posture returns to Nominal via
+    // this same path (no separate recovery logic).
+    // SAFETY: SG4 | REQ: flood-posture-coupling | TEST: test_flood_active_nominal_escalates_to_degraded,test_flood_active_locked_out_stays_locked_out,test_flood_active_degraded_stays_degraded,test_flood_and_rss_compose,test_flood_clears_auto_recovers_to_nominal,test_flood_default_false_is_inert
+    let escalate = (app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
+        || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst))
+        && dag_posture == FleetPosture::Nominal;
+    let new_posture = if escalate {
         FleetPosture::Degraded
     } else {
         dag_posture
@@ -460,5 +466,132 @@ mod posture_engine_tests {
             "generation > 0 must populate an empty cache");
         let snap_gen = cache.read().unwrap().as_ref().unwrap().generation;
         assert_eq!(snap_gen, 1);
+    }
+
+    // ── #99 flood-condition → FleetPosture coupling ──────────────────────────
+    // Driven through the real authoritative write path (`recalculate_and_broadcast`,
+    // audit-commit-gated), reading the resulting cache posture. DAG postures are
+    // forced by inserting nodes: Untrusted → LockedOut, Unknown → Degraded,
+    // empty/Trusted → Nominal (per `recursive_calculate`).
+
+    fn active_app() -> std::sync::Arc<AppState> {
+        use crate::verifier::VerifierOperationMode;
+        use crate::verifier_store::VerifierStore;
+        let store = VerifierStore::new(":memory:").unwrap();
+        std::sync::Arc::new(AppState::new(store, VerifierOperationMode::Active))
+    }
+
+    fn insert_node(app: &AppState, id: &str, status: NodeTrustState) {
+        use crate::verifier::RegisteredNode;
+        app.nodes.insert(
+            id.to_string(),
+            RegisteredNode {
+                node_id: id.to_string(),
+                status,
+                registered_at_ms: 0,
+                last_trust_update_ms: 0,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+            },
+        );
+    }
+
+    fn cache_posture(cache: &SharedPostureCache) -> Option<FleetPosture> {
+        cache.read().ok().and_then(|g| g.as_ref().map(|c| c.posture.clone()))
+    }
+
+    fn empty_cache() -> SharedPostureCache {
+        std::sync::Arc::new(std::sync::RwLock::new(None))
+    }
+
+    #[test]
+    fn test_flood_active_nominal_escalates_to_degraded() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "flood + DAG Nominal must escalate to Degraded");
+    }
+
+    /// THE KEY SAFETY ASSERTION: flood never downgrades a DAG LockedOut.
+    #[test]
+    fn test_flood_active_locked_out_stays_locked_out() {
+        let app = active_app();
+        let cache = empty_cache();
+        insert_node(&app, "n", NodeTrustState::Untrusted("test".to_string())); // DAG → LockedOut
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
+            "flood must NEVER downgrade a DAG LockedOut");
+    }
+
+    #[test]
+    fn test_flood_active_degraded_stays_degraded() {
+        let app = active_app();
+        let cache = empty_cache();
+        insert_node(&app, "n", NodeTrustState::Unknown); // DAG → Degraded
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "flood does not alter an already-Degraded DAG posture");
+    }
+
+    /// flood and RSS compose: either active (with Nominal DAG) → Degraded.
+    #[test]
+    fn test_flood_and_rss_compose() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        app.rss_active_violation.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "flood OR rss escalates Nominal → Degraded");
+    }
+
+    /// Clearing the flag auto-recovers to Nominal via the existing path — no new
+    /// recovery logic.
+    #[test]
+    fn test_flood_clears_auto_recovers_to_nominal() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
+
+        app.flood_condition_active.store(false, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
+            "clearing the flood flag returns posture to Nominal (auto-recovery)");
+    }
+
+    /// Default-false flag is inert (no setter exists in this PR).
+    #[test]
+    fn test_flood_default_false_is_inert() {
+        let app = active_app();
+        let cache = empty_cache();
+        assert!(!app.flood_condition_active.load(Ordering::SeqCst), "the flag defaults false");
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
+            "no flood (default) → no escalation");
+    }
+
+    /// The flood escalation flows through the EXISTING audit-commit-gated path:
+    /// the cache being written to Degraded proves the audit committed, and the
+    /// existing posture-transition event is emitted (no new audit plumbing).
+    #[test]
+    fn test_flood_transition_flows_through_audit_gated_path() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.flood_condition_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
+
+        let store = app.store.lock().unwrap();
+        let events = store.load_all_posture_events().expect("load events");
+        assert!(
+            events.iter().any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
+            "the flood escalation must emit the existing posture-transition audit event"
+        );
     }
 }

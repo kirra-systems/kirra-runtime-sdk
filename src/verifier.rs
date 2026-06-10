@@ -227,6 +227,12 @@ pub struct AppState {
     pub transport_identity: TransportIdentityConfig,
     /// True while an RSS safe-distance violation is active (recalculate elevates to Degraded).
     pub rss_active_violation: Arc<AtomicBool>,
+    /// #99 — true while flood conditions are present. Read by the posture engine
+    /// to escalate Nominal → Degraded (SG4 operational layer), exactly like
+    /// `rss_active_violation`. The SETTER (a flood detector, or a bridge from
+    /// sustained #98 WATER_UNTRAVERSABLE vetoes) is a deferred cross-subsystem
+    /// follow-up; this flag is read-only in the current code (defaults false).
+    pub flood_condition_active: Arc<AtomicBool>,
     /// Recovery streak for clearing an active RSS violation.
     pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
     /// #104 — the currently-open post-incident forensic sequence (correlation id
@@ -264,6 +270,7 @@ impl AppState {
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
+            flood_condition_active: Arc::new(AtomicBool::new(false)),
             rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
