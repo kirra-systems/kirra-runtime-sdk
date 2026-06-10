@@ -170,6 +170,21 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         return;
     }
 
+    // #104: post-incident forensic sequence — OBSERVABILITY ONLY. Runs only
+    // after the posture transition is committed to the chain (above); it never
+    // perturbs or blocks the cache/broadcast path below. A failed forensic write
+    // bumps `post_incident_write_failures` and is dropped, never propagated.
+    // Emitted on both Active and PassiveStandby (whichever node wrote the
+    // posture audit), before the PassiveStandby early-return.
+    crate::post_incident::record_posture_transition(
+        app,
+        previous_posture.as_ref(),
+        &new_posture,
+        is_transition,
+        generation,
+        ts,
+    );
+
     // Step 5: PassiveStandby — audit only, no cache or broadcast mutation.
     if !app.is_active() {
         tracing::debug!(

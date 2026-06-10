@@ -229,6 +229,14 @@ pub struct AppState {
     pub rss_active_violation: Arc<AtomicBool>,
     /// Recovery streak for clearing an active RSS violation.
     pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
+    /// #104 — the currently-open post-incident forensic sequence (correlation id
+    /// + ordinal), or `None` when no incident is open. Volatile; the durable
+    /// forensic record lives in the signed audit chain.
+    pub current_incident: Arc<Mutex<Option<crate::post_incident::IncidentState>>>,
+    /// #104 — operator-observable count of post-incident audit writes that were
+    /// detected but could not be durably recorded (#245/#247 pattern). MUST be 0
+    /// in a healthy deployment; never gates the verdict path.
+    pub post_incident_write_failures: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -253,6 +261,8 @@ impl AppState {
             transport_identity: TransportIdentityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
             rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            current_incident: Arc::new(Mutex::new(None)),
+            post_incident_write_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 

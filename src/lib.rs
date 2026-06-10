@@ -32,6 +32,9 @@ pub mod clock;
 pub mod scenario_runner;
 pub mod audit_chain;
 pub mod audit_writer;
+// #104 — post-incident forensic sequence instrumentation (observability-only;
+// emits a correlation-id'd, signed, hash-chained sequence into the audit log).
+pub mod post_incident;
 // Learning-loop capture channel (Phase 1, #190) — sibling of audit_writer;
 // non-blocking, default-OFF side channel recording the verdict/correction.
 pub mod capture;
