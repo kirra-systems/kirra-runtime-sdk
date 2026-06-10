@@ -28,7 +28,9 @@ use parko_core::backends::mock::MockBackend;
 use parko_core::commands::ControlCommand;
 use parko_core::safety::SafetyPosture;
 use parko_core::scheduler::InferenceLoop;
-use parko_kirra::{DiverseKirraGovernor, GovernorComparator, KirraGovernor};
+use parko_kirra::{
+    select_divergence_sink, DiverseKirraGovernor, GovernorComparator, KirraGovernor,
+};
 use parko_ros2::{
     comparator_adapter::ComparatorAsGovernor,
     config::ParkoNodeConfig,
@@ -57,6 +59,53 @@ fn build_dev_backend() -> Arc<MockBackend> {
     outputs.insert("cmd_vel_linear".to_string(),  vec![0.0]);
     outputs.insert("cmd_vel_angular".to_string(), vec![0.0]);
     Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu))
+}
+
+/// CERT-006: resolve the comparator divergence sink from the environment,
+/// fail-closed.
+///
+///   - `PARKO_DIVERGENCE_AUDIT_DB` — SQLite path for the durable, hash-chained
+///     audit ledger. Unset → divergences are buffered in memory only
+///     (ephemeral; NOT certification-grade) and a loud WARN is emitted.
+///   - `KIRRA_LOG_SIGNING_KEY` — base64 Ed25519 signing key. REQUIRED when the
+///     audit DB is set; the durable chain must be signed to be tamper-evident.
+///
+/// If a durable audit was requested but cannot be made signed + persistent
+/// (missing/invalid key, or the store will not open), that is a FATAL
+/// misconfiguration: the node exits non-zero rather than run with divergences
+/// going unaudited while the operator believes they are captured.
+fn build_divergence_sink() -> Arc<dyn parko_kirra::comparator::DivergenceEventSink> {
+    let db = std::env::var("PARKO_DIVERGENCE_AUDIT_DB").ok();
+    let key = std::env::var("KIRRA_LOG_SIGNING_KEY").ok();
+
+    let durable_requested = db.as_deref().is_some_and(|s| !s.is_empty());
+
+    match select_divergence_sink(db, key) {
+        Ok(sink) => {
+            if durable_requested {
+                tracing::info!(
+                    "parko-ros2: CERT-006 comparator divergences → durable, signed audit chain \
+                     (PARKO_DIVERGENCE_AUDIT_DB)"
+                );
+            } else {
+                tracing::warn!(
+                    "parko-ros2: PARKO_DIVERGENCE_AUDIT_DB is unset — comparator divergences are \
+                     buffered IN MEMORY ONLY and are LOST on restart. This is NOT a \
+                     certification-grade configuration; set PARKO_DIVERGENCE_AUDIT_DB and \
+                     KIRRA_LOG_SIGNING_KEY for a durable, signed divergence record."
+                );
+            }
+            sink
+        }
+        Err(e) => {
+            tracing::error!(
+                "parko-ros2: FATAL — cannot configure the CERT-006 divergence audit sink: {e}. \
+                 A durable audit was requested but cannot be made signed + persistent. Refusing \
+                 to start with divergences unaudited."
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 fn build_loop<B>(
@@ -93,8 +142,13 @@ where
 
     // CERT-006: diverse redundancy — primary KirraGovernor paired with a
     // structurally diverse DiverseKirraGovernor shadow, so the comparator can
-    // catch implementation-level systematic faults, not just random ones.
-    let comparator = GovernorComparator::new(KirraGovernor::new(), DiverseKirraGovernor::new());
+    // catch implementation-level systematic faults, not just random ones. Every
+    // divergence is routed to the selected sink (durable+signed if configured).
+    let comparator = GovernorComparator::with_sink(
+        KirraGovernor::new(),
+        DiverseKirraGovernor::new(),
+        build_divergence_sink(),
+    );
     let infer = InferenceLoop::new(backend, model, actuator_tx)
         .with_governor(ComparatorAsGovernor(comparator))
         .with_tick_period(tick_period_s);

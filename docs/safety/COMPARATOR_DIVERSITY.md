@@ -31,8 +31,11 @@ The `GovernorComparator` is Kirra's software lockstep: it runs two safety
 governors on the same input each tick and compares their outputs. On a
 persistent divergence (and once the vehicle is at a safe speed) it escalates
 to a fail-closed `Deny` (LockedOut). The escalation, leaky-bucket
-accumulator, speed gate and audit sink are unchanged by this work — see the
-`comparator.rs` module documentation.
+accumulator and speed gate are unchanged by this work — see the
+`comparator.rs` module documentation. The **divergence sink** (where each
+detected divergence is recorded) is now selectable per deployment: an
+ephemeral in-memory buffer (dev/test) or a durable, Ed25519-signed,
+hash-chained audit ledger (production). See §7a.
 
 Until CERT-006-diversity, the comparator ran **two identical
 `KirraGovernor` instances**. Identical redundancy detects:
@@ -183,6 +186,40 @@ is materially more effort and is **not** built in this deliverable.
   comparator is now generic over the shadow type (default
   `DiverseKirraGovernor`; a second `KirraGovernor` still constructs the
   legacy identical-redundancy comparator for tests).
+
+## 7a. Durable divergence audit sink (CERT-006 follow-up)
+
+A divergence the comparator *detects but does not durably record* is itself
+safety-relevant: a post-incident investigation needs a tamper-evident trail of
+every time the primary and shadow governors disagreed. The reference node
+(`parko-ros2`) therefore wires the comparator to a sink selected fail-closed
+from two environment variables:
+
+| `PARKO_DIVERGENCE_AUDIT_DB` | `KIRRA_LOG_SIGNING_KEY` | Sink selected | Notes |
+|---|---|---|---|
+| unset / empty | unset | in-memory (ephemeral) | node emits a loud `WARN`; **not** certification-grade — divergences are lost on restart |
+| unset / empty | set | in-memory (ephemeral) | a signing key with no DB is inert; same `WARN` |
+| set | set (valid) + store opens | **durable + signed** | divergences appended to the SDK's hash-chained `audit_log_chain`, Ed25519-signed with the supplied key |
+| set | unset | **FATAL — node exits non-zero** | a durable audit was requested but would be unsigned (not tamper-evident); no silent fallback |
+| set | set but invalid, OR store will not open | **FATAL — node exits non-zero** | no silent fallback to an ephemeral/unsigned sink |
+
+The selection logic is `parko_kirra::select_divergence_sink`; the durable sink
+is `AuditChainLinkerDivergenceSink`, which records each divergence through the
+SDK's `VerifierStore::save_posture_event_chained` with event type
+`"ComparatorDivergence"` and the JSON-serialised `DivergenceEvent` as the body.
+A persistence failure is never swallowed: it increments an operator-observable
+`write_failures` counter and logs loudly.
+
+**Scope of the durability claim (honest limits):**
+
+- The chain is **node-local**. Each `parko-ros2` node signs its own divergence
+  ledger with `KIRRA_LOG_SIGNING_KEY`. It is hash-linked and signature-verifiable
+  (`verify_audit_chain_full`), but it does **not** yet participate in the
+  verifier's `#165` key-adoption / lineage trust map, and divergences are **not**
+  forwarded to the central verifier audit chain. Cross-node correlation and
+  fleet-level key trust are a tracked follow-up, not part of this deliverable.
+- The signing key is supplied via env (`KIRRA_LOG_SIGNING_KEY`); key custody,
+  rotation and HSM-backing are deployment concerns outside this document.
 
 ## 8. Status
 

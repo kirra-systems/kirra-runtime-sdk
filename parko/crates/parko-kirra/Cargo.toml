@@ -12,10 +12,13 @@ kirra-runtime-sdk = { path = "../../.." }
 # it through the SDK's hash-chained, signed audit log (VerifierStore).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `AuditChainLinkerDivergenceSink::open` parses a base64-encoded Ed25519 signing
+# key (KIRRA_LOG_SIGNING_KEY) in non-test code, so these are regular deps.
+ed25519-dalek = { version = "2" }
+base64 = "0.22"
 
 [dev-dependencies]
 proptest = "1"
-# Durability + signing test for AuditChainLinkerDivergenceSink: a real signing
-# key + a file-backed SQLite audit chain.
-ed25519-dalek = { version = "2" }
+# Durability + signing test for AuditChainLinkerDivergenceSink: a file-backed
+# SQLite audit chain.
 tempfile = "3"

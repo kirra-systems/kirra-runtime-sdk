@@ -19,12 +19,71 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
+use ed25519_dalek::SigningKey;
 use kirra_runtime_sdk::verifier_store::VerifierStore;
 
-use crate::comparator::{DivergenceEvent, DivergenceEventSink};
+use crate::comparator::{DivergenceEvent, DivergenceEventSink, InMemoryDivergenceSink};
 
 /// The audit-log event type for a comparator divergence (the doc-spec name).
 pub const COMPARATOR_DIVERGENCE_EVENT_TYPE: &str = "ComparatorDivergence";
+
+/// A fail-closed misconfiguration of the durable divergence sink (CERT-006).
+///
+/// The reference node treats every variant as FATAL: a deployment that asked
+/// for a durable audit (`PARKO_DIVERGENCE_AUDIT_DB` set) but cannot produce a
+/// *signed, persisted* record must NOT silently fall back to the ephemeral
+/// in-memory sink — that would leave comparator divergences unaudited while the
+/// operator believes they are captured.
+#[derive(Debug)]
+pub enum FatalAuditConfig {
+    /// A durable DB was requested but no signing key was supplied. The audit
+    /// chain would be persisted but UNSIGNED — not tamper-evident — so reject.
+    MissingSigningKey,
+    /// The supplied signing key could not be decoded into an Ed25519 key
+    /// (bad base64, or not 32 bytes).
+    InvalidSigningKey(String),
+    /// The SQLite audit store at the requested path could not be opened.
+    StoreOpenFailed(String),
+}
+
+impl std::fmt::Display for FatalAuditConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FatalAuditConfig::MissingSigningKey => write!(
+                f,
+                "PARKO_DIVERGENCE_AUDIT_DB is set but KIRRA_LOG_SIGNING_KEY is unset — \
+                 a durable divergence audit must be signed (tamper-evident); refusing to \
+                 persist an unsigned chain"
+            ),
+            FatalAuditConfig::InvalidSigningKey(why) => write!(
+                f,
+                "KIRRA_LOG_SIGNING_KEY is not a valid base64 Ed25519 signing key: {why}"
+            ),
+            FatalAuditConfig::StoreOpenFailed(why) => write!(
+                f,
+                "could not open the divergence audit store (PARKO_DIVERGENCE_AUDIT_DB): {why}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FatalAuditConfig {}
+
+/// Decode a base64-encoded 32-byte Ed25519 signing key (the same encoding the
+/// verifier service accepts for `KIRRA_LOG_SIGNING_KEY`).
+fn parse_signing_key(key_b64: &str) -> Result<SigningKey, FatalAuditConfig> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(key_b64.trim())
+        .map_err(|e| FatalAuditConfig::InvalidSigningKey(e.to_string()))?;
+    let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+        FatalAuditConfig::InvalidSigningKey(format!(
+            "expected 32 key bytes, got {}",
+            raw.len()
+        ))
+    })?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
 
 /// Durable, signed [`DivergenceEventSink`] (CERT-006).
 ///
@@ -49,6 +108,18 @@ impl AuditChainLinkerDivergenceSink {
             store,
             write_failures: AtomicU64::new(0),
         }
+    }
+
+    /// Open a durable, *signed* divergence sink from a DB path and a base64
+    /// Ed25519 signing key. Fail-closed: a store that cannot be opened, or a key
+    /// that cannot be decoded, is a [`FatalAuditConfig`] — never a silent
+    /// fallback to an unsigned or ephemeral sink.
+    pub fn open(db_path: &str, key_b64: &str) -> Result<Self, FatalAuditConfig> {
+        let key = parse_signing_key(key_b64)?;
+        let mut store = VerifierStore::new(db_path)
+            .map_err(|e| FatalAuditConfig::StoreOpenFailed(e.to_string()))?;
+        store.set_signing_key(key);
+        Ok(Self::new(Arc::new(Mutex::new(store))))
     }
 
     /// Number of divergences that were DETECTED but could NOT be durably +
@@ -109,6 +180,37 @@ impl DivergenceEventSink for AuditChainLinkerDivergenceSink {
                  divergence detected but NOT in the tamper-evident log"
             );
         }
+    }
+}
+
+/// Select the divergence sink for a deployment from its two environment
+/// inputs, applying the CERT-006 fail-closed contract:
+///
+/// | `db` (`PARKO_DIVERGENCE_AUDIT_DB`) | `key` (`KIRRA_LOG_SIGNING_KEY`) | result |
+/// |---|---|---|
+/// | unset | unset | `Ok` ephemeral in-memory sink — caller MUST warn (non-cert) |
+/// | unset | set   | `Ok` ephemeral in-memory sink — caller MUST warn (non-cert) |
+/// | set   | set, valid, store opens | `Ok` durable + signed sink |
+/// | set   | unset | `Err(MissingSigningKey)` — would be unsigned |
+/// | set   | invalid key OR store unopenable | `Err(...)` — no silent fallback |
+///
+/// The key insight: a durable audit was *requested* (db set) but cannot be made
+/// tamper-evident → FATAL. The caller (the reference node) exits non-zero.
+pub fn select_divergence_sink(
+    db: Option<String>,
+    key: Option<String>,
+) -> Result<Arc<dyn DivergenceEventSink>, FatalAuditConfig> {
+    match db.as_deref() {
+        // No durable DB requested → ephemeral sink (the caller warns it is
+        // non-cert / divergences are not persisted). A stray signing key with
+        // no DB is harmless: nothing to sign.
+        None | Some("") => Ok(Arc::new(InMemoryDivergenceSink::new())),
+        Some(db_path) => match key.as_deref() {
+            None | Some("") => Err(FatalAuditConfig::MissingSigningKey),
+            Some(key_b64) => Ok(Arc::new(AuditChainLinkerDivergenceSink::open(
+                db_path, key_b64,
+            )?)),
+        },
     }
 }
 
@@ -192,6 +294,113 @@ mod tests {
             sink.write_failures(),
             1,
             "a divergence that could not be durably recorded MUST be counted, not swallowed"
+        );
+    }
+
+    /// Base64-encode a 32-byte key the way `KIRRA_LOG_SIGNING_KEY` is supplied.
+    fn key_b64(seed: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([seed; 32])
+    }
+
+    // --- TASK 3a: `select_divergence_sink` fail-closed contract -------------
+
+    /// db unset + key unset → ephemeral in-memory sink (caller warns).
+    #[test]
+    fn select_neither_set_yields_in_memory_sink() {
+        let sink = select_divergence_sink(None, None).expect("in-memory is Ok");
+        // It records without panicking and is NOT durable (nothing to assert on
+        // disk) — exercising it proves the trait object is usable.
+        sink.record(sample_event());
+    }
+
+    /// db unset + key set → still ephemeral (a key with no DB is harmless).
+    #[test]
+    fn select_key_without_db_yields_in_memory_sink() {
+        let sink =
+            select_divergence_sink(None, Some(key_b64(9))).expect("in-memory is Ok");
+        sink.record(sample_event());
+    }
+
+    /// An empty DB string is treated as unset (env vars are often set to "").
+    #[test]
+    fn select_empty_db_string_is_treated_as_unset() {
+        let sink = select_divergence_sink(Some(String::new()), Some(key_b64(9)))
+            .expect("empty db == unset → in-memory Ok");
+        sink.record(sample_event());
+    }
+
+    /// db set + key UNSET → fatal: a durable audit was requested but would be
+    /// unsigned. No silent fallback.
+    #[test]
+    fn select_db_without_key_is_fatal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.sqlite");
+        let res = select_divergence_sink(Some(db.to_str().unwrap().to_string()), None);
+        assert!(
+            matches!(res, Err(FatalAuditConfig::MissingSigningKey)),
+            "durable audit with no signing key must be fatal"
+        );
+    }
+
+    /// db set + key set but UNDECODABLE → fatal, not a fallback.
+    #[test]
+    fn select_db_with_invalid_key_is_fatal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.sqlite");
+        let res = select_divergence_sink(
+            Some(db.to_str().unwrap().to_string()),
+            Some("not-valid-base64-!!!".to_string()),
+        );
+        assert!(
+            matches!(res, Err(FatalAuditConfig::InvalidSigningKey(_))),
+            "an undecodable signing key must be fatal"
+        );
+    }
+
+    /// A well-formed base64 string of the wrong length is also fatal.
+    #[test]
+    fn select_db_with_wrong_length_key_is_fatal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.sqlite");
+        let short = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+        let res = select_divergence_sink(Some(db.to_str().unwrap().to_string()), Some(short));
+        assert!(
+            matches!(res, Err(FatalAuditConfig::InvalidSigningKey(_))),
+            "a 16-byte key must be fatal"
+        );
+    }
+
+    /// db set + valid key + openable store → durable, SIGNED sink, end-to-end:
+    /// a recorded divergence verifies under the supplied key's public half.
+    #[test]
+    fn select_db_and_valid_key_yields_durable_signed_sink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("audit.sqlite");
+        let db_path = db.to_str().unwrap().to_string();
+
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let vk = key.verifying_key();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key.to_bytes());
+
+        let sink = select_divergence_sink(Some(db_path.clone()), Some(b64))
+            .expect("durable sink with a valid key is Ok");
+        sink.record(sample_event());
+
+        // Re-open the same DB and prove the entry is durable + signed.
+        let verifier = VerifierStore::new(&db_path).expect("re-open store");
+        let v = verifier
+            .verify_audit_chain_full(Some(&vk))
+            .expect("verify chain");
+        assert!(v.chain_intact, "chain must be hash-intact");
+        assert!(v.signature_valid, "signature must verify under the key");
+        assert!(v.signed_entries >= 1, "the divergence entry must be signed");
+
+        let events = verifier.load_all_posture_events().expect("load events");
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event_type"] == COMPARATOR_DIVERGENCE_EVENT_TYPE),
+            "a ComparatorDivergence audit entry must be persisted"
         );
     }
 }

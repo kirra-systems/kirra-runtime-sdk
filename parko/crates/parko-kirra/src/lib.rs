@@ -49,7 +49,9 @@ pub mod audit_sink;
 pub mod comparator;
 pub mod diverse;
 pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEAR_VELOCITY_MPS};
-pub use audit_sink::AuditChainLinkerDivergenceSink;
+pub use audit_sink::{
+    select_divergence_sink, AuditChainLinkerDivergenceSink, FatalAuditConfig,
+};
 pub use comparator::{GovernorComparator, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
 
