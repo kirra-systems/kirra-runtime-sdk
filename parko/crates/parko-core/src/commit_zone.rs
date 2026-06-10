@@ -106,6 +106,12 @@ pub struct CommitZoneCfg {
     /// Extra receiving-space margin (m) required beyond the vehicle length for a
     /// downstream exit to count as verified. VALIDATION-PENDING.
     pub exit_margin_m: f64,
+    /// Temporal safety margin (s) the ego must FULLY clear a conflict zone ahead
+    /// of a non-yielding crosser's arrival (the train / fast non-yielding-agent
+    /// model). VALIDATION-PENDING — the margin also absorbs MODERATE agent
+    /// acceleration (the model itself is constant-speed; a worst-case
+    /// ACCELERATING agent is explicitly out of scope here).
+    pub clearance_time_margin_s: f64,
 }
 
 impl Default for CommitZoneCfg {
@@ -115,6 +121,7 @@ impl Default for CommitZoneCfg {
             look_ahead_m: 94.0,    // SG5 / SG4 ≈ 94 m look-ahead basis
             vehicle_length_m: 4.5, // a passenger-vehicle-class default
             exit_margin_m: 1.0,    // a small standoff beyond the vehicle length
+            clearance_time_margin_s: 2.0, // conservative temporal standoff
         }
     }
 }
@@ -140,6 +147,118 @@ pub struct ExitClearanceEvidence {
 pub fn exit_clearance_verified(evidence: &ExitClearanceEvidence, cfg: &CommitZoneCfg) -> bool {
     evidence.downstream_clear_m.is_finite()
         && evidence.downstream_clear_m >= cfg.vehicle_length_m + cfg.exit_margin_m
+}
+
+/// A non-yielding crosser converging on the commit zone — a train, or a fast
+/// agent that will NOT brake for the ego (the no-yield assumption). Synthetic in
+/// tests; detection / ingestion is DEFERRED (as with the agent-set / water /
+/// occlusion ingestion).
+///
+/// WHY THIS ISN'T RSS: `longitudinal_safe_distance` assumes the other agent
+/// BRAKES at `brake_max` (the yielding assumption). A train does not yield. This
+/// model assumes the agent MAINTAINS speed (never brakes) and asks whether it
+/// will occupy the conflict zone while the ego is still inside it.
+#[derive(Debug, Clone, Copy)]
+pub struct NonYieldingAgent {
+    /// The agent's converging speed (m/s) toward the conflict zone. Assumed
+    /// CONSTANT (no braking). `<= 0` (stationary / receding), finite → the agent
+    /// never arrives (clear w.r.t. it). Non-finite → fail-closed NOT clear.
+    pub approach_velocity_mps: f64,
+    /// Distance along the AGENT's path to the conflict zone (m). Non-finite →
+    /// fail-closed NOT clear.
+    pub distance_to_conflict_m: f64,
+}
+
+/// The non-yielding-crosser scene this tick. Mirrors `AgentScene`'s three-way
+/// ABSENT-vs-KNOWN discipline EXACTLY (cf. parko-kirra empty-agents rule, #92):
+/// an absent detector is NOT "no train", and an EMPTY agent vector is ambiguous
+/// vs a positive "none detected" — both fail closed.
+#[derive(Debug, Clone)]
+pub enum NonYieldingScene {
+    /// No detection ran this tick → fail-closed NOT clear (absent ≠ none).
+    Absent,
+    /// Detection ran and positively reported NO non-yielding agent → clear by
+    /// this check.
+    KnownNone,
+    /// Detected non-yielding agents — ALL must clear. An EMPTY vec is ambiguous
+    /// vs `KnownNone` and is treated as NOT clear (the #92 empty-agents rule).
+    Agents(Vec<NonYieldingAgent>),
+}
+
+/// SG5 — derive `clearance_confirmed` against the NON-YIELDING model: is entry
+/// clear of EVERY converging non-yielding crosser?
+///
+/// `true` iff the ego FULLY exits the conflict zone (its whole length past the
+/// far edge) before each agent arrives, with `clearance_time_margin_s` to spare:
+///
+/// * `ego_full_clear_time = (map.distance_to_zone_m + zone_length_m +
+///   cfg.vehicle_length_m) / ego_speed_mps` — constant-speed ego (conservative).
+/// * `agent_arrival_time = distance_to_conflict_m / approach_velocity_mps` —
+///   constant speed, NO braking assumed.
+/// * an agent is clear iff `agent_arrival_time > ego_full_clear_time +
+///   cfg.clearance_time_margin_s` (STRICT). ALL agents must clear.
+///
+/// FAIL-CLOSED arithmetic:
+/// * `ego_speed_mps <= 0` or non-finite → NOT clear (an ego that cannot traverse
+///   cannot claim clearance).
+/// * any non-finite agent field → NOT clear (NaN must not ride the `<= 0` branch).
+/// * `approach_velocity_mps <= 0` (stationary / receding), FINITE → that agent
+///   never arrives → clear w.r.t. that agent.
+/// * `Absent` / empty `Agents` vec → NOT clear; `KnownNone` → clear.
+///
+/// Callers POPULATE `ZoneAhead.clearance_confirmed` with this — the same pattern
+/// as [`exit_clearance_verified`]. NOTE: "confirmed clearance" for SG5 now means
+/// CONFIRMED AGAINST THE NON-YIELDING MODEL, not perception's optimistic guess.
+// SAFETY: SG5 | REQ: non-yielding-agent-clearance | TEST: test_nonyield_train_beats_ego_not_clear,test_nonyield_ego_clears_with_margin,test_nonyield_margin_boundary_strict,test_nonyield_all_rule_one_not_clear,test_nonyield_absent_not_clear,test_nonyield_known_none_clear,test_nonyield_empty_vec_not_clear,test_nonyield_ego_speed_nonpositive_or_nan_not_clear,test_nonyield_agent_receding_clear_nan_velocity_not_clear,test_nonyield_nonfinite_distance_not_clear
+pub fn non_yielding_clearance(
+    scene: &NonYieldingScene,
+    map: &CommitZoneMap,
+    zone_length_m: f64,
+    ego_speed_mps: f64,
+    cfg: &CommitZoneCfg,
+) -> bool {
+    let agents = match scene {
+        // Absent detector ≠ "no train"; empty vec is ambiguous vs KnownNone.
+        NonYieldingScene::Absent => return false,
+        NonYieldingScene::KnownNone => return true,
+        NonYieldingScene::Agents(a) if a.is_empty() => return false,
+        NonYieldingScene::Agents(a) => a,
+    };
+
+    // An ego that cannot traverse cannot claim clearance.
+    if !ego_speed_mps.is_finite() || ego_speed_mps <= 0.0 {
+        return false;
+    }
+    if !map.distance_to_zone_m.is_finite() || !zone_length_m.is_finite() {
+        return false;
+    }
+    let ego_full_clear_time =
+        (map.distance_to_zone_m + zone_length_m + cfg.vehicle_length_m) / ego_speed_mps;
+    if !ego_full_clear_time.is_finite() {
+        return false;
+    }
+
+    for agent in agents {
+        // NaN discipline FIRST so a non-finite value can never ride the <= 0
+        // (receding) branch.
+        if !agent.approach_velocity_mps.is_finite() || !agent.distance_to_conflict_m.is_finite() {
+            return false;
+        }
+        // Stationary / receding (finite) → never arrives → clear w.r.t. this one.
+        if agent.approach_velocity_mps <= 0.0 {
+            continue;
+        }
+        let agent_arrival_time = agent.distance_to_conflict_m / agent.approach_velocity_mps;
+        if !agent_arrival_time.is_finite() {
+            return false;
+        }
+        // Clear ONLY if the agent arrives strictly AFTER the ego has fully
+        // cleared, plus the temporal margin. Equality (or earlier) → NOT clear.
+        if agent_arrival_time <= ego_full_clear_time + cfg.clearance_time_margin_s {
+            return false;
+        }
+    }
+    true
 }
 
 /// SG5 — must the governor BLOCK entry to this commit zone (stop short)?
@@ -502,5 +621,126 @@ mod tests {
         };
         assert!(commit_zone_blocked(&s, &c),
             "a derived unverified exit must veto entry");
+    }
+
+    // ───────────────────── #108 non-yielding-agent clearance ───────────────
+
+    /// Reference geometry: zone at 50 m, length 30 m, ego 10 m/s. The ego must
+    /// clear `50 + 30 + 4.5 = 84.5 m` → `ego_full_clear_time = 8.45 s`. With the
+    /// default 2.0 s margin the agent must arrive AFTER 10.45 s.
+    fn agents(v: Vec<NonYieldingAgent>) -> NonYieldingScene {
+        NonYieldingScene::Agents(v)
+    }
+
+    /// Headline case: a train arrives BEFORE the ego has cleared → not clear.
+    #[test]
+    fn test_nonyield_train_beats_ego_not_clear() {
+        // arrival = 60 / 10 = 6.0 s  <  8.45 s clear time → not clear.
+        let s = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0,
+        }]);
+        assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a train that arrives before the ego clears must NOT be clear");
+    }
+
+    /// Ego clears with margin to spare → clear.
+    #[test]
+    fn test_nonyield_ego_clears_with_margin() {
+        // arrival = 200 / 10 = 20.0 s  >  8.45 + 2.0 = 10.45 s → clear.
+        let s = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0,
+        }]);
+        assert!(non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "an agent arriving well after the ego clears must be clear");
+    }
+
+    /// Hand-checked margin boundary: arrival EXACTLY at clear + margin → NOT clear
+    /// (strict `>`). clear+margin = 8.45 + 2.0 = 10.45 s; at v=10, that's d=104.5.
+    #[test]
+    fn test_nonyield_margin_boundary_strict() {
+        let at = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 104.5,
+        }]);
+        assert!(!non_yielding_clearance(&at, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "arrival exactly at clear+margin must NOT be clear (strict >)");
+        // just past the boundary → clear.
+        let past = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 104.5 + 1e-3,
+        }]);
+        assert!(non_yielding_clearance(&past, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "arrival just past clear+margin must be clear");
+    }
+
+    /// ALL rule: one clear agent + one not-clear agent → NOT clear.
+    #[test]
+    fn test_nonyield_all_rule_one_not_clear() {
+        let s = agents(vec![
+            NonYieldingAgent { approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0 }, // clear
+            NonYieldingAgent { approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0 },  // not clear
+        ]);
+        assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "one non-clear agent among many must make the scene NOT clear");
+    }
+
+    /// Absent detector → NOT clear (absent ≠ none).
+    #[test]
+    fn test_nonyield_absent_not_clear() {
+        assert!(!non_yielding_clearance(&NonYieldingScene::Absent, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "an absent detector must NOT be clear (fail-closed)");
+    }
+
+    /// KnownNone → clear.
+    #[test]
+    fn test_nonyield_known_none_clear() {
+        assert!(non_yielding_clearance(&NonYieldingScene::KnownNone, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a positive 'none detected' must be clear");
+    }
+
+    /// EMPTY Agents vec is ambiguous vs KnownNone → NOT clear (#92 rule).
+    #[test]
+    fn test_nonyield_empty_vec_not_clear() {
+        assert!(!non_yielding_clearance(&agents(vec![]), &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "an empty agents vec must NOT be clear (distinct from KnownNone)");
+    }
+
+    /// An ego that cannot traverse cannot claim clearance: speed 0 / negative /
+    /// NaN → NOT clear, even against an agent that would otherwise be clear.
+    #[test]
+    fn test_nonyield_ego_speed_nonpositive_or_nan_not_clear() {
+        let far = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 1.0e6,
+        }]);
+        for bad in [0.0, -5.0, f64::NAN] {
+            assert!(!non_yielding_clearance(&far, &healthy_map(50.0), 30.0, bad, &cfg()),
+                "ego speed {bad} must make the scene NOT clear");
+        }
+    }
+
+    /// A finite RECEDING agent (negative velocity) never arrives → clear w.r.t.
+    /// it; a NaN velocity must NOT ride the `<= 0` receding branch → NOT clear.
+    #[test]
+    fn test_nonyield_agent_receding_clear_nan_velocity_not_clear() {
+        let receding = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: -3.0, distance_to_conflict_m: 5.0,
+        }]);
+        assert!(non_yielding_clearance(&receding, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a finite receding agent never arrives → clear w.r.t. it");
+        let nan_v = agents(vec![NonYieldingAgent {
+            approach_velocity_mps: f64::NAN, distance_to_conflict_m: 5.0,
+        }]);
+        assert!(!non_yielding_clearance(&nan_v, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+            "a NaN velocity must NOT slip through the receding branch (NOT clear)");
+    }
+
+    /// Non-finite distance_to_conflict → NOT clear.
+    #[test]
+    fn test_nonyield_nonfinite_distance_not_clear() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            let s = agents(vec![NonYieldingAgent {
+                approach_velocity_mps: 10.0, distance_to_conflict_m: bad,
+            }]);
+            assert!(!non_yielding_clearance(&s, &healthy_map(50.0), 30.0, 10.0, &cfg()),
+                "non-finite distance_to_conflict must be NOT clear ({bad})");
+        }
     }
 }

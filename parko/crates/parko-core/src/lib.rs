@@ -60,8 +60,8 @@ pub use rss::{
     OcclusionScene, RssAgent, RssParams, RssState, MAX_RSS_AGENTS,
 };
 pub use commit_zone::{
-    commit_zone_blocked, exit_clearance_verified, CommitZoneCfg, CommitZoneMap, CommitZoneScene,
-    ExitClearanceEvidence,
+    commit_zone_blocked, exit_clearance_verified, non_yielding_clearance, CommitZoneCfg,
+    CommitZoneMap, CommitZoneScene, ExitClearanceEvidence, NonYieldingAgent, NonYieldingScene,
 };
 pub use impact::{is_impact, ImpactCfg, ImpactEvidence, ImpactLatch};
 pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};

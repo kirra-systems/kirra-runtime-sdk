@@ -1408,9 +1408,10 @@ mod scene_rss_tests {
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
     use parko_core::{
-        AgentScene, CommitZoneCfg, CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence,
-        ImpactLatch, OcclusionScene, RssAgent, RssParams, RssState, TraversalEvidence, WaterScene,
-        WaterVetoConfig, MAX_RSS_AGENTS,
+        non_yielding_clearance, AgentScene, CommitZoneCfg, CommitZoneMap, CommitZoneScene,
+        ImpactCfg, ImpactEvidence, ImpactLatch, NonYieldingAgent, NonYieldingScene, OcclusionScene,
+        RssAgent, RssParams, RssState, TraversalEvidence, WaterScene, WaterVetoConfig,
+        MAX_RSS_AGENTS,
     };
 
     fn params() -> RssParams {
@@ -1881,5 +1882,56 @@ mod scene_rss_tests {
             &AgentScene::KnownEmpty, &CommitZoneScene::Unknown, &CommitZoneCfg::default(), &params());
         assert!(!matches!(action, EnforcementAction::Allow),
             "an absent/unhealthy map must override pushed safe:true (Reject from map alone), got {action:?}");
+    }
+
+    /// SG5 trio end-to-end (#260 map-anchored block + #107 exit-clearance + #108
+    /// non-yielding clearance): a train that arrives before the ego clears →
+    /// DERIVED clearance_confirmed=false → blocked → overrides pushed safe:true.
+    #[test]
+    fn commit_zone_non_yielding_train_overrides_pushed_safe() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        let cfg = CommitZoneCfg::default();
+        let map = healthy_zone_map(50.0);
+        // train: arrival 60/10 = 6.0 s < ego clear (8.45 s) → NOT clear.
+        let scene = NonYieldingScene::Agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 60.0,
+        }]);
+        let clearance = non_yielding_clearance(&scene, &map, 30.0, 10.0, &cfg);
+        assert!(!clearance, "the train must defeat clearance (derived false)");
+        // exit verified independently, but clearance is false → blocked.
+        let zone = CommitZoneScene::ZoneAhead {
+            map, clearance_confirmed: clearance, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
+        };
+        let action = gov.evaluate_scene_with_commit_zone(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &zone, &cfg, &params());
+        assert!(!matches!(action, EnforcementAction::Allow),
+            "a non-yielding train must override safe:true → MRC (stop short), got {action:?}");
+    }
+
+    /// Inverse: train arrives well AFTER the ego clears + exit verified → DERIVED
+    /// clearance_confirmed=true → permitted (no over-block).
+    #[test]
+    fn commit_zone_non_yielding_clear_passes_through() {
+        let gov = KirraGovernor::new();
+        let cfg = CommitZoneCfg::default();
+        let map = healthy_zone_map(50.0);
+        // train: arrival 200/10 = 20.0 s > 8.45 + 2.0 = 10.45 s → clear.
+        let scene = NonYieldingScene::Agents(vec![NonYieldingAgent {
+            approach_velocity_mps: 10.0, distance_to_conflict_m: 200.0,
+        }]);
+        let clearance = non_yielding_clearance(&scene, &map, 30.0, 10.0, &cfg);
+        assert!(clearance, "an agent arriving well after the ego clears must be clear");
+        let zone = CommitZoneScene::ZoneAhead {
+            map, clearance_confirmed: clearance, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
+        };
+        let action = gov.evaluate_scene_with_commit_zone(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &zone, &cfg, &params());
+        assert!(matches!(action, EnforcementAction::Allow),
+            "a non-yielding-clear, exit-verified zone must permit entry, got {action:?}");
     }
 }
