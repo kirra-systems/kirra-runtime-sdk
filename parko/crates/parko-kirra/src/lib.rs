@@ -43,8 +43,8 @@ use parko_core::commands::ControlCommand;
 use parko_core::rss::{lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
-    water_untraversable_veto, AgentScene, OcclusionScene, RssParams, RssState, WaterScene,
-    WaterVetoConfig, MAX_RSS_AGENTS,
+    water_untraversable_veto, AgentScene, ImpactLatch, OcclusionScene, RssParams, RssState,
+    WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
 };
 
 pub mod angular_bound;
@@ -690,6 +690,33 @@ impl KirraGovernor {
             pairwise_safe && !water_veto,
         )
     }
+
+    /// AUTHORITATIVE post-collision path (SG6 / #102).
+    ///
+    /// While the [`ImpactLatch`] is latched, OVERRIDE any proposed motion →
+    /// **immobilize** (a motion-veto `Deny`), regardless of the planner's verdict
+    /// or the posture: SG6 requires no further motion after a detected collision
+    /// until clearance is confirmed. Not latched → normal pushed-state evaluation.
+    ///
+    /// The latch is sticky-toward-safe and cleared only by an explicit clearance
+    /// signal (`ImpactLatch::clear`) — wiring that to the #103 authenticated
+    /// clearance is a deferred follow-up.
+    pub fn evaluate_with_impact_latch(
+        &self,
+        proposed: &ControlCommand,
+        previous: Option<&ControlCommand>,
+        delta_time_s: f64,
+        posture: SafetyPosture,
+        latch: &ImpactLatch,
+    ) -> EnforcementAction {
+        if latch.is_latched() {
+            return EnforcementAction::Deny {
+                reason: "SG6: post-collision impact latch — immobilize until clearance"
+                    .to_string(),
+            };
+        }
+        self.evaluate(proposed, previous, delta_time_s, posture)
+    }
 }
 
 impl SafetyGovernor for KirraGovernor {
@@ -1326,8 +1353,8 @@ mod scene_rss_tests {
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
     use parko_core::{
-        AgentScene, OcclusionScene, RssAgent, RssParams, RssState, TraversalEvidence, WaterScene,
-        WaterVetoConfig, MAX_RSS_AGENTS,
+        AgentScene, ImpactCfg, ImpactEvidence, ImpactLatch, OcclusionScene, RssAgent, RssParams,
+        RssState, TraversalEvidence, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
     };
 
     fn params() -> RssParams {
@@ -1657,5 +1684,62 @@ mod scene_rss_tests {
             &AgentScene::KnownEmpty, &WaterScene::Clear, &WaterVetoConfig::default(), &params());
         assert!(matches!(clear, EnforcementAction::Allow),
             "Clear water must not veto, got {clear:?}");
+    }
+
+    // --- SG6 post-collision impact latch (issue #102) ---
+
+    fn latched() -> ImpactLatch {
+        let mut l = ImpactLatch::new();
+        l.observe(
+            &ImpactEvidence { imu_accel_spike_mps2: 0.0, contact_sensor: true, vanished_object: false },
+            &ImpactCfg::default(),
+        );
+        l
+    }
+
+    /// THE KEY TEST: while latched, a pushed-safe motion is OVERRIDDEN to
+    /// immobilize (Deny) — regardless of the planner's Nominal verdict.
+    #[test]
+    fn impact_latch_overrides_pushed_safe_to_immobilize() {
+        let gov = KirraGovernor::new();
+        let action = gov.evaluate_with_impact_latch(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &latched());
+        assert!(matches!(action, EnforcementAction::Deny { .. }),
+            "a latched impact must immobilize (Deny), got {action:?}");
+    }
+
+    /// Not latched → motion passes through (normal evaluation).
+    #[test]
+    fn impact_not_latched_passes_through() {
+        let gov = KirraGovernor::new();
+        let action = gov.evaluate_with_impact_latch(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &ImpactLatch::new());
+        assert!(matches!(action, EnforcementAction::Allow),
+            "an un-latched governor passes motion through, got {action:?}");
+    }
+
+    /// The SG6 named test — "no resume without clearance": a latch that has seen
+    /// further CLEAN evidence (sticky) still immobilizes a pushed-safe motion;
+    /// only an explicit clearance releases it.
+    #[test]
+    fn impact_no_resume_without_clearance() {
+        let gov = KirraGovernor::new();
+        let mut l = latched();
+        // More clean ticks must NOT release the latch (sticky-toward-safe).
+        l.observe(
+            &ImpactEvidence { imu_accel_spike_mps2: 0.1, contact_sensor: false, vanished_object: false },
+            &ImpactCfg::default(),
+        );
+        let still = gov.evaluate_with_impact_latch(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
+        assert!(matches!(still, EnforcementAction::Deny { .. }),
+            "no resume without clearance — still immobilized, got {still:?}");
+
+        // Only an explicit clearance permits motion again.
+        l.clear(true);
+        let resumed = gov.evaluate_with_impact_latch(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
+        assert!(matches!(resumed, EnforcementAction::Allow),
+            "after explicit clearance, motion resumes, got {resumed:?}");
     }
 }
