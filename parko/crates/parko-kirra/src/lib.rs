@@ -48,8 +48,10 @@ use parko_core::commands::ControlCommand;
 use parko_core::rss::{lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
-    commit_zone_blocked, water_untraversable_veto, AgentScene, CommitZoneCfg, CommitZoneScene,
-    ImpactLatch, OcclusionScene, RssParams, RssState, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
+    commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, localization_trusted,
+    water_untraversable_veto, AgentScene, CommitZoneCfg, CommitZoneScene, ImpactLatch,
+    LocalizationCfg, LocalizationIntegrity, OcclusionScene, RssParams, RssState, WaterScene,
+    WaterVetoConfig, MAX_RSS_AGENTS,
 };
 
 pub mod angular_bound;
@@ -748,6 +750,63 @@ impl KirraGovernor {
         )
     }
 
+    /// SG5 commit-zone path GATED by localization integrity (#123, runtime half).
+    ///
+    /// The map-anchored commit-zone trust is only as sound as the integrator's
+    /// pose. When the localization-integrity report says the G2 AoU (≤ 0.10 m
+    /// 95th-pct lateral error) does NOT currently hold, the commit-zone scene is
+    /// degraded to [`CommitZoneScene::Unknown`] BEFORE the check — so a clean
+    /// `NoZone` (or a confirmed zone) under a bad pose still vetoes via the #260
+    /// fail-closed path. Then delegates to [`evaluate_scene_with_commit_zone`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scene_with_commit_zone_localized(
+        &self,
+        proposed: &ControlCommand,
+        previous: Option<&ControlCommand>,
+        delta_time_s: f64,
+        posture: SafetyPosture,
+        scene: &AgentScene,
+        commit_zone: &CommitZoneScene,
+        cz_cfg: &CommitZoneCfg,
+        localization: &LocalizationIntegrity,
+        loc_cfg: &LocalizationCfg,
+        params: &RssParams,
+    ) -> EnforcementAction {
+        let trusted = localization_trusted(localization, loc_cfg);
+        let gated = gate_commit_zone_scene(*commit_zone, trusted);
+        self.evaluate_scene_with_commit_zone(
+            proposed, previous, delta_time_s, posture, scene, &gated, cz_cfg, params,
+        )
+    }
+
+    /// SG4 water path GATED by localization integrity (#123, runtime half).
+    ///
+    /// Under an untrusted pose, only the MAP-DERIVED water trust is stripped: a
+    /// `MapKnownSafe` ford earn-back falls back to the fail-closed veto state,
+    /// while an `OperatorAuthorized` grant SURVIVES (operator authority is not
+    /// map-frame-dependent) and perception-derived states are untouched. Then
+    /// delegates to [`evaluate_scene_with_water`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scene_with_water_localized(
+        &self,
+        proposed: &ControlCommand,
+        previous: Option<&ControlCommand>,
+        delta_time_s: f64,
+        posture: SafetyPosture,
+        scene: &AgentScene,
+        water: &WaterScene,
+        water_cfg: &WaterVetoConfig,
+        localization: &LocalizationIntegrity,
+        loc_cfg: &LocalizationCfg,
+        params: &RssParams,
+    ) -> EnforcementAction {
+        let trusted = localization_trusted(localization, loc_cfg);
+        let gated = gate_water_scene(*water, trusted);
+        self.evaluate_scene_with_water(
+            proposed, previous, delta_time_s, posture, scene, &gated, water_cfg, params,
+        )
+    }
+
     /// AUTHORITATIVE post-collision path (SG6 / #102).
     ///
     /// While the [`ImpactLatch`] is latched, OVERRIDE any proposed motion →
@@ -1411,8 +1470,8 @@ mod scene_rss_tests {
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
     use parko_core::{
         AgentScene, CommitZoneCfg, CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence,
-        ImpactLatch, OcclusionScene, RssAgent, RssParams, RssState, TraversalEvidence, WaterScene,
-        WaterVetoConfig, MAX_RSS_AGENTS,
+        ImpactLatch, LocalizationCfg, LocalizationIntegrity, OcclusionScene, RssAgent, RssParams,
+        RssState, TraversalEvidence, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
     };
 
     fn params() -> RssParams {
@@ -1883,5 +1942,77 @@ mod scene_rss_tests {
             &AgentScene::KnownEmpty, &CommitZoneScene::Unknown, &CommitZoneCfg::default(), &params());
         assert!(!matches!(action, EnforcementAction::Allow),
             "an absent/unhealthy map must override pushed safe:true (Reject from map alone), got {action:?}");
+    }
+
+    // --- #123 localization-integrity gate over the map-anchored checks ------
+
+    /// Commit-zone path: a pushed safe:true with a HEALTHY, confirmed zone that
+    /// would normally pass — but under UNTRUSTED localization the scene degrades
+    /// to Unknown and the verdict is overridden (stop short). The G2 AoU complement.
+    #[test]
+    fn localization_untrusted_overrides_healthy_commit_zone() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        // A confirmed, healthy, exit-verified zone — passes through when trusted.
+        let confirmed = CommitZoneScene::ZoneAhead {
+            map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
+        };
+        // Sanity: trusted localization → the confirmed zone passes through.
+        let trusted = LocalizationIntegrity::Reported { lateral_error_95_m: 0.05, age_ms: 50 };
+        let ok = gov.evaluate_scene_with_commit_zone_localized(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
+            &trusted, &LocalizationCfg::default(), &params());
+        assert!(matches!(ok, EnforcementAction::Allow),
+            "a confirmed zone under trusted localization must pass, got {ok:?}");
+        // Untrusted (absent report) → scene degrades to Unknown → overridden.
+        let untrusted = LocalizationIntegrity::Unknown;
+        let action = gov.evaluate_scene_with_commit_zone_localized(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
+            &untrusted, &LocalizationCfg::default(), &params());
+        assert!(!matches!(action, EnforcementAction::Allow),
+            "untrusted localization must override a healthy commit zone → MRC, got {action:?}");
+    }
+
+    /// Water path: a mapped-ford earn-back (MapKnownSafe) that normally permits
+    /// traversal is STRIPPED under untrusted localization → the veto fires.
+    #[test]
+    fn localization_untrusted_vetoes_mapknownsafe_ford() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::MapKnownSafe };
+        let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
+        // Trusted → the mapped ford permits traversal.
+        let trusted = LocalizationIntegrity::Reported { lateral_error_95_m: 0.05, age_ms: 50 };
+        let ok = gov.evaluate_scene_with_water_localized(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &ford, &wcfg, &trusted, &LocalizationCfg::default(), &params());
+        assert!(matches!(ok, EnforcementAction::Allow),
+            "a mapped ford under trusted localization must pass, got {ok:?}");
+        // Untrusted → MapKnownSafe stripped → veto.
+        let untrusted = LocalizationIntegrity::Unknown;
+        let action = gov.evaluate_scene_with_water_localized(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &LocalizationCfg::default(), &params());
+        assert!(!matches!(action, EnforcementAction::Allow),
+            "untrusted localization must strip the MapKnownSafe ford → veto, got {action:?}");
+    }
+
+    /// The asymmetry crux at the integration layer: an OperatorAuthorized grant
+    /// SURVIVES untrusted localization (it is not map-frame-dependent).
+    #[test]
+    fn localization_untrusted_preserves_operator_authorized_ford() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::OperatorAuthorized };
+        let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
+        let untrusted = LocalizationIntegrity::Unknown;
+        let action = gov.evaluate_scene_with_water_localized(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &LocalizationCfg::default(), &params());
+        assert!(matches!(action, EnforcementAction::Allow),
+            "operator authority must survive untrusted localization, got {action:?}");
     }
 }

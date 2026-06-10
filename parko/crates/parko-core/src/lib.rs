@@ -19,6 +19,8 @@ pub mod commit_zone;
 pub mod control_loop;
 // SG6 — post-collision impact latch (IMU/contact/vanished fusion, #102).
 pub mod impact;
+// SG2/SG5 — localization-integrity gate over the map-anchored checks (#123).
+pub mod localization;
 pub mod rss;
 pub mod runtime;
 // SG4 — WATER_UNTRAVERSABLE governor veto (depth-free, bounded-worst-case, #98).
@@ -64,6 +66,10 @@ pub use commit_zone::{
     ExitClearanceEvidence,
 };
 pub use impact::{is_impact, ImpactCfg, ImpactEvidence, ImpactLatch};
+pub use localization::{
+    gate_commit_zone_scene, gate_water_scene, localization_trusted, LocalizationCfg,
+    LocalizationIntegrity,
+};
 pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 pub use water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};
 pub use scheduler::{DegradationThresholds, InferenceLoop};
