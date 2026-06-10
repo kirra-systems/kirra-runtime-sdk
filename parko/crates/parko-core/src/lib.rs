@@ -59,7 +59,10 @@ pub use rss::{
     lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed, AgentScene,
     OcclusionScene, RssAgent, RssParams, RssState, MAX_RSS_AGENTS,
 };
-pub use commit_zone::{commit_zone_blocked, CommitZoneCfg, CommitZoneMap, CommitZoneScene};
+pub use commit_zone::{
+    commit_zone_blocked, exit_clearance_verified, CommitZoneCfg, CommitZoneMap, CommitZoneScene,
+    ExitClearanceEvidence,
+};
 pub use impact::{is_impact, ImpactCfg, ImpactEvidence, ImpactLatch};
 pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 pub use water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};

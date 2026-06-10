@@ -1818,6 +1818,8 @@ mod scene_rss_tests {
             map: healthy_zone_map(50.0),
             clearance_confirmed: false,
             exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         }
     }
 
@@ -1841,12 +1843,31 @@ mod scene_rss_tests {
         let gov = KirraGovernor::new();
         let confirmed = CommitZoneScene::ZoneAhead {
             map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         let action = gov.evaluate_scene_with_commit_zone(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
             &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(), &params());
         assert!(matches!(action, EnforcementAction::Allow),
             "a confirmed-clear zone must permit entry, got {action:?}");
+    }
+
+    /// SG5 stop-inside at the integration layer: a confirmed, healthy zone whose
+    /// proposed plan STOPS inside it overrides a pushed safe:true → MRC.
+    #[test]
+    fn commit_zone_stop_inside_overrides_pushed_safe() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
+        // zone [50, 80]; plan stops at 65 — inside.
+        let stop_inside = CommitZoneScene::ZoneAhead {
+            map: healthy_zone_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(65.0),
+        };
+        let action = gov.evaluate_scene_with_commit_zone(
+            &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
+            &AgentScene::KnownEmpty, &stop_inside, &CommitZoneCfg::default(), &params());
+        assert!(!matches!(action, EnforcementAction::Allow),
+            "a plan that stops inside the zone must override safe:true → MRC, got {action:?}");
     }
 
     /// Reject-from-map-alone at the integration layer: an `Unknown` (absent /

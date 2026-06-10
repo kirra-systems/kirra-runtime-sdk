@@ -64,13 +64,25 @@ pub enum CommitZoneScene {
     /// A healthy map reports no commit zone on the path → no veto.
     NoZone,
     /// A mapped commit zone is ahead, with the (supplied) clearance / exit
-    /// confirmations for it. Entry requires BOTH on a HEALTHY map.
+    /// confirmations for it. Entry requires BOTH on a HEALTHY map. Additionally
+    /// the proposed plan must not STOP within the zone (SG5 clause 3).
     ZoneAhead {
         map: CommitZoneMap,
         /// Clearance into the zone is confirmed (no conflicting traffic / train).
+        /// (#108 derives this from non-yielding-agent arrival.)
         clearance_confirmed: bool,
         /// A clear exit beyond the zone is verified (won't get stuck inside).
+        /// This boolean is now DERIVED by [`exit_clearance_verified`] (the
+        /// box-junction receiving-space rule); it stays a field so #108 still
+        /// composes through it.
         exit_verified: bool,
+        /// Along-path length of the commit zone (m). Used by the stop-inside
+        /// clause. Non-finite → veto (when a stop is proposed).
+        zone_length_m: f64,
+        /// The proposal's implied stop point, as a distance ahead of ego (m).
+        /// `None` = the proposal does not plan a stop within the horizon (the
+        /// stop-inside clause is then inert).
+        proposed_stop_distance_m: Option<f64>,
     },
     /// The map source is absent / unhealthy this tick → fail-closed VETO.
     /// DISTINCT from `NoZone`: an absent map is not "no zone" (the #238 trap and
@@ -87,13 +99,47 @@ pub enum CommitZoneScene {
 pub struct CommitZoneCfg {
     /// Actionable look-ahead (m): a zone farther than this is not yet a decision.
     pub look_ahead_m: f64,
+    /// Ego vehicle length (m). parko has NO vehicle model (that lives in the
+    /// frozen gateway contract), so this is config. VALIDATION-PENDING — a
+    /// conservative placeholder, not a certified value.
+    pub vehicle_length_m: f64,
+    /// Extra receiving-space margin (m) required beyond the vehicle length for a
+    /// downstream exit to count as verified. VALIDATION-PENDING.
+    pub exit_margin_m: f64,
 }
 
 impl Default for CommitZoneCfg {
     fn default() -> Self {
-        // VALIDATION-PENDING placeholder — the SG5 / SG4 ≈ 94 m look-ahead basis.
-        Self { look_ahead_m: 94.0 }
+        // VALIDATION-PENDING placeholders (not certified values):
+        Self {
+            look_ahead_m: 94.0,    // SG5 / SG4 ≈ 94 m look-ahead basis
+            vehicle_length_m: 4.5, // a passenger-vehicle-class default
+            exit_margin_m: 1.0,    // a small standoff beyond the vehicle length
+        }
     }
+}
+
+/// Evidence for the box-junction / queue-spillback exit-clearance rule.
+/// Synthetic in tests; perception/map ingestion of the receiving space is
+/// DEFERRED (as with the agent-set / water / occlusion ingestion).
+#[derive(Debug, Clone, Copy)]
+pub struct ExitClearanceEvidence {
+    /// Measured clear receiving space (m) beyond the zone's FAR edge — the room
+    /// to fully exit without stopping inside (the box-junction measure).
+    pub downstream_clear_m: f64,
+}
+
+/// SG5 — derive `exit_verified`: is there enough downstream receiving space to
+/// fully clear the zone (no spillback / no stuck-inside)?
+///
+/// `true` iff `downstream_clear_m` is finite AND ≥ `vehicle_length_m +
+/// exit_margin_m`. A non-finite measurement is fail-closed (an unverifiable exit
+/// is NO exit). Callers use this to POPULATE `ZoneAhead.exit_verified` — the
+/// boolean is now DERIVED, not asserted.
+// SAFETY: SG5 | REQ: commit-zone-exit-clearance | TEST: test_exit_clearance_queue_spillback_blocks,test_exit_clearance_ample_space_verified,test_exit_clearance_nonfinite_not_verified,test_exit_clearance_boundary
+pub fn exit_clearance_verified(evidence: &ExitClearanceEvidence, cfg: &CommitZoneCfg) -> bool {
+    evidence.downstream_clear_m.is_finite()
+        && evidence.downstream_clear_m >= cfg.vehicle_length_m + cfg.exit_margin_m
 }
 
 /// SG5 — must the governor BLOCK entry to this commit zone (stop short)?
@@ -104,12 +150,16 @@ impl Default for CommitZoneCfg {
 /// Lattice:
 ///   * `NoZone`   → `false` (healthy map, no zone).
 ///   * `Unknown`  → `true`  (fail-closed; absent map ≠ no zone — Reject from map alone).
-///   * `ZoneAhead`→ a non-finite distance vetoes; a zone BEYOND the look-ahead
+///   * `ZoneAhead`→ a non-finite distance vetoes. The STOP-INSIDE clause (SG5
+///     "shall not stop within one") vetoes — REGARDLESS of clearance/exit and of
+///     the horizon — when a proposed stop falls within the zone interval
+///     `[distance_to_zone_m, distance_to_zone_m + zone_length_m]` (inclusive;
+///     non-finite `zone_length_m` / `d_stop` → veto). A stop SHORT of the zone is
+///     the safe state and never vetoes. Otherwise: a zone BEYOND the look-ahead
 ///     horizon is not yet actionable (no veto); a zone WITHIN the horizon is
 ///     blocked UNLESS the map is HEALTHY **and** `clearance_confirmed` **and**
-///     `exit_verified`. Either confirmation missing, or a degraded map, → block.
-///     (Health gates the confirmations — a degraded map cannot earn entry.)
-// SAFETY: SG5 | REQ: commit-zone-map-anchored-block | TEST: test_map_prior_perception_miss_unknown_vetoes,test_gate_down_clearance_unconfirmed_vetoes,test_no_verified_exit_vetoes,test_both_confirmed_healthy_no_veto,test_unhealthy_map_with_confirmations_still_vetoes,test_no_zone_distinct_from_unknown,test_nonfinite_distance_vetoes,test_horizon_boundary,test_beyond_horizon_no_veto
+///     `exit_verified`. (Health gates the confirmations.)
+// SAFETY: SG5 | REQ: commit-zone-map-anchored-block,commit-zone-stop-inside | TEST: test_map_prior_perception_miss_unknown_vetoes,test_gate_down_clearance_unconfirmed_vetoes,test_no_verified_exit_vetoes,test_both_confirmed_healthy_no_veto,test_unhealthy_map_with_confirmations_still_vetoes,test_no_zone_distinct_from_unknown,test_nonfinite_distance_vetoes,test_horizon_boundary,test_beyond_horizon_no_veto,test_stop_inside_vetoes_despite_confirmations,test_stop_short_of_zone_no_veto,test_stop_beyond_far_edge_no_veto,test_stop_inside_interval_boundaries,test_stop_none_clause_inert,test_nonfinite_zone_length_or_stop_vetoes
 pub fn commit_zone_blocked(scene: &CommitZoneScene, cfg: &CommitZoneCfg) -> bool {
     match *scene {
         CommitZoneScene::NoZone => false,
@@ -118,11 +168,32 @@ pub fn commit_zone_blocked(scene: &CommitZoneScene, cfg: &CommitZoneCfg) -> bool
             map,
             clearance_confirmed,
             exit_verified,
+            zone_length_m,
+            proposed_stop_distance_m,
         } => {
             // A non-finite distance can never be trusted as "beyond horizon".
             if !map.distance_to_zone_m.is_finite() {
                 return true;
             }
+
+            // STOP-INSIDE clause (SG5 "shall not stop within one") — independent
+            // of clearance/exit AND of the horizon: a plan that stops inside the
+            // zone interval is a violation. Checked before the horizon gate so a
+            // planned stop inside even a far zone is rejected now.
+            if let Some(d_stop) = proposed_stop_distance_m {
+                if !zone_length_m.is_finite() || !d_stop.is_finite() {
+                    return true; // NaN discipline — fail closed
+                }
+                let zone_start = map.distance_to_zone_m;
+                let zone_end = map.distance_to_zone_m + zone_length_m;
+                // Inclusive bounds — stopping exactly on either edge is stopping
+                // in the zone. A stop SHORT (d_stop < zone_start) is the safe
+                // state and must NOT veto.
+                if d_stop >= zone_start && d_stop <= zone_end {
+                    return true;
+                }
+            }
+
             // Beyond the actionable horizon → not yet a decision (no veto).
             if map.distance_to_zone_m > cfg.look_ahead_m {
                 return false;
@@ -153,11 +224,14 @@ mod tests {
     }
 
     /// Confirmed entry on a healthy map within the horizon → permitted.
+    /// Benign stop-inside inputs (`None`) so the stop clause is inert here.
     fn confirmed_zone(distance_m: f64) -> CommitZoneScene {
         CommitZoneScene::ZoneAhead {
             map: healthy_map(distance_m),
             clearance_confirmed: true,
             exit_verified: true,
+            zone_length_m: 30.0,
+            proposed_stop_distance_m: None,
         }
     }
 
@@ -174,6 +248,7 @@ mod tests {
     fn test_gate_down_clearance_unconfirmed_vetoes() {
         let s = CommitZoneScene::ZoneAhead {
             map: healthy_map(50.0), clearance_confirmed: false, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(commit_zone_blocked(&s, &cfg()), "unconfirmed clearance must veto");
     }
@@ -183,6 +258,7 @@ mod tests {
     fn test_no_verified_exit_vetoes() {
         let s = CommitZoneScene::ZoneAhead {
             map: healthy_map(50.0), clearance_confirmed: true, exit_verified: false,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(commit_zone_blocked(&s, &cfg()), "no verified exit must veto");
     }
@@ -202,12 +278,14 @@ mod tests {
         let low_conf = CommitZoneScene::ZoneAhead {
             map: CommitZoneMap { confidence: 0.1, ..healthy_map(50.0) },
             clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(commit_zone_blocked(&low_conf, &cfg()), "low-confidence map must veto despite confirmations");
         // stale
         let stale = CommitZoneScene::ZoneAhead {
             map: CommitZoneMap { age_ms: 999_999, ..healthy_map(50.0) },
             clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(commit_zone_blocked(&stale, &cfg()), "stale map must veto despite confirmations");
     }
@@ -245,6 +323,7 @@ mod tests {
         // exactly at horizon, unconfirmed → within horizon → veto.
         let at_unconfirmed = CommitZoneScene::ZoneAhead {
             map: healthy_map(94.0), clearance_confirmed: false, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(commit_zone_blocked(&at_unconfirmed, &cfg()),
             "an unconfirmed zone exactly at the horizon must veto (within horizon)");
@@ -256,8 +335,172 @@ mod tests {
     fn test_beyond_horizon_no_veto() {
         let beyond = CommitZoneScene::ZoneAhead {
             map: healthy_map(94.0 + 1e-6), clearance_confirmed: false, exit_verified: false,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         assert!(!commit_zone_blocked(&beyond, &cfg()),
             "a zone beyond the look-ahead horizon is not yet actionable");
+    }
+
+    // ───────────────────────── #107 exit-clearance derivation ──────────────
+
+    /// Queue spillback: too little downstream receiving space → exit NOT verified
+    /// (the box-junction rule rejects entry that would strand the ego inside).
+    #[test]
+    fn test_exit_clearance_queue_spillback_blocks() {
+        let c = cfg(); // needs >= 4.5 + 1.0 = 5.5 m
+        let ev = ExitClearanceEvidence { downstream_clear_m: 3.0 };
+        assert!(!exit_clearance_verified(&ev, &c),
+            "insufficient downstream space must NOT verify the exit");
+    }
+
+    /// Ample receiving space → exit verified.
+    #[test]
+    fn test_exit_clearance_ample_space_verified() {
+        let c = cfg();
+        let ev = ExitClearanceEvidence { downstream_clear_m: 20.0 };
+        assert!(exit_clearance_verified(&ev, &c),
+            "ample downstream space must verify the exit");
+    }
+
+    /// Non-finite measurement is fail-closed (an unverifiable exit is NO exit).
+    #[test]
+    fn test_exit_clearance_nonfinite_not_verified() {
+        let c = cfg();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let ev = ExitClearanceEvidence { downstream_clear_m: bad };
+            assert!(!exit_clearance_verified(&ev, &c),
+                "non-finite downstream space must NOT verify ({bad})");
+        }
+    }
+
+    /// Boundary: exactly `vehicle_length_m + exit_margin_m` (5.5 m) verifies;
+    /// one ULP short does not.
+    #[test]
+    fn test_exit_clearance_boundary() {
+        let c = cfg();
+        let threshold = c.vehicle_length_m + c.exit_margin_m; // 5.5
+        let at = ExitClearanceEvidence { downstream_clear_m: threshold };
+        assert!(exit_clearance_verified(&at, &c), "exactly at threshold verifies");
+        let below = ExitClearanceEvidence { downstream_clear_m: threshold - 1e-9 };
+        assert!(!exit_clearance_verified(&below, &c), "just below threshold does not verify");
+    }
+
+    // ───────────────────────── #107 stop-inside clause ─────────────────────
+
+    /// Confirmed, healthy, in-horizon zone — but the plan STOPS inside it →
+    /// veto regardless of clearance/exit (SG5 "shall not stop within one").
+    #[test]
+    fn test_stop_inside_vetoes_despite_confirmations() {
+        // zone [50, 80]; stop at 65 is inside.
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(65.0),
+        };
+        assert!(commit_zone_blocked(&s, &cfg()),
+            "a stop inside the zone must veto even with both confirmations");
+    }
+
+    /// A stop SHORT of the zone is the safe state → no veto (with entry confirmed).
+    #[test]
+    fn test_stop_short_of_zone_no_veto() {
+        // zone [50, 80]; stop at 40 is short.
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(40.0),
+        };
+        assert!(!commit_zone_blocked(&s, &cfg()),
+            "a stop short of the zone is the safe state and must not veto");
+    }
+
+    /// A stop BEYOND the far edge (fully clears) → no veto (with entry confirmed).
+    #[test]
+    fn test_stop_beyond_far_edge_no_veto() {
+        // zone [50, 80]; stop at 90 is beyond.
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(90.0),
+        };
+        assert!(!commit_zone_blocked(&s, &cfg()),
+            "a stop beyond the far edge fully clears and must not veto");
+    }
+
+    /// Inclusive interval: stopping EXACTLY on either edge is stopping in the zone.
+    #[test]
+    fn test_stop_inside_interval_boundaries() {
+        // near edge (zone_start = 50)
+        let at_start = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(50.0),
+        };
+        assert!(commit_zone_blocked(&at_start, &cfg()),
+            "a stop exactly on the near edge is stopping in the zone");
+        // far edge (zone_end = 80)
+        let at_end = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(80.0),
+        };
+        assert!(commit_zone_blocked(&at_end, &cfg()),
+            "a stop exactly on the far edge is stopping in the zone");
+    }
+
+    /// `None` proposed stop → the stop-inside clause is inert (no veto on its
+    /// account); entry still permitted when confirmed/healthy.
+    #[test]
+    fn test_stop_none_clause_inert() {
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
+        };
+        assert!(!commit_zone_blocked(&s, &cfg()),
+            "no proposed stop → the stop-inside clause must not veto");
+    }
+
+    /// The stop-inside clause vetoes even for a zone BEYOND the horizon: a planned
+    /// stop inside a far zone is still a violation (clause precedes the horizon
+    /// gate).
+    #[test]
+    fn test_stop_inside_vetoes_beyond_horizon() {
+        // zone start 200 (> 94 horizon), length 30 → [200, 230]; stop at 210 inside.
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(200.0), clearance_confirmed: true, exit_verified: true,
+            zone_length_m: 30.0, proposed_stop_distance_m: Some(210.0),
+        };
+        assert!(commit_zone_blocked(&s, &cfg()),
+            "a planned stop inside a far zone must still veto (clause precedes horizon)");
+    }
+
+    /// NaN discipline on the stop-inside inputs: a non-finite `zone_length_m` or
+    /// `proposed_stop_distance_m` fails closed.
+    #[test]
+    fn test_nonfinite_zone_length_or_stop_vetoes() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            let bad_len = CommitZoneScene::ZoneAhead {
+                map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+                zone_length_m: bad, proposed_stop_distance_m: Some(60.0),
+            };
+            assert!(commit_zone_blocked(&bad_len, &cfg()),
+                "non-finite zone_length_m with a proposed stop must veto ({bad})");
+            let bad_stop = CommitZoneScene::ZoneAhead {
+                map: healthy_map(50.0), clearance_confirmed: true, exit_verified: true,
+                zone_length_m: 30.0, proposed_stop_distance_m: Some(bad),
+            };
+            assert!(commit_zone_blocked(&bad_stop, &cfg()),
+                "non-finite proposed stop must veto ({bad})");
+        }
+    }
+
+    /// End-to-end: a DERIVED unverified exit (queue spillback) feeds the gate and
+    /// vetoes entry — the boolean is computed, not asserted.
+    #[test]
+    fn test_derived_exit_clearance_feeds_gate() {
+        let c = cfg();
+        let exit = exit_clearance_verified(
+            &ExitClearanceEvidence { downstream_clear_m: 2.0 }, &c); // < 5.5 → false
+        let s = CommitZoneScene::ZoneAhead {
+            map: healthy_map(50.0), clearance_confirmed: true, exit_verified: exit,
+            zone_length_m: 30.0, proposed_stop_distance_m: None,
+        };
+        assert!(commit_zone_blocked(&s, &c),
+            "a derived unverified exit must veto entry");
     }
 }
