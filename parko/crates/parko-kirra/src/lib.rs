@@ -50,8 +50,8 @@ use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
     commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, localization_trusted,
     water_untraversable_veto, AgentScene, ClearanceLoop, CommitZoneCfg, CommitZoneScene,
-    ImpactLatch, LocalizationCfg, LocalizationIntegrity, OcclusionScene, RssParams, RssState,
-    WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
+    ImpactEvidence, ImpactLatch, LocalizationCfg, LocalizationIntegrity, OcclusionScene, RssParams,
+    RssState, VanishedCfg, VanishedObjectDetector, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
 };
 
 pub mod angular_bound;
@@ -862,6 +862,31 @@ impl KirraGovernor {
     }
 }
 
+/// SG6 — derive `vanished_object` from the agent scene and fold it into this
+/// tick's [`ImpactEvidence`], BEFORE the existing [`ImpactLatch`] /
+/// [`ClearanceLoop`] consumes it (#102 follow-up). Thin by design: it only runs
+/// the [`VanishedObjectDetector`] and sets the flag — the latch, the clearance
+/// loop, and the `is_impact` fusion are UNCHANGED (they already handle the flag,
+/// which latches ALONE per SG6). `imu_accel_spike_mps2` and `contact_sensor` are
+/// the caller's other evidence for the tick; `now_ms` follows the same
+/// caller-supplied-clock convention as the detector and the clearance loop.
+#[allow(clippy::too_many_arguments)]
+pub fn impact_evidence_with_vanished(
+    detector: &mut VanishedObjectDetector,
+    scene: &AgentScene,
+    now_ms: u64,
+    vanished_cfg: &VanishedCfg,
+    imu_accel_spike_mps2: f64,
+    contact_sensor: bool,
+) -> ImpactEvidence {
+    let vanished_object = detector.observe(scene, now_ms, vanished_cfg);
+    ImpactEvidence {
+        imu_accel_spike_mps2,
+        contact_sensor,
+        vanished_object,
+    }
+}
+
 impl SafetyGovernor for KirraGovernor {
     fn evaluate(
         &self,
@@ -1492,15 +1517,15 @@ mod tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod scene_rss_tests {
-    use super::{compute_occlusion_cap, compute_scene_rss, KirraGovernor};
+    use super::{compute_occlusion_cap, compute_scene_rss, impact_evidence_with_vanished, KirraGovernor};
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
     use parko_core::{
         non_yielding_clearance, AgentScene, ClearanceLoop, ClearanceState, CommitZoneCfg,
         CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence, ImpactLatch, LocalizationCfg,
         LocalizationIntegrity, NonYieldingAgent, NonYieldingScene, OcclusionScene,
-        OperatorClearanceGrant, RssAgent, RssParams, RssState, TraversalEvidence, WaterScene,
-        WaterVetoConfig, MAX_RSS_AGENTS,
+        OperatorClearanceGrant, RssAgent, RssParams, RssState, TraversalEvidence, VanishedCfg,
+        VanishedObjectDetector, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
     };
 
     fn params() -> RssParams {
@@ -1919,6 +1944,41 @@ mod scene_rss_tests {
         l.try_clear(&grant, now, 60_000).expect("well-formed grant clears");
         let resumed = gov.evaluate_with_clearance_loop(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &l);
         assert!(matches!(resumed, EnforcementAction::Allow), "after the grant, motion resumes, got {resumed:?}");
+    }
+
+    /// SG6 end-to-end (#102 follow-up): a close agent, then a next valid frame
+    /// empty within the band → DERIVED `vanished_object` → the impact latch fires
+    /// ALONE (no IMU spike, no contact) → the motion veto immobilizes.
+    #[test]
+    fn vanished_object_derivation_latches_alone_and_vetoes() {
+        let gov = KirraGovernor::new();
+        let mut detector = VanishedObjectDetector::new();
+        let vcfg = VanishedCfg::default();
+        let mut latch = ImpactLatch::new();
+
+        let close = AgentScene::Agents(vec![RssAgent {
+            ego_vel: 0.0, lead_vel: 0.0, actual_longitudinal_gap_m: 1.0,
+            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 100.0,
+        }]);
+
+        // Tick 1 — close agent: derives vanished=false (obligation opens), no latch.
+        let ev1 = impact_evidence_with_vanished(&mut detector, &close, 0, &vcfg, 0.0, false);
+        assert!(!ev1.vanished_object);
+        latch.observe(&ev1, &ImpactCfg::default());
+        assert!(!latch.is_latched());
+
+        // Tick 2 — KnownEmpty within the band: derives vanished=true with NO IMU
+        // spike and NO contact → the latch fires on the vanished flag ALONE.
+        let ev2 = impact_evidence_with_vanished(&mut detector, &AgentScene::KnownEmpty, 100, &vcfg, 0.0, false);
+        assert!(ev2.vanished_object, "small-band empty after a close agent must derive vanished");
+        assert!(!ev2.contact_sensor && ev2.imu_accel_spike_mps2 == 0.0, "latches on vanished ALONE");
+        latch.observe(&ev2, &ImpactCfg::default());
+        assert!(latch.is_latched(), "vanished_object latches alone per SG6");
+
+        // The motion veto immobilizes a pushed-safe command.
+        let action = gov.evaluate_with_impact_latch(&cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &latch);
+        assert!(matches!(action, EnforcementAction::Deny { .. }),
+            "a derived vanished-object latch must immobilize, got {action:?}");
     }
 
     // --- SG5 commit-zone veto (issue #106) ---

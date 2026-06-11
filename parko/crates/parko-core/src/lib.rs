@@ -67,7 +67,8 @@ pub use commit_zone::{
 };
 pub use impact::{
     is_impact, ClearanceLoop, ClearanceRejection, ClearanceState, ImpactCfg, ImpactEvidence,
-    ImpactLatch, OperatorClearanceGrant, DEFAULT_MAX_GRANT_AGE_MS,
+    ImpactLatch, OperatorClearanceGrant, VanishedCfg, VanishedObjectDetector,
+    DEFAULT_MAX_GRANT_AGE_MS,
 };
 pub use localization::{
     gate_commit_zone_scene, gate_water_scene, localization_trusted, LocalizationCfg,
