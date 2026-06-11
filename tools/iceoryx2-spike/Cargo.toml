@@ -1,0 +1,31 @@
+# Standalone spike crate — NOT a member of the kirra-runtime-sdk workspace.
+# The empty [workspace] table below makes this its own workspace root, so it
+# carries its own Cargo.lock and iceoryx2 never enters any SDK/parko crate's
+# dependency tree (this is a spike, not an adoption — adoption is the #275 ADR's
+# decision). See README.md.
+[workspace]
+
+[package]
+name = "iceoryx2-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Host-side iceoryx2 feature-subset + fault-matrix spike (#273)"
+
+# PINNED — host-side feature-subset spike (#273). Version recorded in README.
+# `default-features = false` so THIS crate's features (below) drive iceoryx2's,
+# letting us reproduce the QNX 8.0 `--no-default-features` constraint on host:
+#   cargo test                       -> "full"    config (iceoryx2 std + console)
+#   cargo test --no-default-features -> "minimal" config (iceoryx2 NO features)
+[dependencies]
+iceoryx2 = { version = "=0.9.1", default-features = false }
+
+[features]
+# DEFAULT (host full): mirror iceoryx2's own default feature set (std + console).
+default = ["ix-full"]
+ix-full = ["iceoryx2/std", "iceoryx2/console"]
+# MINIMAL (QNX 8.0 `--no-default-features` mirror): iceoryx2 with NO features.
+# Empirically sufficient for pub/sub + subscriber lifecycle + the judge — the
+# minimal subset is EMPTY (the #273 deliverable; see README). Reached via
+# `--no-default-features` (leaves iceoryx2 at default-features = false with
+# nothing added back).
