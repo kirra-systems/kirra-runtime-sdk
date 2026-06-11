@@ -156,6 +156,25 @@ companions `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`, `KIRRA_BRINGUP_RUNBOOK.md`,
 and `KIRRA_QNX_CROSSCOMPILE.md`. (That file's `ADR-0001` prefix is independent of
 the numbered ODD-cap ADRs in the table above — a known naming overlap.)
 
+### Governor transport / QNX partition lane (EPIC #270)
+
+The governor command path is moving to **Rust end-to-end** on a QNX-resident
+safety partition, with the Autoware/ROS 2 planner as an isolated guest. The C
+ABI / FFI is demoted to the documented C/C++ integration boundary (ADR-0006
+Clause 3) — it is no longer the command hot path.
+
+| Document | Doc ID | Status |
+|----------|--------|--------|
+| Hypervisor contract-channel layout + trust-chain spec (#278) | KIRRA-OCCY-HVCHAN-001 | Draft |
+| WCET measurement methodology (#274 / #279 timing-evidence strategy) | KIRRA-OCCY-WCET-METH-001 | Draft |
+| Assumptions-of-Use register (incl. `AOU-TIMESYNC-001` boundary-clock time-sync) | KIRRA-OCCY-AOU-001 | Draft |
+
+Test-evidence tooling: [`tools/qnx-rtm-harness/`](tools/qnx-rtm-harness/) — a C++
+shim (driver) → Rust judge (checker) FDIT/RTM fault-injection harness, every row
+traced to the kernel RTM (#271 / #272); [`tools/iceoryx2-spike/`](tools/iceoryx2-spike/)
+— the host-side iceoryx2 feature-subset spike (#273). **Host timing is indicative
+only; certified WCET is measured on the QNX target under FIFO scheduling (#274).**
+
 See [docs/safety/](docs/safety/) for the complete safety case foundation,
 [docs/safety/SAFETY_CASE_INDEX.md](docs/safety/SAFETY_CASE_INDEX.md) for the
 full document registry, and [docs/safety/ROADMAP_TO_ASIL_D.md](docs/safety/ROADMAP_TO_ASIL_D.md)
@@ -172,6 +191,7 @@ includes honest caveats, effort estimates, and explicit sequencing dependencies.
 |-------------|-------------|--------|
 | [Autoware (Option-B)](docs/safety/OCCY_131_OPTIONB_DESIGN.md) | Two-rate Governor check on the Autoware ROS 2 stack; per-trajectory verdict with MRC publication | **Implemented (#131 closed)** |
 | [IEEE 2846 / RSS](docs/roadmap/RSS_KIRRA_INTEGRATION.md) | Behavioral safety invariants based on IEEE 2846 — safe distance enforcement given perception state | **Implemented** (parko-core RSS, wired via SG3 in #131) |
+| [QNX governor transport lane](docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md) | Rust-end-to-end command path on a QNX safety partition; hypervisor contract channel + iceoryx2 transport; FFI demoted to integration boundary (EPIC #270) | In progress — RTM harness + HVCHAN/WCET specs landed (#271/#272/#278/#274 docs); QNX cross-compile + hardware fault-injection campaigns blocked (#274/#279) |
 | [Apollo AV Stack](docs/roadmap/APOLLO_KIRRA_INTEGRATION.md) | Cyber RT bridge between Apollo Control and Canbus — kinematic enforcement and lockout in the Apollo pipeline | Planned — after QNX + robot demo |
 | Ferrocene compiler qualification | Switch from upstream `rustc` to Ferrocene + `criticalup.toml` for the ASIL-D toolchain claim | Planned — tracked in #132 |
 

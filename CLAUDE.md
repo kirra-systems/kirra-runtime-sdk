@@ -122,6 +122,8 @@ src/
 ├── health.rs                 — Health check utilities
 ├── tpm.rs                    — TPM attestation support (optional feature)
 ├── ffi.rs                    — C FFI bindings
+├── wcet_gate.rs              — Governor verdict WCET CI guard (O(1) structural
+│                               boundedness argument; GOVERNOR_VERDICT_WCET_*_MICROS)
 ├── gateway/
 │   ├── mod.rs
 │   ├── policy.rs             — classify_command (path+method → OperationalCommand)
@@ -316,6 +318,38 @@ proptest = "1"  # dev-dependency
 | `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |
 | `KIRRA_FABRIC_ASSET_ID` | No | — | Local fabric asset id fed by the verifier→fabric posture feed (#88). Unset/empty → feed inert (asset keeps its `Degraded` registration seed) |
+
+---
+
+## EPIC #270 — Governor transport / QNX partition lane
+
+The governor command path is moving to **Rust end-to-end** on a QNX safety
+partition; the Autoware/ROS 2 planner is an isolated guest. The C ABI/FFI is
+demoted to the C/C++ integration boundary (**ADR-0006 Clause 3**) — not the hot path.
+
+- **`tools/qnx-rtm-harness/`** (#271/#272) — C++ **shim** (driver: header-tear /
+  bounds / CRC) → Rust **judge** (checker: `kirra_judge.rs` — the contract verdict on
+  a shim-stabilized snapshot). Built **g++ + rustc directly (no cargo)**; the judge is
+  `no_std`, `panic=abort`, zero-alloc. The FDIT/RTM matrix gates on **VERDICT
+  CORRECTNESS** only; every row is traced to the kernel RTM (`QNX_MAPPING.md`, #272).
+  The concern split is load-bearing: memory faults die in the driver, contract faults
+  reach the judge. Sequence rule mirrors the kernel: `sequence <= last_accepted ⇒
+  reject` (equal = replay).
+- **`tools/iceoryx2-spike/`** (#273) — host-side iceoryx2 feature-subset spike
+  (seqlock-style owned snapshot; same `<=` replay rule; `src/judge.rs`).
+- **`docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md`** (KIRRA-OCCY-HVCHAN-001, #278) —
+  frozen `#[repr(C)]` pointer-free `GovernorContractView` over hypervisor shared
+  memory; 7-step seqlock write/read trust chain; **two-clock-domain model (§5)** with
+  the normative **non-mixing rule** (safety/boundary timing vs system timing).
+- **`docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`** (KIRRA-OCCY-WCET-METH-001,
+  #274/#279) — measurement-based timing-evidence strategy; `src/wcet_gate.rs` holds the
+  O(1) structural boundedness argument + the CI guard.
+- **`AOU-TIMESYNC-001`** (`ASSUMPTIONS_OF_USE.md`) — integrator timestamps must be
+  synchronized/monotonic and **converted to the boundary clock domain before publish**.
+
+**Invariant — host timing is INDICATIVE, never WCET.** Only QNX-target-under-FIFO
+numbers feed an FTTI claim (the harness/spike banners + the methodology enforce this;
+the harness CSV carries `wcet_status = TBD-QNX-TARGET`).
 
 ---
 
