@@ -261,6 +261,8 @@ Modern robotic and autonomous deployments increasingly rely on AI models to gene
 
 ## Architecture
 
+> **The seven-technology integration, in one place:** [docs/ARCHITECTURE_STACK.md](docs/ARCHITECTURE_STACK.md) — the three-domain model (safety partition / boundary / autonomy guest), every claim anchored to its owning ADR/spec.
+
 ```
 src/
 ├── verifier.rs                — AppState, FleetPosture, DAG traversal, TransportIdentityConfig
