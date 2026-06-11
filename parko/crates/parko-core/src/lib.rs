@@ -11,6 +11,8 @@
 //! depend on this crate and implement the `InferenceBackend` trait.
 
 pub mod backend;
+// PARK-022 — descriptor → backend resolution (factory registry + stub fallback).
+pub mod backend_selector;
 pub mod backends;
 pub mod clock;
 pub mod commands;
@@ -40,6 +42,11 @@ pub use backend::{
     PrecisionMode,
     TensorBatch,
     TensorStorage,
+};
+
+pub use backend_selector::{
+    descriptor_from_env_str, register_backend_factory, BackendFactory, BackendSelector,
+    KIRRA_BACKEND_ENV,
 };
 
 pub use backends::mock::MockBackend;

@@ -86,7 +86,7 @@ pub struct TensorBatch<'a> {
 /// (PARK-020 TensorRT, PARK-027 QNN, PARK-028 TIDL, PARK-029 OpenVINO,
 /// PARK-030 AMD). Matchers must use a wildcard arm.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BackendDescriptor {
     Cpu,
     /// NVIDIA GPU via the ONNX Runtime **CUDA** execution provider
