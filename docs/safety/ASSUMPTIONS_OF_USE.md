@@ -51,6 +51,7 @@ the verification passes for the target deployment.
 | AOU-HW-COMMBUS-001 (DR-2) | Governor comm path (Auto-Ethernet PHY+MAC) achieves LFM ≥ 90 % | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate | the ASIL-D LFM target for the Governor element (KIRRA-OCCY-QUANT-001) |
 | AOU-LOCALIZATION-001 | Integrator localization ≤ 0.10 m 95th-pct lateral (cross-track) error over the ODD; else the documented 0.75 m conservative-fallback margin | Integrator (localization) | **AoU-GAP** (base) — integrator-characterized; runtime gate live (#123 / PR #264) | `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m` (SG2 ASIL D); all map-anchored SG5 commit-zone enforcement (#260–#262) + the SG4 `MapKnownSafe` earn-back |
 | AOU-CLEARANCE-AUTH-001 | The integrator/verifier shall issue an `OperatorClearanceGrant` ONLY after authenticating the operator (the parko clearance loop enforces structure, not identity) | Integrator (verifier / operations) | **AoU** (by design) — structural loop live (#103 / PR #267); authentication delegated | the SG6 post-collision no-resume (`ClearanceLoop::try_clear` is the only un-latch path); SS-003 human-reset intent |
+| AOU-TIMESYNC-001 | Sensor/message timestamps consumed by governor staleness/deadline validation are synchronized, monotonic, drift-bounded vs the boundary clock domain, and converted to it before publication (HVCHAN §5 non-mixing rule) | Integrator (time sync / platform) | **AoU-GAP** — integrator obligation; drift bound **VALIDATION-PENDING** (set with the FTTI budget, #274/#278) | the governor staleness/deadline barrier (HVCHAN §3 judge; the #271 harness + #273 spike deadline checks); PTP/gPTP expected discharge |
 
 ---
 
@@ -848,3 +849,117 @@ authorization, which is why authentication is an explicit integrator obligation.
 - Occy **SG6** (post-collision immobilize) — the goal this clause's authentication
   precondition protects.
 - `#103` — the issue (runtime structure = PR #267; this clause = the docs half).
+
+---
+
+# Hypervisor contract-channel time synchronization (#278 / EPIC #270) — SEooC assumption of use
+
+The clause below files the **time-synchronization obligation** the hypervisor
+contract-channel spec leans on. `HYPERVISOR_CONTRACT_CHANNEL.md`
+(KIRRA-OCCY-HVCHAN-001) §5 R-HV-3 resolves the channel's clock question into a
+**two-clock-domain model with a normative non-mixing rule** (safety/boundary
+timing vs system timing); this register **files** the integrator obligation that
+model depends on. It is the **contractual** half of that §5 resolution — the spec
+defines the domains; this AoU records what the integrator must guarantee about the
+timestamps that enter the **boundary** one.
+
+## AOU-TIMESYNC-001 — Synchronized, monotonic, boundary-domain-converted timestamps
+
+### Assumption
+> *Integrator-provided sensor and message timestamps consumed by governor
+> staleness/deadline validation shall originate from a synchronized, monotonic
+> time source meeting a defined drift bound relative to the boundary clock domain
+> (bound: **VALIDATION-PENDING**, to be set with the FTTI budget); timestamps
+> shall be converted to the boundary clock domain before publication into the
+> contract channel.*
+
+### Why it is load-bearing
+Every staleness check the governor performs is structurally
+`now − message_timestamp < deadline` — concretely the HVCHAN §3 judge step
+`now > deadline ⇒ reject`, the same `now_monotonic_ns > deadline_monotonic_ns ⇒
+DeadlineMissed` check in the #271 harness judge (`kirra_judge.rs`
+`kirra_judge_assess`), and the same deadline discipline in the #273 spike judge.
+That comparison is only meaningful if `message_timestamp` and `now` are in the
+**same monotonic domain** and the source neither jumps nor runs backwards:
+- an **unsynchronized** source makes `now − message_timestamp` an arbitrary
+  quantity — a stale command can compute as fresh, or a fresh one as stale;
+- a **non-monotonic** source (wall-clock step, NTP/PTP slew backwards, counter
+  reset) can make a real delay read as negative → a **stale command admitted as
+  fresh**.
+
+This is the §5 **non-mixing rule** as an integrator obligation: the guest must
+convert to the boundary domain **before** publishing, because the governor — by
+design — reads **only** the boundary clock on its validation path and never
+wall/PTP time. An out-of-domain or unsynchronized timestamp **silently disables
+the deadline barrier**: no fault is raised, the check simply stops meaning what it
+asserts — the guarantee degrades without any detectable failure.
+
+### Evidence / consuming mechanisms
+- `HYPERVISOR_CONTRACT_CHANNEL.md` (KIRRA-OCCY-HVCHAN-001) **§5 R-HV-3** — the
+  two-clock-domain model + non-mixing rule this AoU discharges; **§4** — the
+  `cross-domain timestamp` and `clock skew beyond bound` fail-closed rows that
+  catch *gross* violations.
+- `tools/qnx-rtm-harness/kirra_judge.rs` (`kirra_judge_assess`) — the deadline
+  check `now_monotonic_ns > deadline_monotonic_ns ⇒ DeadlineMissed` (#271).
+- `tools/iceoryx2-spike/` judge — the same deadline/`<=`-freshness discipline (#273).
+- `ADR-0006` Clause 2 — the partition-boundary contract channel the boundary
+  domain lives in.
+
+### Scope
+- **In scope:** the synchronization, monotonicity, and **boundary-domain
+  conversion** of every sensor/message timestamp the governor's staleness/deadline
+  validation consumes.
+- **Owner:** Integrator (time synchronization / platform). KIRRA takes **no**
+  base-tier measurement of the integrator's sensor-clock synchronization; it
+  validates only the timestamps presented in the contract channel, already in the
+  boundary domain.
+- **Out of scope:** the boundary clock **provision** itself (the hypervisor shared
+  monotonic source + bounded skew, HVCHAN R-HV-3) — a separate, not-yet-filed
+  hypervisor AoU, target work (#274/#278); and **system-timing** uses (sensor
+  fusion, audit ordering, fleet analysis) that never touch the governor validation
+  path.
+
+### Verification status — **AoU-GAP** (integrator obligation; no kernel measurement of sensor-clock sync)
+No KIRRA base-tier measurement of upstream clock synchronization. Discharged for a
+deployment by the integrator establishing a synchronized, monotonic time
+distribution and characterizing its drift against the boundary domain within the
+**VALIDATION-PENDING** bound (to be fixed with the FTTI budget on target,
+#274/#278). **PTP / gPTP (IEEE 1588 / IEEE 802.1AS) is the *expected* discharge
+mechanism — named, not mandated**; any source meeting the synchronization,
+monotonicity, and drift-bound properties satisfies the clause.
+
+**Partial runtime mitigations (honest — catch gross, not subtle).** The §4
+`cross-domain timestamp` (domain-tag / range-plausibility) and `clock skew beyond
+bound` rows, plus the judge's monotonic-`sequence` `<=` reject, catch **gross**
+violations — an out-of-range timestamp, an obviously-backwards counter, a stale
+generation. They do **NOT** catch **drift within the plausible range**: a slowly
+desynchronized but still-plausible timestamp passes every runtime check while
+quietly eroding the deadline margin. Only the integrator's sync discipline closes
+that — the runtime checks are a backstop, **not** a discharge.
+
+### Consequence if violated
+Staleness validation becomes **meaningless**: stale commands are admitted as fresh
+(or fresh ones spuriously rejected). The deadline barrier — one of the channel's
+fail-closed guarantees — is **silently disabled** with no detectable fault,
+defeating the freshness/liveness property the staleness check exists to provide.
+**SG-relevant:** this is the same deadline/staleness barrier the SG-003
+sensor-liveness posture and the §3 judge deadline check rest on; with it silently
+off, a stale command reaches actuation as if fresh. This is exactly why it is
+filed as an explicit integrator obligation rather than assumed.
+
+### Cross-references
+- `HYPERVISOR_CONTRACT_CHANNEL.md` (KIRRA-OCCY-HVCHAN-001) §5 R-HV-3 (the
+  two-domain resolution + non-mixing rule) and §4 (the `cross-domain timestamp` /
+  `clock skew beyond bound` fail-closed rows) — the source resolution this clause
+  files.
+- `ADR-0006` Clause 2 — the partition-boundary contract channel.
+- The **#126 perception-AoU family** (AOU-PERCEPTION-FRAME-001 / -RANGE-001 /
+  -CLASS-001) — the sibling integrator-input obligations; this is the **time**
+  analogue of those **frame / range / class** perception-input assumptions (an
+  integrator-owned property of the data the governor consumes, kernel-unverifiable
+  at base tier, fail-closed only against gross violation).
+- **EPIC #270**; **#278** (the HVCHAN design + hardware implementation that fixes
+  the drift bound); **#279** (the fault-injection campaign whose clock-domain /
+  skew cases exercise the §4 rows).
+- **PTP / gPTP** (IEEE 1588 / IEEE 802.1AS) — the **expected** discharge mechanism
+  (named, **not** mandated).

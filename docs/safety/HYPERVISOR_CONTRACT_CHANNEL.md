@@ -221,6 +221,7 @@ the **barrier layer that owns it** — using the **#279 attribution taxonomy**
 | Judge reject (deadline / kinematic / contract) | governor judge | reject | judge |
 | Stale / equal generation or sequence | governor judge (`<=` rule, §3.1) | reject (replay/regress) | judge |
 | Clock skew beyond bound (§5) | governor freshness check | reject | hypervisor / contract-discipline |
+| **Cross-domain timestamp** (deadline computed in one clock domain, checked in the other — violates the §5 non-mixing rule) | governor, domain-tag / range-plausibility check | reject | contract-discipline |
 | **Publisher silent** (no fresh generation within the watchdog window) | governor liveness watchdog | the existing **sensor-liveness / SG-003** posture (Degraded → MRC) | hypervisor (scheduling) + governor |
 
 - **Publisher-silent liveness** reuses the existing watchdog discipline
@@ -248,14 +249,38 @@ safety argument leans on. They become the **hypervisor-config checklist** that
 - **R-HV-2 — Region size & alignment.** The region is exactly
   `size_of::<GovernorContractView>()`, aligned to the struct's natural alignment;
   the governor maps no more and no less.
-- **R-HV-3 — Shared monotonic clock source.** `publication_nanos` /
-  `deadline_nanos` are in a **single shared monotonic domain** both partitions
-  read — **likely the hypervisor's shared monotonic counter**. *(OPEN: the exact
-  source and the skew owner are unresolved until the target is in hand. Resolution
-  path: a hypervisor-provided monotonic source read identically by both
-  partitions, with a bounded max skew; until resolved, "clock skew beyond bound"
-  is the §4 fail-closed row, and an integrator/hypervisor **clock-provision AoU**
-  is implied — see §6.)*
+- **R-HV-3 — Two clock domains + the non-mixing rule (RESOLVED — domain model
+  decided; the clock *primitive* is target work).** The channel defines **two
+  distinct time domains**, and they are **never mixed**:
+  - **Safety timing — the boundary clock domain.** The hypervisor's shared
+    monotonic counter: **hypervisor-provided** and **partition-local-readable** by
+    both partitions. **ALL `GovernorContractView` timestamp/deadline fields
+    (`publication_nanos`, `deadline_nanos`) are DEFINED in this domain.** It is the
+    **only** clock the governor's validation path reads — used for
+    deadline/staleness validation, WCET, and FTTI accounting.
+  - **System timing.** PTP/gPTP-synchronized, wall-adjacent time. Used **guest-side**
+    for sensor fusion, and for audit-chain ordering and fleet analysis. It is
+    **NEVER consumed by the governor's validation path.**
+  - **The non-mixing rule (NORMATIVE).** Timestamps from the two domains **shall
+    never be compared or differenced.** The **guest converts to the boundary
+    domain BEFORE publishing** into the contract region; the governor **never
+    reads wall/PTP time on the validation path.** A deadline computed in one domain
+    and checked in the other is a **defined fault class** — the **`cross-domain
+    timestamp`** row in the §4 failure-semantics table (detection: domain-tag /
+    range-plausibility; verdict: reject; barrier: contract-discipline). The
+    integrator-side obligation this rule leans on — synchronized, monotonic,
+    boundary-domain-converted timestamps — is **filed as `AOU-TIMESYNC-001`**
+    (`ASSUMPTIONS_OF_USE.md`); see §6.
+  - **What stays target work (#274/#278).** The **DOMAIN MODEL is decided**; the
+    **PRIMITIVE is not.** Hardware day must still (a) identify the **concrete QNX
+    hypervisor clock primitive** that backs the boundary domain, (b) establish its
+    **guest-visibility mechanism** (how both partitions read it identically), and
+    (c) **measure its read cost** (it sits on the validation path's WCET). Until
+    measured, the boundary clock's **bounded max skew** is the open figure, and
+    both the **`clock skew beyond bound`** and **`cross-domain timestamp`** rows in
+    §4 are the fail-closed backstops; the hypervisor **clock-provision AoU** (the
+    bounded-skew shared source itself) remains implied (§6), distinct from the
+    now-filed integrator-conversion AoU.
 - **R-HV-4 — Partition scheduling guarantees.** The governor partition receives a
   scheduling guarantee sufficient to run its bounded snapshot/validate/digest
   path within the FTTI allocation **regardless of guest CPU behavior** — i.e. a
@@ -284,11 +309,21 @@ safety argument leans on. They become the **hypervisor-config checklist** that
     `src/bin/kirra_verifier_service.rs` (`held_epoch` #79 fence),
     `src/telemetry_watchdog.rs` (SG-003 liveness),
     `src/gateway/kinematics_contract.rs` (the talisman / freeze precedent).
-- **AoU candidates this spec implies (named here, NOT filed):**
-  - **Integrator / hypervisor clock provision** — a shared monotonic source with
-    a bounded max skew across partitions (R-HV-3). To be filed as an AoU register
-    entry when the clock source is resolved on target.
+- **AoUs this spec implies:**
+  - **Integrator time-sync / boundary-domain conversion — FILED as
+    `AOU-TIMESYNC-001`** (`ASSUMPTIONS_OF_USE.md`). Sensor/message timestamps
+    consumed by staleness/deadline validation must be synchronized, monotonic,
+    drift-bounded against the boundary domain, and **converted to it before
+    publication** (the §5 R-HV-3 non-mixing rule). This is the integrator half of
+    the resolved two-domain model.
+  - **Integrator / hypervisor clock provision — *NOT filed yet*.** The boundary
+    domain *itself*: a hypervisor-provided shared monotonic source with a bounded
+    max skew across partitions (R-HV-3). The domain model is decided (§5); the
+    concrete clock **primitive** + its bounded-skew figure are **target work
+    (#274/#278)**, to be filed as its own register entry when resolved on target.
+    Distinct from `AOU-TIMESYNC-001`: that one binds the integrator's *timestamps*;
+    this one binds the hypervisor's *clock source*.
   - **Hypervisor partition-scheduling guarantee** — the governor-partition CPU
-    guarantee independent of guest behavior (R-HV-4).
+    guarantee independent of guest behavior (R-HV-4). *(NOT filed yet.)*
   - **Read-only-mapping enforcement** — the hypervisor config that makes R-HV-1
-    a checkable precondition.
+    a checkable precondition. *(NOT filed yet.)*
