@@ -644,3 +644,83 @@ Tracked in PARK-024b / GitHub issue #67.
 
 The RTM's self-reported "All 16 safety goals are covered" was aspirational and never reconciled with the codebase. Closing CERT-003 requires implementing the 11 stub bodies and the 7 single-coverage gaps (TR-001b, TR-002a, TR-002b, TR-004a, TR-004b, TR-005a, TR-011a, TR-011b) before any ASIL-D pre-assessment can be defended.
 
+---
+
+## ADL-012 — PARK-025: QNN + QNX compatibility analysis
+
+**Date:** 2026-06-11
+**Status:** Analysis complete — #39 (QNN backend MVP) remains BLOCKED; #38 QNN row stays PENDING
+**Deciders:** Justin Looney
+**Source:** Owner-supplied vendor research (live Qualcomm / QNX sources, June 2026). Findings are filed with their caveats intact; **on-target verification rides the eventual hardware day** (no claim here is bench-confirmed in this repo).
+**Cross-refs:** #37 (this analysis), #39 (QNN backend MVP), #38 / PARK-026 (`parko/QNX_BACKEND_SELECTION.md`, the QNN row), #36 / PARK-024 (QNX spike), #276 (vendor-engagement track), ADL-003 (no-alloc hot-path contract), ADL-010 (QNX POSIX gaps).
+
+### 1. Distribution gate (the headline)
+
+QNN / QAIRT **QNX binaries are NOT in the public SDK** — the public SDK ships
+Android / Windows / Linux-aarch64 artifacts only. QNX artifacts ship through the
+**Snapdragon Ride / automotive BSP channel under commercial agreement**, not via
+public download.
+
+- **Production precedent exists:** SA8295 + QNX 7.1 + SDK 2.29, with the **CPU
+  backend confirmed working in the field**; the **GPU backend has known OpenCL
+  issues** on that stack.
+- **Consequence for #39 (record both options — the choice is an owner / business
+  call, related to the #276 vendor-engagement track):**
+  1. **Vendor engagement** — obtain the QNX QAIRT artifacts via a Qualcomm
+     automotive / Ride agreement, then implement against them; or
+  2. **Phased FFI-first** — scope #39's first phase to the **API-level FFI
+     bindings compiled against the public headers**, with the **QNX link step
+     deferred** until the artifacts are in hand.
+- Either way, **#39 cannot start from public artifacts.**
+
+### 2. Versioning + the ORT non-path
+
+- The SDK was **rebranded QNN → QAIRT** (~2.32; current ~2.34+).
+- **Version selection on QNX is BSP-coupled:** the Ride BSP bundles its matched
+  QAIRT. **Pin QAIRT per-target**, not free-floating.
+- The **ONNX Runtime QNN execution provider is tested on Android / Windows only.**
+  parko's `ort`-based backend pattern (parko-onnx) **does NOT extend to QNX QNN.**
+  → **Confirmed design input for #39:** the correct plan is **direct C FFI via
+  `QnnInterface_t`**, not an ORT EP.
+
+### 3. FFI / linking differences from Linux
+
+- Inference uses a **per-accelerator backend `.so` set**: `libQnnCpu` / `libQnnGpu`
+  / `libQnnHtp`, plus per-arch **HtpV6x / V7x Stub** libs and their **hexagon Skel**
+  counterparts, plus `libQnnSystem`.
+- **HTP rides a Stub/Skel FastRPC split to the cDSP** → the **QNX BSP must provide
+  the FastRPC transport driver** (a BSP precondition, not something parko can supply).
+- **`dlopen`-style loading of the backend `.so` is the SDK's own model.** Mapped
+  against `parko/QNX_BACKEND_SELECTION.md` **R-2** (the sanctioned loader path):
+  **COMPATIBLE-IF-CONFINED** — one documented `dlopen` of a **pinned path at init**,
+  **never on the hot path**. Arbitrary / relative / per-run `dlopen` remains forbidden.
+
+### 4. Memory model vs the no-alloc contract (ADL-003)
+
+- **Steady-state inference can be allocation-stable** via buffers **pre-registered
+  at load** (QnnMem-style registration) — this satisfies the inference-time no-alloc
+  requirement.
+- **Context / graph creation allocates internally.**
+- **Contract mapping:** *no-alloc at inference time, registration at load time,
+  QNN-internal allocation a **NAMED RESIDUAL*** requiring **vendor confirmation**
+  for any safety-partition use.
+- **Hard limit: < 4 GB model per process (HTP).** The vendor workaround is
+  **multi-process**, which **conflicts with the single-process constraint (R-3)** in
+  `parko/QNX_BACKEND_SELECTION.md`. **Under our rules a > 4 GB model is effectively
+  FORBIDDEN — it is not multi-processed around.**
+
+### 5. Pipeline fact
+
+- **Context-binary generation runs offline on x64 hosts (no device).** → KIRRA's
+  model-prep can be **CI-side**; **only execution needs silicon.**
+
+### 6. Verdict
+
+- **#39 remains BLOCKED** — silicon **and** the distribution gate (§1).
+- **#38's QNN row stays PENDING-#36**, now citing this analysis.
+- **The analysis half of #37 is DONE.** This entry is the closing evidence; **#37
+  is closed**, with on-target verification deferred to the hardware day (the
+  per-target QAIRT pin, the FastRPC driver presence, and the memory-residual vendor
+  confirmation all ride #36 / a #276 engagement).
+
+
