@@ -50,6 +50,7 @@ the verification passes for the target deployment.
 | AOU-HW-POWER-001 (DR-1) | Governor D3 compute on an ASIL-D-class redundant / supervised power supply | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate | the ASIL-D PMHF target for the Governor element (KIRRA-OCCY-QUANT-001) |
 | AOU-HW-COMMBUS-001 (DR-2) | Governor comm path (Auto-Ethernet PHY+MAC) achieves LFM ≥ 90 % | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate | the ASIL-D LFM target for the Governor element (KIRRA-OCCY-QUANT-001) |
 | AOU-LOCALIZATION-001 | Integrator localization ≤ 0.10 m 95th-pct lateral (cross-track) error over the ODD; else the documented 0.75 m conservative-fallback margin | Integrator (localization) | **AoU-GAP** (base) — integrator-characterized; runtime gate live (#123 / PR #264) | `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m` (SG2 ASIL D); all map-anchored SG5 commit-zone enforcement (#260–#262) + the SG4 `MapKnownSafe` earn-back |
+| AOU-CLEARANCE-AUTH-001 | The integrator/verifier shall issue an `OperatorClearanceGrant` ONLY after authenticating the operator (the parko clearance loop enforces structure, not identity) | Integrator (verifier / operations) | **AoU** (by design) — structural loop live (#103 / PR #267); authentication delegated | the SG6 post-collision no-resume (`ClearanceLoop::try_clear` is the only un-latch path); SS-003 human-reset intent |
 
 ---
 
@@ -745,3 +746,105 @@ gate fail-closing whatever the integrity channel does report.
   underwrites; **SG5** (commit-zone) and **SG4** (water-untraversable) — the
   map-anchored goals a violated pose mislocates.
 - `#123` — the issue (runtime gate = PR #264; this clause = the docs half).
+
+---
+
+# Post-collision clearance (#103) — SEooC assumption of use
+
+The clause below files the **operator-authentication boundary** of the SG6
+post-collision clearance loop. The runtime structure (the `ClearanceLoop` state
+machine, #103 runtime half / PR #267) is merged; this is its **contractual**
+half. The two are a pair: the loop guarantees that — once immobilized after a
+detected impact — the vehicle CANNOT resume except via a well-formed operator
+grant (structural no-resume), and this AoU records the obligation the loop
+cannot itself discharge: that a grant is only ever issued to an **authenticated**
+operator. parko enforces *structure*, not *identity*.
+
+## AOU-CLEARANCE-AUTH-001 — Clearance grants issued only after operator authentication
+
+### Assumption
+> *The integrator / verifier shall issue an `OperatorClearanceGrant` (the only
+> input that releases the SG6 post-collision immobilization) ONLY after it has
+> authenticated the clearing operator. The parko clearance loop enforces that a
+> grant is structurally well-formed; it does NOT — and cannot — authenticate the
+> operator's identity or authority.*
+
+### Why it is load-bearing
+SS-003's safe-state intent for a post-collision latch is *"human intervention
+required"* — a person may be under or near the vehicle, so the governor
+immobilizes and resumes only on a deliberate human act (contrast the automatic
+SS-001/SS-002 recovery). The `ClearanceLoop` (#103) makes that **structural**:
+once `Latched` / `EscalationRaised`, the ONLY transition back to `Normal` is
+`ClearanceLoop::try_clear` with a grant that passes
+`OperatorClearanceGrant::is_well_formed` (non-empty operator id, not
+future-dated, not stale). Clean evidence never clears it.
+
+But *structure is not identity.* A well-formed grant proves only that the input
+is shaped correctly and fresh — NOT that it came from a real, authorized
+operator. parko, by design (ADR-0004 independent governor), holds **no**
+credential store and performs **no** authentication: it checks the output of the
+surrounding system, it does not own the operator-trust boundary. If the
+integrator issues grants without authenticating the operator, the structural
+no-resume is defeated at its only door — anything that can synthesize a
+well-formed grant can resume a post-collision-immobilized vehicle. The
+authentication itself lives in the verifier / `kirra_core` reset mechanism
+(`KIRRA_SUPERVISOR_RESET_KEY`, #255) — a constant-time-compared, env-sourced,
+non-empty supervisor key — which is the authenticated act that should precede
+grant issuance.
+
+### Evidence
+- `parko/crates/parko-core/src/impact.rs` — `ClearanceLoop` (the structural
+  no-resume state machine) and `OperatorClearanceGrant::is_well_formed` (the
+  shape/freshness check, explicitly NOT authentication; the boundary is stated in
+  the type's doc-comment).
+- `docs/safety/SAFE_STATE_SPECIFICATION.md` **SS-003** — the
+  LockedOut / hard-stop safe state whose recovery is by **human reset** (the
+  intent the clearance loop realizes for the SG6 post-collision case).
+- `KIRRA_SUPERVISOR_RESET_KEY` (#255) — the authenticated, env-sourced,
+  constant-time-compared supervisor reset key the integrator/verifier should gate
+  grant issuance behind (read in `src/ffi.rs` / `src/main.rs`; invariant #7 in
+  `CLAUDE.md` — present, non-empty, ≤ 64 bytes).
+
+### Scope
+- **In scope:** the authentication of the operator BEFORE a clearance grant is
+  issued to the SG6 clearance loop.
+- **Owner:** Integrator (verifier / operations). The kernel structurally requires
+  a well-formed grant; the integrator owns who is allowed to produce one.
+- **Out of scope (named deferrals):** operator-notification **transport** — how
+  `ClearanceLoop::escalation_pending` reaches a human (UI / paging) is integrator
+  territory; and the cryptographic binding of a grant to an authenticated session
+  (a possible future hardening — today the grant is a structurally-validated
+  value, not a signed token at the parko layer).
+
+### Verification status — **AoU** (by design)
+Not a gap to be closed in parko — it is an architectural boundary (ADR-0004): the
+independent governor enforces structure and delegates identity. Discharged for a
+deployment by the integrator wiring grant issuance behind an authenticated
+operator action (e.g. the #255 supervisor-reset path) and recording that binding
+in their integration safety case. The structural half is **live** (#103 / PR
+#267): the loop admits no other un-latch path, and every clearance attempt
+(grant accepted OR rejected, with reason + operator-id subject) lands in the
+tamper-evident audit chain via the #263 sink family — so an unauthenticated or
+malformed clearance attempt is itself an audited event.
+
+### Consequence if violated
+If grants are issued without authentication, the SG6 post-collision no-resume is
+defeated at its only door: a vehicle immobilized after a detected collision —
+potentially with a person underneath — could be resumed by any party able to
+synthesize a well-formed grant. This is precisely the high-consequence,
+human-in-the-loop case SS-003 exists for; the kernel cannot self-detect a forged
+authorization, which is why authentication is an explicit integrator obligation.
+
+### Cross-references
+- `parko/crates/parko-core/src/impact.rs` (#103 / PR #267) — `ClearanceLoop` /
+  `OperatorClearanceGrant`, the structural no-resume this clause complements.
+- `docs/safety/SAFE_STATE_SPECIFICATION.md` SS-003 — the human-reset safe state.
+- `#255` (`KIRRA_SUPERVISOR_RESET_KEY`) — the authenticated reset mechanism that
+  should gate grant issuance; `CLAUDE.md` invariant #7.
+- `#263` — the audit bridge that records clearance / escalation / rejection
+  events (the transparency half of the post-collision sequence, #104).
+- `UL4600_SAFETY_CASE.md` (G-UL-TOP) — assumed external requirement; an
+  unauthenticated resume is a path to unreasonable risk at the SG6 boundary.
+- Occy **SG6** (post-collision immobilize) — the goal this clause's authentication
+  precondition protects.
+- `#103` — the issue (runtime structure = PR #267; this clause = the docs half).
