@@ -45,8 +45,8 @@ pub use backend::{
 };
 
 pub use backend_selector::{
-    descriptor_from_env_str, register_backend_factory, BackendFactory, BackendSelector,
-    KIRRA_BACKEND_ENV,
+    backend_permitted, current_platform, descriptor_from_env_str, register_backend_factory,
+    BackendFactory, BackendSelector, KIRRA_BACKEND_ENV, TargetPlatform,
 };
 
 pub use backends::mock::MockBackend;

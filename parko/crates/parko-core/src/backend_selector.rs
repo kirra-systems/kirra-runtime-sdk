@@ -140,6 +140,76 @@ pub fn descriptor_from_env_str(value: &str) -> Result<BackendDescriptor, Backend
     }
 }
 
+/// The deployment platform a backend would run on.
+///
+/// An explicit *parameter* (not hidden behind `cfg`) so every QNX-safe selection
+/// rule (PARK-026; `parko/QNX_BACKEND_SELECTION.md`) is testable on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetPlatform {
+    Linux,
+    Qnx,
+    Other,
+}
+
+/// The platform this binary was compiled for.
+///
+/// QNX Neutrino is `target_os = "nto"`. This `cfg` is the *only* compile-target
+/// dependence; the policy ([`backend_permitted`]) takes the platform as an
+/// argument, so the rules themselves are host-testable.
+#[must_use]
+pub fn current_platform() -> TargetPlatform {
+    #[cfg(target_os = "nto")]
+    {
+        TargetPlatform::Qnx
+    }
+    #[cfg(target_os = "linux")]
+    {
+        TargetPlatform::Linux
+    }
+    #[cfg(not(any(target_os = "nto", target_os = "linux")))]
+    {
+        TargetPlatform::Other
+    }
+}
+
+// SAFETY: parko backend selection | REQ: PARK-026 | TEST: backend_selector::tests::{off_qnx_permits_every_backend, qnx_forbids_cuda_and_tensorrt, qnx_pending_backends_denied_naming_36, platform_gate_precedes_factory}
+/// Apply the QNX-safe backend selection rules (PARK-026) for `platform`.
+///
+/// - **`Linux` / `Other` → always `Ok`.** Off-QNX behavior is unchanged — the held
+///   line: existing users see zero difference; the QNX rules engage only on QNX.
+/// - **`Qnx` → the `parko/QNX_BACKEND_SELECTION.md` §3 allowlist.** `Cuda` and
+///   `TensorRT` are **FORBIDDEN** (no CUDA/TensorRT runtime on QNX Neutrino); every
+///   other descriptor is **PENDING-#36** and **denied by default** until the #36
+///   spike confirms the target's POSIX facilities. Both return `Err` naming the
+///   rule doc; the pending case also names #36. Deny-by-default, never
+///   allow-until-denied — and the `_` arm denies any future (`#[non_exhaustive]`)
+///   descriptor too.
+pub fn backend_permitted(
+    platform: TargetPlatform,
+    d: BackendDescriptor,
+) -> Result<(), BackendError> {
+    const DOC: &str = "parko/QNX_BACKEND_SELECTION.md";
+    match platform {
+        TargetPlatform::Linux | TargetPlatform::Other => Ok(()),
+        TargetPlatform::Qnx => match d {
+            // FORBIDDEN — no CUDA/TensorRT runtime on standard QNX Neutrino.
+            BackendDescriptor::Cuda | BackendDescriptor::TensorRT => {
+                Err(BackendError::InitializationError(format!(
+                    "backend {d:?} is FORBIDDEN on QNX (no CUDA/TensorRT runtime on \
+                     QNX Neutrino); see {DOC} §3"
+                )))
+            }
+            // PENDING-#36 — deny-by-default until the QNX deployment spike (#36)
+            // confirms the required POSIX facilities. `_` also denies any future
+            // descriptor — conservative by design.
+            _ => Err(BackendError::InitializationError(format!(
+                "backend {d:?} is not yet permitted on QNX: POSIX availability \
+                 unconfirmed (deny-by-default until PARK-024 / #36 confirms); see {DOC} §3"
+            ))),
+        },
+    }
+}
+
 /// Owns the selected inference backend.
 ///
 /// Derefs to `dyn InferenceBackend`, so a `BackendSelector` is usable directly
@@ -162,6 +232,22 @@ impl BackendSelector {
     ///    stub is unconstructible. This is always an error, **never a panic**
     ///    and **never a silent substitution** of a different backend.
     pub fn new(descriptor: BackendDescriptor) -> Result<Self, BackendError> {
+        Self::new_for_platform(current_platform(), descriptor)
+    }
+
+    /// [`new`] with the platform as an explicit argument, so the QNX gate
+    /// (PARK-026) is host-testable. The platform rule is consulted **first** —
+    /// before factory or stub resolution — so a registered factory cannot bypass
+    /// it (`parko/QNX_BACKEND_SELECTION.md` §4).
+    ///
+    /// [`new`]: BackendSelector::new
+    fn new_for_platform(
+        platform: TargetPlatform,
+        descriptor: BackendDescriptor,
+    ) -> Result<Self, BackendError> {
+        // PARK-026 platform gate, BEFORE any factory/stub resolution.
+        backend_permitted(platform, descriptor.clone())?;
+
         // 1. Registered real backend wins.
         if let Some(factory) = registered_factory(&descriptor) {
             return factory().map(BackendSelector);
@@ -222,6 +308,10 @@ impl BackendSelector {
     }
 
     /// The unconfigured default: a deterministic zero-output `MockBackend`.
+    ///
+    /// Intentionally bypasses the PARK-026 platform gate: the Mock uses no
+    /// hardware and no restricted POSIX surface, so it is safe on any target and
+    /// is the correct fail-safe fallback on QNX when no real backend is permitted.
     fn default_mock() -> Self {
         BackendSelector(Box::new(MockBackend::new(
             HashMap::new(),
@@ -262,6 +352,20 @@ impl std::fmt::Debug for BackendSelector {
 mod tests {
     use super::*;
     use crate::backend::BackendDescriptor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Every descriptor, for the platform-policy sweeps.
+    fn all_descriptors() -> [BackendDescriptor; 7] {
+        [
+            BackendDescriptor::Cpu,
+            BackendDescriptor::Cuda,
+            BackendDescriptor::TensorRT,
+            BackendDescriptor::QualcommQnn,
+            BackendDescriptor::TiTidl,
+            BackendDescriptor::IntelOpenVino,
+            BackendDescriptor::AmdVitis,
+        ]
+    }
 
     // The factory registry is process-global and persists across the whole test
     // binary, which runs tests in parallel. To stay race-free, each registry-
@@ -396,5 +500,99 @@ mod tests {
         register_backend_factory(BackendDescriptor::IntelOpenVino, ok_mock_cpu);
         let sel = BackendSelector::from_env_value(Some("OpenVino")).unwrap();
         assert_eq!(sel.load_model("m").unwrap().model_id, "mock::m");
+    }
+
+    // ---- PARK-026 — QNX-safe backend selection rules -----------------------
+
+    #[test]
+    fn off_qnx_permits_every_backend() {
+        // The held line: off-QNX is unchanged — every descriptor is permitted.
+        for p in [TargetPlatform::Linux, TargetPlatform::Other] {
+            for d in all_descriptors() {
+                assert!(
+                    backend_permitted(p, d.clone()).is_ok(),
+                    "{p:?} must permit {d:?} (zero behavior change off-QNX)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qnx_forbids_cuda_and_tensorrt() {
+        for d in [BackendDescriptor::Cuda, BackendDescriptor::TensorRT] {
+            let msg = backend_permitted(TargetPlatform::Qnx, d.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains("FORBIDDEN") && msg.contains("QNX_BACKEND_SELECTION.md"),
+                "{d:?} on QNX must be FORBIDDEN and name the rule doc, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn qnx_pending_backends_denied_naming_36() {
+        // PENDING rows are denied by default and name #36 + the rule doc.
+        for d in [
+            BackendDescriptor::Cpu,
+            BackendDescriptor::QualcommQnn,
+            BackendDescriptor::TiTidl,
+            BackendDescriptor::IntelOpenVino,
+            BackendDescriptor::AmdVitis,
+        ] {
+            let msg = backend_permitted(TargetPlatform::Qnx, d.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains("#36") && msg.contains("QNX_BACKEND_SELECTION.md"),
+                "PENDING backend {d:?} on QNX must be denied naming #36 + the doc, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn qnx_is_currently_deny_all() {
+        // Conservative starting posture: NO row is CONFIRMED yet, so QNX denies
+        // every descriptor (FORBIDDEN or PENDING-#36). Encodes deny-by-default.
+        for d in all_descriptors() {
+            assert!(
+                backend_permitted(TargetPlatform::Qnx, d.clone()).is_err(),
+                "{d:?} must be denied on QNX (deny-by-default until #36)"
+            );
+        }
+    }
+
+    // Owns `AmdVitis`. A fn-pointer factory flags whether it ran.
+    static ORDERING_FACTORY_CALLED: AtomicBool = AtomicBool::new(false);
+    fn ordering_flagging_factory() -> Result<Box<dyn InferenceBackend>, BackendError> {
+        ORDERING_FACTORY_CALLED.store(true, Ordering::SeqCst);
+        Ok(Box::new(MockBackend::new(HashMap::new(), BackendDescriptor::Cpu)))
+    }
+
+    #[test]
+    fn platform_gate_precedes_factory() {
+        register_backend_factory(BackendDescriptor::AmdVitis, ordering_flagging_factory);
+
+        // On QNX the gate denies (AmdVitis is PENDING) BEFORE the factory runs —
+        // a registered factory must NOT bypass the platform rule.
+        ORDERING_FACTORY_CALLED.store(false, Ordering::SeqCst);
+        let err = BackendSelector::new_for_platform(TargetPlatform::Qnx, BackendDescriptor::AmdVitis)
+            .unwrap_err();
+        assert!(
+            !ORDERING_FACTORY_CALLED.load(Ordering::SeqCst),
+            "platform gate must deny before the registered factory is consulted"
+        );
+        assert!(matches!(err, BackendError::InitializationError(_)));
+
+        // Off-QNX the same descriptor + factory resolves normally (held line).
+        ORDERING_FACTORY_CALLED.store(false, Ordering::SeqCst);
+        let sel =
+            BackendSelector::new_for_platform(TargetPlatform::Linux, BackendDescriptor::AmdVitis)
+                .unwrap();
+        assert!(
+            ORDERING_FACTORY_CALLED.load(Ordering::SeqCst),
+            "off-QNX the registered factory must run (zero behavior change)"
+        );
+        assert_eq!(sel.descriptor(), BackendDescriptor::Cpu);
     }
 }
