@@ -14,6 +14,10 @@
 // INDICATIVE ONLY. Certified WCET comes from the QNX 8.0 target under FIFO
 // scheduling (#274) — host numbers are never presented as WCET.
 
+// COMPILER-ENFORCED no-unsafe (not comment-asserted): any `unsafe` in this
+// binary's own code is a hard error.
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::process::Command;
 

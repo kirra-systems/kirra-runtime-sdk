@@ -68,6 +68,18 @@ added back — both `std` and `console` are droppable.
   `--no-default-features` on the QNX 8.0 target and verify this empty set
   survives the 8.0 build + runtime (the host cannot prove the *target* runtime —
   that is #274's job).
+* **TOOLCHAIN CONSTRAINT — edition 2024.** iceoryx2 0.9.1 and essentially its
+  entire `iceoryx2-*` / `iceoryx2-bb-*` / `iceoryx2-pal-*` dependency family
+  declare **`edition = "2024"`** (verified across the 0.9.1 lock tree). Edition
+  2024 stabilized in **Rust 1.85**, so an older `cargo`/`rustc` (e.g. **1.75
+  refuses it**) cannot build this dependency tree at all — `feature-subset`
+  is moot if the toolchain can't compile the deps. **The spike crate itself is
+  `edition = "2021"`; only the iceoryx2 *dependency tree* forces edition 2024.**
+  Therefore, an additional input to #274: **the QNX cross-toolchain AND the
+  Ferrocene qualified `rustc` must support edition 2024** (i.e. be based on
+  ≥ 1.85-equivalent), **or the iceoryx2 pin must move to an older release** whose
+  tree predates the edition-2024 bump. This is a hard gate alongside the
+  feature-subset check — not a soft preference.
 
 > Note on `cargo build --no-default-features`: the CLI flag gates **this crate's**
 > features, not the dependency's. The two configs are therefore driven through
@@ -146,7 +158,14 @@ never presented as WCET.
 ## Informs
 
 * **#274** — QNX 8.0 `--no-default-features` build + feature-subset verification +
-  target-measured FDIT/WCET. This spike's empty minimal feature list is its input.
+  target-measured FDIT/WCET. This spike's empty minimal feature list is its input,
+  **plus the edition-2024 toolchain gate above** (the QNX cross-toolchain must
+  compile an edition-2024 dependency tree, or the pin moves older).
 * **#275** — the transport ADR (iceoryx2 over classic; Rust end-to-end; FFI
-  demoted). This spike supplies the no-FFI demonstration and the
-  transport-eliminates-TornHeader finding.
+  demoted). This spike supplies the no-FFI demonstration (now
+  **compiler-enforced** via `#![forbid(unsafe_code)]`) and the
+  transport-eliminates-TornHeader finding. **Version-selection consideration for
+  the ADR:** iceoryx2 0.9.1's tree requires **edition 2024 (Rust ≥ 1.85)** — the
+  ADR must record that the chosen iceoryx2 version is compatible with the
+  qualified **Ferrocene** `rustc` edition, or pin an older iceoryx2 whose tree
+  predates the bump.

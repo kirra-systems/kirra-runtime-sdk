@@ -11,6 +11,12 @@
 // `src/gateway/kinematics_contract.rs`; this crate imports NOTHING from it and
 // labels its own envelope numbers as PROXIES.
 
+// The no-FFI/no-unsafe property is COMPILER-ENFORCED, not comment-asserted: any
+// `unsafe` in this crate's own code is a hard error. (iceoryx2's internal
+// `unsafe` lives in the dependency and is unaffected — the point is that the
+// command path WE author is unsafe-free.)
+#![forbid(unsafe_code)]
+
 pub mod harness;
 pub mod judge;
 pub mod wire;
