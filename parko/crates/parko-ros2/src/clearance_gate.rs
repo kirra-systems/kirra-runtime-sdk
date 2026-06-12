@@ -57,6 +57,7 @@
 // it is not what delivery operates on. The node owns the bare loop; recording the
 // detection edges to the signed chain is a separate concern tracked with #309.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use parko_core::backend::InferenceBackend;
@@ -88,6 +89,39 @@ pub struct ImpactInputs {
     /// The latest contact-sensor reading (`false` when no contact topic is
     /// configured — a missing sensor reads as "no contact", reduced coverage).
     pub contact: bool,
+}
+
+/// Sticky-until-read contact flag (#320). Contact is a definitive SG6 collision
+/// trigger and a boolean EDGE — the most likely signal to be transient. The
+/// subscriber writes via [`assert`](Self::assert) (OR in any `true`; a later
+/// `false` is a no-op), and the tick reads via [`drain`](Self::drain) (consume the
+/// sticky `true` and reset). So a contact pulse that asserts and de-asserts between
+/// two 50 ms ticks is **not lost** (the bug was a plain `store`/`load`, which a
+/// `false` write would overwrite away), and one contact event latches exactly once
+/// rather than every subsequent tick. Lives here (the default-lane tick harness,
+/// with [`ImpactInputs`]) so the semantics are CI-tested without ROS; `node.rs`
+/// (fully `ros2`-gated) only wires the subscription to it.
+#[derive(Debug, Default)]
+pub struct ContactCell {
+    fired: AtomicBool,
+}
+
+impl ContactCell {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Write side: OR in the latest reading — sticky on any `true`.
+    pub fn assert(&self, value: bool) {
+        self.fired.fetch_or(value, Ordering::Release);
+    }
+
+    /// Read side: drain — return whether contact fired since the last drain, and
+    /// reset the flag atomically.
+    pub fn drain(&self) -> bool {
+        self.fired.swap(false, Ordering::Acquire)
+    }
 }
 
 /// Convention-free deceleration proxy: the Euclidean magnitude of the IMU
@@ -333,6 +367,28 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ---- #320: contact ContactCell sticky-until-read --------------------
+
+    /// A contact pulse that asserts then de-asserts BEFORE the tick reads it is
+    /// NOT lost — the old `store`/`load` would have seen the trailing `false`.
+    #[test]
+    fn contact_pulse_between_ticks_is_not_lost() {
+        let cell = ContactCell::new();
+        cell.assert(true); // the pulse
+        cell.assert(false); // de-assert before the tick reads
+        assert!(cell.drain(), "a sub-tick contact pulse must survive to the next tick read");
+    }
+
+    /// One contact event latches exactly ONCE — after the tick drains a `true`,
+    /// the next tick sees `false` (no double-latch every subsequent tick).
+    #[test]
+    fn contact_resets_after_tick_read() {
+        let cell = ContactCell::new();
+        cell.assert(true);
+        assert!(cell.drain(), "first read sees the contact");
+        assert!(!cell.drain(), "second read is reset — one event latches once");
+    }
 
     use parko_core::backend::{BackendDescriptor, TensorBatch};
     use parko_core::backends::mock::MockBackend;

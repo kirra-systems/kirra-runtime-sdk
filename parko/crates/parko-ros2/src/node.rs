@@ -20,7 +20,6 @@
 //     next-milestone deliverable. For M2 the node accepts a posture
 //     parameter (CLI / env) and defaults to `Nominal`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use parko_core::backend::InferenceBackend;
@@ -28,7 +27,9 @@ use parko_core::safety::SafetyPosture;
 use parko_core::scheduler::InferenceLoop;
 use tokio::sync::Mutex;
 
-use crate::clearance_gate::{run_pipeline_tick_with_clearance, ImpactInputs, NodeClearance};
+use crate::clearance_gate::{
+    run_pipeline_tick_with_clearance, ContactCell, ImpactInputs, NodeClearance,
+};
 use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
 use crate::imu_shim::imu_msg_to_sample;
@@ -93,14 +94,17 @@ where
     // --- SG6 impact-detection sources (#309) --------------------------
     //
     // Optional IMU (decel) + contact subscriptions feed the per-tick
-    // `ImpactInputs`. Each runs a background drain task that writes the
-    // LATEST reading into a shared cell; the tick reads them. A missing
-    // source is REDUCED detection coverage, logged loudly — never a
-    // fabricated reading (absent IMU → no decel; absent contact → `false`).
-    // Detection only matters when the clearance gate is active.
+    // `ImpactInputs`. Each runs a background drain task; the IMU task writes the
+    // LATEST sample (a spike present at read time survives), the contact task is
+    // STICKY-UNTIL-READ (#320) so a sub-tick pulse is not lost. A missing source
+    // is REDUCED detection coverage, logged loudly — never a fabricated reading
+    // (absent IMU → no decel; absent contact → `false`). Detection only matters
+    // when the clearance gate is active.
     let detection_enabled = clearance.is_some();
     let latest_imu: Arc<StdMutex<Option<ImuSample>>> = Arc::new(StdMutex::new(None));
-    let contact_state: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // Contact is sticky-until-read so a sub-tick pulse is not lost — see
+    // [`ContactCell`] (#320), the CI-tested semantics this transport just wires.
+    let contact_state: Arc<ContactCell> = Arc::new(ContactCell::new());
 
     if detection_enabled {
         match &config.imu_topic {
@@ -136,7 +140,7 @@ where
                     use futures::StreamExt;
                     let mut s = contact_stream;
                     while let Some(msg) = s.next().await {
-                        cell.store(msg.data, Ordering::Relaxed);
+                        cell.assert(msg.data); // sticky-until-read (#320)
                     }
                     tracing::warn!("parko-ros2: contact stream closed — contact detection now inactive");
                 });
@@ -194,7 +198,7 @@ where
             // Absent sources read as their no-signal defaults (no fabrication).
             let impact_inputs = ImpactInputs {
                 imu: drain_imu.lock().ok().and_then(|g| *g),
-                contact: drain_contact.load(Ordering::Relaxed),
+                contact: drain_contact.drain(), // sticky-until-read drain (#320)
             };
 
             let cleared = run_pipeline_tick_with_clearance(
