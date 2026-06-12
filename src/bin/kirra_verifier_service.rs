@@ -2993,6 +2993,14 @@ async fn console_clearance_grant(
     headers: HeaderMap,
     Json(req): Json<ClearanceGrantRequest>,
 ) -> impl IntoResponse {
+    // HA split-brain guard (#323): recording a grant is a store MUTATION. The
+    // `/console` posture-exemption keeps this reachable during LockedOut, but that
+    // is about POSTURE — it does NOT justify a passive-standby instance writing
+    // grants and diverging from the primary. Fail-closed like every other mutation.
+    if !svc.app.is_active() {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+    }
     let now = now_ms();
     let operator_id = req.operator_id.trim().to_string();
     let node_id = req.node_id.trim().to_string();
@@ -4555,5 +4563,21 @@ mod console_phase_a_tests {
         let blob = serde_json::to_string(&page.entries).unwrap();
         assert!(blob.contains("supervisor-break-glass"),
             "break-glass auth_method recorded distinctly in the signed chain");
+    }
+
+    /// #323 — a passive-standby instance must REJECT a clearance-grant write (the
+    /// HA split-brain guard), mirroring every other mutation handler. The
+    /// `/console` posture-exemption keeps it reachable, but is_active() fail-closes.
+    #[tokio::test]
+    async fn standby_instance_rejects_clearance_grant() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        // Demote this instance to passive standby.
+        svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Any grant shape — the is_active guard fires FIRST, before auth.
+        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let (s, _b) = post_json(svc, "/console/clearance-grants", body, None).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
+            "a passive-standby instance must not accept grant writes (split-brain guard)");
     }
 }
