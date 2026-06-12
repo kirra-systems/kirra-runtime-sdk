@@ -800,3 +800,47 @@ in tests.
 - **Per-class wiring into the node binary** — selecting `impact_cfg_for_class(class)`
   at runtime is the #312 remainder; until then the node uses the default (30.0, 1/1).
 
+---
+
+## ADL-014: QNX 8.0 cross-compile — first light (PARK-024 / #36)
+
+**Date:** 2026-06-12
+**Status:** COMPILE CONFIRMED — deploy pending QNX target
+
+### Toolchain findings
+- QNX SDP 2.0.4 (`/opt/qnx800/sdp2`) does NOT ship rustc/cargo
+- Upstream stable rustup has no prebuilt std for `x86_64-pc-nto-qnx800`
+- Working build path: `cargo +nightly build -Z build-std=std,panic_abort
+  --release --target x86_64-pc-nto-qnx800 -p kirra-governor-service`
+- Compiler: GCC 12.2.0 (`gcc_ntox86_64_cxx`), rustc 1.98.0-nightly (2026-06-11)
+
+### Binary confirmed genuine QNX NTO ELF
+- `readelf -l` output: `[Requesting program interpreter: /usr/lib/ldqnx-64.so.2]`
+- QNX dynamic linker confirmed in SDP:
+  `/opt/qnx800/sdp2/target/qnx/x86_64/usr/lib/ldqnx-64.so.2`
+  `/opt/qnx800/sdp2/target/qnx/aarch64le/usr/lib/ldqnx-64.so.2`
+- Note: `file` reports SYSV (QNX uses SYSV ELF format); the interpreter path
+  is the authoritative QNX marker, not the OS label in `file` output
+
+### Both targets confirmed available in SDP 2.0.4
+- `gcc_ntox86_64_cxx` → x86_64 QNX (laptop/VM/x86 target)
+- `gcc_ntoaarch64le_cxx` → AArch64 (Jetson Orin NX — the cert target)
+- AArch64 cross-compile uses identical process: swap target triple to
+  `aarch64-unknown-nto-qnx800` and variant to `gcc_ntoaarch64le_cxx`
+
+### #274-verify finding
+QNX SDP 2.0.4 does NOT ship Ferrocene or an edition-2024-equivalent Rust
+toolchain. The nightly `-Z build-std` path produces a working NTO binary but
+is not cert-quality. Ferrocene ≥1.85-equiv remains the required toolchain for
+#274/#278 (iceoryx2 safety-partition adoption). The edition-2024 gate in
+ADR-0006 Constraints stands — this finding confirms it is a real gap, not a
+theoretical one.
+
+### Remaining for full #36 closure
+1. Deploy binary to a running QNX instance (VM or Jetson hardware)
+2. Confirm `/health` returns 200 on QNX
+3. Document POSIX findings (signal handling, threading, filesystem, dynamic
+   linking) → flip PENDING rows in parko/QNX_BACKEND_SELECTION.md to
+   CONFIRMED or FORBIDDEN with target evidence
+Cross-ref: #274-verify, #278, ADR-0006, parko/QNX_BACKEND_SELECTION.md
+
