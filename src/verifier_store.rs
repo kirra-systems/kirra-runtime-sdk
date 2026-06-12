@@ -656,6 +656,15 @@ impl VerifierStore {
         self.signing_key = Some(key);
     }
 
+    /// The PUBLIC half of the in-memory audit signing key, or `None` if no key is
+    /// installed. Read-only exposure (#329 residual): lets the
+    /// [`crate::key_registry::KeyRegistry`] resolve the chain's verifying key through
+    /// the unified registry. There is exactly ONE audit signer and it is volatile
+    /// (no rotation, no persisted history) — that wider residual is still deferred.
+    pub fn audit_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.signing_key.as_ref().map(|sk| sk.verifying_key())
+    }
+
     /// TEST-ONLY tamper seam (SG-010): hands a test the raw rusqlite connection
     /// so it can mutate a previously-written `audit_log_chain` row out of band —
     /// exactly what a tamperer with disk access would do. Used to prove

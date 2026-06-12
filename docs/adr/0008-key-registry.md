@@ -109,10 +109,14 @@ no migration risk: the stores are untouched, only the read path is unified.
 
 ## Honest limits (named, not built)
 
-- **The audit signing key is NOT in this registry.** It is an in-memory `SigningKey`
-  on the store — no rotation, no persisted public entry. Resolving it through a registry
-  of *stored* keys would be a lie; it is a **named residual**, documented in the module,
-  not silently omitted.
+- **The audit signing key is resolvable READ-ONLY (Phase A.1, #329 residual).** The
+  `AuditSigning` role resolves the chain's verifying key from the store's in-memory
+  signer, keyed by the key's `verifying_key_id` fingerprint (the same id the audit
+  chain stamps in `key_id`), so a chain row's `key_id` resolves to a key through the
+  registry. **Still deferred:** rotation + a persisted key *history* — the registry
+  knows only the ONE current in-memory key, so any other fingerprint is `None`, and a
+  key rotated away cannot be resolved to verify its historical rows. That wider change
+  touches the store schema + the chain trust model (see *Conditions that reopen*).
 - **Encoding migration is deferred.** Phase A normalizes at the read boundary; it does
   **not** rewrite the stores to a single on-disk format. One abstraction now; one
   on-disk encoding is named future work.
