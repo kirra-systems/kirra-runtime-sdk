@@ -59,6 +59,39 @@ impl ClearanceDelivery {
         }
     }
 
+    /// Open the co-located per-vehicle store at `db_path`, install the base64
+    /// Ed25519 signing key (the same `KIRRA_LOG_SIGNING_KEY` encoding the verifier
+    /// service accepts) so delivered-grant outcomes are SIGNED in the shared
+    /// ledger, and build a delivery handle for `node_id`.
+    ///
+    /// This is the node-side deploy constructor (the #304 deferral): the parko-ros2
+    /// node calls it at startup so it never has to name `base64` / `ed25519_dalek`
+    /// itself (those deps live here). Fail-closed: an unopenable store or an
+    /// undecodable key is an `Err(String)` — never a silent unsigned fallback.
+    ///
+    /// The signing key is moved into the store and never retained or logged here.
+    pub fn open_signed(
+        db_path: &str,
+        node_id: &str,
+        signing_key_b64: &str,
+    ) -> Result<Self, String> {
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(signing_key_b64.trim())
+            .map_err(|e| format!("KIRRA_LOG_SIGNING_KEY is not valid base64: {e}"))?;
+        let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+            format!(
+                "KIRRA_LOG_SIGNING_KEY must decode to 32 key bytes, got {}",
+                raw.len()
+            )
+        })?;
+        let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
+        let mut store = VerifierStore::new(db_path)
+            .map_err(|e| format!("could not open the co-located store '{db_path}': {e}"))?;
+        store.set_signing_key(key);
+        Ok(Self::new(Arc::new(Mutex::new(store)), node_id))
+    }
+
     /// Override the grant-age ceiling (default [`DEFAULT_MAX_GRANT_AGE_MS`]).
     #[must_use]
     pub fn with_max_grant_age_ms(mut self, ms: u64) -> Self {
@@ -232,6 +265,40 @@ mod tests {
         assert_eq!(l.state(), before, "loop untouched on empty pickup");
         assert!(!audit_has(&s, "ClearanceDelivered"));
         assert!(!audit_has(&s, "ClearanceDeliveryRejected"));
+    }
+
+    #[test]
+    fn open_signed_rejects_a_bad_key_and_signs_with_a_good_one() {
+        use base64::Engine as _;
+        let dir = std::env::temp_dir();
+        let db = dir.join(format!("parko_open_signed_{}.sqlite", std::process::id()));
+        let db_path = db.to_str().unwrap();
+        let _ = std::fs::remove_file(&db);
+
+        // A non-base64 / wrong-length key is a fail-closed Err — never a silent
+        // unsigned fallback.
+        assert!(ClearanceDelivery::open_signed(db_path, "KIRRA-DEMO-03", "not-base64!!").is_err());
+
+        // A valid 32-byte base64 seed opens a SIGNED store: a delivered grant's
+        // outcome lands as a verifiable row.
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode([3u8; 32]);
+        let d = ClearanceDelivery::open_signed(db_path, "KIRRA-DEMO-03", &key_b64)
+            .expect("valid key opens a signed store");
+
+        // Record a grant directly through the same store handle, then deliver.
+        d.store
+            .lock()
+            .unwrap()
+            .save_clearance_grant_chained("KIRRA-DEMO-03", "alice", 1_000)
+            .expect("record grant");
+        let mut l = immobilized_loop();
+        let out = d.poll_and_deliver(&mut l, 1_500);
+        assert!(matches!(out, DeliveryOutcome::Cleared { .. }), "got {out:?}");
+        assert!(audit_has(&d.store, "ClearanceDelivered"));
+
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(format!("{db_path}-wal"));
+        let _ = std::fs::remove_file(format!("{db_path}-shm"));
     }
 
     #[test]

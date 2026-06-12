@@ -32,6 +32,7 @@ use parko_kirra::{
     select_divergence_sink, DiverseKirraGovernor, GovernorComparator, KirraGovernor,
 };
 use parko_ros2::{
+    clearance_gate::NodeClearance,
     comparator_adapter::ComparatorAsGovernor,
     config::ParkoNodeConfig,
     node::run_node,
@@ -102,6 +103,93 @@ fn build_divergence_sink() -> Arc<dyn parko_kirra::comparator::DivergenceEventSi
                 "parko-ros2: FATAL — cannot configure the CERT-006 divergence audit sink: {e}. \
                  A durable audit was requested but cannot be made signed + persistent. Refusing \
                  to start with divergences unaudited."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Resolve the ONE co-located store path (#304). The node and the vehicle's
+/// verifier share a single SQLite store; this reads `KIRRA_DB_PATH` first and
+/// falls back to the divergence sink's `PARKO_DIVERGENCE_AUDIT_DB`. If BOTH are
+/// set and DIFFER, that is a co-location error — warn once and prefer
+/// `KIRRA_DB_PATH` (the verifier's canonical var). See docs/CONSOLE_RUNBOOK.md
+/// "On the vehicle".
+fn resolve_one_store_db() -> Option<String> {
+    let kirra = std::env::var("KIRRA_DB_PATH").ok().filter(|s| !s.is_empty());
+    let divergence = std::env::var("PARKO_DIVERGENCE_AUDIT_DB").ok().filter(|s| !s.is_empty());
+    if let (Some(k), Some(d)) = (&kirra, &divergence) {
+        if k != d {
+            tracing::warn!(
+                kirra_db = %k, divergence_db = %d,
+                "parko-ros2: KIRRA_DB_PATH and PARKO_DIVERGENCE_AUDIT_DB are BOTH set and DIFFER. \
+                 The co-located node + verifier are ONE store (one vehicle, one SQLite file) — \
+                 using KIRRA_DB_PATH. Point both env vars at the SAME file."
+            );
+        }
+    }
+    kirra.or(divergence)
+}
+
+/// Build the node-owned clearance gate (#304 Phase-B), mirroring the divergence
+/// sink's env-gated warn-and-continue shape.
+///
+///   - the store path (`KIRRA_DB_PATH`, or `PARKO_DIVERGENCE_AUDIT_DB`) AND
+///     `KIRRA_LOG_SIGNING_KEY` present → delivery is REQUESTED.
+///   - `KIRRA_NODE_ID` — REQUIRED when delivery is requested. There is NO safe
+///     default: a wrong-node grant pickup must be impossible. Missing → FATAL.
+///   - either env input missing → delivery DISABLED (the dev lane): warn naming
+///     what is off (console grants will not be delivered) and return `None`.
+///
+/// The node NEVER reads `KIRRA_SUPERVISOR_RESET_KEY` — operator authentication is
+/// the SERVICE's job (the #255 grant form); the node only delivers what the
+/// verifier already recorded + signed.
+fn build_node_clearance() -> Option<NodeClearance> {
+    let db = resolve_one_store_db();
+    let key = std::env::var("KIRRA_LOG_SIGNING_KEY").ok().filter(|s| !s.is_empty());
+
+    let (db, key) = match (db, key) {
+        (Some(db), Some(key)) => (db, key),
+        _ => {
+            tracing::warn!(
+                "parko-ros2: clearance delivery DISABLED — set KIRRA_DB_PATH (the one co-located \
+                 store), KIRRA_LOG_SIGNING_KEY, and KIRRA_NODE_ID to enable it. Console-recorded \
+                 operator clearance grants will NOT be delivered to this node."
+            );
+            return None;
+        }
+    };
+
+    // Delivery requested → the node id is mandatory and has no default.
+    let node_id = match std::env::var("KIRRA_NODE_ID").ok().filter(|s| !s.is_empty()) {
+        Some(id) => id,
+        None => {
+            tracing::error!(
+                "parko-ros2: FATAL — clearance delivery requested (KIRRA_DB_PATH + \
+                 KIRRA_LOG_SIGNING_KEY set) but KIRRA_NODE_ID is unset/empty. There is no safe \
+                 default node id — a wrong-node grant pickup must be impossible. Set KIRRA_NODE_ID \
+                 to THIS vehicle's node id."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    match NodeClearance::open_signed(&db, &node_id, &key) {
+        Ok(c) => {
+            tracing::info!(
+                node_id = %node_id, db = %db,
+                "parko-ros2: clearance delivery ENABLED — console-recorded operator grants are \
+                 delivered on this node's own tick (poll_and_deliver per tick); the post-collision \
+                 loop holds the vehicle stopped until a grant clears it."
+            );
+            Some(c)
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "parko-ros2: FATAL — clearance delivery requested but the co-located store could \
+                 not be opened / the signing key is invalid. Refusing to start with delivery \
+                 silently broken."
             );
             std::process::exit(1);
         }
@@ -198,12 +286,16 @@ async fn main() {
 
     let mapping = Arc::new(VectorMapping::new("observation"));
 
+    // #304 Phase-B: the node-owned clearance gate (delivery + the SG6 stop
+    // tie-in). `None` when delivery is not configured (the dev lane).
+    let clearance = build_node_clearance();
+
     let run_task = {
         let config = Arc::clone(&config);
         let infer = Arc::clone(&infer);
         let mapping = Arc::clone(&mapping);
         tokio::spawn(async move {
-            if let Err(e) = run_node(config, infer, mapping, posture, "parko_governor").await {
+            if let Err(e) = run_node(config, infer, mapping, posture, clearance, "parko_governor").await {
                 tracing::error!(error = ?e, "parko-ros2: run_node exited with error");
             }
         })

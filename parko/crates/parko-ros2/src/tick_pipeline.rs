@@ -119,7 +119,7 @@ where
     run_pipeline_tick_inner(config, loop_mutex, frame, posture).await
 }
 
-async fn run_pipeline_tick_inner<B>(
+pub(crate) async fn run_pipeline_tick_inner<B>(
     config:      &ParkoNodeConfig,
     loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
     frame:       SensorFrame,
@@ -176,7 +176,7 @@ where
     }
 }
 
-fn current_time_ms() -> u64 {
+pub(crate) fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

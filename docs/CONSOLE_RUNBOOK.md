@@ -122,3 +122,68 @@ mock.
 
 > The console is **QM** and **posture-exempt** (reachable during LockedOut — the
 > posture it exists to recover from). The governor judges; the console does not.
+
+---
+
+## On the vehicle (the deployed delivery path)
+
+The desk demo above runs the delivery by hand (`cargo run --example
+deliver_clearance`). **On a real vehicle the node delivers grants on its own
+tick** — no manual step. The `parko-ros2` node, when configured, calls
+`poll_and_deliver` every tick: a console-recorded grant is picked up and clears
+the post-collision loop on the node's next cycle, and the node holds the vehicle
+**stopped** (regardless of posture) while that loop is immobilized.
+
+### ⚠️ ONE store, one vehicle
+
+The node and the vehicle's verifier **share a single SQLite store** — one
+vehicle, one file. Clearance delivery is store-level pickup over that shared
+store (no network hop). Point every component at the **same** path:
+
+```sh
+# THE one co-located store + the one signing key (shared by service + node):
+export KIRRA_DB_PATH="/var/lib/kirra/this_vehicle.sqlite"
+export KIRRA_LOG_SIGNING_KEY="$(cat /etc/kirra/log_signing_key.b64)"
+
+# Service-only — the operator-auth secret. The NODE never sees this.
+export KIRRA_SUPERVISOR_RESET_KEY="$(cat /etc/kirra/supervisor_key)"   # service shell ONLY
+
+# Node-only — THIS vehicle's node id. REQUIRED to enable delivery; no default
+# (a wrong-node grant pickup must be impossible).
+export KIRRA_NODE_ID="KIRRA-DEMO-03"
+```
+
+The node reads `KIRRA_DB_PATH` first, falling back to the divergence sink's
+`PARKO_DIVERGENCE_AUDIT_DB`; if both are set and **differ**, it warns and uses
+`KIRRA_DB_PATH`. In the co-located deployment they must name the **same** file.
+
+If the store + signing key + `KIRRA_NODE_ID` are not all present, the node logs
+a loud warning and runs with **clearance delivery disabled** (the dev lane) —
+console grants will not be delivered. If the store/key are present but
+`KIRRA_NODE_ID` is missing, the node **refuses to start** (it will not guess a
+node id).
+
+> **The node never holds the supervisor key.** Operator authentication is the
+> **service's** job (the `KIRRA_SUPERVISOR_RESET_KEY` grant form, #255). The node
+> only delivers what the verifier already recorded and signed — it authenticates
+> nothing itself.
+
+### Day-one flow
+
+1. **Launch the stack** with the env above — the verifier service *and* the
+   `parko-ros2` node against the one store.
+2. **The console shows real posture** (`/console`) — the live fleet, not seed
+   data, this time.
+3. **Record a grant** for the immobilized vehicle in the grant form (operator id
+   + supervisor key), exactly as in the desk demo.
+4. **The node's own tick delivers it** — `poll_and_deliver` picks up the grant,
+   re-validates it at the `ClearanceLoop`, and on success the post-collision hold
+   lifts and motion resumes. A `ClearanceDelivered` row appears in the same
+   signed chain. No manual `deliver_clearance` run.
+
+> **Scope note (what's wired here vs. next):** this path wires the *delivery* and
+> the *stop tie-in* — a grant releases the loop, and an immobilized loop forces a
+> stop. **Feeding the loop from live collision detection** (so the node *enters*
+> the immobilized state on a real impact, not only in tests) is the named
+> follow-up; until it lands, the node-owned loop is exercised by the delivery
+> path and the test harness.

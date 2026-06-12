@@ -24,6 +24,7 @@
 // subset as an aligned list the markdown-nesting lint would reformat.
 #![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
+pub mod clearance_gate;
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
@@ -54,3 +55,6 @@ pub use crate::sensor_mapping::{
     OdomMappingError, OdomOrientation, OdomSample, OwnedCameraSample, SensorInputMapping,
 };
 pub use crate::tick_pipeline::{run_pipeline_tick, TickError, TickOutcome};
+pub use crate::clearance_gate::{
+    run_pipeline_tick_with_clearance, ClearedTickOutcome, NodeClearance,
+};

@@ -27,10 +27,12 @@ use parko_core::safety::SafetyPosture;
 use parko_core::scheduler::InferenceLoop;
 use tokio::sync::Mutex;
 
+use crate::clearance_gate::{run_pipeline_tick_with_clearance, NodeClearance};
 use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
 use crate::sensor_mapping::SensorInputMapping;
-use crate::tick_pipeline::{run_pipeline_tick, TickError};
+use crate::tick_pipeline::TickError;
+use parko_kirra::clearance_delivery::DeliveryOutcome;
 
 /// Run the Parko ROS 2 node. Owns the r2r context for the lifetime of
 /// the returned future. Cancelling the future drops the node + the
@@ -41,11 +43,18 @@ use crate::tick_pipeline::{run_pipeline_tick, TickError};
 /// is the integrator's sensor → frame mapper. `posture` is the
 /// **static** posture for now (M1b wiring is a follow-up; see the
 /// module-level note).
+///
+/// `clearance` is the node-owned [`NodeClearance`] (#304 Phase-B): when `Some`,
+/// every tick polls for a console-recorded operator grant (delivering it on this
+/// node's own tick) and forces a stopped command while the loop is immobilized
+/// — alongside the LockedOut stop path. `None` is the dev lane (delivery
+/// disabled); the binary warns when it constructs `None`.
 pub async fn run_node<B, M>(
     config:  Arc<ParkoNodeConfig>,
     infer:   Arc<Mutex<InferenceLoop<B>>>,
     mapping: Arc<M>,
     posture: SafetyPosture,
+    clearance: Option<NodeClearance>,
     node_name: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -86,6 +95,9 @@ where
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
+        // The node-owned clearance gate (Phase-B). Owned by the single drain task
+        // so the per-tick `&mut` borrow needs no extra locking.
+        let mut clearance = clearance;
         let mut frame_id: u64 = 0;
         let mut stream = sensor_sub;
         while let Some(msg) = stream.next().await {
@@ -107,12 +119,34 @@ where
                 .unwrap_or(0);
             frame_id = frame_id.saturating_add(1);
             let frame = drain_mapping.to_frame(frame_id, stamp_ms, &sample_vec);
-            let outcome = run_pipeline_tick(
+            let cleared = run_pipeline_tick_with_clearance(
                 &drain_config,
                 Arc::clone(&drain_infer),
                 frame,
                 posture,
+                clearance.as_mut(),
             ).await;
+            let outcome = cleared.tick;
+
+            // Surface the per-tick clearance delivery (a console-recorded grant
+            // arriving on this node's own tick). A `NoGrant` no-op is silent.
+            match &cleared.delivery {
+                Some(DeliveryOutcome::Cleared { operator_id, grant_rowid }) =>
+                    tracing::info!(operator_id = %operator_id, grant_rowid,
+                        "parko-ros2: operator clearance DELIVERED — loop cleared, motion released"),
+                Some(DeliveryOutcome::Rejected { reason, grant_rowid }) =>
+                    tracing::warn!(reason = %reason, grant_rowid,
+                        "parko-ros2: clearance grant REJECTED at delivery (consumed, not retried) — \
+                         operator must re-issue in the console"),
+                Some(DeliveryOutcome::StoreError) =>
+                    tracing::error!("parko-ros2: clearance store error — fail-closed (nothing cleared)"),
+                Some(DeliveryOutcome::NoGrant) | None => {}
+            }
+            if cleared.vetoed {
+                tracing::warn!(frame_id,
+                    "parko-ros2: clearance veto ACTIVE (post-collision loop immobilized) — \
+                     publishing stop regardless of posture until an operator grant is delivered");
+            }
 
             if let Some(err) = &outcome.error {
                 match err {
@@ -125,7 +159,7 @@ where
                 }
             }
 
-            // Publish the gated twist (always — happy path OR MRC).
+            // Publish the gated twist (always — happy path OR MRC OR clearance veto).
             if let Err(e) = publish_twist(&cmd_pub, outcome.twist) {
                 tracing::warn!(error = ?e,
                     "parko-ros2: failed to publish OutgoingTwist; \
