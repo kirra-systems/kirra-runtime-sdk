@@ -378,3 +378,32 @@ Key naming decision (ADL-006):
 - MockClock = test double with Arc<AtomicU64> and advance(ms)
 
 Test count after PARK-005: 34 (parko-core)
+
+---
+
+## KEY-001 — Unified key registry (#329, ADR-0008)
+Completed: 2026-06-12 (Phase A merged; Phase A.1 in PR #338)
+Commits: #337 (Phase A), feat/audit-key-registry-329 (Phase A.1)
+Labels: epic, domain:boundary, domain:fleet, security
+Source: code-review register #319 (gap 1) — four key stores in three encodings,
+no unified registry; fleet ingest verified against a caller-supplied key.
+
+Phase A (#337, merged):
+- src/key_registry.rs: additive `KeyRegistry` over `VerifierStore`.
+  `resolve_ed25519_pubkey(principal_id, role) -> Result<Option<[u8;32]>>` +
+  `verify_for(...)` unify lookup across node attestation / federation controller /
+  operator / fleet-grant stores, normalizing PEM/b64 → raw 32 bytes at the read
+  boundary. Fail-closed throughout (unknown principal / revoked operator / malformed
+  or wrong-length key → None; Err reserved for SQL failure).
+- Fleet adoption: `accept_report_from_registry` / `ingest_clearance_grant_from_registry`
+  resolve the verifying key from a stored registration, not a caller-supplied string.
+- No schema change, no encoding migration, no breaking API change; talisman byte-identical.
+
+Phase A.1 (PR #338 — the read-only audit-key residual):
+- VerifierStore::audit_verifying_key() exposes the public half of the in-memory
+  audit signer; KeyRole::AuditSigning resolves the chain's verifying key keyed by its
+  verifying_key_id fingerprint (the audit chain's key_id). Read-only, fail-closed.
+
+Named residuals still deferred (ADR-0008 "conditions that reopen"):
+- Audit-key ROTATION + persisted key HISTORY (touches store schema + chain trust model).
+- On-disk ENCODING migration to one canonical format (normalization stays at read boundary).

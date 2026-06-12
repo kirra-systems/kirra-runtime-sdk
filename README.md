@@ -147,6 +147,10 @@ Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 
 | ADR-0002 | Condition-dependent speed cap + sub-ODD partition | Accepted |
 | ADR-0003 | Two-tier KIRRA architecture — base + optional D1 | Accepted |
 | ADR-0004 | Independent Safety Channel — D1–D3 settlement | Superseded by ADR-0003 |
+| ADR-0005 | Availability model — externally-orchestrated failover (no autonomous leader election in v1) | Accepted |
+| ADR-0006 | Governor transport — iceoryx2 inside partitions; frozen-layout contract at the boundary; FFI demoted | Accepted |
+| ADR-0007 | Fleet transport — Zenoh as an untrusted carrier under Ed25519 payload trust | Accepted |
+| ADR-0008 | Unified key registry — one abstraction over four key stores; trust grounded in stored registrations | Accepted |
 
 The **cert-target platform** decision and its prototype bring-up plan live under
 [`docs/adr/`](docs/adr/): `ADR-0001-governor-deployment-platform.md` (KIRRA
@@ -244,6 +248,7 @@ Modern robotic and autonomous deployments increasingly rely on AI models to gene
 - **Recovery hysteresis** — 5 consecutive healthy reports required over a 10 s window to restore trust
 - **Industrial protocol support** — Modbus and OPC-UA event evaluation
 - **DDS bridge** — CDR-encapsulated actuator topics with `Volatile` durability
+- **Unified key registry** — one `KeyRegistry` abstraction over the four Ed25519 key stores (node attestation, federation controller, operator, audit signer); `resolve_ed25519_pubkey(principal_id, role)` normalizes PEM/b64 → raw 32 bytes at the read boundary and grounds fleet trust in a stored registration, not a caller-supplied key (fail-closed; ADR-0008, #329)
 - **Ed25519 federation** — cross-controller trust reports with replay prevention and nonce burning
 - **Federation reconciliation** — generation-ordered conflict resolution for multi-controller deployments
 - **HA standby/promotion** — heartbeat-based automatic promotion from passive standby to active
