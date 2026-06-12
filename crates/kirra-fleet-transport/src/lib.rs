@@ -626,4 +626,24 @@ mod core_tests {
         assert_eq!(err, RejectReason::Malformed("empty nonce_hex".into()));
         assert_eq!(counter.snapshot().malformed, 1);
     }
+
+    #[test]
+    fn grant_for_node_a_rejected_as_node_b() {
+        // A3 — CROSS-NODE BINDING: a grant legitimately signed for node-A cannot be
+        // re-presented as node-B's. `node_id` is inside the signed canonical payload,
+        // so substituting it breaks the signature → BadSignature, never a store write.
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+
+        let mut grant = sign_clearance_grant(&sk, "robot-A", "alice", 1_000);
+        // Re-target the (authentically node-A) grant at node-B AFTER signing.
+        grant.node_id = "robot-B".into();
+        let err = ingest_clearance_grant(&mut store, &grant, &pk, &counter, 1_001).unwrap_err();
+        assert_eq!(err, RejectReason::BadSignature, "node_id substitution must break the sig");
+        assert_eq!(counter.snapshot().bad_signature, 1);
+        // Neither node sees a pending row — the cross-node grant reached no store.
+        assert!(store.take_pending_clearance_grant("robot-A", 2_000).unwrap().is_none());
+        assert!(store.take_pending_clearance_grant("robot-B", 2_000).unwrap().is_none());
+    }
 }
