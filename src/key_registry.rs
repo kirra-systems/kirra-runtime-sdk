@@ -9,6 +9,7 @@
 //! | Federation controller| `trusted_federation_controllers` | `public_key_b64`  | raw b64  |
 //! | Operator             | `operators`                      | `pubkey_pem`      | SPKI PEM |
 //! | Fleet-grant signer   | `trusted_federation_controllers` | `public_key_b64`  | raw b64  |
+//! | Audit signer         | in-memory `SigningKey` (store)   | —                 | raw bytes|
 //!
 //! Before this, every verification site re-implemented the load + the decode, and
 //! the fleet crate verified against a **caller-supplied** `public_key_b64: &str` —
@@ -21,9 +22,13 @@
 //! Decision + rationale: `docs/adr/0008-key-registry.md` (ADR-0008).
 //!
 //! ## Named residuals (ADR-0008, honest limits)
-//! - **The audit signing key is NOT in this registry.** It is an in-memory
-//!   `SigningKey` on the store (no rotation, no persisted public entry); resolving it
-//!   here would be a lie. Documented as a residual, not silently omitted.
+//! - **The audit signing key is resolvable READ-ONLY (#329 residual, Phase A.1).**
+//!   [`KeyRole::AuditSigning`] resolves the chain's verifying key from the store's
+//!   in-memory signer, keyed by the key's `verifying_key_id` fingerprint (the same id
+//!   the audit chain stamps in its `key_id` column) — so a chain row's `key_id` can be
+//!   resolved to a key through the registry. **Rotation + persisted key history remain
+//!   deferred:** the registry knows only the ONE current in-memory key, so a request
+//!   for any fingerprint other than the live signer's is `None`.
 //! - **Encoding migration is deferred.** This normalizes at the *read* boundary
 //!   (PEM/b64 → bytes); it does NOT rewrite the stores to one on-disk format. One
 //!   abstraction now; one on-disk encoding is named future work.
@@ -50,6 +55,11 @@ pub enum KeyRole {
     /// `public_key_b64` from `trusted_federation_controllers` — the same registry as
     /// [`KeyRole::FederationController`]; the role marks fleet-grant intent.
     FleetGrant,
+    /// The store's in-memory audit signing key (read-only, #329 residual). The
+    /// `principal_id` is the key's `verifying_key_id` fingerprint (as stamped in the
+    /// audit chain's `key_id`); resolves ONLY the single live signer — there is no
+    /// rotation/history, so any other fingerprint is `None`.
+    AuditSigning,
 }
 
 /// A read-only unified view over the four key stores, wrapping a [`VerifierStore`].
@@ -89,6 +99,15 @@ impl<'a> KeyRegistry<'a> {
                 Some(op) if op.revoked_at_ms.is_none() => pem_to_key_bytes(&op.pubkey_pem),
                 _ => None,
             },
+            KeyRole::AuditSigning => self.store.audit_verifying_key().and_then(|vk| {
+                // Resolve ONLY when the requested fingerprint matches the live signer
+                // (no key history) — fail-closed for any other id.
+                if crate::audit_chain::verifying_key_id(&vk) == principal_id {
+                    Some(vk.to_bytes())
+                } else {
+                    None
+                }
+            }),
         };
         Ok(bytes)
     }
@@ -267,5 +286,45 @@ mod tests {
             None,
             "a wrong-length stored key is rejected (None), not a panic"
         );
+    }
+
+    #[test]
+    fn audit_signing_key_resolves_readonly_by_fingerprint() {
+        let (sk, _pem, _b64) = keypair(11);
+        let mut store = store();
+
+        // No signer installed → None for any fingerprint (fail-closed).
+        {
+            let reg = KeyRegistry::new(&store);
+            assert_eq!(
+                reg.resolve_ed25519_pubkey("anything", KeyRole::AuditSigning).unwrap(),
+                None,
+                "no audit signer installed → None"
+            );
+        }
+
+        let vk = sk.verifying_key();
+        let fp = crate::audit_chain::verifying_key_id(&vk);
+        store.set_signing_key(sk.clone());
+        let reg = KeyRegistry::new(&store);
+
+        // The live audit key resolves by its verifying_key_id (the chain's key_id).
+        assert_eq!(
+            reg.resolve_ed25519_pubkey(&fp, KeyRole::AuditSigning).unwrap(),
+            Some(vk.to_bytes()),
+            "the live audit key resolves by its verifying_key_id"
+        );
+        // Any other fingerprint → None (no rotation / no key history — the residual).
+        assert_eq!(
+            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning).unwrap(),
+            None,
+            "only the single live signer resolves — rotation/history still deferred"
+        );
+
+        // verify_for over the audit key: good sig true; wrong fingerprint false.
+        let payload = b"a-signed-audit-event";
+        let sig = B64.encode(sk.sign(payload).to_bytes());
+        assert!(reg.verify_for(&fp, KeyRole::AuditSigning, payload, &sig), "audit-key signature verifies");
+        assert!(!reg.verify_for("wrong-fp", KeyRole::AuditSigning, payload, &sig), "wrong fingerprint → false");
     }
 }
