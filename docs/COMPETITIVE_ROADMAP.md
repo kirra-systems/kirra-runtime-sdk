@@ -6,6 +6,12 @@ current state and what is required for production automotive deployment,
 acquirer readiness, and certification. It is organized by milestone,
 not by calendar date.
 
+> **Market context:** `docs/MARKET_AUTONOMOUS_SERVICES.md` maps the converging
+> autonomous-services market (sidewalk couriers → delivery AVs → robotaxis) that
+> promotes several items below — remote transport (#296), multi-tenant
+> console/federation, per-class kinematic-contract profiles, and a VRU-dense ODD
+> profile.
+
 ---
 
 ## Current State (v1.1.1 — May 2026)
