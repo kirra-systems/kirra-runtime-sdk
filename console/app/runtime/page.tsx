@@ -1,7 +1,8 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
-import { resources, latency, network, partitions, nodes, ddsTopics, ddsPeers } from '@/lib/runtime'
+import { TopologyMap } from '@/components/ui/topology-map'
+import { resources, latency, network, partitions, nodes, ddsTopics, ddsPeers, topoNodes, topoEdges } from '@/lib/runtime'
 import type { Tone } from '@/lib/types'
 
 export default function RuntimePage() {
@@ -97,6 +98,17 @@ export default function RuntimePage() {
           </ul>
         </Panel>
       </div>
+
+      {/* ── System Topology Map (#10) ── */}
+      <Panel title="System Topology" subtitle="trust core · isolated guests · DDS bus · edge assets" action={<Pill tone="ice">live</Pill>}>
+        <TopologyMap nodes={topoNodes} edges={topoEdges} height={340} />
+        <div className="mt-3 flex flex-wrap items-center gap-4 border-t border-line pt-3 font-mono text-[10px] text-faint">
+          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-safe" /> trusted</span>
+          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-warn" /> degraded</span>
+          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-crit" /> locked out / link lost</span>
+          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-ice" /> transport</span>
+        </div>
+      </Panel>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Panel title="Hypervisor & Partition Isolation" subtitle="QNX safety partition · isolated guests" dense>

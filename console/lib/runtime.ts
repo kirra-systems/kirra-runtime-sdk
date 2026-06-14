@@ -87,3 +87,29 @@ export const ddsPeers: DdsPeer[] = [
   { id: 'participant-tel-2', role: 'Telemetry capture', rttMs: 7, liveliness: 'ALIVE', lastSeen: 'now', tone: 'safe' },
   { id: 'participant-fed-w', role: 'Peer controller (west)', rttMs: 24, liveliness: 'ALIVE', lastSeen: 'now', tone: 'safe' },
 ]
+
+// ── System Topology Map (#10) ─────────────────────────────────────────
+// Node-link view: the QNX Governor at the trust core, isolated guests, the DDS
+// bus, and edge assets. Coords are in a 0..100 × 0..70 viewBox.
+export const topoNodes: { id: string; label: string; sub?: string; x: number; y: number; tone: Tone; core?: boolean }[] = [
+  { id: 'gov', label: 'Governor', sub: 'QNX · ASIL-D', x: 50, y: 34, tone: 'safe', core: true },
+  { id: 'plan', label: 'Autoware', sub: 'guest VM', x: 22, y: 16, tone: 'safe' },
+  { id: 'dds', label: 'DDS bus', sub: 'Volatile QoS', x: 50, y: 12, tone: 'ice' },
+  { id: 'tel', label: 'Telemetry', sub: 'capture', x: 78, y: 16, tone: 'safe' },
+  { id: 'audit', label: 'Audit ledger', sub: 'SHA-256 chain', x: 80, y: 52, tone: 'safe' },
+  { id: 'fed', label: 'Peer (west)', sub: 'federation', x: 20, y: 52, tone: 'safe' },
+  { id: 'e09', label: 'KIRRA-09', sub: 'Nominal', x: 38, y: 60, tone: 'safe' },
+  { id: 'e10', label: 'KIRRA-10', sub: 'Degraded', x: 56, y: 62, tone: 'warn' },
+  { id: 'e13', label: 'KIRRA-13', sub: 'LockedOut', x: 68, y: 36, tone: 'crit' },
+]
+export const topoEdges: { from: string; to: string; tone: Tone }[] = [
+  { from: 'gov', to: 'dds', tone: 'ice' },
+  { from: 'plan', to: 'dds', tone: 'muted' },
+  { from: 'tel', to: 'dds', tone: 'muted' },
+  { from: 'gov', to: 'plan', tone: 'safe' },
+  { from: 'gov', to: 'audit', tone: 'safe' },
+  { from: 'gov', to: 'fed', tone: 'safe' },
+  { from: 'gov', to: 'e09', tone: 'safe' },
+  { from: 'gov', to: 'e10', tone: 'warn' },
+  { from: 'gov', to: 'e13', tone: 'crit' },
+]

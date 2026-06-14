@@ -1,6 +1,7 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { ScoreRing } from '@/components/charts/charts'
-import { constraints, violations, interventions, verdictMix } from '@/lib/safety'
+import { EnvelopePlot } from '@/components/ui/envelope-plot'
+import { constraints, violations, interventions, verdictMix, envPoints, envelopeBands } from '@/lib/safety'
 import type { Tone } from '@/lib/types'
 
 export default function SafetyPage() {
@@ -46,6 +47,30 @@ export default function SafetyPage() {
             <span className="font-mono text-xs text-muted">decisions</span>
           </div>
           <VerdictBar allow={verdictMix.allow} clamp={verdictMix.clamp} deny={verdictMix.deny} />
+        </Panel>
+      </div>
+
+      {/* ── Safety Envelope Visualizer (#3) ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel className="xl:col-span-2" title="Operating Envelope" subtitle="linear velocity × angular rate · admitted command region" action={<Pill tone="ice">phase plane</Pill>}>
+          <EnvelopePlot points={envPoints} height={320} />
+        </Panel>
+
+        <Panel title="Envelope Bands" subtitle="layered fail-closed limits">
+          <ul className="space-y-3">
+            {envelopeBands.map((b) => (
+              <li key={b.name} className="rounded-lg border border-line bg-bg/40 p-3">
+                <div className="flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-sm ${dotBg(b.tone)}`} />
+                  <span className="text-[13px] text-ink">{b.name}</span>
+                </div>
+                <p className="mt-1 pl-[18px] font-mono text-[10px] text-faint">{b.note}</p>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 border-t border-line pt-3 font-mono text-[10px] leading-relaxed text-muted">
+            The envelope cap always wins over rate-of-change priority. In Degraded, only non-increasing speed on the decel-to-stop trajectory is admitted; re-acceleration is never authored.
+          </div>
         </Panel>
       </div>
 
