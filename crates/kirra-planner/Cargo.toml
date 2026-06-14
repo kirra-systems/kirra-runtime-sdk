@@ -19,6 +19,7 @@ name = "kirra-planner"
 version = "0.1.0"
 edition = "2021"
 description = "Occy autonomy planner — Phase-0 interface lock. Proposes trajectories consumed by the existing #131 validation path; does not itself check."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 

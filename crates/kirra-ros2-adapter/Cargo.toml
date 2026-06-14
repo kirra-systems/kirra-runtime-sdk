@@ -30,6 +30,7 @@ name = "kirra-ros2-adapter"
 version = "0.1.0"
 edition = "2021"
 description = "ROS 2 adapter for the Kirra Governor (Option-B per-trajectory wiring, S131 Phase 1)"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
