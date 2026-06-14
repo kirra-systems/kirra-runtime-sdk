@@ -14,7 +14,7 @@ function g(n: number, b: number, j: number, drift = 0): SeriesPoint[] {
 export interface Sensor { name: string; health: number; status: string; tone: Tone }
 export interface ActuatorCmd { ts: string; channel: string; value: string; tone: Tone }
 export interface PosPoint { x: number; y: number }
-export interface ActPoint { t: string; steer: number; throttle: number }
+export type ActPoint = { t: string; steer: number; throttle: number }
 
 export const velocity: SeriesPoint[] = g(30, 1.2, 0.5)
 export const battery: SeriesPoint[] = g(30, 74, 0.6, -0.4)

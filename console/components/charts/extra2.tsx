@@ -2,7 +2,9 @@
 
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, Legend } from 'recharts'
 
-export function DualLine({ data, keys, colors, height = 180 }: { data: Array<{ t: string } & Record<string, number>>; keys: [string, string]; colors: [string, string]; height?: number }) {
+type Row = { t: string; [key: string]: string | number }
+
+export function DualLine({ data, keys, colors, height = 180 }: { data: Row[]; keys: [string, string]; colors: [string, string]; height?: number }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={data} margin={{ top: 6, right: 8, left: -16, bottom: 0 }}>
