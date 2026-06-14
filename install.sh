@@ -5,7 +5,7 @@
 # Supports x86_64, aarch64 (NVIDIA Jetson, Raspberry Pi), and armv7.
 #
 # Usage (recommended — pulls latest release from GitHub):
-#   curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/master/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh | sudo bash
 #
 # Usage (from downloaded release archive):
 #   sudo bash install.sh
@@ -28,7 +28,7 @@
 #   - sudo / root access
 #   - Internet access (if downloading binary from GitHub)
 #
-# Support: https://github.com/justinlooney/kirra-runtime-sdk/issues
+# Support: https://github.com/kirra-systems/kirra-runtime-sdk/issues
 
 set -euo pipefail
 
@@ -46,7 +46,7 @@ SERVICE_NAME="kirra-verifier"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE="${CONFIG_DIR}/kirra.env"
 BINARY_NAME="kirra_verifier_service"
-GITHUB_REPO="justinlooney/kirra-runtime-sdk"
+GITHUB_REPO="kirra-systems/kirra-runtime-sdk"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
 # Minimum supported OS versions
