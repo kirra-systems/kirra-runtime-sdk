@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
-import { LayoutDashboard, Boxes, ShieldCheck, Activity, Radio, Route, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, FileText, Settings } from 'lucide-react'
+import { LayoutDashboard, Boxes, ShieldCheck, Activity, Radio, Route, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings } from 'lucide-react'
 
 const groups = [
   {
@@ -30,6 +30,7 @@ const groups = [
     label: 'Insight',
     items: [
       { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+      { href: '/explorer', label: 'Telemetry Explorer', icon: Database },
       { href: '/reports', label: 'Reports', icon: FileText },
       { href: '/settings', label: 'Settings', icon: Settings },
     ],
