@@ -1,5 +1,6 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
-import { mission, phases, waypoints, tasks, risk, operatorInterventions } from '@/lib/missions'
+import { mission, phases, waypoints, tasks, risk, operatorInterventions, gantt, ganttWindow } from '@/lib/missions'
+import type { Tone } from '@/lib/types'
 
 export default function MissionsPage() {
   return (
@@ -14,6 +15,61 @@ export default function MissionsPage() {
           <span className="font-mono text-[11px] text-faint">ETA {mission.eta}</span>
         </div>
       </div>
+
+      {/* ── Fleet Mission Gantt (Drop 6) ── */}
+      <Panel title="Fleet Mission Gantt" subtitle={`${gantt.length} missions · ${ganttWindow.start}–${ganttWindow.end} · ${ganttWindow.label}`} action={<Pill tone="ice">now {clock(ganttWindow.nowFrac)}</Pill>}>
+        {/* axis */}
+        <div className="mb-2 flex items-center">
+          <div className="w-40 shrink-0" />
+          <div className="relative flex-1">
+            <div className="flex justify-between font-mono text-[10px] text-faint">
+              {['10:00', '11:00', '12:00', '13:00', '14:00'].map((h) => <span key={h}>{h}</span>)}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2.5">
+          {gantt.map((row) => (
+            <div key={row.id} className="flex items-center">
+              <div className="w-40 shrink-0 pr-3">
+                <div className="flex items-center gap-2">
+                  <StatusDot tone={row.tone} pulse={row.status === 'held'} />
+                  <span className="truncate font-mono text-[12px] text-ink">{row.asset}</span>
+                </div>
+                <div className="truncate pl-4 font-mono text-[10px] text-faint">{row.name}</div>
+              </div>
+              <div className="relative h-7 flex-1 overflow-hidden rounded-md border border-line bg-bg/40">
+                {/* hour gridlines */}
+                {[0.25, 0.5, 0.75].map((f) => (
+                  <span key={f} className="absolute top-0 h-full w-px bg-white/[0.04]" style={{ left: `${f * 100}%` }} />
+                ))}
+                {/* now line */}
+                <span className="absolute top-0 z-10 h-full w-px bg-ice/70" style={{ left: `${ganttWindow.nowFrac * 100}%` }} />
+                {/* segments */}
+                {row.segments.map((s, i) => (
+                  <div
+                    key={i}
+                    className={`absolute top-1 flex h-5 items-center overflow-hidden rounded ${segBg(s.tone)} ${s.tone === 'muted' ? 'border border-dashed border-line' : ''}`}
+                    style={{ left: `${s.start * 100}%`, width: `${(s.end - s.start) * 100}%` }}
+                    title={s.phase}
+                  >
+                    <span className={`truncate px-1.5 font-mono text-[9px] ${s.tone === 'muted' ? 'text-faint' : 'text-bg'}`}>{s.phase}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-4 border-t border-line pt-3 font-mono text-[10px] text-faint">
+          <Legend tone="safe" label="completed" />
+          <Legend tone="ice" label="active" />
+          <Legend tone="warn" label="held / degraded" />
+          <Legend tone="crit" label="lockout" />
+          <Legend tone="muted" label="queued" />
+          <span className="ml-auto flex items-center gap-1.5"><span className="h-3 w-px bg-ice/70" /> now</span>
+        </div>
+      </Panel>
 
       <Panel title="Mission Timeline" subtitle={`${mission.progress}% complete · started ${mission.started}`}>
         <div className="mb-4 h-1.5 w-full overflow-hidden rounded-full bg-white/5">
@@ -94,4 +150,23 @@ export default function MissionsPage() {
       </Panel>
     </div>
   )
+}
+
+function Legend({ tone, label }: { tone: Tone; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`h-2.5 w-2.5 rounded-sm ${segBg(tone)}`} />
+      {label}
+    </span>
+  )
+}
+
+function segBg(t: Tone) { return t === 'safe' ? 'bg-safe' : t === 'warn' ? 'bg-warn' : t === 'crit' ? 'bg-crit' : t === 'ice' ? 'bg-ice' : 'bg-muted/40' }
+
+// Convert a window fraction to a wall-clock label for the 10:00–14:00 window.
+function clock(frac: number): string {
+  const totalMin = 4 * 60 * frac
+  const h = 10 + Math.floor(totalMin / 60)
+  const m = Math.round(totalMin % 60)
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 }
