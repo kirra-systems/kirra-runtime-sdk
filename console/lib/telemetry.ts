@@ -48,3 +48,22 @@ export const path: PosPoint[] = Array.from({ length: 40 }).map((_, i) => {
   return { x: 8 + t * 84, y: 50 + Math.sin(t * Math.PI * 3) * 28 + (Math.random() - 0.5) * 2 }
 })
 export const ego: PosPoint = path[25]
+
+// ── Environmental Awareness (#14) ──────────────────────────────────────
+// Detected actors in the ego frame for the occupancy view. Coords are in the
+// 0..100 occupancy viewBox; the ego sits at (50, 84) facing up.
+export const actors: { x: number; y: number; kind: 'person' | 'vehicle' | 'static'; tone: Tone; label?: string }[] = [
+  { x: 44, y: 50, kind: 'person', tone: 'warn', label: 'pedestrian · 9 m' },
+  { x: 58, y: 60, kind: 'vehicle', tone: 'ice', label: 'AMR · 6 m' },
+  { x: 36, y: 38, kind: 'static', tone: 'muted', label: 'pallet' },
+  { x: 70, y: 44, kind: 'static', tone: 'crit', label: 'keep-out' },
+  { x: 52, y: 30, kind: 'person', tone: 'safe', label: 'worker · 18 m' },
+]
+
+export interface AwarenessStat { label: string; value: string; tone: Tone }
+export const awareness: AwarenessStat[] = [
+  { label: 'Tracked actors', value: '5', tone: 'ice' },
+  { label: 'Nearest pedestrian', value: '9.0 m', tone: 'warn' },
+  { label: 'Drivable corridor', value: 'clear', tone: 'safe' },
+  { label: 'Hazard zones', value: '1 active', tone: 'crit' },
+]

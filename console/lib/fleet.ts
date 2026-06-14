@@ -162,3 +162,24 @@ export const twins: Twin[] = roster.map((r, i) => {
 export function twinById(id: string): Twin | undefined {
   return twins.find((t) => t.id === id)
 }
+
+// ── Global Ops Map (#1) ───────────────────────────────────────────────
+// Fleet sites worldwide, color-coded by aggregate site posture. `hub` is the
+// control center all sites arc back to. Coords are in a 0..100 × 0..50 viewBox.
+export const sites: { id: string; name: string; region: string; x: number; y: number; assets: number; tone: Tone; hub?: boolean }[] = [
+  { id: 'sf', name: 'San Francisco', region: 'US-West · HQ', x: 16, y: 22, assets: 142, tone: 'warn', hub: true },
+  { id: 'aus', name: 'Austin', region: 'US-Central', x: 26, y: 28, assets: 88, tone: 'safe' },
+  { id: 'rot', name: 'Rotterdam', region: 'EU-West', x: 50, y: 17, assets: 64, tone: 'safe' },
+  { id: 'sin', name: 'Singapore', region: 'APAC', x: 76, y: 34, assets: 51, tone: 'safe' },
+  { id: 'tok', name: 'Tokyo', region: 'APAC-North', x: 86, y: 22, assets: 37, tone: 'safe' },
+]
+
+export interface SiteRow { id: string; name: string; region: string; assets: number; degraded: number; tone: Tone }
+
+export const siteRows: SiteRow[] = [
+  { id: 'sf', name: 'San Francisco', region: 'US-West · HQ', assets: 142, degraded: 2, tone: 'warn' },
+  { id: 'aus', name: 'Austin', region: 'US-Central', assets: 88, degraded: 0, tone: 'safe' },
+  { id: 'rot', name: 'Rotterdam', region: 'EU-West', assets: 64, degraded: 0, tone: 'safe' },
+  { id: 'sin', name: 'Singapore', region: 'APAC', assets: 51, degraded: 0, tone: 'safe' },
+  { id: 'tok', name: 'Tokyo', region: 'APAC-North', assets: 37, degraded: 0, tone: 'safe' },
+]

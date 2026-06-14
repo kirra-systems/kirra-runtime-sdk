@@ -2,7 +2,9 @@ import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { TrendArea } from '@/components/charts/charts'
 import { DualLine } from '@/components/charts/extra2'
 import { PositionMap } from '@/components/ui/position-map'
-import { velocity, battery, actuator, sensors, actuatorLog, path, ego } from '@/lib/telemetry'
+import { OccupancyView } from '@/components/ui/occupancy-view'
+import { velocity, battery, actuator, sensors, actuatorLog, path, ego, actors, awareness } from '@/lib/telemetry'
+import type { Tone } from '@/lib/types'
 
 export default function TelemetryPage() {
   return (
@@ -23,6 +25,26 @@ export default function TelemetryPage() {
         <Quick label="Heading" value="041" unit="°" />
         <Quick label="Battery" value="73" unit="%" />
         <Quick label="Link RSSI" value="−61" unit="dBm" />
+      </div>
+
+      {/* ── Environmental Awareness (#14) ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel className="xl:col-span-2" title="Environmental Awareness" subtitle="ego-centric occupancy · sensor fusion · detected actors" action={<Pill tone="ice">perception</Pill>}>
+          <OccupancyView actors={actors} height={340} />
+        </Panel>
+        <Panel title="Perception Summary" subtitle="situational state">
+          <div className="space-y-3">
+            {awareness.map((a) => (
+              <div key={a.label} className="flex items-center justify-between rounded-lg border border-line bg-bg/40 px-3 py-2.5">
+                <span className="font-mono text-[11px] uppercase tracking-wider text-faint">{a.label}</span>
+                <span className={`font-mono text-[13px] ${txt(a.tone)}`}>{a.value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 border-t border-line pt-3 font-mono text-[10px] leading-relaxed text-muted">
+            360° LiDAR + front radar + camera fans fuse into the occupancy grid. The Governor gates any command that would breach the human-proximity or hazard keep-out envelope.
+          </div>
+        </Panel>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
@@ -86,3 +108,5 @@ function Quick({ label, value, unit }: { label: string; value: string; unit: str
     </div>
   )
 }
+
+function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }

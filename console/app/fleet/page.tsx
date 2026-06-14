@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
-import { twins } from '@/lib/fleet'
+import { WorldMap } from '@/components/ui/world-map'
+import { twins, sites, siteRows } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
 import type { Tone } from '@/lib/types'
 
@@ -21,6 +22,30 @@ export default function FleetPage() {
           {degraded > 0 && <Pill tone="warn">{degraded} degraded</Pill>}
           {locked > 0 && <Pill tone="crit">{locked} locked out</Pill>}
         </div>
+      </div>
+
+      {/* ── Global Ops Map (#1) ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel className="xl:col-span-2" title="Global Operations" subtitle={`${siteRows.length} sites · ${siteRows.reduce((a, s) => a + s.assets, 0)} assets worldwide`} action={<Pill tone="ice">all regions</Pill>}>
+          <WorldMap sites={sites} height={300} />
+        </Panel>
+        <Panel title="Sites" subtitle="aggregate posture by region" dense>
+          <ul>
+            {siteRows.map((s) => (
+              <li key={s.id} className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-0">
+                <StatusDot tone={s.tone} pulse={s.tone !== 'safe'} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px] text-ink">{s.name}</div>
+                  <div className="font-mono text-[10px] text-faint">{s.region}</div>
+                </div>
+                <div className="text-right font-mono text-[11px]">
+                  <div className="text-ink">{s.assets}</div>
+                  <div className={s.degraded > 0 ? 'text-warn' : 'text-faint'}>{s.degraded > 0 ? `${s.degraded} degraded` : 'all nominal'}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Panel>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
