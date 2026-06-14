@@ -34,6 +34,8 @@ jobs:
       # Enables Pages (build type = GitHub Actions) if not already enabled.
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v3
