@@ -6,7 +6,7 @@
 
 [Unit]
 Description=Kirra Safety Kernel Verifier Service
-Documentation=https://github.com/justinlooney/kirra-runtime-sdk
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
 After=network.target
 Wants=network.target
 

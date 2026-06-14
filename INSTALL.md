@@ -31,7 +31,7 @@ instructs.
 ## Quick Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/master/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh | sudo bash
 ```
 
 The installer will:
@@ -180,7 +180,7 @@ Update all clients and integrations with the new token before restarting.
 ## Upgrading
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/master/install.sh \
+curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh \
     | sudo bash -s -- --force
 ```
 
@@ -192,7 +192,7 @@ The `--force` flag reinstalls over the existing installation. Your configuration
 ## Uninstalling
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/master/install.sh \
+curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh \
     | sudo bash -s -- --uninstall
 ```
 
@@ -263,7 +263,7 @@ export KIRRA_PORT="8090"
 export KIRRA_DB_PATH="/var/lib/kirra/kirra.db"
 export KIRRA_VERIFIER_MODE="active"
 
-curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/master/install.sh \
+curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh \
     | sudo -E bash -s -- --non-interactive
 ```
 
@@ -320,7 +320,7 @@ sudo chown -R kirra:kirra /var/lib/kirra
 
 If you see `Exec format error`, the binary architecture doesn't match your
 system. The installer detects architecture automatically — if it downloaded
-the wrong binary, open an issue at https://github.com/justinlooney/kirra-runtime-sdk/issues
+the wrong binary, open an issue at https://github.com/kirra-systems/kirra-runtime-sdk/issues
 with the output of `uname -m`.
 
 ---
@@ -467,6 +467,6 @@ clamped/denied by Kirra with the vehicle on stands).
 
 ## Getting Help
 
-- **Documentation**: https://github.com/justinlooney/kirra-runtime-sdk
-- **Issues**: https://github.com/justinlooney/kirra-runtime-sdk/issues
+- **Documentation**: https://github.com/kirra-systems/kirra-runtime-sdk
+- **Issues**: https://github.com/kirra-systems/kirra-runtime-sdk/issues
 - **Logs**: `sudo journalctl -u kirra-verifier -f`

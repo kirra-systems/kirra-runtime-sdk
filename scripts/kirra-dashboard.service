@@ -1,6 +1,6 @@
 [Unit]
 Description=Kirra Safety Kernel Web Dashboard
-Documentation=https://github.com/justinlooney/kirra-runtime-sdk
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
 After=network.target kirra-verifier.service
 Wants=kirra-verifier.service
 

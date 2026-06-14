@@ -1,7 +1,7 @@
 # Kirra Runtime SDK
 
-![CI](https://github.com/justinlooney/kirra-runtime-sdk/actions/workflows/ci.yml/badge.svg)
-![Version](https://img.shields.io/github/v/tag/justinlooney/kirra-runtime-sdk)
+![CI](https://github.com/kirra-systems/kirra-runtime-sdk/actions/workflows/ci.yml/badge.svg)
+![Version](https://img.shields.io/github/v/tag/kirra-systems/kirra-runtime-sdk)
 
 A distributed runtime legitimacy engine and safety governor for AI-driven robotic and edge systems. Kirra enforces **fail-closed trust semantics** across a heterogeneous fleet — preventing unsafe or unauthorized commands from reaching actuators regardless of what an AI model, LLM output, or upstream orchestration layer instructs.
 
@@ -461,7 +461,7 @@ The service listens on `0.0.0.0:8090` by default.
 ### Install (Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/justinlooney/kirra-runtime-sdk/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/kirra-systems/kirra-runtime-sdk/main/install.sh | sudo bash
 ```
 
 See [INSTALL.md](INSTALL.md) for full installation documentation including non-interactive mode, HA setup, and upgrade/uninstall instructions.
