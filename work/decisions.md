@@ -9,7 +9,7 @@
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -94,7 +94,7 @@ LockedOut is and always was a hard stop. The PARK-003 finding was a bug report.
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -129,7 +129,7 @@ acceptance test enforces this invariant.
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -168,7 +168,7 @@ caller-provided output slice allows buffer reuse across ticks.
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -204,7 +204,7 @@ deterministic, and independent of system load. This also eliminates
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -262,7 +262,7 @@ ISO 26262 ASIL-D fail-safe decomposition.
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -314,7 +314,7 @@ a new error variant or changing the error path semantics.
 
 **Date:** 2026-05-26
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -449,7 +449,7 @@ using Kirra naming (`KirraGovernor`, `parko-kirra`).
 
 **Date:** 2026-05-27
 **Status:** Accepted
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 
 ### Decision
 
@@ -650,7 +650,7 @@ The RTM's self-reported "All 16 safety goals are covered" was aspirational and n
 
 **Date:** 2026-06-11
 **Status:** Analysis complete — #39 (QNN backend MVP) remains BLOCKED; #38 QNN row stays PENDING
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 **Source:** Owner-supplied vendor research (live Qualcomm / QNX sources, June 2026). Findings are filed with their caveats intact; **on-target verification rides the eventual hardware day** (no claim here is bench-confirmed in this repo).
 **Cross-refs:** #37 (this analysis), #39 (QNN backend MVP), #38 / PARK-026 (`parko/QNX_BACKEND_SELECTION.md`, the QNN row), #36 / PARK-024 (QNX spike), #276 (vendor-engagement track), ADL-003 (no-alloc hot-path contract), ADL-010 (QNX POSIX gaps).
 
@@ -728,7 +728,7 @@ public download.
 
 **Date:** 2026-06-12
 **Status:** Decided — implemented in this PR. Thresholds are **VALIDATION-PENDING** (bench/SOTIF characterization rides the eventual hardware day); the *convention* and the *window mechanism* are decided.
-**Deciders:** Kirra Systems LLC
+**Deciders:** Kirra Systems, LLC
 **Source:** Code-review register #319 (finding H2+A1). The prior raw-norm proxy (`‖a‖`, gravity-inclusive) had a floor bug: at rest `‖a‖ ≈ 9.80665`, so the courier threshold of 8.0 was *below gravity* — a static, level courier latched on gravity alone — and a single-tick jolt permanently latched (human clearance required). Both are fixed here.
 **Cross-refs:** #321 (this fix), #319 (register), #311 (the raw-norm proxy this replaces), #312/#316 (the per-class contract family), `docs/CONTRACT_PROFILES.md` (the normative `*.impact_spike` rows + the convention row), `parko/crates/parko-core/src/impact.rs` (`ImpactCfg`), `parko/crates/parko-ros2/src/clearance_gate.rs` (`decel_deviation` / `SpikeDebouncer`).
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Offline learning-loop collector: joins Kirra capture JSONL to a bus recording and writes a training-ready Parquet dataset. Depends on kirra-capture-schema ONLY — never the governor (docs/COLLECTOR_DESIGN.md §0)."
 repository = "https://github.com/justinlooney/kirra-runtime-sdk"
-authors = ["Kirra Systems LLC <justin@kirrasystems.io>"]
+authors = ["Kirra Systems, LLC <justin@kirrasystems.io>"]
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 

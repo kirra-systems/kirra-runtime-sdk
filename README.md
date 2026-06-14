@@ -645,4 +645,4 @@ KIRRA_VERIFIER_MODE=passive_standby KIRRA_INSTANCE_ID=kirra-standby ./kirra_veri
 
 See [COPYRIGHT](COPYRIGHT) for details.
 
-© 2026 Kirra Systems LLC. All rights reserved.
+© 2026 Kirra Systems, LLC. All rights reserved.
