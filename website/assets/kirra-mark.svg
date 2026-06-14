@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Kirra">
   <defs>
     <filter id="kglow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="1.4" result="b"/>
+      <feGaussianBlur stdDeviation="1.1" result="b"/>
       <feMerge>
         <feMergeNode in="b"/>
         <feMergeNode in="SourceGraphic"/>
@@ -9,20 +9,38 @@
     </filter>
   </defs>
   <g filter="url(#kglow)">
-    <!-- "K" as a node graph: spine + two arms meeting at the governor junction -->
-    <g stroke="#34f5a6" stroke-width="3" stroke-linecap="round" opacity="0.9">
-      <line x1="20" y1="12" x2="20" y2="52"/>
-      <line x1="20" y1="32" x2="48" y2="12"/>
-      <line x1="20" y1="32" x2="48" y2="52"/>
+    <!-- "K" as a triangulated trust-lattice; edges -->
+    <g stroke="#34f5a6" stroke-width="1.2" stroke-linecap="round" opacity="0.5">
+      <!-- spine -->
+      <path d="M18 12 L20 21 L19 31 L21 41 L18 52"/>
+      <!-- spine ↔ governor -->
+      <path d="M20 21 L29 31 M19 31 L29 31 M21 41 L29 31"/>
+      <!-- upper arm + mesh -->
+      <path d="M29 31 L33 23 L41 16 L49 11 M29 31 L37 30 L33 23 M37 30 L41 16"/>
+      <!-- lower arm + mesh -->
+      <path d="M29 31 L32 39 L40 46 L49 52 M32 39 L27 40 L21 41 M32 39 L37 30 M37 30 L40 46"/>
     </g>
+    <!-- nodes -->
     <g fill="#34f5a6">
-      <circle cx="20" cy="12" r="3"/>
-      <circle cx="20" cy="52" r="3"/>
-      <circle cx="48" cy="12" r="3"/>
-      <circle cx="48" cy="52" r="3"/>
+      <circle cx="18" cy="12" r="2.4"/>
+      <circle cx="20" cy="21" r="1.8"/>
+      <circle cx="19" cy="31" r="1.8"/>
+      <circle cx="21" cy="41" r="1.8"/>
+      <circle cx="18" cy="52" r="2.4"/>
+      <circle cx="33" cy="23" r="1.8"/>
+      <circle cx="37" cy="30" r="1.8"/>
+      <circle cx="40" cy="46" r="1.8"/>
+      <circle cx="27" cy="40" r="1.6"/>
+      <circle cx="32" cy="39" r="1.8"/>
     </g>
-    <!-- governor: the junction where the graph resolves, brightest -->
-    <circle cx="20" cy="32" r="6" fill="#34f5a6"/>
-    <circle cx="20" cy="32" r="2.6" fill="#eafff6"/>
+    <!-- cyan accent nodes (arm tips) -->
+    <g fill="#5cf0ff">
+      <circle cx="49" cy="11" r="2.4"/>
+      <circle cx="41" cy="16" r="1.8"/>
+      <circle cx="49" cy="52" r="2.4"/>
+    </g>
+    <!-- governor: junction where the graph resolves, brightest -->
+    <circle cx="29" cy="31" r="5.5" fill="#34f5a6"/>
+    <circle cx="29" cy="31" r="2.4" fill="#eafff6"/>
   </g>
 </svg>
