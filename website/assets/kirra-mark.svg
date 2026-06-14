@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Kirra">
   <defs>
     <filter id="kglow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="1.5" result="b"/>
+      <feGaussianBlur stdDeviation="1.4" result="b"/>
       <feMerge>
         <feMergeNode in="b"/>
         <feMergeNode in="SourceGraphic"/>
@@ -9,22 +9,20 @@
     </filter>
   </defs>
   <g filter="url(#kglow)">
-    <!-- fleet trust-lattice in the brand diamond -->
-    <path d="M32 7 L57 32 L32 57 L7 32 Z" stroke="#34f5a6" stroke-width="2" stroke-linejoin="round" opacity="0.65"/>
-    <g stroke="#34f5a6" stroke-width="1.4" opacity="0.4">
-      <line x1="32" y1="32" x2="32" y2="7"/>
-      <line x1="32" y1="32" x2="57" y2="32"/>
-      <line x1="32" y1="32" x2="32" y2="57"/>
-      <line x1="32" y1="32" x2="7" y2="32"/>
+    <!-- "K" as a node graph: spine + two arms meeting at the governor junction -->
+    <g stroke="#34f5a6" stroke-width="3" stroke-linecap="round" opacity="0.9">
+      <line x1="20" y1="12" x2="20" y2="52"/>
+      <line x1="20" y1="32" x2="48" y2="12"/>
+      <line x1="20" y1="32" x2="48" y2="52"/>
     </g>
     <g fill="#34f5a6">
-      <circle cx="32" cy="7" r="2.4"/>
-      <circle cx="57" cy="32" r="2.4"/>
-      <circle cx="32" cy="57" r="2.4"/>
-      <circle cx="7" cy="32" r="2.4"/>
+      <circle cx="20" cy="12" r="3"/>
+      <circle cx="20" cy="52" r="3"/>
+      <circle cx="48" cy="12" r="3"/>
+      <circle cx="48" cy="52" r="3"/>
     </g>
-    <!-- the governor: brightest, central, gating the graph -->
-    <circle cx="32" cy="32" r="6" fill="#34f5a6"/>
-    <circle cx="32" cy="32" r="2.6" fill="#eafff6"/>
+    <!-- governor: the junction where the graph resolves, brightest -->
+    <circle cx="20" cy="32" r="6" fill="#34f5a6"/>
+    <circle cx="20" cy="32" r="2.6" fill="#eafff6"/>
   </g>
 </svg>
