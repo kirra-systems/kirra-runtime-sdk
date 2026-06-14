@@ -310,7 +310,9 @@ section { position: relative; z-index: 3; }
 .footer__brand { font-family: var(--font-display); font-weight: 700; letter-spacing: 2px; font-size: 14px; }
 .footer__cols { display: flex; gap: 28px; font-size: 14px; color: var(--ink-soft); }
 .footer__cols a:hover { color: var(--accent); }
-.footer__legal { width: 100%; font-size: 12px; color: var(--ink-mute); font-family: var(--font-mono); }
+.footer__disclaimer { width: 100%; max-width: 820px; margin: 4px 0 0; font-size: 12px; line-height: 1.65; color: var(--ink-mute); }
+.footer__legal { width: 100%; display: flex; flex-wrap: wrap; gap: 6px 20px; justify-content: space-between; font-size: 12px; color: var(--ink-mute); font-family: var(--font-mono); }
+.footer__tag { color: var(--ink-mute); }
 
 /* ───────── Hero on mobile: clear the fixed nav (KIRRA vs eyebrow overlap) ───────── */
 @media (max-width: 860px) {
