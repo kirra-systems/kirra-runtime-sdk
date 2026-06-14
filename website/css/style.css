@@ -133,7 +133,7 @@ body::before {
 }
 .nav.is-stuck { background: var(--bg-glass); backdrop-filter: blur(14px); padding-top: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .nav__brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; letter-spacing: 3px; font-size: 15px; }
-.nav__logo { color: var(--green); font-size: 18px; }
+.nav__logo { width: 22px; height: 22px; display: inline-block; vertical-align: middle; flex: none; }
 .nav__links { display: flex; gap: 30px; font-size: 14px; color: var(--ink-soft); }
 .nav__links a { position: relative; }
 .nav__links a::after { content: ''; position: absolute; left: 0; bottom: -5px; width: 0; height: 1px; background: var(--accent); transition: width .35s var(--ease); }
