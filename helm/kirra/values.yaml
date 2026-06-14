@@ -61,7 +61,7 @@ affinity: {}
 dashboard:
   enabled: true
   image:
-    repository: ghcr.io/justinlooney/kirra-dashboard
+    repository: ghcr.io/kirra-systems/kirra-dashboard
     pullPolicy: IfNotPresent
     tag: ""
   service:

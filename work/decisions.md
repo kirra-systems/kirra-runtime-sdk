@@ -804,6 +804,8 @@ in tests.
 
 ## ADL-014: QNX 8.0 cross-compile — first light (PARK-024 / #36)
 
+**Org migration (2026-06-14):** repo moved to github.com/kirra-systems/kirra-runtime-sdk; all internal references updated.
+
 **Date:** 2026-06-12
 **Status:** COMPILE CONFIRMED — deploy pending QNX target
 
