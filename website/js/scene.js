@@ -52,7 +52,7 @@ function init() {
   renderer.setSize(sizes.w, sizes.h);
   renderer.setClearColor(0x000000, 0);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.15;
+  renderer.toneMappingExposure = 0.98;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(52, sizes.w / sizes.h, 0.1, 200);
@@ -188,7 +188,7 @@ function init() {
   // ── Post-processing: bloom for the neon glow ──
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new THREE.Vector2(sizes.w, sizes.h), 0.95, 0.55, 0.0);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(sizes.w, sizes.h), 0.5, 0.4, 0.15);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
   composer.setPixelRatio(pr);
@@ -230,7 +230,7 @@ function init() {
     tmpColor.copy(pc).multiplyScalar(0.5);
     edgeMat.color.lerp(tmpColor, 0.1);
     edgeMat.opacity = 0.14 + state.agitation * 0.12;
-    bloom.strength = 0.9 + state.agitation * 0.5 + state.posture01 * 0.25;
+    bloom.strength = 0.5 + state.agitation * 0.35 + state.posture01 * 0.2;
 
     nodeMat.uniforms.uTime.value = t * (1 + state.agitation * 1.5);
 
