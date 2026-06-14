@@ -1,4 +1,4 @@
-import { LayoutDashboard, Boxes, ShieldCheck, Activity, Radio, Route, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings } from 'lucide-react'
+import { LayoutDashboard, Globe, Boxes, ShieldCheck, Activity, Radio, Route, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 export interface NavItem { href: string; label: string; icon: LucideIcon }
@@ -10,6 +10,7 @@ export const navGroups: NavGroup[] = [
     label: 'Operations',
     items: [
       { href: '/', label: 'Overview', icon: LayoutDashboard },
+      { href: '/global', label: 'Global Operations', icon: Globe },
       { href: '/fleet', label: 'Fleet Operations', icon: Boxes },
       { href: '/safety', label: 'Safety Governor', icon: ShieldCheck },
       { href: '/runtime', label: 'Runtime Health', icon: Activity },
