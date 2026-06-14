@@ -5,20 +5,47 @@ import { Pill } from '@/components/ui/primitives'
 import { MobileNav } from '@/components/shell/mobile-nav'
 
 function KMark() {
+  // Trust-lattice "K" — mirrors the marketing-site logo: a constellation of
+  // nodes meshed into the letter with a glowing central vertex.
+  const nodes: Record<string, [number, number]> = {
+    s0: [20, 12], s1: [20, 23], c: [23, 33], s3: [20, 43], s4: [20, 53],
+    a1: [35, 22], a0: [47, 11], m: [40, 30], l1: [35, 42], l0: [49, 54],
+  }
+  const edges: [string, string][] = [
+    ['s0', 's1'], ['s1', 'c'], ['c', 's3'], ['s3', 's4'],
+    ['c', 'a1'], ['a1', 'a0'], ['s1', 'a1'], ['s0', 'a1'], ['c', 'a0'],
+    ['a1', 'm'], ['c', 'm'], ['m', 'l1'],
+    ['c', 'l1'], ['l1', 'l0'], ['m', 'l0'], ['s3', 'l1'],
+  ]
+  const dim = ['s0', 's1', 's3', 's4', 'a1', 'a0', 'm', 'l1', 'l0']
   return (
     <svg viewBox="0 0 64 64" className="h-7 w-7" aria-hidden="true">
-      <g stroke="#2fe6a6" strokeWidth="3" strokeLinecap="round" opacity="0.9">
-        <line x1="20" y1="12" x2="20" y2="52" />
-        <line x1="20" y1="32" x2="46" y2="12" />
-        <line x1="20" y1="32" x2="46" y2="52" />
+      <defs>
+        <radialGradient id="k-ctr" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#cdf6ff" stopOpacity="0.9" />
+          <stop offset="45%" stopColor="#5cc6ff" stopOpacity="0.5" />
+          <stop offset="100%" stopColor="#5cc6ff" stopOpacity="0" />
+        </radialGradient>
+        <filter id="k-blur" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="1.4" />
+        </filter>
+      </defs>
+      <g stroke="#46d6cf" strokeWidth="1.3" strokeLinecap="round" opacity="0.6">
+        {edges.map(([a, b], i) => {
+          const [x1, y1] = nodes[a]
+          const [x2, y2] = nodes[b]
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} />
+        })}
       </g>
-      <g fill="#2fe6a6">
-        <circle cx="20" cy="12" r="3" />
-        <circle cx="20" cy="52" r="3" />
-        <circle cx="46" cy="12" r="3" />
-        <circle cx="46" cy="52" r="3" />
+      <g fill="#5fd9d2">
+        {dim.map((k) => {
+          const [x, y] = nodes[k]
+          return <circle key={k} cx={x} cy={y} r="1.9" />
+        })}
       </g>
-      <circle cx="20" cy="32" r="5" fill="#5cc6ff" />
+      <circle cx={nodes.c[0]} cy={nodes.c[1]} r="7" fill="url(#k-ctr)" filter="url(#k-blur)" />
+      <circle cx={nodes.c[0]} cy={nodes.c[1]} r="3.4" fill="none" stroke="#5cc6ff" strokeOpacity="0.6" strokeWidth="0.8" />
+      <circle cx={nodes.c[0]} cy={nodes.c[1]} r="2.6" fill="#d6f6ff" />
     </svg>
   )
 }
