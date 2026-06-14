@@ -17,7 +17,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${display.variable} ${sans.variable} ${mono.variable} dark`}>
       <body className="font-sans antialiased">
-        <div className="flex h-screen overflow-hidden bg-bg">
+        <div className="app-bg" aria-hidden="true" />
+        <div className="relative z-10 flex h-screen overflow-hidden">
           <Sidebar />
           <div className="flex min-w-0 flex-1 flex-col">
             <TopNav />

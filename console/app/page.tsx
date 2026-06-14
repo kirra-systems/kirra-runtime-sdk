@@ -1,14 +1,14 @@
-import type { ReactNode } from 'react'
-import { Panel, Stat, Pill, StatusDot, Meter } from '@/components/ui/primitives'
-import { TrendArea, Spark, ScoreRing } from '@/components/charts/charts'
-import { kpis, robots, events, series, postureTone } from '@/lib/mock'
+import { Stat, Pill, StatusDot, Meter, Panel } from '@/components/ui/primitives'
+import { Spark } from '@/components/charts/charts'
+import { HeroSafety, FleetTopology, MissionMap, ExecSummary, AuditLedger, EventFeed } from '@/components/command'
+import { kpis, robots, postureTone } from '@/lib/mock'
 
 export default function OverviewPage() {
   return (
-    <div className="mx-auto max-w-[1500px] space-y-6 p-6">
+    <div className="mx-auto max-w-[1600px] space-y-6 p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="font-display text-xl font-semibold text-ink">Fleet Overview</h1>
+          <h1 className="font-display text-xl font-semibold text-ink">Fleet Command</h1>
           <p className="font-mono text-[11px] text-faint">PRODUCTION · us-fleet-1 · updated 2s ago</p>
         </div>
         <div className="flex items-center gap-2">
@@ -18,29 +18,24 @@ export default function OverviewPage() {
         </div>
       </div>
 
+      <HeroSafety />
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <div className="xl:col-span-2"><FleetTopology /></div>
+        <ExecSummary />
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <div className="xl:col-span-2"><MissionMap /></div>
+        <AuditLedger />
+      </div>
+
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
         {kpis.map((k) => (
           <Stat key={k.label} label={k.label} value={k.value} unit={k.unit} delta={k.delta} tone={k.tone}>
             {k.spark && <Spark data={k.spark} color={k.tone === 'muted' ? 'ice' : k.tone} />}
           </Stat>
         ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <Panel className="xl:col-span-2" title="Fleet Throughput" subtitle="commands evaluated · per second" action={<Pill tone="ice">live</Pill>}>
-          <TrendArea data={series.throughput} color="ice" height={220} />
-        </Panel>
-        <Panel title="Safety Governor" subtitle="real-time verdict engine">
-          <div className="flex items-center gap-4">
-            <div className="w-1/2"><ScoreRing value={98} color="safe" label="Safety Score" /></div>
-            <div className="w-1/2 space-y-3">
-              <Row label="State" value={<Pill tone="safe">Nominal</Pill>} />
-              <Row label="E-Stop" value={<span className="font-mono text-xs text-safe">ARMED</span>} />
-              <Row label="Constraints" value={<span className="font-mono text-xs text-ink">42 / 42</span>} />
-              <Row label="Violations 24h" value={<span className="font-mono text-xs text-warn">3</span>} />
-            </div>
-          </div>
-        </Panel>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -72,30 +67,8 @@ export default function OverviewPage() {
             </table>
           </div>
         </Panel>
-
-        <Panel title="Event Stream" subtitle="governor + fleet" action={<Pill tone="ice">live</Pill>} dense>
-          <ul className="divide-y divide-line">
-            {events.map((e) => (
-              <li key={e.id} className="flex gap-3 px-4 py-3">
-                <span className="mt-1.5"><StatusDot tone={e.tone} /></span>
-                <div className="min-w-0">
-                  <p className="text-[12px] leading-snug text-ink">{e.message}</p>
-                  <p className="mt-0.5 font-mono text-[10px] text-faint">{e.source} · {e.ts}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </Panel>
+        <EventFeed />
       </div>
-    </div>
-  )
-}
-
-function Row({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="font-mono text-[11px] uppercase tracking-wider text-faint">{label}</span>
-      {value}
     </div>
   )
 }
