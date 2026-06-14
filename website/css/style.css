@@ -133,16 +133,16 @@ body::before {
 }
 .nav.is-stuck { background: var(--bg-glass); backdrop-filter: blur(14px); padding-top: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .nav__brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; letter-spacing: 3px; font-size: 15px; }
-/* Brand PNG mark — mix-blend hides its dark bg over the dark site; a gentle
-   breathing-glow gives it life (the K can't have data travel inside a flat image). */
-.nav__logo { width: 30px; height: 30px; display: inline-block; vertical-align: middle; flex: none; object-fit: contain; mix-blend-mode: screen; animation: logo-breathe 3.4s ease-in-out infinite; }
-.preloader__logo { width: 88px; height: 88px; object-fit: contain; mix-blend-mode: screen; animation: logo-breathe 3.4s ease-in-out infinite; }
+/* Brand mark — its dark background is knocked out to transparent at runtime
+   (js/logomask.js), then a gentle breathing-glow follows the K's shape. */
+.nav__logo { width: 44px; height: 44px; display: inline-block; vertical-align: middle; flex: none; object-fit: contain; animation: logo-breathe 3.6s ease-in-out infinite; }
+.preloader__logo { width: 96px; height: 96px; object-fit: contain; animation: logo-breathe 3.6s ease-in-out infinite; }
 @keyframes logo-breathe {
-  0%, 100% { filter: brightness(0.9); transform: scale(1); }
-  50%      { filter: brightness(1.28); transform: scale(1.04); }
+  0%, 100% { filter: brightness(0.95) drop-shadow(0 0 3px rgba(52,245,166,0.45)); transform: scale(1); }
+  50%      { filter: brightness(1.25) drop-shadow(0 0 9px rgba(92,240,255,0.7)); transform: scale(1.05); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .nav__logo, .preloader__logo { animation: none; filter: brightness(1.05); }
+  .nav__logo, .preloader__logo { animation: none; filter: brightness(1.08) drop-shadow(0 0 4px rgba(52,245,166,0.5)); }
 }
 .nav__links { display: flex; gap: 30px; font-size: 14px; color: var(--ink-soft); }
 .nav__links a { position: relative; }
@@ -276,7 +276,18 @@ section { position: relative; z-index: 3; }
 .code-dot { width: 11px; height: 11px; border-radius: 50%; background: #2a3142; }
 .code-dot:nth-child(1){ background:#ff5f57; } .code-dot:nth-child(2){ background:#febc2e; } .code-dot:nth-child(3){ background:#28c840; }
 .code-window__title { margin-left: 10px; font-family: var(--font-mono); font-size: 12px; color: var(--ink-mute); }
-.code-window__body { padding: 24px 26px; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.85; color: var(--ink-soft); overflow-x: auto; }
+.code-window__body { padding: 24px 26px; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.85; color: var(--ink-soft); overflow-x: auto; min-height: 360px; }
+/* live action_filter.py terminal */
+.t-line { white-space: pre; min-height: 1.25em; }
+.t-prompt { color: var(--cyan); }
+.t-code { color: var(--ink-soft); }
+.t-dim { color: var(--ink-mute); font-style: italic; }
+.t-ok { color: var(--green); }
+.t-warn { color: var(--amber); }
+.t-bad { color: var(--red); }
+.t-cursor { display: inline-block; width: 8px; height: 1.05em; background: var(--green); vertical-align: -2px; margin-left: 1px; animation: t-blink 1s steps(1) infinite; }
+@keyframes t-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .t-cursor { animation: none; } }
 .c-kw { color: #ff79c6; } .c-fn { color: var(--cyan); } .c-str { color: var(--green); } .c-num { color: var(--amber); } .c-cm { color: var(--ink-mute); font-style: italic; }
 @media (max-width: 900px) { .quickstart { grid-template-columns: 1fr; } }
 
