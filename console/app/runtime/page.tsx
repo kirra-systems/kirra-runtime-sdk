@@ -1,7 +1,7 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
-import { resources, latency, network, partitions, nodes } from '@/lib/runtime'
+import { resources, latency, network, partitions, nodes, ddsTopics, ddsPeers } from '@/lib/runtime'
 import type { Tone } from '@/lib/types'
 
 export default function RuntimePage() {
@@ -45,6 +45,56 @@ export default function RuntimePage() {
               </div>
             ))}
           </div>
+        </Panel>
+      </div>
+
+      {/* ── DDS / Network Health (Drop 6) ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel className="xl:col-span-2" title="DDS Topic Health" subtitle="deadline budget vs observed p99 · Volatile durability enforced" dense action={<Pill tone="safe">QoS: Volatile</Pill>}>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left">
+              <thead>
+                <tr className="border-b border-line font-mono text-[10px] uppercase tracking-wider text-faint">
+                  <th className="px-4 py-2 font-normal">Topic</th>
+                  <th className="px-4 py-2 font-normal">QoS</th>
+                  <th className="px-4 py-2 font-normal">Pub/Sub</th>
+                  <th className="px-4 py-2 font-normal">Deadline</th>
+                  <th className="px-4 py-2 font-normal">Observed</th>
+                  <th className="px-4 py-2 font-normal">Miss rate</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono text-[12px]">
+                {ddsTopics.map((d) => (
+                  <tr key={d.topic} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                    <td className="px-4 py-2.5 text-ink">{d.topic}</td>
+                    <td className="px-4 py-2.5 text-ice">{d.qos}</td>
+                    <td className="px-4 py-2.5 text-faint">{d.pubs}/{d.subs}</td>
+                    <td className="px-4 py-2.5 text-muted">{d.deadlineMs} ms</td>
+                    <td className={`px-4 py-2.5 ${d.observedMs > d.deadlineMs * 0.85 ? 'text-warn' : 'text-muted'}`}>{d.observedMs} ms</td>
+                    <td className={`px-4 py-2.5 ${txt(d.tone)}`}>{d.missRate.toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title="Participant Discovery" subtitle="DDS liveliness matrix" dense>
+          <ul>
+            {ddsPeers.map((p) => (
+              <li key={p.id} className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-0">
+                <StatusDot tone={p.tone} pulse={p.liveliness === 'LOST'} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-mono text-[12px] text-ink">{p.id}</div>
+                  <div className="font-mono text-[10px] text-faint">{p.role}</div>
+                </div>
+                <div className="text-right">
+                  <div className={`font-mono text-[11px] ${p.liveliness === 'LOST' ? 'text-crit' : 'text-muted'}`}>{p.liveliness}</div>
+                  <div className="font-mono text-[10px] text-faint">{p.rttMs} ms · {p.lastSeen}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
         </Panel>
       </div>
 
