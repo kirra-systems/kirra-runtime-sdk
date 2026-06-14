@@ -10,6 +10,11 @@ const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 function boot() {
   const gsap = window.gsap;
   if (!gsap) { return void setTimeout(boot, 50); } // wait for CDN
+
+  // Always resolve at the top — don't let the browser restore a scroll offset.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  window.scrollTo(0, 0);
+
   const { ScrollTrigger } = window;
   if (window.ScrollTrigger) gsap.registerPlugin(window.ScrollTrigger);
   const ST = window.ScrollTrigger;
@@ -34,6 +39,7 @@ function boot() {
   sceneReady.then(() => { sceneDone = true; });
 
   function finishPreloader() {
+    window.scrollTo(0, 0);
     const tl = gsap.timeline();
     tl.to(pre, { yPercent: -100, duration: 1, ease: 'power4.inOut', onComplete: () => pre && (pre.style.display = 'none') })
       .add(introHero, '-=0.5');

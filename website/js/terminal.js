@@ -9,22 +9,24 @@
 // line = { c?: lineColourClass, text?: string }  — single colour
 //      | { segs: [ [text, tokenClass], ... ] }   — syntax-coloured code
 const LINES = [
-  { c: 't-prompt', text: '$ python action_filter.py' },
+  { c: 't-prompt', text: '$ cargo run --example action_filter' },
   { text: '' },
-  { segs: [['import ', 'c-kw'], ['kirra', '']] },
-  { segs: [['gov = kirra.', ''], ['Governor', 'c-fn'], ['(', ''], ['"verifier.fleet.local"', 'c-str'], [')', '']] },
+  { segs: [['use ', 'c-kw'], ['kirra::action_filter::', ''], ['evaluate_action_claim', 'c-fn'], [';', '']] },
+  { segs: [['use ', 'c-kw'], ['kirra::verifier::FleetPosture', ''], [';', '']] },
   { text: '' },
-  { c: 'c-cm', text: '# every action is judged against live fleet posture' },
-  { segs: [['gov.', ''], ['evaluate', 'c-fn'], ['(', ''], ['"robot-07"', 'c-str'], [', cmd_vel=', ''], ['1.2', 'c-num'], [')', '']] },
-  { c: 't-ok', text: '  ✓ ALLOW   Nominal · dispatched' },
-  { segs: [['gov.', ''], ['evaluate', 'c-fn'], ['(', ''], ['"robot-07"', 'c-str'], [', cmd_vel=', ''], ['999', 'c-num'], [')', '']] },
-  { c: 't-warn', text: '  ⊘ CLAMP   999 → 2.0 m/s · envelope cap' },
-  { segs: [['gov.', ''], ['evaluate', 'c-fn'], ['(', ''], ['"robot-07"', 'c-str'], [', ', ''], ['"drive_to_moon"', 'c-str'], [')', '']] },
-  { c: 't-bad', text: '  ✕ DENY    unknown action · blocked' },
-  { segs: [['gov.', ''], ['evaluate', 'c-fn'], ['(', ''], ['"robot-07"', 'c-str'], [', cmd_vel=', ''], ['1.2', 'c-num'], [')', ''], ['   # Degraded', 'c-cm']] },
-  { c: 't-bad', text: '  ✕ DENY    kinetic write blocked' },
+  { c: 'c-cm', text: '// every agent action is judged against live posture' },
+  { segs: [['let ', 'c-kw'], ['d = ', ''], ['evaluate_action_claim', 'c-fn'], ['(claim, ', ''], ['FleetPosture::Nominal', 'c-num'], [')', '']] },
+  { c: 't-ok', text: '  ✓ allowed=true    NOMINAL_VALID_KINEMATICS' },
+  { c: 'c-cm', text: '// claim.payload = { "linear": 999.0 }' },
+  { c: 't-bad', text: '  ✕ allowed=false   KINEMATIC_ENVELOPE_BREACH' },
+  { c: 'c-cm', text: '// claim.action_type = "drive_to_moon"' },
+  { c: 't-bad', text: '  ✕ allowed=false   UNKNOWN_ACTION_TYPE' },
+  { c: 'c-cm', text: '// posture = FleetPosture::Degraded' },
+  { c: 't-bad', text: '  ✕ allowed=false   DEGRADED_POSTURE_KINETIC_DENIED' },
+  { c: 'c-cm', text: '// claim.action_type = "read_telemetry"' },
+  { c: 't-ok', text: '  ✓ allowed=true    DEGRADED_READ_ONLY_PERMITTED' },
   { text: '' },
-  { c: 'c-cm', text: "# fail-closed — if trust isn't proven, nothing moves" },
+  { c: 'c-cm', text: "// fail-closed — if trust isn't proven, nothing moves" },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
