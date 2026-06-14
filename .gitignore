@@ -1,5 +1,10 @@
 target/
-Cargo.lock
+# The root Cargo.lock is committed: this repo ships binaries/services, so a
+# pinned, reproducible dependency graph is required (prevents transitive drift
+# like the alloc-no-stdlib 2.x/3.x split that broke the brotli build in CI).
+# Separate sub-workspaces keep their locks ignored for now.
+parko/Cargo.lock
+tools/iceoryx2-spike/Cargo.lock
 data/outputs/
 node_modules/
 dashboard/dist/

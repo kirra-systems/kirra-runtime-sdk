@@ -30,9 +30,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
-        run: cargo test --workspace
+        # --locked: build the committed Cargo.lock exactly; never re-resolve on
+        # the runner (a fresh resolve pulls drifting transitives — see the
+        # alloc-no-stdlib 2.x/3.x split that broke the brotli build).
+        run: cargo test --workspace --locked
       - name: Fault injection tests (ISO 26262 safe-state verification — CERT-004)
-        run: cargo test --test fault_injection
+        run: cargo test --test fault_injection --locked
 
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)
