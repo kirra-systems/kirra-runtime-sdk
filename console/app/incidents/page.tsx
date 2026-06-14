@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from 'react'
 import { Play, Pause, SkipBack, RotateCcw } from 'lucide-react'
-import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
-import { incidents, replay, featured, rootCause } from '@/lib/incidents'
+import { Panel, Pill, StatusDot, Meter } from '@/components/ui/primitives'
+import { ReplayMap } from '@/components/ui/replay-map'
+import { incidents, replay, featured, rootCause, replaySpatial, replayActors, replayHazard } from '@/lib/incidents'
 import { postureTone } from '@/lib/mock'
 import type { Tone } from '@/lib/types'
 
@@ -13,6 +14,7 @@ export default function IncidentsPage() {
   const [i, setI] = useState(6) // start at the trigger frame (t = 0)
   const [playing, setPlaying] = useState(false)
   const frame = replay[i]
+  const spatial = replaySpatial[i]
 
   useEffect(() => {
     if (!playing) return
@@ -114,6 +116,35 @@ export default function IncidentsPage() {
         </div>
       </Panel>
 
+      {/* ── Spatial replay + sensor playback (#8) ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel className="xl:col-span-2" title="Spatial Replay" subtitle="position over time · ego advances with the scrubber" action={<Pill tone="ice">top-down</Pill>}>
+          <ReplayMap frames={replaySpatial} actors={replayActors} hazard={replayHazard} index={i} height={320} />
+          <div className="mt-3 flex flex-wrap items-center gap-4 border-t border-line pt-3 font-mono text-[10px] text-faint">
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-ice" /> traveled path</span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-px bg-muted" /> planned</span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-crit/60" /> keep-out zone</span>
+            <span className="ml-auto">front cone = radar health · {spatial.confidence < 0.6 ? 'confidence below floor' : 'nominal'}</span>
+          </div>
+        </Panel>
+
+        <Panel title="Sensor Playback" subtitle={`t = ${frame.t > 0 ? '+' : ''}${frame.t}s · ${frame.clock}`}>
+          <div className="space-y-3">
+            <SensorRow label="LiDAR (top)" tone={spatial.lidar} />
+            <SensorRow label="Radar (front)" tone={spatial.radar} />
+            <SensorRow label="Camera ×6" tone={spatial.camera} />
+          </div>
+          <div className="mt-4 border-t border-line pt-3">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-faint">Localization confidence</span>
+              <span className={`font-mono text-[12px] ${confTone(spatial.confidence) === 'safe' ? 'text-safe' : confTone(spatial.confidence) === 'warn' ? 'text-warn' : 'text-crit'}`}>{spatial.confidence.toFixed(2)}</span>
+            </div>
+            <div className="mt-2"><Meter value={spatial.confidence * 100} tone={confTone(spatial.confidence)} /></div>
+            <p className="mt-1.5 font-mono text-[10px] text-faint">floor ≥ 0.60 · {spatial.confidence < 0.6 ? 'breached → Degraded' : 'within floor'}</p>
+          </div>
+        </Panel>
+      </div>
+
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel className="xl:col-span-2" title="Frame Log" subtitle="full second-by-second reconstruction" dense>
           <ul>
@@ -199,6 +230,18 @@ function StateCard({ label, children }: { label: string; children: React.ReactNo
     </div>
   )
 }
+
+function SensorRow({ label, tone }: { label: string; tone: Tone }) {
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-line bg-bg/40 px-3 py-2">
+      <StatusDot tone={tone} pulse={tone === 'crit'} />
+      <span className="flex-1 text-[12px] text-ink">{label}</span>
+      <span className={`font-mono text-[10px] uppercase tracking-wider ${txt(tone)}`}>{tone === 'safe' ? 'OK' : tone === 'warn' ? 'intermittent' : 'fault'}</span>
+    </div>
+  )
+}
+
+function confTone(v: number): Tone { return v < 0.3 ? 'crit' : v < 0.6 ? 'warn' : 'safe' }
 
 function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }
 function badge(t: Tone) { return t === 'safe' ? 'bg-safe/15 text-safe' : t === 'warn' ? 'bg-warn/15 text-warn' : t === 'crit' ? 'bg-crit/15 text-crit' : 'bg-ice/15 text-ice' }
