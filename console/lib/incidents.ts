@@ -49,6 +49,41 @@ export const replay: ReplayFrame[] = [
   { t: 3, clock: '12:02:43', speed: 0.0, posture: 'LockedOut', verdict: '—', event: 'asset at full stop — HOLD; human reset required', tone: 'crit' },
 ]
 
+// ── Spatial replay (#8) ────────────────────────────────────────────────
+// Per-frame ego pose for forensic position-over-time playback, plus detected
+// actors, the hazard keep-out zone, and frame-by-frame sensor health. Indices
+// align 1:1 with `replay` above. Coords are top-down in a 0..100 viewBox.
+
+export interface ReplayActor { id: string; x: number; y: number; kind: 'person' | 'vehicle' | 'static'; label: string; tone: Tone }
+export const replayActors: ReplayActor[] = [
+  { id: 'worker', x: 74, y: 72, kind: 'person', label: 'worker · 9 m', tone: 'warn' },
+  { id: 'amr', x: 64, y: 50, kind: 'vehicle', label: 'AMR-08', tone: 'ice' },
+  { id: 'pallet', x: 44, y: 42, kind: 'static', label: 'pallet', tone: 'muted' },
+]
+
+export const replayHazard = { x: 56, y: 46, w: 18, h: 24, label: 'keep-out' }
+
+export interface SpatialFrame {
+  ego: { x: number; y: number; heading: number }
+  lidar: Tone
+  radar: Tone
+  camera: Tone
+  confidence: number
+}
+
+export const replaySpatial: SpatialFrame[] = [
+  { ego: { x: 12, y: 60, heading: 88 }, lidar: 'safe', radar: 'safe', camera: 'safe', confidence: 0.78 },
+  { ego: { x: 18, y: 59, heading: 89 }, lidar: 'safe', radar: 'safe', camera: 'safe', confidence: 0.74 },
+  { ego: { x: 25, y: 59, heading: 90 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.71 },
+  { ego: { x: 33, y: 58, heading: 90 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.66 },
+  { ego: { x: 42, y: 58, heading: 91 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.54 },
+  { ego: { x: 49, y: 57, heading: 91 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.50 },
+  { ego: { x: 55, y: 57, heading: 92 }, lidar: 'safe', radar: 'crit', camera: 'safe', confidence: 0.41 },
+  { ego: { x: 60, y: 56, heading: 92 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.30 },
+  { ego: { x: 62.5, y: 56, heading: 92 }, lidar: 'safe', radar: 'warn', camera: 'safe', confidence: 0.18 },
+  { ego: { x: 63.5, y: 56, heading: 92 }, lidar: 'warn', radar: 'warn', camera: 'safe', confidence: 0.11 },
+]
+
 export interface RootCause { id: string; label: string; detail: string; tone: Tone }
 
 export const rootCause: RootCause[] = [
