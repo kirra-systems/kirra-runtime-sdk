@@ -3,7 +3,6 @@
 @tailwind utilities;
 
 :root {
-  /* graphite surfaces (space-separated RGB channels for tailwind alpha) */
   --bg: 8 10 16;
   --surface: 11 14 22;
   --panel: 16 20 30;
@@ -11,7 +10,6 @@
   --ink: 233 237 246;
   --muted: 154 166 189;
   --faint: 105 114 138;
-  /* restrained state accents */
   --safe: 47 230 166;
   --warn: 255 176 32;
   --crit: 255 84 104;
@@ -31,7 +29,28 @@
   .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(150,166,198,0.18); border-radius: 8px; }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .grid-bg { background-image: radial-gradient(rgba(150,166,198,0.06) 1px, transparent 1px); background-size: 22px 22px; }
+}
+
+/* Subtle mission-control environmental layer (grid + glow), restrained. */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 560px at 8% -8%, rgba(47, 230, 166, 0.05), transparent 60%),
+    radial-gradient(1000px 680px at 102% 108%, rgba(92, 198, 255, 0.045), transparent 60%);
+}
+.app-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(150, 166, 198, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(150, 166, 198, 0.035) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
 }
 
 ::selection { background: rgb(var(--safe)); color: #04130d; }
