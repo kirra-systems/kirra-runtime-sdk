@@ -1,4 +1,4 @@
-import type { Tone, Posture } from './types'
+import type { Tone, Posture, SeriesPoint } from './types'
 import type { PosPoint } from './telemetry'
 
 // Robot Digital Twin — the per-asset deep view: subsystem health, the live
@@ -18,6 +18,12 @@ export interface TwinAttestation {
   tone: Tone
 }
 
+export interface TwinPose { yaw: number; pitch: number; roll: number; heading: string }
+export interface TwinVitals { velocity: SeriesPoint[]; accel: SeriesPoint[]; localization: SeriesPoint[] }
+export interface Thermal { name: string; tempC: number; tone: Tone }
+export interface ActuatorLoad { name: string; loadPct: number; tone: Tone }
+export interface MissionPhase { name: string; status: 'done' | 'active' | 'pending'; pct: number }
+
 export interface Twin {
   id: string
   name: string
@@ -35,6 +41,11 @@ export interface Twin {
   commands: TwinCommand[]
   path: PosPoint[]
   ego: PosPoint
+  pose: TwinPose
+  vitals: TwinVitals
+  thermals: Thermal[]
+  actuators: ActuatorLoad[]
+  missionPhases: MissionPhase[]
 }
 
 function trace(seed: number): PosPoint[] {
@@ -117,6 +128,99 @@ const commandsLocked: TwinCommand[] = [
   { ts: '12:02:41', channel: 'any motion', value: 'human reset pending', verdict: 'DENY', tone: 'crit' },
 ]
 
+// Per-kind pose, thermals, actuator load, and mission timeline.
+interface KindDetail { pose: TwinPose; thermals: Thermal[]; actuators: ActuatorLoad[]; missionPhases: MissionPhase[] }
+const detail: Record<string, KindDetail> = {
+  nominal: {
+    pose: { yaw: 41, pitch: 2, roll: -1, heading: 'NE · aisle-7' },
+    thermals: [
+      { name: 'Drive motor', tempC: 48, tone: 'safe' },
+      { name: 'Battery pack', tempC: 32, tone: 'safe' },
+      { name: 'Compute (Orin)', tempC: 61, tone: 'safe' },
+      { name: 'Brake assembly', tempC: 40, tone: 'safe' },
+    ],
+    actuators: [
+      { name: 'Drive · left', loadPct: 38, tone: 'safe' },
+      { name: 'Drive · right', loadPct: 41, tone: 'safe' },
+      { name: 'Steering', loadPct: 22, tone: 'safe' },
+      { name: 'Lift / mast', loadPct: 0, tone: 'safe' },
+    ],
+    missionPhases: [
+      { name: 'Dispatch', status: 'done', pct: 100 },
+      { name: 'Transit', status: 'done', pct: 100 },
+      { name: 'Pick & place', status: 'active', pct: 62 },
+      { name: 'Return', status: 'pending', pct: 0 },
+    ],
+  },
+  degraded: {
+    pose: { yaw: 118, pitch: 1, roll: 0, heading: 'SE · holding' },
+    thermals: [
+      { name: 'Drive motor', tempC: 58, tone: 'warn' },
+      { name: 'Battery pack', tempC: 41, tone: 'safe' },
+      { name: 'Compute (Orin)', tempC: 66, tone: 'warn' },
+      { name: 'Brake assembly', tempC: 47, tone: 'safe' },
+    ],
+    actuators: [
+      { name: 'Drive · left', loadPct: 64, tone: 'warn' },
+      { name: 'Drive · right', loadPct: 61, tone: 'warn' },
+      { name: 'Steering', loadPct: 34, tone: 'safe' },
+      { name: 'Lift / mast', loadPct: 0, tone: 'safe' },
+    ],
+    missionPhases: [
+      { name: 'Survey', status: 'done', pct: 100 },
+      { name: 'Inspect', status: 'active', pct: 40 },
+      { name: 'HOLD (degraded)', status: 'active', pct: 0 },
+      { name: 'Resume', status: 'pending', pct: 0 },
+    ],
+  },
+  lockedout: {
+    pose: { yaw: 0, pitch: 0, roll: 0, heading: 'HOLD · stopped' },
+    thermals: [
+      { name: 'Drive motor', tempC: 30, tone: 'safe' },
+      { name: 'Battery pack', tempC: 78, tone: 'crit' },
+      { name: 'Compute (Orin)', tempC: 55, tone: 'safe' },
+      { name: 'Brake assembly', tempC: 33, tone: 'safe' },
+    ],
+    actuators: [
+      { name: 'Drive · left', loadPct: 0, tone: 'crit' },
+      { name: 'Drive · right', loadPct: 0, tone: 'crit' },
+      { name: 'Steering', loadPct: 0, tone: 'crit' },
+      { name: 'Brake · A/B', loadPct: 100, tone: 'safe' },
+    ],
+    missionPhases: [
+      { name: 'Transit', status: 'done', pct: 100 },
+      { name: 'LOCKOUT', status: 'active', pct: 100 },
+      { name: 'Human reset', status: 'pending', pct: 0 },
+    ],
+  },
+}
+
+// Deterministic 24-sample vitals (no RNG — stable across server render + build).
+function vitalsFor(kind: string, seed: number): TwinVitals {
+  const N = 24
+  const s = (fn: (i: number) => number): SeriesPoint[] =>
+    Array.from({ length: N }, (_, i) => ({ t: String(i).padStart(2, '0'), v: Math.round(fn(i) * 100) / 100 }))
+  if (kind === 'lockedout') {
+    return {
+      velocity: s((i) => Math.max(0, 1.6 - i * 0.12)),
+      accel: s((i) => (i < 6 ? -0.4 : 0)),
+      localization: s(() => 11 + Math.sin(seed) * 2),
+    }
+  }
+  if (kind === 'degraded') {
+    return {
+      velocity: s((i) => Math.max(0, 2.0 + Math.sin(i / 5 + seed) * 0.25 - i * 0.01)),
+      accel: s((i) => Math.cos(i / 5 + seed) * 0.3),
+      localization: s((i) => 54 + Math.sin(i / 6 + seed) * 4),
+    }
+  }
+  return {
+    velocity: s((i) => 3.0 + Math.sin(i / 5 + seed) * 0.6),
+    accel: s((i) => Math.cos(i / 4 + seed) * 0.4),
+    localization: s((i) => 93 + Math.sin(i / 7 + seed) * 3),
+  }
+}
+
 // Map the 8 roster robots → digital twins with posture-appropriate detail.
 const roster = [
   { id: 'r1', name: 'KIRRA-07', model: 'Atlas-X', kind: 'nominal', battery: 88, draw: 240, range: 11.4 },
@@ -156,6 +260,11 @@ export const twins: Twin[] = roster.map((r, i) => {
     commands,
     path,
     ego: path[26],
+    pose: detail[r.kind].pose,
+    vitals: vitalsFor(r.kind, i * 1.3),
+    thermals: detail[r.kind].thermals,
+    actuators: detail[r.kind].actuators,
+    missionPhases: detail[r.kind].missionPhases,
   }
 })
 
@@ -163,7 +272,7 @@ export function twinById(id: string): Twin | undefined {
   return twins.find((t) => t.id === id)
 }
 
-// ── Global Ops Map (#1) ───────────────────────────────────────────────
+// ── Global Ops Map (#1) ─────────────────────────────────────────────────
 // Fleet sites worldwide, color-coded by aggregate site posture. `hub` is the
 // control center all sites arc back to. Coords are in a 0..100 × 0..50 viewBox.
 export const sites: { id: string; name: string; region: string; x: number; y: number; assets: number; tone: Tone; hub?: boolean }[] = [
