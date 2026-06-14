@@ -29,3 +29,22 @@ export const interventions: Intervention[] = [
 ]
 
 export const verdictMix = { allow: 18420, clamp: 142, deny: 37 }
+
+// ── Safety Envelope Visualizer (#3) ─────────────────────────────────────
+// Sample commands plotted on the linear-velocity (vx) × angular-rate (vy) phase
+// plane, normalized to −1…1. The Governor admits a command only inside the
+// active envelope; these illustrate ALLOW / CLAMP / DENY outcomes.
+export const envPoints: { vx: number; vy: number; tone: Tone; label?: string }[] = [
+  { vx: 0.18, vy: 0.10, tone: 'safe', label: 'ALLOW 1.2' },
+  { vx: 0.55, vy: -0.22, tone: 'safe', label: 'ALLOW 3.2' },
+  { vx: 0.86, vy: 0.30, tone: 'warn', label: 'CLAMP' },
+  { vx: 1.06, vy: 0.12, tone: 'crit', label: 'DENY 999' },
+  { vx: -0.30, vy: 0.42, tone: 'warn', label: 'CLAMP ω' },
+]
+
+export interface EnvelopeBand { name: string; tone: Tone; note: string }
+export const envelopeBands: EnvelopeBand[] = [
+  { name: 'Hard kinematic limit', tone: 'ice', note: 'certified envelope · cap always wins' },
+  { name: 'Nominal admitted region', tone: 'safe', note: 'all valid kinematics allowed' },
+  { name: 'Degraded decel envelope', tone: 'warn', note: 'non-increasing speed · decel-to-stop' },
+]
