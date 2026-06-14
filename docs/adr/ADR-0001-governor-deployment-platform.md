@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-06-08
-**Owner:** Justin Looney
+**Owner:** Kirra Systems LLC
 **Scope:** Certification-target platform and deployment topology for the KIRRA runtime safety governor. This is a decision of record for the *cert target*, not a statement of achieved certification.
 
 ---
