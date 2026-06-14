@@ -2,7 +2,7 @@
 
 > This file defines the complete Kanban board layout for the Kirra + Parko
 > monorepo. Apply it manually at:
-> github.com/justinlooney/kirra-runtime-sdk → Projects → New project → Board
+> github.com/kirra-systems/kirra-runtime-sdk → Projects → New project → Board
 
 ---
 
@@ -329,7 +329,7 @@ Run this once to create all labels, milestones, and issues:
 # Requires: gh CLI authenticated as justinlooney
 # Usage: bash work/setup-board.sh
 
-REPO="justinlooney/kirra-runtime-sdk"
+REPO="kirra-systems/kirra-runtime-sdk"
 
 # ── Labels ────────────────────────────────────────────────────────────────────────────
 gh label create "control-loop"       --color "0075ca" --repo $REPO 2>/dev/null || true
