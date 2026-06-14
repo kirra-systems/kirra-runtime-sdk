@@ -2,6 +2,7 @@
 
 import { Search, Bell, ChevronDown } from 'lucide-react'
 import { Pill } from '@/components/ui/primitives'
+import { MobileNav } from '@/components/shell/mobile-nav'
 
 function KMark() {
   return (
@@ -25,6 +26,7 @@ function KMark() {
 export function TopNav() {
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-line bg-bg/70 px-4 backdrop-blur-xl">
+      <MobileNav />
       <div className="flex items-center gap-2.5">
         <KMark />
         <div className="leading-none">
