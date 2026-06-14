@@ -3,9 +3,11 @@ import { notFound } from 'next/navigation'
 import { ChevronLeft } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { PositionMap } from '@/components/ui/position-map'
+import { PoseView } from '@/components/ui/pose-view'
+import { Spark } from '@/components/charts/charts'
 import { twinById, twins } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
-import type { Tone } from '@/lib/types'
+import type { Tone, SeriesPoint } from '@/lib/types'
 
 export function generateStaticParams() {
   return twins.map((t) => ({ id: t.id }))
@@ -41,6 +43,27 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
         <Metric label="Power draw" value={`${t.drawW} W`} tone="ice" />
         <Metric label="Est. range" value={`${t.rangeKm.toFixed(1)} km`} tone="ice" />
         <Metric label="Status" value={t.status} tone={tone} />
+      </div>
+
+      {/* Pose + live telemetry */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel title="Pose & Attitude" subtitle="orientation · IMU">
+          <PoseView pose={t.pose} tone={tone} height={228} />
+          <div className="mt-2 grid grid-cols-4 gap-2 border-t border-line pt-3 text-center font-mono text-[10px] text-faint">
+            <div><div className="text-sm text-ink">{t.pose.yaw}°</div>yaw</div>
+            <div><div className="text-sm text-ink">{t.pose.pitch}°</div>pitch</div>
+            <div><div className="text-sm text-ink">{t.pose.roll}°</div>roll</div>
+            <div><div className="text-sm text-ice">{t.pose.heading.split(' · ')[0]}</div>head</div>
+          </div>
+        </Panel>
+
+        <Panel className="xl:col-span-2" title="Live Telemetry" subtitle="velocity · acceleration · localization confidence" action={<Pill tone="ice">50 Hz</Pill>}>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Vital label="Velocity" unit="m/s" data={t.vitals.velocity} color="ice" />
+            <Vital label="Acceleration" unit="m/s²" data={t.vitals.accel} color="safe" />
+            <Vital label="Localization conf." unit="%" data={t.vitals.localization} color={confColor(t.vitals.localization)} />
+          </div>
+        </Panel>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -96,6 +119,57 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
         </div>
       </div>
 
+      {/* Thermal + actuator load + mission timeline */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel title="Thermal" subtitle="component temperatures" dense>
+          <ul>
+            {t.thermals.map((th) => (
+              <li key={th.name} className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-0">
+                <StatusDot tone={th.tone} pulse={th.tone === 'crit'} />
+                <span className="flex-1 truncate text-[12px] text-ink">{th.name}</span>
+                <div className="w-24"><Meter value={Math.min(100, (th.tempC / 90) * 100)} tone={th.tone} /></div>
+                <span className={`w-12 text-right font-mono text-[12px] ${txt(th.tone)}`}>{th.tempC}°C</span>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+
+        <Panel title="Actuator Load" subtitle="per-channel duty cycle">
+          <ul className="space-y-4">
+            {t.actuators.map((a) => (
+              <li key={a.name}>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[12px] text-ink">{a.name}</span>
+                  <span className={`font-mono text-[11px] ${txt(a.tone)}`}>{a.loadPct}%</span>
+                </div>
+                <div className="mt-2"><Meter value={a.loadPct} tone={a.tone} /></div>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+
+        <Panel title="Mission Timeline" subtitle="current assignment" dense>
+          <ol className="px-4 py-3">
+            {t.missionPhases.map((p, idx) => {
+              const pt: Tone = p.status === 'done' ? 'safe' : p.status === 'active' ? (/lockout|hold/i.test(p.name) ? 'crit' : 'ice') : 'muted'
+              return (
+                <li key={p.name} className="relative flex gap-3 pb-5 pl-1 last:pb-0">
+                  {idx < t.missionPhases.length - 1 && <span className="absolute left-[5px] top-4 h-full w-px bg-line" />}
+                  <span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${dotBg(pt)}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] text-ink">{p.name}</span>
+                      <span className={`font-mono text-[10px] uppercase tracking-wider ${txt(pt)}`}>{p.status}</span>
+                    </div>
+                    {p.status === 'active' && p.pct > 0 && <div className="mt-2"><Meter value={p.pct} tone={pt} /></div>}
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+        </Panel>
+      </div>
+
       <Panel title="Command Stream" subtitle="recent actuator commands · governor verdict" dense>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[640px] text-left">
@@ -143,5 +217,24 @@ function KV({ k, v }: { k: string; v: string }) {
   )
 }
 
+function Vital({ label, unit, data, color }: { label: string; unit: string; data: SeriesPoint[]; color: 'safe' | 'warn' | 'crit' | 'ice' }) {
+  const last = data[data.length - 1]?.v ?? 0
+  return (
+    <div className="rounded-lg border border-line bg-bg/40 p-3">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-faint">{label}</span>
+        <span className="font-mono text-[12px] text-ink">{last}<span className="text-muted"> {unit}</span></span>
+      </div>
+      <div className="mt-2"><Spark data={data} color={color} /></div>
+    </div>
+  )
+}
+
+function confColor(data: SeriesPoint[]): 'safe' | 'warn' | 'crit' | 'ice' {
+  const last = data[data.length - 1]?.v ?? 100
+  return last < 20 ? 'crit' : last < 60 ? 'warn' : 'safe'
+}
+
 function txt(t: Tone) { return t === 'safe' ? 'text-safe' : t === 'warn' ? 'text-warn' : t === 'crit' ? 'text-crit' : t === 'ice' ? 'text-ice' : 'text-muted' }
+function dotBg(t: Tone) { return t === 'safe' ? 'bg-safe' : t === 'warn' ? 'bg-warn' : t === 'crit' ? 'bg-crit' : t === 'ice' ? 'bg-ice' : 'bg-muted' }
 function badge(t: Tone) { return t === 'safe' ? 'bg-safe/15 text-safe' : t === 'warn' ? 'bg-warn/15 text-warn' : t === 'crit' ? 'bg-crit/15 text-crit' : 'bg-ice/15 text-ice' }
