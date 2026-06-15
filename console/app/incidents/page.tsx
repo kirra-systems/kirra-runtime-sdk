@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Play, Pause, SkipBack, RotateCcw } from 'lucide-react'
 import { Panel, Pill, StatusDot, Meter } from '@/components/ui/primitives'
 import { ReplayMap } from '@/components/ui/replay-map'
+import { useRawModal } from '@/components/ui/raw-modal'
 import { useIncidentHistory } from '@/lib/api/hooks'
 import { replay, featured, rootCause, replaySpatial, replayActors, replayHazard } from '@/lib/incidents'
 import { postureTone } from '@/lib/mock'
@@ -17,6 +18,7 @@ export default function IncidentsPage() {
   const frame = replay[i]
   const spatial = replaySpatial[i]
   const history = useIncidentHistory(80)
+  const raw = useRawModal()
 
   useEffect(() => {
     if (!playing) return
@@ -153,7 +155,9 @@ export default function IncidentsPage() {
             {replay.map((f, idx) => (
               <li
                 key={idx}
-                className={`flex items-center gap-4 border-b border-line px-4 py-2.5 last:border-0 ${idx === i ? 'bg-white/[0.04]' : idx > i ? 'opacity-40' : ''}`}
+                onClick={() => { setPlaying(false); setI(idx); raw.open({ title: `Frame ${f.t > 0 ? '+' : ''}${f.t}s`, subtitle: `${f.clock} · ${f.verdict}`, data: f }) }}
+                className={`flex cursor-pointer items-center gap-4 border-b border-line px-4 py-2.5 last:border-0 hover:bg-white/[0.02] ${idx === i ? 'bg-white/[0.04]' : idx > i ? 'opacity-40' : ''}`}
+                title="tap for raw frame"
               >
                 <span className="w-10 shrink-0 font-mono text-[11px] text-faint">{f.t > 0 ? '+' : ''}{f.t}s</span>
                 <span className="w-16 shrink-0 font-mono text-[11px] text-muted">{f.clock}</span>
@@ -200,7 +204,12 @@ export default function IncidentsPage() {
             </thead>
             <tbody className="font-mono text-[12px]">
               {history.rows.map((inc) => (
-                <tr key={inc.id} className={`border-b border-line last:border-0 hover:bg-white/[0.02] ${inc.id === featured.id ? 'bg-white/[0.03]' : ''}`}>
+                <tr
+                  key={inc.id}
+                  onClick={() => raw.open({ title: inc.title, subtitle: `${inc.id} · ${inc.asset}`, data: inc })}
+                  className={`cursor-pointer border-b border-line last:border-0 hover:bg-white/[0.02] ${inc.id === featured.id ? 'bg-white/[0.03]' : ''}`}
+                  title="tap for raw incident"
+                >
                   <td className={`px-4 py-2.5 ${txt(inc.tone)}`}>{inc.id}</td>
                   <td className="px-4 py-2.5 text-faint">{inc.ts}</td>
                   <td className="px-4 py-2.5 text-ink">{inc.asset}</td>
@@ -213,6 +222,7 @@ export default function IncidentsPage() {
           </table>
         </div>
       </Panel>
+      {raw.modal}
     </div>
   )
 }
