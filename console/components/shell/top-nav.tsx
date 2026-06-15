@@ -1,8 +1,8 @@
 'use client'
 
 import { Search, Bell, ChevronDown } from 'lucide-react'
-import { Pill } from '@/components/ui/primitives'
 import { MobileNav } from '@/components/shell/mobile-nav'
+import { ConnectionStatus } from '@/components/shell/connection-status'
 
 function KMark() {
   // Trust-lattice "K" — mirrors the marketing-site logo: a constellation of
@@ -61,7 +61,7 @@ export function TopNav() {
           <div className="font-mono text-[9px] uppercase tracking-[2px] text-faint">Mission Console</div>
         </div>
       </div>
-      <div className="ml-2 hidden sm:block"><Pill tone="safe">Governor Online</Pill></div>
+      <div className="ml-2 hidden sm:block"><ConnectionStatus /></div>
       <button className="ml-1 hidden items-center gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 font-mono text-[11px] text-muted hover:text-ink xl:flex">
         PRODUCTION · us-fleet-1 <ChevronDown className="h-3.5 w-3.5 text-faint" />
       </button>

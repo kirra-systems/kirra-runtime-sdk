@@ -34,6 +34,7 @@ console/
   lib/
     types.ts            # domain model (Robot, KPI, Posture, EventItem)
     mock.ts             # mock fleet + telemetry data
+    api/                # live verifier client + hooks (types, client, hooks)
   tailwind.config.ts    # color tokens, fonts, shadows
 ```
 
@@ -47,6 +48,38 @@ console/
 | `warn` (amber) | warnings / degraded |
 | `crit` (red) | critical interventions |
 | `ice` (blue) | telemetry / analytics |
+
+## Live data
+
+The console runs on bundled mock data by default (the public demo always works).
+To bind it to a real Kirra verifier service, set its base URL at build time:
+
+```bash
+# console/.env.local
+NEXT_PUBLIC_KIRRA_API_URL=https://your-verifier.example.com
+```
+
+When set, the **Live Fleet** screen (`/live`) and the top-nav connection
+indicator poll the verifier's **public read endpoints** and fall back to demo
+data on any error:
+
+| Endpoint | Use |
+|----------|-----|
+| `GET /health` | connection indicator (`Live · connected` / `Backend offline` / `Demo data`) |
+| `GET /fleet/posture` | live per-node posture table; transitions become the event feed |
+
+These endpoints are the verifier's **public read-only tier** — no token is
+shipped to the browser. The auth-gated SSE stream (`/system/posture/stream`) is
+intentionally **not** consumed client-side; the live event feed is derived from
+posture-change polling instead.
+
+**CORS:** if the console and verifier are on different origins, the verifier
+must send CORS headers (or sit behind the same origin / a reverse proxy). A
+server-side proxy route (to also carry the admin token for the SSE stream and
+mutation routes) is the natural next increment.
+
+Wire types live in `lib/api/types.ts` and mirror the verifier's serde shapes
+(`FleetNodePosture`, `NodeTrustState`, `FleetPosture`).
 
 ## Roadmap (build increments)
 
