@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
-import type { AuditEntry, AuditVerify, FabricTelemetry, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
+import type { AuditEntry, AuditVerify, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
@@ -357,4 +357,55 @@ export function useNodeHistory(nodeId: string, pollMs = 20000): {
   }, [nodeId, pollMs])
 
   return state
+}
+
+// Cross-controller federated trust reports for an asset (GET
+// /federation/reports/{asset_id}, public). Normalizes the double-encoded posture
+// and flags freshness against each report's expiry. Demo fallback otherwise.
+export interface FedReportRow { source: string; posture: FleetPostureState; expired: boolean; expiresLabel: string }
+
+function normPosture(raw: string): FleetPostureState {
+  const s = raw.replace(/^"+|"+$/g, '')
+  return s === 'Degraded' ? 'Degraded' : s === 'LockedOut' ? 'LockedOut' : 'Nominal'
+}
+
+function fedRow(r: FederatedReport, now: number): FedReportRow {
+  const expired = r.expires_at_ms <= now
+  const secs = Math.round(Math.abs(r.expires_at_ms - now) / 1000)
+  return { source: r.source_controller_id, posture: normPosture(r.posture), expired, expiresLabel: expired ? `expired ${secs}s ago` : `valid ${secs}s` }
+}
+
+function demoFedReports(nodeId: string): FedReportRow[] {
+  const twin = demoTwins.find((t) => t.name === nodeId)
+  const posture = (twin?.posture ?? 'Nominal') as FleetPostureState
+  return [
+    { source: 'peer-controller-west', posture, expired: false, expiresLabel: 'valid 3s' },
+    { source: 'peer-controller-east', posture: 'Nominal', expired: false, expiresLabel: 'valid 4s' },
+  ]
+}
+
+export function useFederationReports(nodeId: string, pollMs = 15000): { rows: FedReportRow[]; source: Source } {
+  const [rows, setRows] = useState<FedReportRow[]>(() => demoFedReports(nodeId))
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const { reports } = await kirra.federationReports(nodeId, ctrl.signal)
+        const now = Date.now()
+        setRows(reports.map((r) => fedRow(r, now))); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setRows(demoFedReports(nodeId)); setSource('demo'); return }
+        setRows(demoFedReports(nodeId)); setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [nodeId, pollMs])
+
+  return { rows, source }
 }
