@@ -2,11 +2,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
-import type { AuditEntry, AuditVerify, FabricTelemetry, FleetNodePosture, FleetPostureState, PostureStreamEvent } from './types'
+import type { AuditEntry, AuditVerify, FabricTelemetry, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
-import type { Tone } from '@/lib/types'
+import { twins as demoTwins } from '@/lib/fleet'
+import type { Tone, SeriesPoint } from '@/lib/types'
 
 // Shared severity classifier for verifier event/audit types.
 export function eventTone(eventType: string): Tone {
@@ -305,4 +306,55 @@ export function useFabricTelemetry(pollMs = 10000): { data: FabricTelemetry; sou
   }, [pollMs])
 
   return { data, source }
+}
+
+// Per-node posture history (GET /fleet/history/{node_id}, public) → a numeric
+// posture-level trend (Nominal=2, Degraded=1, LockedOut=0) for a sparkline.
+const postureLevel = (p: FleetPostureState): number => (p === 'Nominal' ? 2 : p === 'Degraded' ? 1 : 0)
+
+function entryLevel(e: NodeHistoryEntry): number {
+  if (e.posture) return postureLevel(e.posture.propagated_status)
+  return eventTone(e.event_type) === 'crit' ? 0 : eventTone(e.event_type) === 'warn' ? 1 : 2
+}
+
+function demoNodeTrend(nodeId: string): { points: SeriesPoint[]; events: number; lastReason: string | null } {
+  const twin = demoTwins.find((t) => t.name === nodeId)
+  const end = twin ? postureLevel(twin.posture) : 2
+  // Mostly Nominal, converging to the node's current level over the last few steps.
+  const levels = [2, 2, 2, 2, 2, 2, 2, 2, Math.min(2, end + 1), end, end, end]
+  const now = Date.now()
+  const points = levels.map((v, i) => ({ t: new Date(now - (levels.length - i) * 1800000).toLocaleTimeString(), v }))
+  const lastReason = end === 0 ? 'lockout · human reset required' : end === 1 ? 'sensor confidence < 0.60 floor' : null
+  return { points, events: levels.length, lastReason }
+}
+
+export function useNodeHistory(nodeId: string, pollMs = 20000): {
+  points: SeriesPoint[]
+  events: number
+  lastReason: string | null
+  source: Source
+} {
+  const [state, setState] = useState(() => ({ ...demoNodeTrend(nodeId), source: 'demo' as Source }))
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const { history } = await kirra.nodeHistory(nodeId, ctrl.signal)
+        const chrono = [...history].reverse() // API returns newest-first
+        const points: SeriesPoint[] = chrono.map((e) => ({ t: new Date(e.created_at_ms).toLocaleTimeString(), v: entryLevel(e) }))
+        setState({ points, events: history.length, lastReason: history[0]?.reason ?? null, source: 'live' })
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setState({ ...demoNodeTrend(nodeId), source: 'demo' }); return }
+        setState({ ...demoNodeTrend(nodeId), source: 'demo' }); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [nodeId, pollMs])
+
+  return state
 }
