@@ -14,20 +14,20 @@ export default function ExplorerPage() {
   const [range, setRange] = useState<(typeof ranges)[number]>('24h')
   const [sel, setSel] = useState<string[]>(DEFAULT)
 
-  const chosen = sel.map(signalById)
+  const chosen = useMemo(() => sel.map(signalById), [sel])
 
   const rows = useMemo(() => timeAxis.map((t, i) => {
     const r: { t: string; [k: string]: string | number } = { t }
     for (const s of chosen) r[s.id] = s.norm[i]
     return r
-  }), [sel])
+  }), [chosen])
 
   const series = chosen.map((s) => ({ key: s.id, label: `${s.label} (${s.unit})`, color: s.color }))
 
   // Pairwise Pearson correlation over raw values of the selected signals.
   const corr = useMemo(
     () => chosen.map((a) => chosen.map((b) => pearson(a.values, b.values))),
-    [sel]
+    [chosen]
   )
 
   function toggle(id: string) {
