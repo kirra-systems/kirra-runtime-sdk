@@ -56,6 +56,18 @@ export interface AuditPage {
   chain_intact: boolean
 }
 
+// Fabric governance telemetry — GET /fabric/telemetry (admin).
+export interface FabricTelemetry {
+  total_assets: number
+  active_assets: number
+  total_commands_per_minute: number
+  fabric_denial_rate: number
+  assets_by_type: Record<string, number>
+  assets_by_posture: Record<string, number>
+  highest_denial_asset: string | null
+  computed_at_ms: number
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }

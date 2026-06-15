@@ -2,6 +2,7 @@ import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
 import { TopologyMap } from '@/components/ui/topology-map'
+import { FabricTelemetryPanel } from '@/components/ui/fabric-telemetry'
 import { resources, latency, network, partitions, nodes, ddsTopics, ddsPeers, topoNodes, topoEdges } from '@/lib/runtime'
 import type { Tone } from '@/lib/types'
 
@@ -109,6 +110,9 @@ export default function RuntimePage() {
           <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-ice" /> transport</span>
         </div>
       </Panel>
+
+      {/* ── Live fabric governance telemetry ── */}
+      <FabricTelemetryPanel />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Panel title="Hypervisor & Partition Isolation" subtitle="QNX safety partition · isolated guests" dense>
