@@ -4,6 +4,7 @@ import { ChevronLeft } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { PositionMap } from '@/components/ui/position-map'
 import { PoseView } from '@/components/ui/pose-view'
+import { PostureTrend } from '@/components/ui/posture-trend'
 import { Spark } from '@/components/charts/charts'
 import { twinById, twins } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
@@ -65,6 +66,9 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
           </div>
         </Panel>
       </div>
+
+      {/* ── Live posture-history trend ── */}
+      <PostureTrend nodeId={t.name} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel className="xl:col-span-2" title="Kinematic Envelope" subtitle="proposed vs certified hard limits">

@@ -68,6 +68,18 @@ export interface FabricTelemetry {
   computed_at_ms: number
 }
 
+// Per-node posture history — GET /fleet/history/{node_id} (public).
+export interface NodeHistoryEntry {
+  event_type: string
+  posture: FleetNodePosture | null
+  reason: string | null
+  created_at_ms: number
+}
+export interface NodeHistory {
+  node_id: string
+  history: NodeHistoryEntry[]
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }
