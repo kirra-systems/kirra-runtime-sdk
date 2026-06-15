@@ -1,4 +1,5 @@
 import { Panel, Pill, Meter } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { TrendArea, Spark } from '@/components/charts/charts'
 import { DualLine } from '@/components/charts/extra2'
 import { kpiWall, throughputTrend, riskForecast, riskDrivers, projections } from '@/lib/analytics'
@@ -12,7 +13,10 @@ export default function AnalyticsPage() {
           <h1 className="font-display text-xl font-semibold text-ink">Analytics & Risk Forecasting</h1>
           <p className="font-mono text-[11px] text-faint">executive KPIs · fleet trends · forward risk projection</p>
         </div>
-        <Pill tone="ice">30-day window</Pill>
+        <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
+          <Pill tone="ice">30-day window</Pill>
+        </div>
       </div>
 
       {/* Executive KPI Wall (#9) */}

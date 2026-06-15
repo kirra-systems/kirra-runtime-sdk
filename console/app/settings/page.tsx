@@ -1,5 +1,6 @@
 import { AlertOctagon } from 'lucide-react'
 import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { config, flags, operatorActions, operatorSessions, roster } from '@/lib/settings'
 import type { Tone } from '@/lib/types'
 
@@ -11,7 +12,10 @@ export default function SettingsPage() {
           <h1 className="font-display text-xl font-semibold text-ink">System & Operator Control</h1>
           <p className="font-mono text-[11px] text-faint">configuration · feature flags · operator tools · access</p>
         </div>
-        <Pill tone="safe">fail-closed · governor gates all actions</Pill>
+        <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
+          <Pill tone="safe">fail-closed · governor gates all actions</Pill>
+        </div>
       </div>
 
       {/* ── Operator Tools (#12) ── */}
