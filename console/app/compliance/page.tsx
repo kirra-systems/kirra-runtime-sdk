@@ -1,6 +1,7 @@
 'use client'
 
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { useRawModal } from '@/components/ui/raw-modal'
 import { useAuditChain } from '@/lib/api/hooks'
 import { certs, tests, sbom, firmware } from '@/lib/compliance'
@@ -21,6 +22,7 @@ export default function CompliancePage() {
           <p className="font-mono text-[11px] text-faint">functional-safety evidence · audit-ready posture</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={audit.source === 'live'} />
           {audit.source === 'live' ? <Pill tone="safe">audit chain · live</Pill> : <Pill tone="ice">audit chain · demo</Pill>}
           <Pill tone="ice">{coverage}% verification coverage</Pill>
         </div>
