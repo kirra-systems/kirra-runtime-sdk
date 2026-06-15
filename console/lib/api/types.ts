@@ -80,6 +80,21 @@ export interface NodeHistory {
   history: NodeHistoryEntry[]
 }
 
+// Cross-controller federated trust reports — GET /federation/reports/{asset_id}
+// (public). `posture` is the JSON-encoded FleetPosture (e.g. "\"Nominal\"") — the
+// store round-trips serde_json::to_string(&FleetPosture), so normalize on read.
+export interface FederatedReport {
+  source_controller_id: string
+  asset_id: string
+  posture: string
+  issued_at_ms: number
+  expires_at_ms: number
+}
+export interface FederationReports {
+  asset_id: string
+  reports: FederatedReport[]
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }

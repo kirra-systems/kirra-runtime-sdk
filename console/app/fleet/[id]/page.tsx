@@ -5,6 +5,7 @@ import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { PositionMap } from '@/components/ui/position-map'
 import { PoseView } from '@/components/ui/pose-view'
 import { PostureTrend } from '@/components/ui/posture-trend'
+import { FederationPanel } from '@/components/ui/federation-panel'
 import { Spark } from '@/components/charts/charts'
 import { twinById, twins } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
@@ -120,6 +121,9 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
               </div>
             </div>
           </Panel>
+
+          {/* ── Live cross-controller federated trust ── */}
+          <FederationPanel nodeId={t.name} />
         </div>
       </div>
 
