@@ -6,7 +6,7 @@ function g(n: number, b: number, j: number, drift = 0): SeriesPoint[] {
   for (let i = 0; i < n; i++) {
     v += (Math.random() - 0.5) * j + drift
     v = Math.max(0, v)
-    o.push({ t: `${String(i).padStart(2, '0')}:00`, v: Math.round(v * 10) / 10 })
+    o.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v * 10) / 10 })
   }
   return o
 }
@@ -20,7 +20,7 @@ export const velocity: SeriesPoint[] = g(30, 1.2, 0.5)
 export const battery: SeriesPoint[] = g(30, 74, 0.6, -0.4)
 
 export const actuator: ActPoint[] = Array.from({ length: 30 }).map((_, i) => ({
-  t: `${String(i).padStart(2, '0')}:00`,
+  t: `${String(i % 24).padStart(2, '0')}:00`,
   steer: Math.round(Math.sin(i / 4) * 18),
   throttle: 30 + Math.round(Math.abs(Math.sin(i / 5)) * 40),
 }))

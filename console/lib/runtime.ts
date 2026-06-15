@@ -6,7 +6,7 @@ function g(n: number, b: number, j: number): SeriesPoint[] {
   for (let i = 0; i < n; i++) {
     v += (Math.random() - 0.5) * j
     v = Math.max(0, v)
-    o.push({ t: `${String(i).padStart(2, '0')}:00`, v: Math.round(v) })
+    o.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v) })
   }
   return o
 }
@@ -26,7 +26,7 @@ export const resources: Resource[] = [
 
 export const latency: LatPoint[] = Array.from({ length: 24 }).map((_, i) => {
   const base = 7 + Math.round(Math.sin(i / 3) * 2)
-  return { t: `${String(i).padStart(2, '0')}:00`, p50: base + Math.round(Math.random() * 2), p99: base + 8 + Math.round(Math.random() * 8) }
+  return { t: `${String(i % 24).padStart(2, '0')}:00`, p50: base + Math.round(Math.random() * 2), p99: base + 8 + Math.round(Math.random() * 8) }
 })
 
 export const network: NetStat[] = [

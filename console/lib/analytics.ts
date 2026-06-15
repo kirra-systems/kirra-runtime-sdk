@@ -9,7 +9,7 @@ function g(n: number, b: number, j: number, drift = 0): SeriesPoint[] {
   for (let i = 0; i < n; i++) {
     v += (Math.random() - 0.5) * j + drift
     v = Math.max(0, v)
-    o.push({ t: `${String(i).padStart(2, '0')}:00`, v: Math.round(v * 10) / 10 })
+    o.push({ t: `${String(i % 24).padStart(2, '0')}:00`, v: Math.round(v * 10) / 10 })
   }
   return o
 }
@@ -38,13 +38,13 @@ export const riskForecast: RiskRow[] = (() => {
   for (let i = 0; i < 12; i++) {
     obs += (Math.random() - 0.45) * 3
     obs = Math.max(6, Math.min(40, obs))
-    rows.push({ t: `${String(8 + i).padStart(2, '0')}:00`, observed: Math.round(obs), forecast: Math.round(obs), upper: Math.round(obs + 4) })
+    rows.push({ t: `${String((8 + i) % 24).padStart(2, '0')}:00`, observed: Math.round(obs), forecast: Math.round(obs), upper: Math.round(obs + 4) })
   }
   // forward horizon — observed drops out, forecast climbs (congestion + radar drift)
   let fc = rows[rows.length - 1].forecast
   for (let i = 0; i < 6; i++) {
     fc += 2.4 + Math.random()
-    rows.push({ t: `${String(20 + i).padStart(2, '0')}:00`, observed: null, forecast: Math.round(fc), upper: Math.round(fc + 6 + i) })
+    rows.push({ t: `${String((20 + i) % 24).padStart(2, '0')}:00`, observed: null, forecast: Math.round(fc), upper: Math.round(fc + 6 + i) })
   }
   return rows
 })()
