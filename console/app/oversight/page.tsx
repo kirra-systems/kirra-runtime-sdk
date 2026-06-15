@@ -1,6 +1,7 @@
 'use client'
 
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { useRawModal } from '@/components/ui/raw-modal'
 import { trace, traceSubject, factors } from '@/lib/oversight'
 import { useDecisions } from '@/lib/api/hooks'
@@ -18,6 +19,7 @@ export default function OversightPage() {
           <p className="font-mono text-[11px] text-faint">explainability · every model action adjudicated by the Governor</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={source === 'live'} />
           <Pill tone="ice">autoware.planner · v4.2</Pill>
           <Pill tone="safe">{allowShare.toFixed(1)}% allow rate</Pill>
           {source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="ice">demo</Pill>}

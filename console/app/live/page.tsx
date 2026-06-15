@@ -1,6 +1,7 @@
 'use client'
 
 import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { useLiveFleet, useAuditChain } from '@/lib/api/hooks'
 import { postureTone, trustLabel, trustReason, trustTone, type FleetPostureState } from '@/lib/api/types'
 import type { Tone } from '@/lib/types'
@@ -23,6 +24,7 @@ export default function LivePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={source === 'live'} />
           {source === 'live'
             ? <Pill tone="safe">Live · connected</Pill>
             : <Pill tone="ice">Demo data</Pill>}
