@@ -1,5 +1,6 @@
 import { Download, FileText, ShieldCheck } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { AuditEvidence } from '@/components/ui/audit-evidence'
 import { reports, scheduled, rollout, rolloutVersion, versionShare } from '@/lib/reports'
 import type { Tone } from '@/lib/types'
 
@@ -15,6 +16,9 @@ export default function ReportsPage() {
           <FileText className="h-3.5 w-3.5" /> Generate report
         </button>
       </div>
+
+      {/* ── Live signed-evidence summary from the audit chain ── */}
+      <AuditEvidence />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel className="xl:col-span-2" title="Generated Reports" subtitle="signed evidence documents" dense>
