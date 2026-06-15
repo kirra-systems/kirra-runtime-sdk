@@ -1,4 +1,5 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
 import { TopologyMap } from '@/components/ui/topology-map'
@@ -14,7 +15,10 @@ export default function RuntimePage() {
           <h1 className="font-display text-xl font-semibold text-ink">Runtime Health</h1>
           <p className="font-mono text-[11px] text-faint">compute · transport · isolation</p>
         </div>
-        <Pill tone="safe">All partitions enforced</Pill>
+        <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
+          <Pill tone="safe">All partitions enforced</Pill>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

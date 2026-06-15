@@ -22,7 +22,11 @@ export function Sidebar() {
                     <Link href={it.href} className={cn('group flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors', active ? 'bg-white/[0.06] text-ink' : 'text-muted hover:bg-white/[0.03] hover:text-ink')}>
                       <Icon className={cn('h-4 w-4', active ? 'text-safe' : 'text-faint group-hover:text-muted')} strokeWidth={1.75} />
                       <span>{it.label}</span>
-                      {active && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-safe" />}
+                      {active ? (
+                        <span className="ml-auto h-1.5 w-1.5 rounded-full bg-safe" />
+                      ) : it.preview ? (
+                        <span className="ml-auto rounded-sm bg-warn/10 px-1 py-0.5 font-mono text-[8px] uppercase tracking-wider text-warn/80">preview</span>
+                      ) : null}
                     </Link>
                   </li>
                 )
