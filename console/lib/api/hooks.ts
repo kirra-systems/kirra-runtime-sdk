@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
-import type { AuditEntry, AuditVerify, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
+import type { AuditEntry, AuditVerify, AssetPosture, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
@@ -408,4 +408,62 @@ export function useFederationReports(nodeId: string, pollMs = 15000): { rows: Fe
   }, [nodeId, pollMs])
 
   return { rows, source }
+}
+
+// Per-asset fabric governance state (GET /fabric/state, admin via the proxy):
+// the asset's posture in the cross-asset fabric DAG, its generation, the nodes
+// contributing to it, and what (if anything) blocks it. Demo fallback otherwise.
+export interface FabricAssetState {
+  inFabric: boolean
+  posture: FleetPostureState
+  generation: number
+  contributingNodes: string[]
+  blockedBy: string[]
+}
+
+function demoFabricState(nodeId: string): { state: FabricAssetState; fabricGen: number } {
+  const twin = demoTwins.find((t) => t.name === nodeId)
+  const posture = (twin?.posture ?? 'Nominal') as FleetPostureState
+  return {
+    state: {
+      inFabric: true,
+      posture,
+      generation: 4471,
+      contributingNodes: [nodeId, 'fleet-dag'],
+      blockedBy: posture === 'LockedOut' ? ['cross_asset_propagation'] : [],
+    },
+    fabricGen: 4471,
+  }
+}
+
+export function useFabricState(nodeId: string, pollMs = 12000): {
+  state: FabricAssetState
+  fabricGen: number
+  source: Source
+} {
+  const [data, setData] = useState(() => ({ ...demoFabricState(nodeId), source: 'demo' as Source }))
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const fs = await kirra.fabricState(ctrl.signal)
+        const a: AssetPosture | undefined = fs.assets.find((x) => x.asset_id === nodeId)
+        const state: FabricAssetState = a
+          ? { inFabric: true, posture: a.posture, generation: a.generation, contributingNodes: a.contributing_nodes, blockedBy: a.blocked_by }
+          : { inFabric: false, posture: 'Nominal', generation: 0, contributingNodes: [], blockedBy: [] }
+        setData({ state, fabricGen: fs.fabric_generation, source: 'live' })
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setData({ ...demoFabricState(nodeId), source: 'demo' }); return }
+        setData({ ...demoFabricState(nodeId), source: 'demo' }); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [nodeId, pollMs])
+
+  return data
 }
