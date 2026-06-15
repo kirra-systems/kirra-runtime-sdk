@@ -1,12 +1,14 @@
 'use client'
 
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { useRawModal } from '@/components/ui/raw-modal'
 import { useAuditChain } from '@/lib/api/hooks'
 import { certs, tests, sbom, firmware } from '@/lib/compliance'
 import type { Tone } from '@/lib/types'
 
 export default function CompliancePage() {
   const audit = useAuditChain(15000)
+  const raw = useRawModal()
   const totalPassed = tests.reduce((a, t) => a + t.passed, 0)
   const totalTests = tests.reduce((a, t) => a + t.total, 0)
   const coverage = ((totalPassed / totalTests) * 100).toFixed(1)
@@ -68,7 +70,12 @@ export default function CompliancePage() {
         <Panel className="xl:col-span-2" title="Audit Ledger" subtitle="tamper-evident enforcement events · GET /console/audit" dense>
           <ul>
             {audit.entries.map((e) => (
-              <li key={e.id} className="flex items-center gap-4 border-b border-line px-4 py-3 last:border-0">
+              <li
+                key={e.id}
+                onClick={() => raw.open({ title: e.event_type, subtitle: `audit entry #${e.id} · ${e.source}`, data: e })}
+                className="flex cursor-pointer items-center gap-4 border-b border-line px-4 py-3 last:border-0 hover:bg-white/[0.02]"
+                title="tap for raw entry"
+              >
                 <StatusDot tone={auditTone(e.event_type)} />
                 <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{new Date(e.timestamp_ms).toLocaleTimeString()}</span>
                 <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">{e.source}</span>
@@ -159,6 +166,7 @@ export default function CompliancePage() {
           </p>
         </Panel>
       </div>
+      {raw.modal}
     </div>
   )
 }

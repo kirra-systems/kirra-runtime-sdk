@@ -1,12 +1,14 @@
 'use client'
 
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { useRawModal } from '@/components/ui/raw-modal'
 import { trace, traceSubject, factors } from '@/lib/oversight'
 import { useDecisions } from '@/lib/api/hooks'
 import type { Tone } from '@/lib/types'
 
 export default function OversightPage() {
   const { recent, tally, source } = useDecisions()
+  const raw = useRawModal()
   const allowShare = tally.find((t) => t.label === 'Allowed')?.share ?? 0
   return (
     <div className="mx-auto max-w-[1500px] space-y-6 p-6">
@@ -91,7 +93,12 @@ export default function OversightPage() {
             </thead>
             <tbody className="font-mono text-[12px]">
               {recent.map((d) => (
-                <tr key={d.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                <tr
+                  key={d.id}
+                  onClick={() => raw.open({ title: d.reason, subtitle: `${d.verdict} · ${d.asset} · ${d.actionType}`, data: d })}
+                  className="cursor-pointer border-b border-line last:border-0 hover:bg-white/[0.02]"
+                  title="tap for raw decision"
+                >
                   <td className="px-4 py-2.5 text-faint">{d.ts}</td>
                   <td className="px-4 py-2.5 text-ink">{d.asset}</td>
                   <td className="px-4 py-2.5 text-muted">{d.actionType}</td>
@@ -103,6 +110,7 @@ export default function OversightPage() {
           </table>
         </div>
       </Panel>
+      {raw.modal}
     </div>
   )
 }
