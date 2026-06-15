@@ -31,6 +31,23 @@
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 }
 
+/* Horizontal scroll-shadow affordance for wide tables on narrow viewports.
+   Pure CSS (background-attachment: local): the solid "cover" gradients (panel
+   colour) hide the edge shadows when scrolled to that edge, so a shadow only
+   shows when more table is off-screen — signalling swipe-to-reveal. Scoped to
+   table scroll wrappers via :has(> table); degrades to a plain scroll where
+   :has is unsupported. */
+.overflow-x-auto:has(> table) {
+  background:
+    linear-gradient(to right, rgb(var(--panel)) 30%, rgb(var(--panel) / 0)) left center,
+    linear-gradient(to left, rgb(var(--panel)) 30%, rgb(var(--panel) / 0)) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) right center;
+  background-repeat: no-repeat;
+  background-size: 44px 100%, 44px 100%, 16px 100%, 16px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
 /* Subtle mission-control environmental layer (grid + glow), restrained. */
 .app-bg {
   position: fixed;
