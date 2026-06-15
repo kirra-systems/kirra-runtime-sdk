@@ -1,23 +1,34 @@
+'use client'
+
 import Link from 'next/link'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { WorldMap } from '@/components/ui/world-map'
-import { twins, sites, siteRows } from '@/lib/fleet'
+import { useLiveFleet } from '@/lib/api/hooks'
+import { twins, sites, siteRows, type Twin } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
-import type { Tone } from '@/lib/types'
+import type { Tone, Posture } from '@/lib/types'
 
 export default function FleetPage() {
-  const online = twins.filter((t) => t.posture !== 'LockedOut').length
-  const degraded = twins.filter((t) => t.posture === 'Degraded').length
-  const locked = twins.filter((t) => t.posture === 'LockedOut').length
+  const { fleet, source } = useLiveFleet(5000)
+  const liveMap = new Map<string, Posture>(fleet.map((n) => [n.node_id, n.propagated_status as Posture]))
+  const postureOf = (t: Twin): Posture => liveMap.get(t.name) ?? t.posture
+
+  const eff = twins.map(postureOf)
+  const online = eff.filter((p) => p !== 'LockedOut').length
+  const degraded = eff.filter((p) => p === 'Degraded').length
+  const locked = eff.filter((p) => p === 'LockedOut').length
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-6 p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-xl font-semibold text-ink">Fleet Operations</h1>
-          <p className="font-mono text-[11px] text-faint">{twins.length} assets · select an asset for its digital twin</p>
+          <p className="font-mono text-[11px] text-faint">
+            {twins.length} assets · {source === 'live' ? 'posture live · GET /fleet/posture' : 'select an asset for its digital twin'}
+          </p>
         </div>
         <div className="flex items-center gap-2">
+          {source === 'live' ? <Pill tone="safe">posture · live</Pill> : <Pill tone="ice">posture · demo</Pill>}
           <Pill tone="safe">{online} active</Pill>
           {degraded > 0 && <Pill tone="warn">{degraded} degraded</Pill>}
           {locked > 0 && <Pill tone="crit">{locked} locked out</Pill>}
@@ -50,7 +61,8 @@ export default function FleetPage() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {twins.map((t) => {
-          const tone = postureTone(t.posture)
+          const posture = postureOf(t)
+          const tone = postureTone(posture)
           return (
             <Link key={t.id} href={`/fleet/${t.id}`} className="group rounded-xl border border-line bg-panel p-4 shadow-panel transition-colors hover:border-line-strong hover:bg-elevated">
               <div className="flex items-start justify-between">
@@ -58,11 +70,11 @@ export default function FleetPage() {
                   <div className="font-display text-[15px] font-semibold text-ink">{t.name}</div>
                   <div className="mt-0.5 font-mono text-[11px] text-faint">{t.model}</div>
                 </div>
-                <StatusDot tone={tone} pulse={t.posture !== 'Nominal'} />
+                <StatusDot tone={tone} pulse={posture !== 'Nominal'} />
               </div>
 
               <div className="mt-4 flex items-center justify-between">
-                <span className={`font-mono text-[11px] uppercase tracking-wider ${txt(tone)}`}>{t.posture}</span>
+                <span className={`font-mono text-[11px] uppercase tracking-wider ${txt(tone)}`}>{posture}</span>
                 <span className="font-mono text-[11px] text-muted">{t.status}</span>
               </div>
 
@@ -87,7 +99,7 @@ export default function FleetPage() {
         })}
       </div>
 
-      <Panel title="Fleet Roster" subtitle="all assets · tabular" dense>
+      <Panel title="Fleet Roster" subtitle={source === 'live' ? 'posture live · battery/attestation from twin' : 'all assets · tabular'} dense>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-left">
             <thead>
@@ -101,16 +113,19 @@ export default function FleetPage() {
               </tr>
             </thead>
             <tbody className="font-mono text-[12px]">
-              {twins.map((t) => (
-                <tr key={t.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
-                  <td className="px-4 py-2.5"><Link href={`/fleet/${t.id}`} className="text-ink hover:text-ice">{t.name}</Link></td>
-                  <td className="px-4 py-2.5 text-muted">{t.model}</td>
-                  <td className={`px-4 py-2.5 ${txt(postureTone(t.posture))}`}>{t.posture}</td>
-                  <td className="px-4 py-2.5 text-muted">{t.battery}%</td>
-                  <td className={`px-4 py-2.5 ${txt(t.attestation.tone)}`}>{t.attestation.status}</td>
-                  <td className="px-4 py-2.5 text-faint">{t.uptime}</td>
-                </tr>
-              ))}
+              {twins.map((t) => {
+                const posture = postureOf(t)
+                return (
+                  <tr key={t.id} className="border-b border-line last:border-0 hover:bg-white/[0.02]">
+                    <td className="px-4 py-2.5"><Link href={`/fleet/${t.id}`} className="text-ink hover:text-ice">{t.name}</Link></td>
+                    <td className="px-4 py-2.5 text-muted">{t.model}</td>
+                    <td className={`px-4 py-2.5 ${txt(postureTone(posture))}`}>{posture}</td>
+                    <td className="px-4 py-2.5 text-muted">{t.battery}%</td>
+                    <td className={`px-4 py-2.5 ${txt(t.attestation.tone)}`}>{t.attestation.status}</td>
+                    <td className="px-4 py-2.5 text-faint">{t.uptime}</td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
