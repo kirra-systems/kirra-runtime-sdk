@@ -74,7 +74,7 @@ export default function FleetPage() {
               </div>
 
               <div className="mt-4 flex items-center justify-between">
-                <span className={`font-mono text-[11px] uppercase tracking-wider ${txt(tone)}`}>{posture}</span>
+                <span className={`font-mono text-[11px] font-semibold ${txt(tone)}`}>{posture}</span>
                 <span className="font-mono text-[11px] text-muted">{t.status}</span>
               </div>
 
