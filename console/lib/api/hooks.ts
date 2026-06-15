@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
-import type { AuditEntry, AuditVerify, FleetNodePosture, FleetPostureState, PostureStreamEvent } from './types'
+import type { AuditEntry, AuditVerify, FabricTelemetry, FleetNodePosture, FleetPostureState, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
@@ -267,4 +267,42 @@ export function useIncidentHistory(limit = 80): { rows: IncidentRow[]; source: S
   }, [limit])
 
   return { rows, source }
+}
+
+// Fabric governance telemetry — GET /fabric/telemetry (admin via the proxy):
+// commands/min, denial rate, asset distribution. Demo fallback otherwise.
+const DEMO_FABRIC: FabricTelemetry = {
+  total_assets: 8,
+  active_assets: 6,
+  total_commands_per_minute: 312.4,
+  fabric_denial_rate: 0.012,
+  assets_by_type: { 'AMR-400': 2, 'Atlas-X': 2, 'Spot-V2': 2, 'Forklift-A': 2 },
+  assets_by_posture: { Nominal: 6, Degraded: 1, LockedOut: 1 },
+  highest_denial_asset: 'KIRRA-13',
+  computed_at_ms: Date.now(),
+}
+
+export function useFabricTelemetry(pollMs = 10000): { data: FabricTelemetry; source: Source } {
+  const [data, setData] = useState<FabricTelemetry>(DEMO_FABRIC)
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const t = await kirra.fabricTelemetry(ctrl.signal)
+        setData(t); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setSource('demo'); return }
+        setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [pollMs])
+
+  return { data, source }
 }
