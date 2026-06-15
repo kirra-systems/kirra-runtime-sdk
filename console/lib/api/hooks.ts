@@ -5,6 +5,7 @@ import { kirra, DemoMode } from './client'
 import type { AuditEntry, AuditVerify, FleetNodePosture, FleetPostureState, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
+import { incidents as demoIncidents } from '@/lib/incidents'
 import type { Tone } from '@/lib/types'
 
 // Shared severity classifier for verifier event/audit types.
@@ -222,4 +223,48 @@ export function useEventFeed(limit = 60): { rows: FeedRow[]; sources: string[]; 
   }, [limit])
 
   return { rows, sources, source }
+}
+
+// Incident history derived from the audit ledger (/console/audit, public):
+// crit/warn events become incident rows. Mock incidents are the fallback.
+export interface IncidentRow { id: string; ts: string; asset: string; title: string; duration: string; status: string; tone: Tone }
+
+function demoIncidentRows(): IncidentRow[] {
+  return demoIncidents.map((i) => ({ id: i.id, ts: i.ts, asset: i.asset, title: i.title, duration: `${i.durationS}s`, status: i.status, tone: i.tone }))
+}
+
+export function useIncidentHistory(limit = 80): { rows: IncidentRow[]; source: Source } {
+  const [rows, setRows] = useState<IncidentRow[]>(() => demoIncidentRows())
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const page = await kirra.auditPage(limit, ctrl.signal)
+        const inc: IncidentRow[] = page.entries
+          .filter((e) => { const t = eventTone(e.event_type); return t === 'crit' || t === 'warn' })
+          .map((e) => ({
+            id: `INC-${e.id}`,
+            ts: new Date(e.timestamp_ms).toLocaleString(),
+            asset: e.payload.match(/KIRRA-\d+|fleet-dag/)?.[0] ?? '—',
+            title: e.event_type,
+            duration: '—',
+            status: 'logged',
+            tone: eventTone(e.event_type),
+          }))
+        setRows(inc); setSource('live')
+        timer = setTimeout(load, 12000)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setRows(demoIncidentRows()); setSource('demo'); return }
+        setRows(demoIncidentRows()); setSource('demo'); timer = setTimeout(load, 12000)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [limit])
+
+  return { rows, source }
 }

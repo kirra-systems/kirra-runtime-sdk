@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react'
 import { Play, Pause, SkipBack, RotateCcw } from 'lucide-react'
 import { Panel, Pill, StatusDot, Meter } from '@/components/ui/primitives'
 import { ReplayMap } from '@/components/ui/replay-map'
-import { incidents, replay, featured, rootCause, replaySpatial, replayActors, replayHazard } from '@/lib/incidents'
+import { useIncidentHistory } from '@/lib/api/hooks'
+import { replay, featured, rootCause, replaySpatial, replayActors, replayHazard } from '@/lib/incidents'
 import { postureTone } from '@/lib/mock'
 import type { Tone } from '@/lib/types'
 
@@ -15,6 +16,7 @@ export default function IncidentsPage() {
   const [playing, setPlaying] = useState(false)
   const frame = replay[i]
   const spatial = replaySpatial[i]
+  const history = useIncidentHistory(80)
 
   useEffect(() => {
     if (!playing) return
@@ -178,7 +180,12 @@ export default function IncidentsPage() {
         </Panel>
       </div>
 
-      <Panel title="Incident History" subtitle="all logged fail-closed events" dense>
+      <Panel
+        title="Incident History"
+        subtitle={history.source === 'live' ? 'derived from the audit ledger · GET /console/audit' : 'all logged fail-closed events'}
+        action={history.source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="ice">demo</Pill>}
+        dense
+      >
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-left">
             <thead>
@@ -192,13 +199,13 @@ export default function IncidentsPage() {
               </tr>
             </thead>
             <tbody className="font-mono text-[12px]">
-              {incidents.map((inc) => (
+              {history.rows.map((inc) => (
                 <tr key={inc.id} className={`border-b border-line last:border-0 hover:bg-white/[0.02] ${inc.id === featured.id ? 'bg-white/[0.03]' : ''}`}>
                   <td className={`px-4 py-2.5 ${txt(inc.tone)}`}>{inc.id}</td>
                   <td className="px-4 py-2.5 text-faint">{inc.ts}</td>
                   <td className="px-4 py-2.5 text-ink">{inc.asset}</td>
                   <td className="px-4 py-2.5 text-muted">{inc.title}</td>
-                  <td className="px-4 py-2.5 text-muted">{inc.durationS}s</td>
+                  <td className="px-4 py-2.5 text-muted">{inc.duration}</td>
                   <td className="px-4 py-2.5 text-ink">{inc.status}</td>
                 </tr>
               ))}
