@@ -26,6 +26,7 @@ console/
     layout.tsx          # shell: top nav + sidebar grid
     page.tsx            # Fleet Overview
     [...slug]/page.tsx  # styled placeholder for not-yet-built modules
+    api/kirra/          # server proxy to the verifier (token-injecting, CORS-free)
     globals.css         # design tokens + base
   components/
     shell/              # top-nav, sidebar
@@ -52,34 +53,35 @@ console/
 ## Live data
 
 The console runs on bundled mock data by default (the public demo always works).
-To bind it to a real Kirra verifier service, set its base URL at build time:
+To bind it to a real Kirra verifier, point the **server-side proxy** at it:
 
 ```bash
-# console/.env.local
-NEXT_PUBLIC_KIRRA_API_URL=https://your-verifier.example.com
+# console/.env.local  (server-side — NOT shipped to the browser)
+KIRRA_API_URL=https://your-verifier.example.com
+KIRRA_ADMIN_TOKEN=…    # optional — for admin / identity-gated reads
+KIRRA_CLIENT_ID=…      # optional — x-kirra-client-id for the SSE stream
 ```
 
-When set, the **Live Fleet** screen (`/live`) and the top-nav connection
-indicator poll the verifier's **public read endpoints** and fall back to demo
-data on any error:
+Requests go through a same-origin proxy route (`app/api/kirra/[...path]`) which
+injects the token server-side, removes CORS, and only forwards an **allow-listed
+set of read-only GET** paths. The hooks fall back to demo data whenever the
+proxy reports demo mode (`KIRRA_API_URL` unset) or the verifier is unreachable.
 
-| Endpoint | Use |
-|----------|-----|
-| `GET /health` | connection indicator (`Live · connected` / `Backend offline` / `Demo data`) |
-| `GET /fleet/posture` | live per-node posture table; transitions become the event feed |
+Currently wired (Live Fleet `/live` + top-nav indicator):
 
-These endpoints are the verifier's **public read-only tier** — no token is
-shipped to the browser. The auth-gated SSE stream (`/system/posture/stream`) is
-intentionally **not** consumed client-side; the live event feed is derived from
-posture-change polling instead.
+| Source | Endpoint | Tier |
+|--------|----------|------|
+| connection indicator | `GET /health` | public |
+| per-node posture + transition feed | `GET /fleet/posture` | public |
+| audit-chain integrity | `GET /system/audit/verify` | admin (via proxy) |
+| audit event ledger | `GET /console/audit` | public |
 
-**CORS:** if the console and verifier are on different origins, the verifier
-must send CORS headers (or sit behind the same origin / a reverse proxy). A
-server-side proxy route (to also carry the admin token for the SSE stream and
-mutation routes) is the natural next increment.
+Because the proxy holds the token, the richer admin/identity-gated reads
+(`/fabric/*`, `/system/audit/export`, `/system/posture/stream` SSE) are now
+reachable too — wiring more screens is incremental from here.
 
 Wire types live in `lib/api/types.ts` and mirror the verifier's serde shapes
-(`FleetNodePosture`, `NodeTrustState`, `FleetPosture`).
+(`FleetNodePosture`, `NodeTrustState`, `FleetPosture`, audit verify/page).
 
 ## Roadmap (build increments)
 

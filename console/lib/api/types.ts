@@ -24,6 +24,38 @@ export interface PostureStreamEvent {
 
 export interface HealthResponse { status: string }
 
+// Audit chain — /system/audit/verify (admin) and /console/audit (public).
+export interface AuditVerify {
+  chain_intact: boolean
+  total_entries: number
+  latest_hash: string
+  signing_enabled: boolean
+  signed_entries: number
+  unsigned_entries: number
+  signature_valid: boolean
+  public_key_b64: string | null
+  head_verified: boolean
+  head_status: string
+  verified: boolean
+}
+export interface AuditEntry {
+  id: number
+  timestamp_ms: number
+  event_type: string
+  source: string
+  payload: string
+  prev_hash: string
+  entry_hash: string
+  signature_b64: string | null
+  signature_status: string
+}
+export interface AuditPage {
+  entries: AuditEntry[]
+  total: number
+  public_key_b64: string | null
+  chain_intact: boolean
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }

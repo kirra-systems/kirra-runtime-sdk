@@ -1,11 +1,8 @@
-// Live-data configuration. The console talks to a real Kirra verifier service
-// when NEXT_PUBLIC_KIRRA_API_URL is set at build time; otherwise it runs on the
-// bundled mock data ("demo" mode) so the public deploy always works.
-//
-// The endpoints used here (/health, /fleet/posture) are the verifier's
-// PUBLIC read-only tier — no token required, so nothing secret is shipped to
-// the client. The auth-gated SSE stream is intentionally NOT consumed from the
-// browser; the live event feed is derived from posture-change polling instead.
+// The console reads the verifier through a same-origin server proxy
+// (app/api/kirra/[...path]). Whether live data is available is decided at
+// REQUEST time by the proxy (server env KIRRA_API_URL) — not at build time — so
+// there is no NEXT_PUBLIC flag and nothing backend-specific in the bundle.
+// When the proxy reports demo mode (header x-kirra-mode: demo / 503), the hooks
+// fall back to bundled mock data.
 
-export const API_BASE = (process.env.NEXT_PUBLIC_KIRRA_API_URL ?? '').replace(/\/+$/, '')
-export const IS_LIVE = API_BASE.length > 0
+export const PROXY_BASE = '/api/kirra'
