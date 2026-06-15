@@ -4,6 +4,16 @@ import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
 import type { AuditEntry, AuditVerify, FleetNodePosture, FleetPostureState, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
+import { log as demoEvents, sources as demoSources } from '@/lib/events'
+import type { Tone } from '@/lib/types'
+
+// Shared severity classifier for verifier event/audit types.
+export function eventTone(eventType: string): Tone {
+  if (/BREACH|DENY|LOCKEDOUT|CYCLE|REVOK|FAULT|BLOCKED/i.test(eventType)) return 'crit'
+  if (/DEGRADED|CLAMP|TRANSITION|WARN/i.test(eventType)) return 'warn'
+  if (/FEDERATION|DDS|LATENCY/i.test(eventType)) return 'ice'
+  return 'safe'
+}
 
 export type Source = 'live' | 'demo'
 export type LinkStatus = 'connecting' | 'ok' | 'down' | 'demo'
@@ -49,7 +59,7 @@ function mkEvent(p: FleetNodePosture, type: string): PostureStreamEvent {
   return { event_type: type, node_id: p.node_id, emitted_at_ms: Date.now(), posture: p }
 }
 
-// ── Hooks ─────────────────────────────────────────────────────
+// ── Hooks ─────────────────────────────────────────────────
 
 // Polls /health through the proxy for the shell connection indicator.
 export function useHealth(pollMs = 10000): { status: LinkStatus } {
@@ -167,4 +177,49 @@ export function useAuditChain(pollMs = 15000): {
   }, [pollMs])
 
   return { verify, entries, source }
+}
+
+// Unified event feed for the Event Stream: live from the audit ledger
+// (/console/audit, public) with the mock log as fallback. Returns a flat row
+// shape plus the distinct source channels present in the data.
+export interface FeedRow { id: string; tone: Tone; source: string; ts: string; message: string; code?: string }
+
+function demoFeed(): FeedRow[] {
+  return demoEvents.map((e) => ({ id: e.id, tone: e.tone, source: e.source, ts: e.ts, message: e.message, code: e.code }))
+}
+
+export function useEventFeed(limit = 60): { rows: FeedRow[]; sources: string[]; source: Source } {
+  const [rows, setRows] = useState<FeedRow[]>(() => demoFeed())
+  const [sources, setSources] = useState<string[]>([...demoSources])
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const page = await kirra.auditPage(limit, ctrl.signal)
+        const r: FeedRow[] = page.entries.map((e) => ({
+          id: String(e.id),
+          tone: eventTone(e.event_type),
+          source: e.source,
+          ts: new Date(e.timestamp_ms).toLocaleTimeString(),
+          message: e.payload,
+          code: e.event_type,
+        }))
+        setRows(r)
+        setSources(Array.from(new Set(r.map((x) => x.source))))
+        setSource('live')
+        timer = setTimeout(load, 8000)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setRows(demoFeed()); setSources([...demoSources]); setSource('demo'); return }
+        setRows(demoFeed()); setSources([...demoSources]); setSource('demo'); timer = setTimeout(load, 8000)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [limit])
+
+  return { rows, sources, source }
 }
