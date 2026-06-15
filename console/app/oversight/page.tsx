@@ -1,8 +1,13 @@
+'use client'
+
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
-import { tally, trace, traceSubject, recent, factors } from '@/lib/oversight'
+import { trace, traceSubject, factors } from '@/lib/oversight'
+import { useDecisions } from '@/lib/api/hooks'
 import type { Tone } from '@/lib/types'
 
 export default function OversightPage() {
+  const { recent, tally, source } = useDecisions()
+  const allowShare = tally.find((t) => t.label === 'Allowed')?.share ?? 0
   return (
     <div className="mx-auto max-w-[1500px] space-y-6 p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -12,7 +17,8 @@ export default function OversightPage() {
         </div>
         <div className="flex items-center gap-2">
           <Pill tone="ice">autoware.planner · v4.2</Pill>
-          <Pill tone="safe">99.0% allow rate · 24h</Pill>
+          <Pill tone="safe">{allowShare.toFixed(1)}% allow rate</Pill>
+          {source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="ice">demo</Pill>}
         </div>
       </div>
 
@@ -71,7 +77,7 @@ export default function OversightPage() {
         </Panel>
       </div>
 
-      <Panel title="Recent Decisions" subtitle="live adjudication stream" dense>
+      <Panel title="Recent Decisions" subtitle={source === 'live' ? 'live · governor verdicts from the audit ledger' : 'demo · adjudication stream'} dense>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[680px] text-left">
             <thead>

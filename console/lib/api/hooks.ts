@@ -7,6 +7,7 @@ import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
 import { twins as demoTwins } from '@/lib/fleet'
+import { recent as demoDecisions, tally as demoTally, type DecisionRow, type DecisionTally, type Verdict } from '@/lib/oversight'
 import type { Tone, SeriesPoint } from '@/lib/types'
 
 // Shared severity classifier for verifier event/audit types.
@@ -466,4 +467,69 @@ export function useFabricState(nodeId: string, pollMs = 12000): {
   }, [nodeId, pollMs])
 
   return data
+}
+
+// AI Decision Oversight — governor verdicts (ALLOW / CLAMP / DENY) and their
+// reason codes are recorded in the audit ledger (/console/audit, public). Filter
+// the ledger to adjudication events and tally them. Demo fallback otherwise.
+function classifyVerdict(eventType: string): Verdict | null {
+  if (/CLAMP/i.test(eventType)) return 'CLAMP'
+  if (/DENY|DENIED|BREACH|REJECT|BLOCKED|UNKNOWN_ACTION/i.test(eventType)) return 'DENY'
+  if (/ALLOW|ADMITTED|VALID|NOMINAL|PERMITTED/i.test(eventType)) return 'ALLOW'
+  return null
+}
+const verdictTone = (v: Verdict): Tone => (v === 'ALLOW' ? 'safe' : v === 'CLAMP' ? 'warn' : 'crit')
+function parseAction(payload: string, source: string): string {
+  return payload.match(/cmd_vel|drive_to_\w+|grasp_\w+|read_telemetry|motion[_ ]?command/i)?.[0] ?? source
+}
+
+export function useDecisions(limit = 60): { recent: DecisionRow[]; tally: DecisionTally[]; source: Source } {
+  const [recent, setRecent] = useState<DecisionRow[]>(() => demoDecisions)
+  const [tally, setTally] = useState<DecisionTally[]>(() => demoTally)
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const settleDemo = () => { setRecent(demoDecisions); setTally(demoTally); setSource('demo') }
+    const load = async () => {
+      try {
+        const page = await kirra.auditPage(limit, ctrl.signal)
+        const rows: DecisionRow[] = []
+        const counts = { ALLOW: 0, CLAMP: 0, DENY: 0 }
+        for (const e of page.entries) {
+          const v = classifyVerdict(e.event_type)
+          if (!v) continue
+          counts[v] += 1
+          rows.push({
+            id: String(e.id),
+            ts: new Date(e.timestamp_ms).toLocaleTimeString(),
+            asset: e.payload.match(/KIRRA-\d+/)?.[0] ?? '—',
+            actionType: parseAction(e.payload, e.source),
+            verdict: v,
+            reason: e.event_type,
+            tone: verdictTone(v),
+          })
+        }
+        const total = counts.ALLOW + counts.CLAMP + counts.DENY
+        const pct = (n: number) => (total ? Math.round((n / total) * 10000) / 100 : 0)
+        setRecent(rows)
+        setTally([
+          { label: 'Allowed', value: counts.ALLOW, tone: 'safe', share: pct(counts.ALLOW) },
+          { label: 'Clamped', value: counts.CLAMP, tone: 'warn', share: pct(counts.CLAMP) },
+          { label: 'Denied', value: counts.DENY, tone: 'crit', share: pct(counts.DENY) },
+        ])
+        setSource('live')
+        timer = setTimeout(load, 8000)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { settleDemo(); return }
+        settleDemo(); timer = setTimeout(load, 8000)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [limit])
+
+  return { recent, tally, source }
 }
