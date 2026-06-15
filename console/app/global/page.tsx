@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { CloudRain, Network, Flame } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { GlobalMap } from '@/components/ui/global-map'
 import { sites, weatherZones, geofences, crossSiteAlerts, regionRisk, totals } from '@/lib/global'
 import type { Tone } from '@/lib/types'
@@ -20,6 +21,7 @@ export default function GlobalPage() {
           <p className="font-mono text-[11px] text-faint">strategic view · {totals.sites} sites · {totals.assets} assets · {totals.active} active</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone="warn">2 regions elevated</Pill>
           <Pill tone="safe">federation in sync</Pill>
         </div>

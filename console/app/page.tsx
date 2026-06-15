@@ -1,4 +1,5 @@
 import { Stat, Pill, StatusDot, Meter, Panel } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { Spark } from '@/components/charts/charts'
 import { HeroSafety, FleetTopology, MissionMap, ExecSummary, AuditLedger, EventFeed } from '@/components/command'
 import { kpis, robots, postureTone } from '@/lib/mock'
@@ -12,6 +13,7 @@ export default function OverviewPage() {
           <p className="font-mono text-[11px] text-faint">PRODUCTION · us-fleet-1 · updated 2s ago</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone="safe">Fleet Nominal</Pill>
           <Pill tone="ice">E-Stop Armed</Pill>
           <button className="rounded-lg border border-line bg-panel px-3 py-1.5 font-mono text-[11px] text-muted hover:text-ink">Last 24h</button>

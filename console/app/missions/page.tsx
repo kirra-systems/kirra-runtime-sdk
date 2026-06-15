@@ -1,5 +1,6 @@
 import { MapPin, Container, Repeat, BatteryCharging, Radar, Pause, Lock, Clock, Circle, type LucideIcon } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { mission, phases, waypoints, tasks, risk, operatorInterventions, gantt, ganttWindow } from '@/lib/missions'
 import type { Tone } from '@/lib/types'
 
@@ -12,6 +13,7 @@ export default function MissionsPage() {
           <p className="font-mono text-[11px] text-faint">{mission.id} · {mission.name} · {mission.asset}</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone="ice">In progress</Pill>
           <span className="font-mono text-[11px] text-faint">ETA {mission.eta}</span>
         </div>
