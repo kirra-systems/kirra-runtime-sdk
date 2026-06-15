@@ -6,6 +6,7 @@ import { PositionMap } from '@/components/ui/position-map'
 import { PoseView } from '@/components/ui/pose-view'
 import { PostureTrend } from '@/components/ui/posture-trend'
 import { FederationPanel } from '@/components/ui/federation-panel'
+import { FabricStatePanel } from '@/components/ui/fabric-state-panel'
 import { Spark } from '@/components/charts/charts'
 import { twinById, twins } from '@/lib/fleet'
 import { postureTone } from '@/lib/mock'
@@ -124,6 +125,9 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
 
           {/* ── Live cross-controller federated trust ── */}
           <FederationPanel nodeId={t.name} />
+
+          {/* ── Live cross-asset fabric governance state ── */}
+          <FabricStatePanel nodeId={t.name} />
         </div>
       </div>
 

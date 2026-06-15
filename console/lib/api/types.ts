@@ -95,6 +95,27 @@ export interface FederationReports {
   reports: FederatedReport[]
 }
 
+// Fabric governance state — GET /fabric/state (admin). Per-asset posture in the
+// cross-asset fabric DAG plus fleet-wide counts. `posture` is a plain
+// FleetPosture (serde struct field — not double-encoded like federation).
+export interface AssetPosture {
+  asset_id: string
+  posture: FleetPostureState
+  generation: number
+  computed_at_ms: number
+  contributing_nodes: string[]
+  blocked_by: string[]
+}
+export interface FabricState {
+  total_assets: number
+  nominal_count: number
+  degraded_count: number
+  locked_out_count: number
+  assets: AssetPosture[]
+  fabric_generation: number
+  computed_at_ms: number
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }
