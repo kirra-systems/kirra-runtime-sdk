@@ -1,12 +1,13 @@
 'use client'
 
 import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
-import { useLiveFleet } from '@/lib/api/hooks'
+import { useLiveFleet, useAuditChain } from '@/lib/api/hooks'
 import { postureTone, trustLabel, trustReason, trustTone, type FleetPostureState } from '@/lib/api/types'
 import type { Tone } from '@/lib/types'
 
 export default function LivePage() {
   const { fleet, events, source, error, updatedAt } = useLiveFleet(5000)
+  const audit = useAuditChain(15000)
   const counts = fleet.reduce(
     (a, n) => { a[n.propagated_status] = (a[n.propagated_status] ?? 0) + 1; return a },
     {} as Record<FleetPostureState, number>
@@ -36,7 +37,7 @@ export default function LivePage() {
           </p>
         ) : (
           <p className="text-[13px] text-muted">
-            Running on bundled demo data. Set <code className="rounded bg-bg/60 px-1.5 py-0.5 font-mono text-[12px] text-ice">NEXT_PUBLIC_KIRRA_API_URL</code> to a verifier base URL to go live — these read endpoints are public (no token).
+            Running on bundled demo data. Set <code className="rounded bg-bg/60 px-1.5 py-0.5 font-mono text-[12px] text-ice">KIRRA_API_URL</code> (server-side) to a verifier base URL — the same-origin proxy carries the read through and falls back here on any error.
             {error && <span className="text-warn"> · last attempt: {error}</span>}
           </p>
         )}
@@ -105,8 +106,60 @@ export default function LivePage() {
           )}
         </Panel>
       </div>
+
+      {/* ── Live audit chain ── */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel title="Audit Chain Integrity" subtitle="SHA-256 hash-chained ledger · GET /system/audit/verify" action={audit.source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="ice">demo</Pill>}>
+          <div className="flex items-center gap-3">
+            <StatusDot tone={audit.verify.chain_intact ? 'safe' : 'crit'} pulse={!audit.verify.chain_intact} />
+            <span className={`font-display text-2xl font-semibold ${audit.verify.chain_intact ? 'text-safe' : 'text-crit'}`}>
+              {audit.verify.chain_intact ? 'Chain intact' : 'Chain broken'}
+            </span>
+          </div>
+          <div className="mt-4 space-y-3">
+            <KV k="Total entries" v={audit.verify.total_entries.toLocaleString()} />
+            <KV k="Signed / unsigned" v={`${audit.verify.signed_entries.toLocaleString()} / ${audit.verify.unsigned_entries.toLocaleString()}`} />
+            <KV k="Signature valid" v={audit.verify.signature_valid ? 'yes' : 'no'} tone={audit.verify.signature_valid ? 'safe' : 'crit'} />
+            <KV k="Head" v={audit.verify.head_status} />
+            <KV k="Latest hash" v={audit.verify.latest_hash} />
+          </div>
+        </Panel>
+
+        <Panel className="xl:col-span-2" title="Audit Events" subtitle="tamper-evident ledger · GET /console/audit" dense>
+          <ul>
+            {audit.entries.map((e) => (
+              <li key={e.id} className="flex items-start gap-3 border-b border-line px-4 py-2.5 last:border-0">
+                <StatusDot tone={auditTone(e.event_type)} />
+                <span className="w-20 shrink-0 font-mono text-[10px] text-faint">{new Date(e.timestamp_ms).toLocaleTimeString()}</span>
+                <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">{e.source}</span>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate font-mono text-[11px] ${txt(auditTone(e.event_type))}`}>{e.event_type}</div>
+                  <div className="truncate font-mono text-[10px] text-faint">{e.payload}</div>
+                </div>
+                <span className={`shrink-0 font-mono text-[9px] uppercase ${e.signature_status === 'verified' ? 'text-safe' : 'text-faint'}`}>{e.signature_status}</span>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      </div>
     </div>
   )
+}
+
+function KV({ k, v, tone }: { k: string; v: string; tone?: Tone }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="font-mono text-[11px] uppercase tracking-wider text-faint">{k}</span>
+      <span className={`font-mono text-xs ${tone ? txt(tone) : 'text-ink'}`}>{v}</span>
+    </div>
+  )
+}
+
+function auditTone(eventType: string): Tone {
+  if (/BREACH|DENY|LOCKEDOUT|CYCLE|REVOK|FAULT/i.test(eventType)) return 'crit'
+  if (/DEGRADED|CLAMP|TRANSITION|WARN/i.test(eventType)) return 'warn'
+  if (/FEDERATION|DDS|LATENCY/i.test(eventType)) return 'ice'
+  return 'safe'
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone: Tone }) {
