@@ -1,3 +1,4 @@
+import { MapPin, Container, Repeat, BatteryCharging, Radar, Pause, Lock, Clock, Circle, type LucideIcon } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { mission, phases, waypoints, tasks, risk, operatorInterventions, gantt, ganttWindow } from '@/lib/missions'
 import type { Tone } from '@/lib/types'
@@ -49,11 +50,11 @@ export default function MissionsPage() {
                 {row.segments.map((s, i) => (
                   <div
                     key={i}
-                    className={`absolute top-1 flex h-5 items-center overflow-hidden rounded ${segBg(s.tone)} ${s.tone === 'muted' ? 'border border-dashed border-line' : ''}`}
+                    className={`absolute top-1 flex h-5 items-center justify-center overflow-hidden rounded ${segBg(s.tone)} ${s.tone === 'muted' ? 'border border-dashed border-line' : ''}`}
                     style={{ left: `${s.start * 100}%`, width: `${(s.end - s.start) * 100}%` }}
                     title={s.phase}
                   >
-                    <span className={`truncate px-1.5 font-mono text-[9px] ${s.tone === 'muted' ? 'text-faint' : 'text-bg'}`}>{s.phase}</span>
+                    <SegIcon phase={s.phase} muted={s.tone === 'muted'} />
                   </div>
                 ))}
               </div>
@@ -68,6 +69,12 @@ export default function MissionsPage() {
           <Legend tone="crit" label="lockout" />
           <Legend tone="muted" label="queued" />
           <span className="ml-auto flex items-center gap-1.5"><span className="h-3 w-px bg-ice/70" /> now</span>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-[10px] text-faint">
+          {PHASE_LEGEND.map(({ Icon, label }) => (
+            <span key={label} className="flex items-center gap-1.5"><Icon className="h-3 w-3" strokeWidth={2.5} /> {label}</span>
+          ))}
         </div>
       </Panel>
 
@@ -162,6 +169,38 @@ function Legend({ tone, label }: { tone: Tone; label: string }) {
 }
 
 function segBg(t: Tone) { return t === 'safe' ? 'bg-safe' : t === 'warn' ? 'bg-warn' : t === 'crit' ? 'bg-crit' : t === 'ice' ? 'bg-ice' : 'bg-muted/40' }
+
+// Gantt phase → micro-icon. The 18 mission phases group into a small scannable
+// vocabulary so tiny timeline blocks show an icon (with a `title` tooltip + the
+// legend) instead of a cropped word.
+const PHASE_LEGEND: { Icon: LucideIcon; label: string }[] = [
+  { Icon: MapPin, label: 'transit' },
+  { Icon: Container, label: 'load / unload' },
+  { Icon: Repeat, label: 'loop' },
+  { Icon: BatteryCharging, label: 'charge' },
+  { Icon: Radar, label: 'survey' },
+  { Icon: Pause, label: 'hold' },
+  { Icon: Lock, label: 'lockout' },
+  { Icon: Clock, label: 'queued' },
+]
+
+function phaseIcon(phase: string): LucideIcon {
+  const p = phase.toLowerCase()
+  if (p.includes('lockout')) return Lock
+  if (p.includes('hold')) return Pause
+  if (p.includes('charge')) return BatteryCharging
+  if (p.includes('loop')) return Repeat
+  if (p.includes('survey')) return Radar
+  if (p.includes('queued')) return Clock
+  if (/transit|dispatch|return/.test(p)) return MapPin
+  if (/pick|place|haul|drop|stage/.test(p)) return Container
+  return Circle
+}
+
+function SegIcon({ phase, muted }: { phase: string; muted: boolean }) {
+  const Icon = phaseIcon(phase)
+  return <Icon className={`h-3 w-3 ${muted ? 'text-faint' : 'text-bg'}`} strokeWidth={2.5} />
+}
 
 // Convert a window fraction to a wall-clock label for the 10:00–14:00 window.
 function clock(frac: number): string {
