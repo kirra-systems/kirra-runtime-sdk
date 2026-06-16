@@ -7,7 +7,7 @@ should be reported privately.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Report vulnerabilities to: justin@kirrasystems.io
+Report vulnerabilities to: justin.looney@kirrasystems.com
 
 Please include:
 - Description of the vulnerability
