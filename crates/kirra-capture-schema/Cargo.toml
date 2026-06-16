@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Wire schema for Kirra's learning-loop capture records — the single authoritative, governor-free type set shared by the SDK emitters and the offline collector."
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
-authors = ["Kirra Systems, LLC <justin@kirrasystems.io>"]
+authors = ["Kirra Systems, LLC <justin.looney@kirrasystems.com>"]
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
