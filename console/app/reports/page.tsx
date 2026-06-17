@@ -1,5 +1,6 @@
 import { Download, FileText, ShieldCheck } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { AuditEvidence } from '@/components/ui/audit-evidence'
 import { reports, scheduled, rollout, rolloutVersion, versionShare } from '@/lib/reports'
 import type { Tone } from '@/lib/types'
@@ -12,9 +13,12 @@ export default function ReportsPage() {
           <h1 className="font-display text-xl font-semibold text-ink">Reports & Releases</h1>
           <p className="font-mono text-[11px] text-faint">generated evidence · scheduled exports · software rollout</p>
         </div>
-        <button className="flex items-center gap-2 rounded-lg border border-ice/40 bg-ice/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-wider text-ice hover:bg-ice/20">
-          <FileText className="h-3.5 w-3.5" /> Generate report
-        </button>
+        <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
+          <button className="flex items-center gap-2 rounded-lg border border-ice/40 bg-ice/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-wider text-ice hover:bg-ice/20">
+            <FileText className="h-3.5 w-3.5" /> Generate report
+          </button>
+        </div>
       </div>
 
       {/* ── Live signed-evidence summary from the audit chain ── */}

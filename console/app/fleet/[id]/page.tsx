@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { ChevronLeft } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { PositionMap } from '@/components/ui/position-map'
 import { PoseView } from '@/components/ui/pose-view'
 import { PostureTrend } from '@/components/ui/posture-trend'
@@ -36,6 +37,7 @@ export default async function TwinPage({ params }: { params: Promise<{ id: strin
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone={tone}>{t.posture}</Pill>
           <Pill tone={t.attestation.tone}>AK {t.attestation.status}</Pill>
         </div>

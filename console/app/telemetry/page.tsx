@@ -1,4 +1,5 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { TrendArea } from '@/components/charts/charts'
 import { DualLine } from '@/components/charts/extra2'
 import { PositionMap } from '@/components/ui/position-map'
@@ -15,6 +16,7 @@ export default function TelemetryPage() {
           <p className="font-mono text-[11px] text-faint">KIRRA-09 · streaming · 50 Hz</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone="ice">live stream</Pill>
           <button className="rounded-lg border border-line bg-panel px-3 py-1.5 font-mono text-[11px] text-muted hover:text-ink">KIRRA-09 ▾</button>
         </div>

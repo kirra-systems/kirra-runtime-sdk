@@ -1,4 +1,5 @@
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { ScoreRing } from '@/components/charts/charts'
 import { EnvelopePlot } from '@/components/ui/envelope-plot'
 import { constraints, violations, interventions, verdictMix, envPoints, envelopeBands } from '@/lib/safety'
@@ -13,8 +14,12 @@ export default function SafetyPage() {
           <p className="font-mono text-[11px] text-faint">command center · fail-closed verdict engine</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
           <Pill tone="safe">State: Nominal</Pill>
-          <button className="rounded-lg border border-crit/40 bg-crit/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-wider text-crit hover:bg-crit/20">Emergency Stop</button>
+          {/* Read-only indicator — this console has no actuator authority and
+              must never imply it can trigger a stop. The live stop-path status
+              is the "Emergency Stop Readiness" panel below. */}
+          <Pill tone="safe">E-Stop: ARMED</Pill>
         </div>
       </div>
 

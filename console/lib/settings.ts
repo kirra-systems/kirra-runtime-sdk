@@ -29,11 +29,16 @@ export const flags: FeatureFlag[] = [
 // ── Operator Tools (#12) ──────────────────────────────────────────────
 export interface OperatorAction { id: string; name: string; desc: string; tone: Tone; critical?: boolean }
 
+// Each entry is a governed *request* the operator sends to the fail-closed
+// Governor — never a direct console→actuator command. The console holds no
+// actuator authority; the Governor adjudicates and acts under its own. The
+// authenticated operator→governor request path is tracked in #412; these are
+// display-only in this build (no wired request channel yet).
 export const operatorActions: OperatorAction[] = [
-  { id: 'estop', name: 'Fleet E-STOP', desc: 'Command all assets to MRC controlled stop + HOLD', tone: 'crit', critical: true },
-  { id: 'hold', name: 'Hold Selected', desc: 'Pause a single asset at next safe waypoint', tone: 'warn' },
+  { id: 'estop', name: 'Fleet E-STOP', desc: 'Request governor-commanded MRC controlled-stop + HOLD (all assets)', tone: 'crit', critical: true },
+  { id: 'hold', name: 'Hold Selected', desc: 'Request a single-asset pause at the next safe waypoint', tone: 'warn' },
   { id: 'teleop', name: 'Teleop Handoff', desc: 'Request supervised manual control (governor still gates envelope)', tone: 'ice' },
-  { id: 'reset', name: 'Lockout Reset', desc: 'Human reset of a LockedOut asset — requires supervisor key', tone: 'warn' },
+  { id: 'reset', name: 'Lockout Reset', desc: 'Request human reset of a LockedOut asset — requires supervisor key', tone: 'warn' },
 ]
 
 export interface OperatorSession { asset: string; operator: string; mode: string; since: string; tone: Tone }

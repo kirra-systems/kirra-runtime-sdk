@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { useEventFeed } from '@/lib/api/hooks'
 import type { Tone } from '@/lib/types'
 
@@ -33,6 +34,7 @@ export default function EventsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={source === 'live'} />
           {source === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="ice">demo</Pill>}
           <Pill tone="crit">{counts.crit} critical</Pill>
           <Pill tone="warn">{counts.warn} warning</Pill>

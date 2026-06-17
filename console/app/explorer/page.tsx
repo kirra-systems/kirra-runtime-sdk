@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { Panel, Pill, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { MultiLine } from '@/components/charts/multiline'
 import { signals, signalById, timeAxis, assets, ranges, anomalies, pearson } from '@/lib/explorer'
 import type { Tone } from '@/lib/types'
@@ -55,9 +56,12 @@ export default function ExplorerPage() {
           <h1 className="font-display text-xl font-semibold text-ink">Telemetry Explorer</h1>
           <p className="font-mono text-[11px] text-faint">data lake · time-aligned signals · correlation & anomaly detection</p>
         </div>
-        <button onClick={exportCsv} className="flex items-center gap-2 rounded-lg border border-ice/40 bg-ice/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-wider text-ice hover:bg-ice/20">
-          <Download className="h-3.5 w-3.5" /> Export CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <DemoBadge live={false} />
+          <button onClick={exportCsv} className="flex items-center gap-2 rounded-lg border border-ice/40 bg-ice/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-wider text-ice hover:bg-ice/20">
+            <Download className="h-3.5 w-3.5" /> Export CSV
+          </button>
+        </div>
       </div>
 
       {/* Query bar */}

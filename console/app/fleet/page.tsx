@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { WorldMap } from '@/components/ui/world-map'
 import { useLiveFleet } from '@/lib/api/hooks'
 import { twins, sites, siteRows, type Twin } from '@/lib/fleet'
@@ -28,6 +29,7 @@ export default function FleetPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={source === 'live'} />
           {source === 'live' ? <Pill tone="safe">posture · live</Pill> : <Pill tone="ice">posture · demo</Pill>}
           <Pill tone="safe">{online} active</Pill>
           {degraded > 0 && <Pill tone="warn">{degraded} degraded</Pill>}

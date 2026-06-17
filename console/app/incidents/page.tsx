@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Play, Pause, SkipBack, RotateCcw } from 'lucide-react'
 import { Panel, Pill, StatusDot, Meter } from '@/components/ui/primitives'
+import { DemoBadge } from '@/components/ui/demo-badge'
 import { ReplayMap } from '@/components/ui/replay-map'
 import { useRawModal } from '@/components/ui/raw-modal'
 import { useIncidentHistory } from '@/lib/api/hooks'
@@ -37,6 +38,7 @@ export default function IncidentsPage() {
           <p className="font-mono text-[11px] text-faint">{featured.id} · {featured.asset} · {featured.title}</p>
         </div>
         <div className="flex items-center gap-2">
+          <DemoBadge live={history.source === 'live'} />
           <Pill tone="crit">{featured.reason}</Pill>
           <Pill tone="ice">{featured.status}</Pill>
         </div>
