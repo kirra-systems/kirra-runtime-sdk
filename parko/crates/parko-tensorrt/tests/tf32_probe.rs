@@ -36,9 +36,14 @@ use std::process::Command;
 use parko_core::backend::{InferenceBackend, TensorBatch, TensorStorage};
 use parko_tensorrt::{TrtBackend, TrtConfig};
 
-/// Marks the spawned child process (which only runs inference + prints logits).
+/// Marks the spawned child process (which only runs inference + writes logits).
 const CHILD_MARKER: &str = "PARKO_TF32_CHILD";
-/// Prefix of the child's parseable logit line on stdout.
+/// Env var carrying the temp file the child writes its logits to. A FILE (not
+/// stdout) is used deliberately: libtest prints `test NAME ... ` without a trailing
+/// newline, so child println output is interleaved with the harness banner and is
+/// not reliably parseable. The file side-channel sidesteps that entirely.
+const CHILD_OUT: &str = "PARKO_TF32_OUT";
+/// Fallback stdout prefix if no out-file is provided (manual child invocation).
 const LOGITS_PREFIX: &str = "PARKO_TF32_LOGITS:";
 const INPUT_NAME: &str = "Input3";
 const OUTPUT_NAME: &str = "Plus214_Output_0";
@@ -97,7 +102,10 @@ fn trt_fp32_tf32_differential() {
     if std::env::var(CHILD_MARKER).is_ok() {
         if let Some(v) = run_once() {
             let s = v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
-            println!("{LOGITS_PREFIX}{s}");
+            match std::env::var(CHILD_OUT) {
+                Ok(path) => std::fs::write(&path, s).expect("child write logits file"),
+                Err(_) => println!("{LOGITS_PREFIX}{s}"),
+            }
         }
         return;
     }
@@ -126,33 +134,40 @@ fn trt_fp32_tf32_differential() {
     };
 
     // Spawn a fresh child of THIS test binary with TF32 forced OFF (the override is
-    // only honored at CUDA init, hence a new process). ORT_DYLIB_PATH is inherited.
+    // only honored at CUDA init, hence a new process). ORT_DYLIB_PATH is inherited;
+    // the child writes its logits to a temp file we read back.
     let exe = std::env::current_exe().expect("current_exe() for the TF32 child");
+    let out_file = std::env::temp_dir().join(format!("parko_tf32_child_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out_file);
     let output = Command::new(&exe)
         .args(["trt_fp32_tf32_differential", "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_MARKER, "1")
+        .env(CHILD_OUT, &out_file)
         .env("NVIDIA_TF32_OVERRIDE", "0")
         .output()
         .expect("failed to spawn the TF32-off child process");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let tf32off_logits: Vec<f32> = match stdout.lines().find_map(|l| l.strip_prefix(LOGITS_PREFIX)) {
-        Some(payload) => payload
+    let tf32off_logits: Vec<f32> = match std::fs::read_to_string(&out_file) {
+        Ok(s) if !s.trim().is_empty() => s
+            .trim()
             .split(',')
             .map(|x| x.parse::<f32>().expect("child logit parse"))
             .collect(),
-        None => {
-            // Parent inferred fine but the child produced no logits — an anomaly,
-            // not a normal skip. Surface it; fail only under strict mode.
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        _ => {
+            // Parent inferred fine but the child wrote no logits — an anomaly, not a
+            // normal skip. Surface the child's output; fail only under strict mode.
+            let _ = std::fs::remove_file(&out_file);
             eprintln!(
-                "INCONCLUSIVE: TF32-off child produced no logits (the override run did not infer). \
-                 child stdout:\n{stdout}\nchild stderr:\n{stderr}"
+                "INCONCLUSIVE: TF32-off child produced no logits (the override run did not infer).\n\
+                 child stdout:\n{}\nchild stderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
             );
             assert!(!require_ep(), "STRICT: TF32-off child failed to produce logits.");
             return;
         }
     };
+    let _ = std::fs::remove_file(&out_file);
 
     assert_eq!(
         default_logits.len(),
