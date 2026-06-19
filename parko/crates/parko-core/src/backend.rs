@@ -138,6 +138,20 @@ pub trait InferenceBackend: Send + Sync {
     fn descriptor(&self) -> BackendDescriptor {
         BackendDescriptor::Cpu
     }
+
+    /// Startup lifecycle hook — do any first-use work NOW (at node startup, after
+    /// `load_model`) so the first real command never pays it. The default is a
+    /// no-op: most backends (CPU ORT, OpenVINO, the mock) need no warm-up.
+    ///
+    /// Hardware backends that build/cache engines override this — e.g. the
+    /// TensorRT backend forces its multi-second per-model/shape engine build here
+    /// (PARK-021 #2). Called through a shared `&self` because the runtime node
+    /// holds the backend behind an `Arc`. FAIL-CLOSED: an `Err` means the backend
+    /// could not be made ready, and the node must REFUSE to start rather than serve
+    /// against an unbuilt engine.
+    fn warm_up(&self, _model: &ModelHandle) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 /// The SINGLE source of inference thread count, shared by every inference

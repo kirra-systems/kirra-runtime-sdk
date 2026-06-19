@@ -225,6 +225,17 @@ where
             std::process::exit(3);
         });
 
+    // PARK-021 #2: warm up the backend BEFORE the loop serves any command, so a
+    // multi-second first-use cost (e.g. the TensorRT engine build) never lands on
+    // the first real command. No-op for backends that need no warm-up (mock, CPU
+    // ORT). FAIL-CLOSED: if warm-up fails the backend is not ready, so refuse to
+    // start rather than serve against an unbuilt/cold engine.
+    backend.warm_up(&model)
+        .unwrap_or_else(|e| {
+            eprintln!("parko_ros2_node: backend.warm_up failed — refusing to start (fail-closed): {e:?}");
+            std::process::exit(4);
+        });
+
     let (actuator_tx, mut actuator_rx) = mpsc::channel::<ControlCommand>(8);
 
     // The scheduler's actuator_tx receives the post-governor command
