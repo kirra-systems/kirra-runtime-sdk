@@ -2,11 +2,32 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed** |
+| Status | **Partially accepted** — warm-up *hook* wired; backend *construction* home still open |
 | Date | 2026-06-19 |
-| Deciders | Project owner (pending) |
+| Deciders | Project owner (pending on the construction/selection half) |
 | Issues | #415 (PARK-021 #2 — engine warm-up) |
-| Code | `parko/crates/parko-tensorrt/src/lib.rs` (`TrtBackend::warm_up`, `WarmUpReport`), `parko/crates/parko-core/src/backend_selector.rs` |
+| Code | `parko-core::backend::InferenceBackend::warm_up` (hook), `parko-tensorrt` (`warm_up_report`/`engine_sha`/trait impl), `parko-ros2` `parko_ros2_node::build_loop` (call site) |
+
+## Update (implemented) — the warm-up wiring is a TRAIT HOOK, not a parko-kirra factory
+
+This ADR originally guessed the wiring belonged in a `parko-kirra` integration
+factory. Inspection corrected that: `parko-kirra` constructs no backends, and the
+real runtime entrypoint is the `parko_ros2_node` binary, which holds the backend
+behind an `Arc<B: InferenceBackend>` and calls `load_model` in `build_loop`. So the
+warm-up was wired as a **lifecycle hook on the `InferenceBackend` trait** instead:
+
+- `parko-core`: `fn warm_up(&self, &ModelHandle) -> Result<(), BackendError>` with a
+  default **no-op** (CPU/OpenVINO/mock need no warm-up). `&self` because backends are
+  shared behind `Arc`.
+- `parko-tensorrt`: overrides it to force the engine build; `warm_up_report` (now
+  `&self`, SHA captured via a `OnceLock` exposed by `engine_sha()`) carries the detail.
+- `parko-ros2`: `build_loop` calls `backend.warm_up(&model)` right after `load_model`,
+  **fail-closed** (exit 4) — the node refuses to serve against an unbuilt engine.
+
+No `parko-kirra` factory and no new crate were needed for the hook. The **remaining
+open question** is narrower than first framed: only *where the concrete `TrtBackend`
+gets constructed/selected* in the node (it currently builds only mock / CPU-ORT). The
+trait hook means whoever constructs it gets warm-up for free.
 
 ## Context
 
