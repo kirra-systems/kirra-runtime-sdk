@@ -364,31 +364,38 @@ impl InferenceBackend for TrtBackend {
     }
 }
 
-/// PARK-021 JETSON-GATED FOLLOW-UPS — cannot be implemented/validated on CI (no
-/// GPU). Each is a tracked next step with its resolution path; this crate is the
-/// CI-buildable skeleton only.
+/// PARK-021 JETSON-GATED FOLLOW-UPS — status as validated on a Jetson Orin NX
+/// (JP6.2, onnxruntime-gpu 1.23.0). These cannot run on CI (no GPU); each is
+/// exercised by a self-skipping on-hardware probe in `tests/` (set
+/// `PARKO_TRT_REQUIRE_EP=1` to make a skip a hard failure). Issues: #414 (closed),
+/// #415 (remaining decisions).
 ///
-/// 1. **Real `load_model`/`run` output** — needs a TensorRT-enabled ORT runtime
-///    on NVIDIA silicon. The inference path itself is already shared
-///    (`OrtRunCore`); only on-hardware validation remains.
-/// 2. **Engine build / cache + warm-up** — TRT builds a per-model/shape engine
-///    (slow first run), cached at `engine_cache_path`. Parko's sensor mappings
-///    emit FIXED shapes → one engine per model, clean cache reuse. Needs a
-///    startup warm-up so the multi-second build never lands on the first real
-///    command. Populate `TrtPosture.engine_sha` once an engine exists.
-/// 3. **Precision validation** — confirm fp32 is actually used, and resolve TF32:
-///    test `NVIDIA_TF32_OVERRIDE=0` and measure its impact vs the decision
-///    tolerance. If TF32 can't be controlled out-of-band, this is the **A2
-///    (native nvinfer FFI) escalation trigger** (the ort TRT EP has no TF32 knob).
-/// 4. **Cross-backend equivalence** — extend the #152 ORT-vs-OV harness to
-///    TRT-vs-ORT-CPU. TRT-vs-CPU drift exceeds CPU-vs-CPU drift, so the bound is a
-///    SEPARATE, hardware-measured **decision-agreement** tolerance on the governed
-///    command (not bitwise logits). Anchor the harness on `TrtPosture`, NOT
-///    `InferenceThreads` (a CPU concept).
-/// 5. **Perf / latency** — engine-build time, warm vs cold, throughput.
-/// 6. **Runtime confirmation** — verify the JetPack ORT build on the ROSOrin
-///    image actually carries the TensorRT EP (so `with_config` succeeds there,
-///    rather than fail-closing as it correctly does on CI's CPU-only build).
+/// 1. **Real `load_model`/`run` output** — DONE (#414). `tests/positive_probe.rs`
+///    is green on the Orin: `with_config` Ok, descriptor TensorRT, MNIST runs.
+///    The inference path is shared (`OrtRunCore`).
+/// 2. **Engine build / cache + warm-up** — IMPLEMENTED ([`TrtBackend::warm_up`],
+///    #415). Forces the per-model/shape engine build at startup and captures the
+///    serialized engine's SHA-256 into `TrtPosture.engine_sha`.
+///    `tests/engine_cache_probe.rs` measured ~2.2 s cold build vs warm cache reuse
+///    on the Orin (the budget warm-up moves off the hot path); the cache key
+///    includes the GPU arch (`…_sm87.engine`). `tests/warmup_probe.rs` validates it.
+/// 3. **Precision validation / TF32** — MEASURED (#415). `tests/tf32_probe.rs`
+///    (one-shot differential): `NVIDIA_TF32_OVERRIDE=0` is INERT for the ort TRT
+///    EP, and #4's drift is fp32-epsilon scale (~3e-7, ~3000× below TF32 ε), i.e.
+///    TF32 is not engaged for MNIST. The override is therefore NOT a usable fp32
+///    guarantee — **A2 (native nvinfer FFI), which exposes `BuilderFlag::kTF32`,
+///    remains the escalation** if guaranteed fp32 is required on a larger model.
+/// 4. **Cross-backend equivalence** — MEASURED (#415). `tests/equivalence_probe.rs`
+///    asserts TRT-vs-CPU decision agreement and reports drift (Orin/MNIST: max
+///    2.98e-7, ~2.5 ULP). Still TODO: finalize the **decision-agreement** tolerance
+///    on a production-representative model and fold into the #152 harness. Anchor on
+///    `TrtPosture`, NOT `InferenceThreads` (a CPU concept).
+/// 5. **Perf / latency** — PARTIAL (#415). `tests/engine_cache_probe.rs` reports
+///    cold(build+run) ~3.8 s vs warm ~1.6 s on the Orin (host-indicative, NOT a
+///    WCET/FTTI claim). Full throughput / warm-vs-cold sweep on a real model: TODO.
+/// 6. **Runtime confirmation** — DONE (#414, closed). The JP6.2 ORT carries a
+///    usable TensorRT EP, so `with_config` succeeds on hardware (and correctly
+///    fail-closes on CI's CPU-only build).
 pub mod park021_jetson_gated {}
 
 #[cfg(test)]
