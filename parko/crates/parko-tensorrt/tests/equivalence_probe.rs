@@ -43,6 +43,14 @@ fn argmax(scores: &[f32]) -> usize {
         .fold(0usize, |best, (i, &s)| if s > scores[best] { i } else { best })
 }
 
+/// Deterministic NON-zero input (matches `tf32_probe.rs`). A zero image gives 0
+/// TRT-vs-CPU drift (reductions over zeros), which masks the real accumulation-order
+/// divergence; a varied input exercises the fp32 matmuls that actually differ
+/// between the GPU TRT kernels and single-thread CPU ORT.
+fn deterministic_input(n: usize) -> Vec<f32> {
+    (0..n).map(|i| ((i * 7 + 13) % 251) as f32 / 251.0).collect()
+}
+
 /// On a TensorRT-enabled ORT runtime, the TRT backend's MNIST DECISION (argmax)
 /// must match the CPU baseline, and the measured per-logit drift is reported.
 /// Self-skips where the TRT EP is unavailable.
@@ -105,9 +113,10 @@ fn trt_decision_agrees_with_cpu_baseline() {
         .iter()
         .product();
 
-    // Same fixed input through both backends (Parko's sensor mappings emit fixed
-    // shapes; a zero image is deterministic and its argmax is well-separated).
-    let flat = vec![0.0f32; total];
+    // Same deterministic NON-zero input through both backends — exercises the fp32
+    // matmul accumulation where TRT (GPU) and CPU ORT actually diverge, so the
+    // measured drift is real (a zero image would read 0 and tell us nothing).
+    let flat = deterministic_input(total);
     let mut named = HashMap::new();
     named.insert(input_name.to_string(), TensorStorage::Borrowed(&flat));
     let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
