@@ -24,12 +24,15 @@
 // posture is "fixed engine + fixed precision + decision-agreement bound
 // (hardware-measured)", logged — not a bitwise-determinism claim.
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use ort::ep::TensorRT;
 use ort::session::Session;
 
 use parko_core::backend::{
     BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
-    TensorBatch,
+    TensorBatch, TensorStorage,
 };
 use parko_onnx::session_core::OrtRunCore;
 
@@ -204,6 +207,133 @@ impl TrtBackend {
     #[must_use]
     pub fn posture(&self) -> &TrtPosture {
         &self.posture
+    }
+
+    /// Force the per-model/shape TensorRT engine to build (or deserialize from the
+    /// on-disk cache) NOW — at startup — so the multi-second first-build never lands
+    /// on the first real command (PARK-021 #2). Runs ONE inference with a
+    /// shape-correct zero input (output discarded; the engine build depends on the
+    /// input SHAPE, not its values), then captures the cached engine's SHA-256 into
+    /// `TrtPosture.engine_sha`. Idempotent: against a warm cache it only
+    /// deserializes. Measured cold build on a Jetson Orin (MNIST) is ~2.2 s — the
+    /// budget this moves off the hot path; bigger models cost more.
+    ///
+    /// Takes `&mut self` because it populates the posture's `engine_sha`. The
+    /// Nominal `run` hot path is unchanged.
+    pub fn warm_up(&mut self, model: &ModelHandle) -> Result<WarmUpReport, BackendError> {
+        if model.input_shapes.is_empty() {
+            return Err(BackendError::InitializationError(
+                "warm_up: model declares no inputs — cannot synthesize a warm-up batch".into(),
+            ));
+        }
+        // Shape-correct zero input for every declared input (Owned → no lifetimes).
+        let mut named_tensors = HashMap::new();
+        for (name, shape) in &model.input_shapes {
+            let total: usize = shape.iter().product();
+            named_tensors.insert(name.clone(), TensorStorage::Owned(vec![0.0f32; total]));
+        }
+        let batch = TensorBatch { named_tensors, metadata: HashMap::new() };
+
+        let t0 = Instant::now();
+        // Build (cold) or deserialize (warm) the engine; the output is discarded.
+        let _ = self.run(model, &batch)?;
+        let warmed_ms = t0.elapsed().as_millis();
+
+        // Capture the serialized engine's SHA-256 → engine_sha (the #2 hook: the SHA
+        // is None until an engine actually exists on hardware).
+        let (engine_file, engine_sha256, engine_bytes) =
+            sha256_cached_engine(&self.posture.engine_cache_path);
+        if let Some(sha) = &engine_sha256 {
+            self.posture.engine_sha = Some(sha.clone());
+        }
+
+        tracing::info!(
+            backend = "tensorrt",
+            warmed_ms = warmed_ms as u64,
+            engine_file = ?engine_file,
+            engine_sha = ?engine_sha256,
+            engine_bytes = ?engine_bytes,
+            "TrtBackend warm-up complete (engine built/deserialized at startup; engine_sha captured)"
+        );
+
+        Ok(WarmUpReport {
+            warmed_ms,
+            engine_cache_path: self.posture.engine_cache_path.clone(),
+            engine_file,
+            engine_sha256,
+            engine_bytes,
+        })
+    }
+}
+
+/// Outcome of [`TrtBackend::warm_up`] — the engine was forced to build/deserialize
+/// before any real command, and the cached engine fingerprinted for the audit log.
+#[derive(Debug, Clone)]
+pub struct WarmUpReport {
+    /// Wall time the warm-up took (cold build vs warm deserialize). HOST-INDICATIVE
+    /// — a startup-budget figure, NOT a WCET/FTTI claim.
+    pub warmed_ms: u128,
+    /// The engine-cache directory inspected.
+    pub engine_cache_path: String,
+    /// The serialized-engine file fingerprinted (`None` if the cache was empty —
+    /// e.g. the EP did not persist an engine).
+    pub engine_file: Option<String>,
+    /// SHA-256 (hex) of that engine file — mirrored into `TrtPosture.engine_sha`.
+    pub engine_sha256: Option<String>,
+    /// Size of that engine file in bytes.
+    pub engine_bytes: Option<u64>,
+}
+
+/// SHA-256 the serialized TRT engine in `dir`: prefer a `*.engine` file, else the
+/// largest file. Returns `(filename, hex_sha256, size_bytes)`; all `None` if the
+/// directory is unreadable or empty. Pure filesystem read — no GPU.
+fn sha256_cached_engine(dir: &str) -> (Option<String>, Option<String>, Option<u64>) {
+    use sha2::{Digest, Sha256};
+
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return (None, None, None),
+    };
+    // Prefer a *.engine file; among candidates (or all files if none end in
+    // .engine), choose the largest — the serialized engine dominates the cache.
+    let mut best: Option<(std::path::PathBuf, u64, bool)> = None; // (path, size, is_engine)
+    for entry in read_dir.flatten() {
+        let Ok(md) = entry.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let is_engine = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("engine"))
+            .unwrap_or(false);
+        let size = md.len();
+        let better = match &best {
+            None => true,
+            // An .engine file outranks a non-.engine; within the same class, larger wins.
+            Some((_, b_size, b_is_engine)) => match (is_engine, b_is_engine) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => size > *b_size,
+            },
+        };
+        if better {
+            best = Some((path, size, is_engine));
+        }
+    }
+
+    let Some((path, size, _)) = best else {
+        return (None, None, None);
+    };
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            (name, Some(hex::encode(hasher.finalize())), Some(size))
+        }
+        // Engine exists but couldn't be read — report name+size, no SHA.
+        Err(_) => (name, None, Some(size)),
     }
 }
 
