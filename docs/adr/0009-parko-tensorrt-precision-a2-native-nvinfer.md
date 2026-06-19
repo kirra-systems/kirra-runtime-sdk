@@ -2,12 +2,36 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed** |
+| Status | **Accepted — A1 (measured decision-agreement); A2 deferred, data-gated.** Ratify in the safety case. |
 | Date | 2026-06-19 |
-| Deciders | Project owner (pending) |
+| Deciders | Project owner |
 | Issues | #415 (remaining PARK-021 jetson-gated items), #414 (on-hardware validation, closed) |
 | Code | `parko/crates/parko-tensorrt/src/lib.rs` (`Tf32Control`, `TrtPosture`, `park021_jetson_gated` #3) |
 | Evidence | `tests/tf32_probe.rs`, `tests/equivalence_probe.rs` (Jetson Orin NX, JP6.2, ORT 1.23.0) |
+
+## Decision (accepted)
+
+**Stay on A1 (ort TRT EP); do NOT build A2 (native nvinfer) now.** The decisive
+argument is architectural, not just the measured drift: **the Kirra Governor is the
+independent safety channel** — it clamps the actuator to the kinematic envelope
+regardless of what the model emits. So the inference backend's bit-precision bears on
+*decision quality / availability*, **not** the hard safety boundary, which the Governor
+owns. A *measured decision-agreement* bound (the TRT-vs-CPU-baseline argmax, with the
+logit drift recorded) is therefore the proportionate evidence; `full_precision_guaranteed()`
+stays honestly `false`, and that is acceptable because no safety requirement is allocated
+to the raw inference output.
+
+A2 is reconsidered **only** if either trigger fires: (1) on a production-representative
+model the equivalence probe shows TF32-scale drift (~1e-3) that flips the governed
+decision; or (2) the safety case explicitly allocates a positive full-precision
+requirement to the inference output itself. Tonight's data (drift 2.98e-7 ≈ fp32 ε,
+TF32 not engaged on MNIST) is consistent with A1; the trigger measurement is re-run when
+a representative model exists.
+
+**Caveat:** this is the engineering decision; it must be **ratified by the safety-case
+owner** against the certification target before it is load-bearing in the assurance
+argument. If a future HARA/DFA allocates a precision requirement to the model output,
+this ADR is superseded by an A2 decision.
 
 ## Context
 
