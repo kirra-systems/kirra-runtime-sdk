@@ -24,12 +24,15 @@
 // posture is "fixed engine + fixed precision + decision-agreement bound
 // (hardware-measured)", logged — not a bitwise-determinism claim.
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use ort::ep::TensorRT;
 use ort::session::Session;
 
 use parko_core::backend::{
     BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
-    TensorBatch,
+    TensorBatch, TensorStorage,
 };
 use parko_onnx::session_core::OrtRunCore;
 
@@ -205,6 +208,133 @@ impl TrtBackend {
     pub fn posture(&self) -> &TrtPosture {
         &self.posture
     }
+
+    /// Force the per-model/shape TensorRT engine to build (or deserialize from the
+    /// on-disk cache) NOW — at startup — so the multi-second first-build never lands
+    /// on the first real command (PARK-021 #2). Runs ONE inference with a
+    /// shape-correct zero input (output discarded; the engine build depends on the
+    /// input SHAPE, not its values), then captures the cached engine's SHA-256 into
+    /// `TrtPosture.engine_sha`. Idempotent: against a warm cache it only
+    /// deserializes. Measured cold build on a Jetson Orin (MNIST) is ~2.2 s — the
+    /// budget this moves off the hot path; bigger models cost more.
+    ///
+    /// Takes `&mut self` because it populates the posture's `engine_sha`. The
+    /// Nominal `run` hot path is unchanged.
+    pub fn warm_up(&mut self, model: &ModelHandle) -> Result<WarmUpReport, BackendError> {
+        if model.input_shapes.is_empty() {
+            return Err(BackendError::InitializationError(
+                "warm_up: model declares no inputs — cannot synthesize a warm-up batch".into(),
+            ));
+        }
+        // Shape-correct zero input for every declared input (Owned → no lifetimes).
+        let mut named_tensors = HashMap::new();
+        for (name, shape) in &model.input_shapes {
+            let total: usize = shape.iter().product();
+            named_tensors.insert(name.clone(), TensorStorage::Owned(vec![0.0f32; total]));
+        }
+        let batch = TensorBatch { named_tensors, metadata: HashMap::new() };
+
+        let t0 = Instant::now();
+        // Build (cold) or deserialize (warm) the engine; the output is discarded.
+        let _ = self.run(model, &batch)?;
+        let warmed_ms = t0.elapsed().as_millis();
+
+        // Capture the serialized engine's SHA-256 → engine_sha (the #2 hook: the SHA
+        // is None until an engine actually exists on hardware).
+        let (engine_file, engine_sha256, engine_bytes) =
+            sha256_cached_engine(&self.posture.engine_cache_path);
+        if let Some(sha) = &engine_sha256 {
+            self.posture.engine_sha = Some(sha.clone());
+        }
+
+        tracing::info!(
+            backend = "tensorrt",
+            warmed_ms = warmed_ms as u64,
+            engine_file = ?engine_file,
+            engine_sha = ?engine_sha256,
+            engine_bytes = ?engine_bytes,
+            "TrtBackend warm-up complete (engine built/deserialized at startup; engine_sha captured)"
+        );
+
+        Ok(WarmUpReport {
+            warmed_ms,
+            engine_cache_path: self.posture.engine_cache_path.clone(),
+            engine_file,
+            engine_sha256,
+            engine_bytes,
+        })
+    }
+}
+
+/// Outcome of [`TrtBackend::warm_up`] — the engine was forced to build/deserialize
+/// before any real command, and the cached engine fingerprinted for the audit log.
+#[derive(Debug, Clone)]
+pub struct WarmUpReport {
+    /// Wall time the warm-up took (cold build vs warm deserialize). HOST-INDICATIVE
+    /// — a startup-budget figure, NOT a WCET/FTTI claim.
+    pub warmed_ms: u128,
+    /// The engine-cache directory inspected.
+    pub engine_cache_path: String,
+    /// The serialized-engine file fingerprinted (`None` if the cache was empty —
+    /// e.g. the EP did not persist an engine).
+    pub engine_file: Option<String>,
+    /// SHA-256 (hex) of that engine file — mirrored into `TrtPosture.engine_sha`.
+    pub engine_sha256: Option<String>,
+    /// Size of that engine file in bytes.
+    pub engine_bytes: Option<u64>,
+}
+
+/// SHA-256 the serialized TRT engine in `dir`: prefer a `*.engine` file, else the
+/// largest file. Returns `(filename, hex_sha256, size_bytes)`; all `None` if the
+/// directory is unreadable or empty. Pure filesystem read — no GPU.
+fn sha256_cached_engine(dir: &str) -> (Option<String>, Option<String>, Option<u64>) {
+    use sha2::{Digest, Sha256};
+
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return (None, None, None),
+    };
+    // Prefer a *.engine file; among candidates (or all files if none end in
+    // .engine), choose the largest — the serialized engine dominates the cache.
+    let mut best: Option<(std::path::PathBuf, u64, bool)> = None; // (path, size, is_engine)
+    for entry in read_dir.flatten() {
+        let Ok(md) = entry.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let is_engine = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("engine"))
+            .unwrap_or(false);
+        let size = md.len();
+        let better = match &best {
+            None => true,
+            // An .engine file outranks a non-.engine; within the same class, larger wins.
+            Some((_, b_size, b_is_engine)) => match (is_engine, b_is_engine) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => size > *b_size,
+            },
+        };
+        if better {
+            best = Some((path, size, is_engine));
+        }
+    }
+
+    let Some((path, size, _)) = best else {
+        return (None, None, None);
+    };
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            (name, Some(hex::encode(hasher.finalize())), Some(size))
+        }
+        // Engine exists but couldn't be read — report name+size, no SHA.
+        Err(_) => (name, None, Some(size)),
+    }
 }
 
 impl InferenceBackend for TrtBackend {
@@ -234,31 +364,38 @@ impl InferenceBackend for TrtBackend {
     }
 }
 
-/// PARK-021 JETSON-GATED FOLLOW-UPS — cannot be implemented/validated on CI (no
-/// GPU). Each is a tracked next step with its resolution path; this crate is the
-/// CI-buildable skeleton only.
+/// PARK-021 JETSON-GATED FOLLOW-UPS — status as validated on a Jetson Orin NX
+/// (JP6.2, onnxruntime-gpu 1.23.0). These cannot run on CI (no GPU); each is
+/// exercised by a self-skipping on-hardware probe in `tests/` (set
+/// `PARKO_TRT_REQUIRE_EP=1` to make a skip a hard failure). Issues: #414 (closed),
+/// #415 (remaining decisions).
 ///
-/// 1. **Real `load_model`/`run` output** — needs a TensorRT-enabled ORT runtime
-///    on NVIDIA silicon. The inference path itself is already shared
-///    (`OrtRunCore`); only on-hardware validation remains.
-/// 2. **Engine build / cache + warm-up** — TRT builds a per-model/shape engine
-///    (slow first run), cached at `engine_cache_path`. Parko's sensor mappings
-///    emit FIXED shapes → one engine per model, clean cache reuse. Needs a
-///    startup warm-up so the multi-second build never lands on the first real
-///    command. Populate `TrtPosture.engine_sha` once an engine exists.
-/// 3. **Precision validation** — confirm fp32 is actually used, and resolve TF32:
-///    test `NVIDIA_TF32_OVERRIDE=0` and measure its impact vs the decision
-///    tolerance. If TF32 can't be controlled out-of-band, this is the **A2
-///    (native nvinfer FFI) escalation trigger** (the ort TRT EP has no TF32 knob).
-/// 4. **Cross-backend equivalence** — extend the #152 ORT-vs-OV harness to
-///    TRT-vs-ORT-CPU. TRT-vs-CPU drift exceeds CPU-vs-CPU drift, so the bound is a
-///    SEPARATE, hardware-measured **decision-agreement** tolerance on the governed
-///    command (not bitwise logits). Anchor the harness on `TrtPosture`, NOT
-///    `InferenceThreads` (a CPU concept).
-/// 5. **Perf / latency** — engine-build time, warm vs cold, throughput.
-/// 6. **Runtime confirmation** — verify the JetPack ORT build on the ROSOrin
-///    image actually carries the TensorRT EP (so `with_config` succeeds there,
-///    rather than fail-closing as it correctly does on CI's CPU-only build).
+/// 1. **Real `load_model`/`run` output** — DONE (#414). `tests/positive_probe.rs`
+///    is green on the Orin: `with_config` Ok, descriptor TensorRT, MNIST runs.
+///    The inference path is shared (`OrtRunCore`).
+/// 2. **Engine build / cache + warm-up** — IMPLEMENTED ([`TrtBackend::warm_up`],
+///    #415). Forces the per-model/shape engine build at startup and captures the
+///    serialized engine's SHA-256 into `TrtPosture.engine_sha`.
+///    `tests/engine_cache_probe.rs` measured ~2.2 s cold build vs warm cache reuse
+///    on the Orin (the budget warm-up moves off the hot path); the cache key
+///    includes the GPU arch (`…_sm87.engine`). `tests/warmup_probe.rs` validates it.
+/// 3. **Precision validation / TF32** — MEASURED (#415). `tests/tf32_probe.rs`
+///    (one-shot differential): `NVIDIA_TF32_OVERRIDE=0` is INERT for the ort TRT
+///    EP, and #4's drift is fp32-epsilon scale (~3e-7, ~3000× below TF32 ε), i.e.
+///    TF32 is not engaged for MNIST. The override is therefore NOT a usable fp32
+///    guarantee — **A2 (native nvinfer FFI), which exposes `BuilderFlag::kTF32`,
+///    remains the escalation** if guaranteed fp32 is required on a larger model.
+/// 4. **Cross-backend equivalence** — MEASURED (#415). `tests/equivalence_probe.rs`
+///    asserts TRT-vs-CPU decision agreement and reports drift (Orin/MNIST: max
+///    2.98e-7, ~2.5 ULP). Still TODO: finalize the **decision-agreement** tolerance
+///    on a production-representative model and fold into the #152 harness. Anchor on
+///    `TrtPosture`, NOT `InferenceThreads` (a CPU concept).
+/// 5. **Perf / latency** — PARTIAL (#415). `tests/engine_cache_probe.rs` reports
+///    cold(build+run) ~3.8 s vs warm ~1.6 s on the Orin (host-indicative, NOT a
+///    WCET/FTTI claim). Full throughput / warm-vs-cold sweep on a real model: TODO.
+/// 6. **Runtime confirmation** — DONE (#414, closed). The JP6.2 ORT carries a
+///    usable TensorRT EP, so `with_config` succeeds on hardware (and correctly
+///    fail-closes on CI's CPU-only build).
 pub mod park021_jetson_gated {}
 
 #[cfg(test)]
