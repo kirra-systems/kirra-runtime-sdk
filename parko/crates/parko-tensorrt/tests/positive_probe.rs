@@ -21,6 +21,12 @@
 //!
 //!   ORT_DYLIB_PATH=<venv>/onnxruntime/capi/libonnxruntime.so.1.23.0 \
 //!     cargo test -p parko-tensorrt --test positive_probe -- --nocapture
+//!
+//! STRICT MODE — `PARKO_TRT_REQUIRE_EP=1`: the two self-skip branches become hard
+//! FAILURES instead. This is what makes the probe usable as a fail-closed installer
+//! gate (`scripts/install-parko-backend.sh`): there, "TRT EP absent" must REFUSE
+//! (nonzero exit), never pass quietly. Unset (the default) keeps the CI/sandbox-safe
+//! self-skip, so this file stays inert in the GPU-less jobs.
 
 use std::collections::HashMap;
 
@@ -28,6 +34,15 @@ use parko_core::backend::{
     BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage,
 };
 use parko_tensorrt::{TrtBackend, TrtConfig};
+
+/// `PARKO_TRT_REQUIRE_EP` truthy → the TensorRT EP is REQUIRED: a would-be skip
+/// (no ORT lib, or EP unavailable) becomes a hard failure. Used by the installer's
+/// fail-closed backend-load validation; unset everywhere else (self-skip).
+fn require_ep() -> bool {
+    std::env::var("PARKO_TRT_REQUIRE_EP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 /// On a TensorRT-enabled ORT runtime, `TrtBackend::with_config` must SUCCEED
 /// (the TRT EP registers), report the `TensorRT` descriptor, and produce finite
@@ -42,6 +57,12 @@ fn trt_backend_loads_and_runs_when_tensorrt_ep_available() {
     // unconditionally, so the path — not the var — is the reliable signal).
     let dylib = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
     if dylib.is_empty() || !std::path::Path::new(&dylib).exists() {
+        assert!(
+            !require_ep(),
+            "STRICT (PARKO_TRT_REQUIRE_EP): no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?}) — \
+             refusing (fail-closed). The acquire step must install a TensorRT-enabled ORT and export \
+             ORT_DYLIB_PATH before validation.",
+        );
         eprintln!(
             "SKIP: ORT runtime lib not present ({dylib:?}) — the positive probe needs a \
              TensorRT-enabled ORT lib (Jetson / GPU job only)."
@@ -59,6 +80,12 @@ fn trt_backend_loads_and_runs_when_tensorrt_ep_available() {
     let backend = match TrtBackend::with_config(model_path, &cfg) {
         Ok(b) => b,
         Err(e) => {
+            assert!(
+                !require_ep(),
+                "STRICT (PARKO_TRT_REQUIRE_EP): TensorRT EP unavailable ({e:?}) — refusing \
+                 (fail-closed). A loadable ORT runtime is present but carries no usable TensorRT \
+                 provider; the selected backend did NOT load and must not be claimed valid.",
+            );
             eprintln!(
                 "SKIP: TensorRT EP unavailable ({e:?}) — this runtime has no usable TRT \
                  provider (expected on a CPU-only ORT / non-GPU box; the fail-closed test \

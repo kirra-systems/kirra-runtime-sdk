@@ -43,6 +43,18 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 fatal()   { error "$*"; exit 1; }
 section() { echo ""; echo -e "${BOLD}━━━ $* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
+# ── locations + per-target tunables (env-overridable) ─────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The parko cargo workspace (repo_root/parko); the tensorrt load probe runs here.
+PARKO_WORKSPACE_DIR="${PARKO_WORKSPACE_DIR:-${SCRIPT_DIR}/../parko}"
+# TensorRT runtime acquisition (PARK-021 #6 / issue #414) — JetPack-coupled. The
+# jp6/cu126 index serves the cp310 aarch64 onnxruntime-gpu wheel whose ORT 1.23.x
+# matches parko's `ort = "=2.0.0-rc.11"`. Installed into an ISOLATED venv so the
+# stock JetPack ORT (1.20) is left intact for vendor demos.
+PARKO_TRT_VENV="${PARKO_TRT_VENV:-$HOME/parko-trt-venv}"
+PARKO_TRT_ORT_VERSION="${PARKO_TRT_ORT_VERSION:-1.23.0}"
+PARKO_TRT_PIP_INDEX="${PARKO_TRT_PIP_INDEX:-https://pypi.jetson-ai-lab.io/jp6/cu126}"
+
 # ── the matrix: single source, aligned with scheduler descriptor strings ──────
 ALL_TARGETS="ort-cpu openvino tensorrt qnn ti-tidl amd-vitis"
 
@@ -271,12 +283,59 @@ This is the PATH waiting on the EXTERNAL artifact — not a missing install (nev
         fi
         return 0
     fi
-    if [ "$DRY_RUN" = true ]; then info "[dry-run] would acquire the ${t} runtime."; return 0; fi
+    # tensorrt drives its own dry-run (it prints the real recipe); others use the
+    # generic note.
+    if [ "$DRY_RUN" = true ] && [ "$t" != "tensorrt" ]; then
+        info "[dry-run] would acquire the ${t} runtime."; return 0
+    fi
     case "$t" in
         ort-cpu)  info "Acquire ONNX Runtime CPU (v1.23.x) → ORT_DYLIB_PATH (see INSTALL.md)." ;;
         openvino) info "Acquire OpenVINO runtime (pip wheel >=2025.1 / apt) → LD_LIBRARY_PATH." ;;
-        tensorrt) warn "JETSON-GATED: install NVIDIA's TRT-enabled ONNX Runtime from JetPack/L4T on-device." ;;
+        tensorrt) acquire_tensorrt_runtime ;;
     esac
+}
+
+# TensorRT-enabled ONNX Runtime — the on-Jetson recipe validated in PARK-021 #6
+# (issue #414). Installs the version-matched wheel into an ISOLATED venv and exports
+# ORT_DYLIB_PATH (+ the provider-lib dir on LD_LIBRARY_PATH) for the build/validate
+# stages. JETSON-GATED: this is the NVIDIA Jetson path, no license required.
+acquire_tensorrt_runtime() {
+    info "TensorRT-enabled ONNX Runtime ${PARKO_TRT_ORT_VERSION} — Jetson-gated, isolated venv: ${PARKO_TRT_VENV}"
+    info "Index: ${PARKO_TRT_PIP_INDEX} (JetPack-coupled: jp6/cu126 → cp310 aarch64 wheel; matches ort rc.11 = ORT 1.23.x)"
+    if [ "$DRY_RUN" = true ]; then
+        info "[dry-run] would: python3 -m venv ${PARKO_TRT_VENV}"
+        info "[dry-run] would: ${PARKO_TRT_VENV}/bin/pip install --extra-index-url ${PARKO_TRT_PIP_INDEX} 'onnxruntime-gpu==${PARKO_TRT_ORT_VERSION}' 'numpy<2'"
+        info "[dry-run] would: export ORT_DYLIB_PATH=<venv>/…/libonnxruntime.so.${PARKO_TRT_ORT_VERSION}"
+        return 0
+    fi
+    # Jetson sanity (warn, don't hard-fail — the operator may know better). The
+    # fail-closed load probe is the real gate: it REFUSES if the TRT EP is absent.
+    if ! { [ -d /proc/device-tree ] && grep -qi nvidia /proc/device-tree/model 2>/dev/null; }; then
+        warn "Host does not look like an NVIDIA Jetson (no 'nvidia' in device-tree model)."
+        warn "The TensorRT runtime is Jetson-gated; proceeding, but the load probe will REFUSE if the TRT EP isn't present."
+    fi
+    command -v python3 >/dev/null 2>&1 || fatal "python3 not found — required to create the isolated ORT venv."
+    if [ ! -d "$PARKO_TRT_VENV" ]; then
+        info "Creating isolated venv: ${PARKO_TRT_VENV}"
+        python3 -m venv "$PARKO_TRT_VENV" || fatal "venv creation failed at ${PARKO_TRT_VENV}."
+    else
+        info "Reusing existing venv: ${PARKO_TRT_VENV}"
+    fi
+    "$PARKO_TRT_VENV/bin/pip" install --quiet --upgrade pip \
+        || fatal "pip self-upgrade failed in ${PARKO_TRT_VENV}."
+    # numpy<2 — the prebuilt wheel is built against NumPy 1.x (PARK-021 #6 finding).
+    info "Installing onnxruntime-gpu==${PARKO_TRT_ORT_VERSION} (+ numpy<2) from ${PARKO_TRT_PIP_INDEX}"
+    "$PARKO_TRT_VENV/bin/pip" install --extra-index-url "$PARKO_TRT_PIP_INDEX" \
+        "onnxruntime-gpu==${PARKO_TRT_ORT_VERSION}" 'numpy<2' \
+        || fatal "Failed to install onnxruntime-gpu==${PARKO_TRT_ORT_VERSION} from ${PARKO_TRT_PIP_INDEX} (JetPack/index mismatch?)."
+    # Locate the .so the ort crate will dlopen, and export it for build + validate.
+    local so
+    so="$(find "$PARKO_TRT_VENV" -name "libonnxruntime.so.${PARKO_TRT_ORT_VERSION}" 2>/dev/null | head -1)"
+    [ -n "$so" ] && [ -e "$so" ] || fatal "Installed the wheel but could not locate libonnxruntime.so.${PARKO_TRT_ORT_VERSION} under ${PARKO_TRT_VENV}."
+    export ORT_DYLIB_PATH="$so"
+    # The TRT/CUDA provider libs sit beside it; put that dir on the loader path.
+    export LD_LIBRARY_PATH="$(dirname "$so")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    success "TensorRT ORT runtime ready: ORT_DYLIB_PATH=${ORT_DYLIB_PATH}"
 }
 
 build_parko() {
@@ -295,6 +354,21 @@ apply_posture() {
     section "Parko 3/4 — posture config (${t})"
     info "Posture: $(target_posture "$t")"
     if [ "$DRY_RUN" = true ]; then info "[dry-run] would write the ${t} posture config."; fi
+}
+
+# Built-in strict TensorRT load probe (PARK-021 #6 / #414). Runs the parko-tensorrt
+# positive_probe test in REQUIRE_EP mode against the ORT_DYLIB_PATH the acquire step
+# exported; cargo's exit code is authoritative (the test fails — never self-skips —
+# when the TRT EP is absent). Returns nonzero on any miss so the caller fail-closes.
+run_tensorrt_strict_probe() {
+    [ -n "${ORT_DYLIB_PATH:-}" ] && [ -e "${ORT_DYLIB_PATH:-}" ] \
+        || { error "ORT_DYLIB_PATH unset/missing — the acquire step did not export the TensorRT ORT runtime."; return 1; }
+    command -v cargo >/dev/null 2>&1 \
+        || { error "cargo not found — required to run the tensorrt load probe."; return 1; }
+    [ -f "${PARKO_WORKSPACE_DIR}/Cargo.toml" ] \
+        || { error "parko workspace not found at ${PARKO_WORKSPACE_DIR} (set PARKO_WORKSPACE_DIR)."; return 1; }
+    ( cd "$PARKO_WORKSPACE_DIR" \
+        && PARKO_TRT_REQUIRE_EP=1 cargo test -p parko-tensorrt --test positive_probe -- --nocapture )
 }
 
 # FAIL-CLOSED backend-load validation. The single chokepoint for "the selected
@@ -321,6 +395,21 @@ validate_backend_loads() {
             # error/panic without their runtime). Any failure → REFUSE, never
             # substitute. The operator points PARKO_BACKEND_PROBE at the probe
             # (e.g. the crate's load check on a box with the runtime present).
+            #
+            # tensorrt ships a BUILT-IN strict probe (PARK-021 #6 / #414): the
+            # positive_probe test in PARKO_TRT_REQUIRE_EP mode, run against the
+            # ORT_DYLIB_PATH the acquire step exported. It exits nonzero unless the
+            # TRT EP genuinely loaded (a self-skip becomes a hard failure), so an
+            # operator need not wire PARKO_BACKEND_PROBE by hand on the Jetson.
+            if [ -z "${PARKO_BACKEND_PROBE:-}" ] && [ "$t" = "tensorrt" ]; then
+                info "Backend-load probe: built-in tensorrt strict load probe (positive_probe, PARKO_TRT_REQUIRE_EP=1)."
+                if run_tensorrt_strict_probe; then
+                    success "Backend 'tensorrt' load validated (TensorRT EP present, fail-closed)."
+                else
+                    fatal "Backend-load probe FAILED for 'tensorrt' — refusing (fail-closed; no substitution)."
+                fi
+                return 0
+            fi
             if [ -n "${PARKO_BACKEND_PROBE:-}" ]; then
                 info "Backend-load probe: ${PARKO_BACKEND_PROBE}"
                 if "${PARKO_BACKEND_PROBE}"; then
