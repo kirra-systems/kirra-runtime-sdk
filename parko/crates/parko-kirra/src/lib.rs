@@ -478,9 +478,15 @@ impl KirraGovernor {
             return EnforcementAction::Deny { reason: reason.to_string() };
         }
 
-        // Stage 2 — MRC envelope clamp (unchanged).
-        let safe_linear = proposed.linear_velocity.min(MRC_VELOCITY_CEILING_MPS);
-        let linear_clamped = safe_linear < proposed.linear_velocity;
+        // Stage 2 — MRC envelope clamp. `MRC_VELOCITY_CEILING_MPS` is a MAGNITUDE
+        // ceiling (ADL-001), so clamp symmetrically: `.min(ceiling)` bounded only
+        // the forward direction, admitting a reverse command past the ceiling
+        // (e.g. -8 m/s convergent from -10, which passes the Stage-1 non-increasing
+        // gate) unclamped (#407). The angular channel below already clamps by
+        // magnitude; the linear channel must match.
+        let safe_linear =
+            proposed.linear_velocity.clamp(-MRC_VELOCITY_CEILING_MPS, MRC_VELOCITY_CEILING_MPS);
+        let linear_clamped = safe_linear != proposed.linear_velocity;
         // SOTIF-derived: ω_max evaluated at the COMMAND's linear
         // velocity (clamped to the post-linear-cap value so the
         // rollover constraint is consistent with what'll actually
@@ -535,6 +541,20 @@ impl KirraGovernor {
         posture: SafetyPosture,
         rss_safe: bool,
     ) -> EnforcementAction {
+        // Priority 0 (fail-closed): non-finite on EITHER channel. NaN compares
+        // false against every bound, so an unguarded NaN — notably on the Nominal
+        // angular axis (`nominal_angular_clamp`), where `NaN.abs() > omega_max` is
+        // false → `None` → forwarded as `Allow` — slips through as a "safe" command
+        // (the same silent-NaN class as #404). Reject both axes at the boundary,
+        // for every posture. (Defense-in-depth: the Degraded/RSS path also guards in
+        // `degraded_channel_violation`, and the linear axis in
+        // `validate_vehicle_command`; this closes the Nominal angular gap.)
+        if !proposed.linear_velocity.is_finite() || !proposed.angular_velocity.is_finite() {
+            return EnforcementAction::Deny {
+                reason: "NONFINITE_COMMAND_REJECTED".to_string(),
+            };
+        }
+
         // LockedOut check first — hard stop takes absolute priority.
         if posture == SafetyPosture::LockedOut {
             return EnforcementAction::Deny {
@@ -966,6 +986,61 @@ mod tests {
             3.0,
             "Degraded: a non-increasing command below the MRC ceiling must pass through"
         );
+    }
+
+    // #407 Finding 1 — the MRC ceiling is a MAGNITUDE bound: a REVERSE command
+    // above it (convergent from -10, so it passes the Stage-1 non-increasing gate)
+    // must be clamped to -ceiling, not admitted. `.min(ceiling)` only bounded the
+    // forward direction, so reverse over-ceiling slipped through unclamped.
+    #[test]
+    fn degraded_reverse_above_ceiling_clamps_to_negative_mrc() {
+        let gov = KirraGovernor::new();
+        let prev = cmd(-10.0); // reversing, bleeding speed toward the command
+        let action = gov.evaluate(&cmd(-8.0), Some(&prev), 0.05, SafetyPosture::Degraded);
+        assert!(
+            matches!(action, EnforcementAction::ClampLinearVelocity(_)),
+            "reverse over-ceiling must clamp, got {action:?}"
+        );
+        assert_eq!(
+            effective_velocity(action, -8.0),
+            -MRC_VELOCITY_CEILING_MPS,
+            "a reverse command above the MRC magnitude ceiling must clamp to -ceiling, not pass at -8"
+        );
+    }
+
+    // #407 Finding 2 — a non-finite angular velocity must fail-closed to Deny in
+    // the Nominal arm (it previously forwarded as Allow, since `NaN.abs() > ω_max`
+    // is false). The finite linear axis would otherwise admit the command.
+    #[test]
+    fn nominal_nonfinite_angular_is_denied() {
+        let gov = KirraGovernor::new();
+        for &ang in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let proposed = ControlCommand { linear_velocity: 1.0, angular_velocity: ang, timestamp_ms: 0 };
+            let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
+            assert!(
+                matches!(action, EnforcementAction::Deny { .. }),
+                "Nominal: non-finite angular ({ang}) must Deny, got {action:?}"
+            );
+        }
+    }
+
+    // The boundary guard rejects a non-finite command on EITHER channel, in EVERY
+    // posture (defense-in-depth).
+    #[test]
+    fn nonfinite_command_is_denied_in_all_postures() {
+        let gov = KirraGovernor::new();
+        for posture in [SafetyPosture::Nominal, SafetyPosture::Degraded, SafetyPosture::LockedOut] {
+            let nan_lin = ControlCommand { linear_velocity: f64::NAN, angular_velocity: 0.0, timestamp_ms: 0 };
+            let nan_ang = ControlCommand { linear_velocity: 1.0, angular_velocity: f64::NAN, timestamp_ms: 0 };
+            assert!(
+                matches!(gov.evaluate(&nan_lin, None, 0.05, posture), EnforcementAction::Deny { .. }),
+                "posture {posture:?}: NaN linear must Deny"
+            );
+            assert!(
+                matches!(gov.evaluate(&nan_ang, None, 0.05, posture), EnforcementAction::Deny { .. }),
+                "posture {posture:?}: NaN angular must Deny"
+            );
+        }
     }
 
     // Test 3 — LockedOut and Degraded must produce different outputs for non-zero input.
