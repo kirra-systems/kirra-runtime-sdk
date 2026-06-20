@@ -2,13 +2,23 @@
 //
 // SG2 — drivable-space containment check.
 //
-// PENDING-WIRING: this module implements the SG2 corridor-containment check
-// as a SIBLING entry point to `validate_vehicle_command`. The live request
-// path (`ProposedVehicleCommand` over HTTP) is UNCHANGED here — it remains
-// per-command. Activating SG2 enforcement on live traffic requires the
-// Option-B trajectory + corridor wiring (filed as a dedicated follow-up
-// issue alongside this commit). Until that wires through, this module is
-// unit-tested against constructed inputs.
+// SG2 WIRING STATUS (confirmed/updated per #409 — supersedes the original
+// "PENDING-WIRING" note): this module is the SG2 corridor-containment checker, a
+// SIBLING entry point to `validate_vehicle_command`. SG2 is now ENFORCED via the
+// Option-B per-trajectory path — the follow-up #131 ("Realize Option-B
+// per-trajectory checking") is CLOSED/completed. Concretely, the kirra-ros2
+// adapter slow loop (`crates/kirra-ros2-adapter/src/validation.rs`) calls
+// `validate_trajectory_containment` per accepted trajectory; a non-`Allow`
+// verdict returns `TrajectoryVerdict::MRCFallback`, collapsing the per-asset slot
+// so the fast loop publishes the MRC. See `docs/safety/TRACEABILITY_MATRIX.md`
+// (SG2 = ENFORCED) and `docs/safety/OCCY_SG2_MARGIN.md`
+// (KIRRA-OCCY-SG2-MARGIN-001).
+//
+// The SDK's own live HTTP request path (`ProposedVehicleCommand`) is UNCHANGED —
+// it remains per-command; SG2 is enforced in the ROS 2 deployment topology by
+// the adapter, not by the per-command HTTP handler. This module is also
+// unit-tested directly against constructed inputs. (Related: #128 SG2 coverage
+// hole, #126 Perception Input Contract.)
 //
 // Design (per the discovery report + design prompt):
 //   - Sibling entry `validate_trajectory_containment(traj, corridor, footprint)`
@@ -106,6 +116,20 @@ impl Corridor<'_> {
     /// shape-valid (≥ 2 vertices per side, ≤ `MAX_CORRIDOR_VERTICES`).
     /// Failure → conservative containment failure (the entry function
     /// returns `DenyCode::DrivableSpaceDeparture`).
+    ///
+    /// # Trust boundary: polygon simplicity / winding is NOT validated (#409 Obs 2)
+    ///
+    /// This checks confidence, age, and per-side vertex counts, but NOT that the
+    /// implicit polygon is SIMPLE (non-self-intersecting), nor that `left` is
+    /// actually left of `right` (consistent winding). A malformed corridor —
+    /// sides crossing or swapped — yields a self-intersecting polygon where the
+    /// PNPoly inside/outside result is ill-defined; unlike the other failure modes
+    /// (non-finite vertex, degenerate `n_total < 4` — both conservatively rejected
+    /// in `corner_inside_corridor`), this one is NOT guaranteed to fail in the
+    /// safe direction. Supplying a well-formed corridor is the integrator's
+    /// Perception Input Contract (#126) responsibility. Tracked defensive-hardening
+    /// option: require the two sides to be monotone-advancing along the corridor
+    /// axis, or test winding-sign consistency → conservative reject otherwise.
     pub fn is_healthy(&self) -> bool {
         self.confidence >= self.min_confidence
             && self.age_ms <= self.max_age_ms
@@ -265,6 +289,21 @@ fn footprint_corners(pose: &Pose, f: &VehicleFootprint) -> [Point; 4] {
 /// ray-cast winding for the inside test and (b) the minimum squared
 /// distance from the corner to any edge. The corner passes iff it is
 /// inside AND min-distance ≥ margin.
+///
+/// # Over-conservatism: the lateral margin also binds the end-caps (#409 Obs 1)
+///
+/// The loop closes via `(k + 1) % n_total`, so it includes the two END-CAP edges
+/// (corridor front `left[N-1] -> right[M-1]` and the closing back
+/// `right[0] -> left[0]`). `min_dist_sq` is taken over ALL edges including these
+/// caps, so `CONTAINMENT_LATERAL_MARGIN_M` — a documented *lateral* margin — is
+/// ALSO enforced longitudinally, shrinking the usable corridor by that margin at
+/// each end. This is fail-SAFE (it rejects more, never less), and a no-op when
+/// corridors extend well beyond the footprint horizon — the assumed case, since
+/// the Perception Input Contract (#126) supplies a corridor ahead of the vehicle.
+/// On a short / sensor-range-truncated corridor it could spuriously reject a pose
+/// validly within the lateral boundaries yet near a cap. Tracked alternative:
+/// exclude the two cap edges from the *margin* test while keeping them in the
+/// *inside* test.
 fn corner_inside_corridor(corner: &Point, corridor: &Corridor, margin_sq: f64) -> bool {
     if !point_is_finite(corner) {
         return false;
