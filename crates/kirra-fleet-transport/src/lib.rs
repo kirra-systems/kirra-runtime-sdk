@@ -31,7 +31,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use kirra_runtime_sdk::federation_reconciliation::{
-    verify_federated_report_signature_v2, FederatedTrustReportV2,
+    evaluate_federated_report_v2, verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
 use kirra_runtime_sdk::key_registry::{KeyRegistry, KeyRole};
 use kirra_runtime_sdk::verifier::FleetPosture;
@@ -207,10 +207,19 @@ pub fn encode_report(report: &FederatedTrustReportV2) -> Result<Vec<u8>, RejectR
     serde_json::to_vec(report).map_err(|e| RejectReason::Decode(e.to_string()))
 }
 
-/// Decode + **verify** a trust report from wire bytes against `public_key_b64`.
+/// Decode + **verify the signature** of a trust report against `public_key_b64`.
 /// **Verification happens BEFORE the report is surfaced to any caller** — an
 /// unsigned / bad-signature / malformed payload is rejected and the `counter` is
-/// incremented; only a verified report is returned.
+/// incremented; only a signature-verified report is returned.
+///
+/// **Signature-only — NOT replay-safe (#322).** This is the pure-verify primitive
+/// (the report-lane analogue of [`verify_clearance_grant`]); it does **no**
+/// freshness or nonce check, so a captured validly-signed report replays forever
+/// through it. The **replay-safe, store-backed deployment path is
+/// [`ingest_report`]** (and [`ingest_report_from_registry`]), which adds the
+/// freshness window + atomic nonce-burn. Use those whenever a `VerifierStore` is
+/// available; `accept_report` is for spike/test callers verifying a signature in
+/// isolation.
 pub fn accept_report(
     bytes: &[u8],
     public_key_b64: &str,
@@ -259,6 +268,98 @@ pub fn accept_report_from_registry(
         }
     };
     accept_report(bytes, &key_b64, counter)
+}
+
+/// Replay-safe trust-report ingest (#322) — the report-lane analogue of
+/// [`ingest_clearance_grant`]. Decode → verify the Ed25519 signature → enforce
+/// FRESHNESS (the report's `issued_at_ms`/`expires_at_ms` window, via
+/// [`evaluate_federated_report_v2`]) → claim the `nonce_hex` in one atomic
+/// verify-AND-consume step ([`VerifierStore::burn_federation_nonce`]). The nonce is
+/// burned **only after** the signature and freshness pass, so a stale report never
+/// burns a slot; a nonce already on record means the same report was ingested
+/// before ([`RejectReason::Replayed`]). On the explicitly-untrusted carrier this is
+/// what stops a captured validly-signed report from replaying forever — trust is
+/// the signature + freshness + single-use nonce, never the carrier.
+pub fn ingest_report(
+    store: &mut VerifierStore,
+    bytes: &[u8],
+    public_key_b64: &str,
+    counter: &RejectionCounter,
+    now_ms: u64,
+) -> Result<FederatedTrustReportV2, RejectReason> {
+    let report: FederatedTrustReportV2 = match serde_json::from_slice(bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            let r = RejectReason::Decode(e.to_string());
+            counter.record(&r);
+            return Err(r);
+        }
+    };
+    if report.signature_b64.trim().is_empty() {
+        let r = RejectReason::Unsigned;
+        counter.record(&r);
+        return Err(r);
+    }
+    if report.nonce_hex.trim().is_empty() {
+        let r = RejectReason::Malformed("empty nonce_hex".into());
+        counter.record(&r);
+        return Err(r);
+    }
+    // THE TRUST RULE — verify the signature over the canonical payload first.
+    if !verify_federated_report_signature_v2(&report, public_key_b64) {
+        let r = RejectReason::BadSignature;
+        counter.record(&r);
+        return Err(r);
+    }
+    // Authentic — enforce freshness BEFORE consuming the nonce, so a stale report
+    // never burns a nonce slot (mirrors the grant lane's ordering). The
+    // `evaluate_federated_report_v2` gate covers the issued/expiry window + the
+    // structural generation check; any non-accept is a fail-closed freshness reject.
+    if !evaluate_federated_report_v2(&report, now_ms).accepted {
+        let r = RejectReason::Expired;
+        counter.record(&r);
+        return Err(r);
+    }
+    // Verify-AND-consume: atomically claim the nonce. `Ok(false)` = already burned =
+    // a replay of a still-fresh captured report.
+    match store.burn_federation_nonce(&report.nonce_hex) {
+        Ok(true) => {}
+        Ok(false) => {
+            let r = RejectReason::Replayed;
+            counter.record(&r);
+            return Err(r);
+        }
+        Err(e) => {
+            let r = RejectReason::StoreError(e.to_string());
+            counter.record(&r);
+            return Err(r);
+        }
+    }
+    counter.record_accepted();
+    Ok(report)
+}
+
+/// Registry-backed [`ingest_report`] (#322/#329) — the **replay-safe fleet-deployment**
+/// report path. Resolves the controller's key from the unified [`KeyRegistry`]
+/// (grounded in a STORED registration), then delegates to [`ingest_report`].
+/// Fail-closed: an unresolvable principal is a counted [`RejectReason::BadSignature`].
+pub fn ingest_report_from_registry(
+    store: &mut VerifierStore,
+    bytes: &[u8],
+    principal_id: &str,
+    registry: &KeyRegistry,
+    counter: &RejectionCounter,
+    now_ms: u64,
+) -> Result<FederatedTrustReportV2, RejectReason> {
+    let key_b64 = match registry.resolve_ed25519_pubkey(principal_id, KeyRole::FederationController) {
+        Ok(Some(k)) => B64.encode(k),
+        _ => {
+            let r = RejectReason::BadSignature;
+            counter.record(&r);
+            return Err(r);
+        }
+    };
+    ingest_report(store, bytes, &key_b64, counter, now_ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +677,102 @@ mod core_tests {
         // Verify against an UNRELATED key → bad signature, never accepted.
         let err = accept_report(&bytes, &attacker_pk, &counter).unwrap_err();
         assert_eq!(err, RejectReason::BadSignature);
+    }
+
+    // --- #322: replay-safe report ingest (ingest_report) ---
+
+    #[test]
+    fn report_ingest_accepts_once_and_burns_nonce() {
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+        let report = signed_report(&sk, "robot-01", Some(7)); // issued 1_000, expires 6_000
+        let bytes = encode_report(&report).unwrap();
+
+        let got = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap();
+        assert_eq!(got, report);
+        assert_eq!(counter.snapshot().accepted, 1);
+        // The accepted report burned its nonce — a manual re-burn now returns false.
+        assert!(
+            !store.burn_federation_nonce(&report.nonce_hex).unwrap(),
+            "an accepted report must have burned its nonce"
+        );
+    }
+
+    #[test]
+    fn replayed_report_is_rejected_and_not_re_accepted() {
+        // #322 — THE REPORT REPLAY PROOF: the SAME signed report, captured off the
+        // untrusted carrier and re-delivered while still fresh, is rejected on the
+        // second ingest (its nonce is already burned). accept_report (verify-only)
+        // would have replayed it forever; ingest_report does not.
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+        let report = signed_report(&sk, "robot-07", None);
+        let bytes = encode_report(&report).unwrap();
+
+        ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap();
+        assert_eq!(counter.snapshot().accepted, 1);
+
+        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_002).unwrap_err();
+        assert_eq!(err, RejectReason::Replayed);
+        assert_eq!(counter.snapshot().replayed, 1);
+        assert_eq!(counter.snapshot().accepted, 1, "the replay must NOT count as accepted");
+    }
+
+    #[test]
+    fn expired_report_is_rejected_and_burns_no_nonce() {
+        // An authentic-but-stale report replayed past its freshness window is
+        // rejected and — crucially — does NOT burn its nonce (freshness gates first).
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+        let report = signed_report(&sk, "robot-08", None); // expires_at_ms = 6_000
+        let bytes = encode_report(&report).unwrap();
+
+        let err = ingest_report(&mut store, &bytes, &pk, &counter, 6_001).unwrap_err();
+        assert_eq!(err, RejectReason::Expired);
+        assert_eq!(counter.snapshot().expired, 1);
+        assert!(
+            store.burn_federation_nonce(&report.nonce_hex).unwrap(),
+            "freshness gates before the burn → the nonce must still be free"
+        );
+    }
+
+    #[test]
+    fn report_with_empty_nonce_is_malformed() {
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+        let mut report = signed_report(&sk, "robot-09", None);
+        report.nonce_hex = String::new(); // strip the replay nonce
+        let bytes = encode_report(&report).unwrap();
+
+        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap_err();
+        assert_eq!(err, RejectReason::Malformed("empty nonce_hex".into()));
+        assert_eq!(counter.snapshot().malformed, 1);
+    }
+
+    #[test]
+    fn report_for_controller_a_rejected_as_b() {
+        // A3 — CROSS-CONTROLLER BINDING: a report legitimately signed by
+        // controller-A cannot be re-presented as another controller's. The
+        // source_controller_id is inside the signed canonical payload, so
+        // substituting it breaks the signature → BadSignature, never a nonce burn.
+        let (sk, pk) = keypair();
+        let counter = RejectionCounter::new();
+        let mut store = VerifierStore::new(":memory:").unwrap();
+        let mut report = signed_report(&sk, "robot-A", None);
+        report.source_controller_id = "controller-B".into(); // re-target after signing
+        let bytes = encode_report(&report).unwrap();
+
+        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap_err();
+        assert_eq!(err, RejectReason::BadSignature, "controller-id substitution must break the sig");
+        assert_eq!(counter.snapshot().bad_signature, 1);
+        assert!(
+            store.burn_federation_nonce(&report.nonce_hex).unwrap(),
+            "a rejected report must not have burned its nonce"
+        );
     }
 
     #[test]
