@@ -456,6 +456,12 @@ jobs:
         # parko-ros2 uses untyped r2r subscriptions, so base jazzy is enough (no
         # curated msgs workspace needed). ort `load-dynamic` compiles with no ORT
         # runtime present, so these are clean compile-only gates.
+        #
+        # working-directory: parko — parko-ros2 lives in the SEPARATE parko/
+        # workspace; `-p parko-ros2 --features` from the repo root fails with
+        # "cannot specify features for packages outside of workspace", so run from
+        # the parko workspace root (mirrors the parko-ros2-backends job).
+        working-directory: parko
         run: |
           source /opt/ros/jazzy/setup.bash
           cargo build -p parko-ros2 --bin parko_ros2_node --features ros2,onnx-backend
