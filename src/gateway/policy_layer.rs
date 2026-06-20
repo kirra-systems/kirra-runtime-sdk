@@ -416,7 +416,8 @@ pub async fn enforce_actuator_safety_envelope(
 /// readiness MAY still reflect posture inside its own handler. The full
 /// exemption registry — liveness/observability + the `/console` plane — and the
 /// "`/console` is read-only EXCEPT the supervisor-key-gated grant" invariant are
-/// documented in the safety docs per #306. The set is pinned by
+/// documented in `docs/safety/SECURITY_BOUNDARIES.md` ("Posture-Routing Gate —
+/// the Exemption Registry", #306). The set is pinned by
 /// `console_exemption_set_is_pinned` below.
 fn is_posture_exempt(path: &str) -> bool {
     matches!(path, "/health" | "/health/live" | "/ready" | "/metrics")
