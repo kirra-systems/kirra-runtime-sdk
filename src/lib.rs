@@ -9,6 +9,7 @@
 #![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
 pub mod kirra_core;
+pub mod governor_guard;
 pub mod modbus_adapter;
 pub mod config;
 pub mod kinematics_contract;
