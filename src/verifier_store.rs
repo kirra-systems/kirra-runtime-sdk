@@ -82,6 +82,20 @@ pub struct PendingClearanceGrant {
     pub granted_at_ms: u64,
 }
 
+/// Diagnostic meta for a registered AV subsystem. Read-only projection of the
+/// `av_subsystem_meta` table — no secrets (confidence floor, recovery streak,
+/// last telemetry timestamp).
+#[derive(Debug, Clone)]
+pub struct AvSubsystemRecord {
+    pub node_id: String,
+    pub subsystem_type: String,
+    pub hardware_id: String,
+    pub confidence_floor: f64,
+    pub last_telemetry_ms: u64,
+    pub recovery_streak_count: u32,
+    pub recovery_streak_start_ms: u64,
+}
+
 /// A registered operator (#314 Phase 1). `pubkey_pem` is the PUBLIC key only.
 #[derive(Debug, Clone)]
 pub struct OperatorRecord {
@@ -1498,6 +1512,24 @@ impl VerifierStore {
             .optional()
     }
 
+    /// Read-only listing of every registered operator. `pubkey_pem` is the
+    /// PUBLIC key; the handler exposes only its fingerprint.
+    pub fn load_operators(&self) -> Result<Vec<OperatorRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT operator_id, pubkey_pem, registered_at_ms, revoked_at_ms
+             FROM operators ORDER BY operator_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(OperatorRecord {
+                operator_id: row.get(0)?,
+                pubkey_pem: row.get(1)?,
+                registered_at_ms: row.get::<_, i64>(2)? as u64,
+                revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Append a signed, hash-chained console audit event with **no** other table
     /// write — used for REJECTED clearance attempts (unauthorized / malformed).
     /// The `payload_json` must NEVER contain the supervisor key bytes (outcome +
@@ -2469,6 +2501,28 @@ impl VerifierStore {
         rows.collect()
     }
 
+    /// Read-only listing of every registered AV subsystem's diagnostic meta
+    /// (confidence floor, recovery streak, last telemetry). No secrets.
+    pub fn load_av_subsystems(&self) -> Result<Vec<AvSubsystemRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, subsystem_type, hardware_id, confidence_floor,
+                    last_telemetry_ms, recovery_streak_count, recovery_streak_start_ms
+             FROM av_subsystem_meta ORDER BY node_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AvSubsystemRecord {
+                node_id: row.get(0)?,
+                subsystem_type: row.get(1)?,
+                hardware_id: row.get(2)?,
+                confidence_floor: row.get(3)?,
+                last_telemetry_ms: row.get::<_, i64>(4)? as u64,
+                recovery_streak_count: row.get::<_, i64>(5)? as u32,
+                recovery_streak_start_ms: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn load_recovery_streak(&self, node_id: &str) -> Result<(u32, u64)> {
         match self.conn.query_row(
             "SELECT recovery_streak_count, recovery_streak_start_ms
@@ -3166,6 +3220,32 @@ mod attestation_registry_tests {
 
     fn in_memory() -> VerifierStore {
         VerifierStore::new(":memory:").unwrap()
+    }
+
+    #[test]
+    fn test_load_av_subsystems_lists_registered_rows() {
+        let store = in_memory();
+        store.register_av_subsystem_meta("lidar-1", "Perception", "LIDAR-001", 0.65, 1_000).unwrap();
+        store.register_av_subsystem_meta("radar-1", "Perception", "RADAR-002", 0.70, 2_000).unwrap();
+        store.increment_recovery_streak("lidar-1", 1_500).unwrap();
+        let rows = store.load_av_subsystems().unwrap();
+        assert_eq!(rows.len(), 2);
+        let lidar = rows.iter().find(|r| r.node_id == "lidar-1").unwrap();
+        assert_eq!(lidar.subsystem_type, "Perception");
+        assert_eq!(lidar.hardware_id, "LIDAR-001");
+        assert!((lidar.confidence_floor - 0.65).abs() < 1e-9);
+        assert_eq!(lidar.recovery_streak_count, 1);
+    }
+
+    #[test]
+    fn test_load_operators_lists_registered() {
+        let mut store = in_memory();
+        store.register_operator("op-2", "pem-b", 2_000).unwrap();
+        store.register_operator("op-1", "pem-a", 1_000).unwrap();
+        let ops = store.load_operators().unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().all(|o| o.revoked_at_ms.is_none() && o.is_active()));
+        assert_eq!(ops[0].operator_id, "op-1", "ordered by operator_id");
     }
 
     #[test]
