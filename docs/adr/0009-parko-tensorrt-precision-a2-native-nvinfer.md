@@ -20,6 +20,15 @@ decision-agreement* bound (the TRT-vs-CPU-baseline argmax, with the logit drift 
 is therefore the proportionate evidence; `full_precision_guaranteed()` stays honestly
 `false`, accepted because no safety requirement is allocated to the raw inference output.
 
+For an assessor, the precision decision is **explicitly a consequence of the
+doer/checker independence architecture**, not an isolated numerical judgement: the model
+(doer) proposes; the Governor (checker) — a structurally independent channel with its own
+diverse implementation and its own envelope — disposes. A precision deficiency in the doer
+can degrade *what is proposed* but cannot breach the actuator envelope the checker
+enforces. That is precisely why the inference backend's bit-precision sits **outside** the
+hard safety case, and why A1's measured-agreement evidence is sufficient unless the
+independence argument itself is weakened (see triggers).
+
 **A2 is reconsidered only if a trigger fires** — this acceptance is data-gated, not
 permanent: (1) on a production-representative model the equivalence probe shows TF32-scale
 drift (~1e-3) that flips the governed decision; or (2) a future HARA/DFA allocates a

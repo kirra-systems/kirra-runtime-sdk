@@ -132,13 +132,12 @@ jobs:
       - name: build the onnx + tensorrt backend-selection lanes
         # `parko_ros2::backend_select` compiles exactly ONE backend per feature
         # (mock / onnx / tensorrt), fail-closed, TensorRT taking precedence. The
-        # module is NOT ros2-gated, so these lanes build with no ROS 2 and no ORT
-        # runtime (load-dynamic) — this is the only CI step that compiles the
-        # parko-onnx and parko-tensorrt selection paths in parko-ros2. The mock lane
-        # is already covered by the default-feature workspace test in parko-safety;
-        # the ros2 BINARY call site (main → select_backend, warm_up) remains
-        # uncompiled by CI — tracked as a follow-up (no parko-ros2 --features ros2
-        # build job exists yet).
+        # module is NOT ros2-gated, so these lanes build fast with no ROS 2 and no
+        # ORT runtime (load-dynamic). This compiles the backend_select MODULE; the
+        # ros2 BINARY call site (main → select_backend → build_loop → warm_up) is
+        # compiled by the `ros2-adapter-build` job (jazzy sourced) — together they
+        # cover both halves. The mock lane is covered by the default-feature
+        # workspace test in parko-safety.
         working-directory: parko
         run: |
           cargo build -p parko-ros2 --features onnx-backend
@@ -409,7 +408,7 @@ jobs:
     # Jazzy targets Ubuntu 24.04 (Noble), so pin the runner (the rest of the
     # workflow runs on ubuntu-latest, which is fine for the non-ROS jobs).
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: ros-tooling/setup-ros@v0.7
@@ -446,3 +445,18 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           source ros2_ws/install/setup.bash
           cargo build -p kirra-ros2-adapter --features ros2
+      - name: cargo build parko-ros2 node binary (--features ros2 × backend lanes)
+        # PARK-021 #2: the parko-ros2 node BINARY (main → select_backend →
+        # build_loop → backend.warm_up) is r2r/ros2-gated, so neither
+        # `cargo test --workspace` nor the distro-free `parko-ros2-backends` job
+        # (which builds only the backend_select MODULE) ever compiles it. This is
+        # the ONLY CI step that compiles those call sites — build (not check) the
+        # binary on each PRODUCTION backend lane so the warm_up + fail-closed
+        # backend-selection wiring cannot silently rot (evidence-drift guard).
+        # parko-ros2 uses untyped r2r subscriptions, so base jazzy is enough (no
+        # curated msgs workspace needed). ort `load-dynamic` compiles with no ORT
+        # runtime present, so these are clean compile-only gates.
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          cargo build -p parko-ros2 --bin parko_ros2_node --features ros2,onnx-backend
+          cargo build -p parko-ros2 --bin parko_ros2_node --features ros2,tensorrt-backend

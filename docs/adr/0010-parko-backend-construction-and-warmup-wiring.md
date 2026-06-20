@@ -52,13 +52,16 @@ Two explicit gates, both fail-closed, both must agree:
 
 **Verified:** all three lanes build (`cargo build -p parko-ros2 --features {onnx,tensorrt}-backend`),
 mock-lane tests pass, runtime-isolation guard still passes (the `parko-tensorrt` dep is
-optional, so `parko-ros2` stays off the runtime-dependent list). A new CI job
-(`parko-ros2-backends`) compiles the onnx/tensorrt lanes.
+optional, so `parko-ros2` stays off the runtime-dependent list).
 
-**Remaining open item (pre-existing CI gap, not introduced here):** no CI job builds the
-`parko-ros2` *binary* with `--features ros2`, so the node `main`/`build_loop` call sites
-(this ADR's wiring + #418's warm-up) are not yet compile-checked by CI. A `parko-ros2
---features ros2` build job (ROS 2 env, like the kirra-ros2-adapter job) should be added.
+**CI coverage (both halves, closed in this PR):**
+- `parko-ros2-backends` job — compiles the `backend_select` *module* on the onnx + tensorrt
+  lanes (no ROS 2 / no ORT runtime).
+- `ros2-adapter-build` job (jazzy sourced) — now also builds the `parko_ros2_node` *binary*
+  on the `ros2,onnx-backend` and `ros2,tensorrt-backend` lanes, compiling the node call
+  sites (`main` → `select_backend` → `build_loop` → `warm_up`). This closes the earlier
+  evidence-drift gap: a break in the wiring that makes warm-up real in the node now turns
+  CI red instead of silently passing.
 
 ## Context
 
