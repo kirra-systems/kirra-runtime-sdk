@@ -87,6 +87,12 @@ The PASS gate is **verdict correctness**. The per-row p50/p99/max are
 measured on the QNX 8.0 target under FIFO scheduling (#274)** — host numbers are
 never presented as WCET.
 
+The "QNX 8.0 target" is an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX
+Thor) running DRIVE OS + QNX OS for Safety — **not** a Jetson module (Orin NX / AGX
+Orin / Jetson Thor), which runs L4T/Linux and has no QNX support. The Jetson dev box
+used for the parko inference bring-up therefore cannot produce a `TBD-QNX-TARGET`
+row. See `docs/safety/ASSUMPTIONS_OF_USE.md` → **AOU-HW-QNX-TARGET-001**.
+
 ## The four corrections (vs the original draft)
 
 1. **Sequence check** is `sequence <= last_accepted ⇒ SequenceRegress` (equal IS

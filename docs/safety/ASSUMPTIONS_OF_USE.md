@@ -52,6 +52,7 @@ the verification passes for the target deployment.
 | AOU-LOCALIZATION-001 | Integrator localization ≤ 0.10 m 95th-pct lateral (cross-track) error over the ODD; else the documented 0.75 m conservative-fallback margin | Integrator (localization) | **AoU-GAP** (base) — integrator-characterized; runtime gate live (#123 / PR #264) | `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m` (SG2 ASIL D); all map-anchored SG5 commit-zone enforcement (#260–#262) + the SG4 `MapKnownSafe` earn-back |
 | AOU-CLEARANCE-AUTH-001 | The integrator/verifier shall issue an `OperatorClearanceGrant` ONLY after authenticating the operator (the parko clearance loop enforces structure, not identity) | Integrator (verifier / operations) | **AoU** (by design) — structural loop live (#103 / PR #267); authentication delegated | the SG6 post-collision no-resume (`ClearanceLoop::try_clear` is the only un-latch path); SS-003 human-reset intent |
 | AOU-TIMESYNC-001 | Sensor/message timestamps consumed by governor staleness/deadline validation are synchronized, monotonic, drift-bounded vs the boundary clock domain, and converted to it before publication (HVCHAN §5 non-mixing rule) | Integrator (time sync / platform) | **AoU-GAP** — integrator obligation; drift bound **VALIDATION-PENDING** (set with the FTTI budget, #274/#278) | the governor staleness/deadline barrier (HVCHAN §3 judge; the #271 harness + #273 spike deadline checks); PTP/gPTP expected discharge |
+| AOU-HW-QNX-TARGET-001 | The QNX-resident safety partition and its **certified-WCET** evidence run on an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX Thor) running DRIVE OS + QNX OS for Safety — **NOT** a Jetson module (Orin NX / AGX Orin / Jetson Thor), which runs L4T/Linux and which NVIDIA does **not** support QNX on | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate; vendor-fixed (informational) | the QNX-target WCET / FTTI claim (`TBD-QNX-TARGET`, #274); the EPIC #270 QNX safety-partition lane; ADR `KIRRA_QNX_CROSSCOMPILE` aarch64 path |
 
 ---
 
@@ -963,3 +964,61 @@ filed as an explicit integrator obligation rather than assumed.
   skew cases exercise the §4 rows).
 - **PTP / gPTP** (IEEE 1588 / IEEE 802.1AS) — the **expected** discharge mechanism
   (named, **not** mandated).
+
+---
+
+## AOU-HW-QNX-TARGET-001 — QNX safety partition / certified-WCET target is an NVIDIA DRIVE platform, not Jetson
+
+### Assumption
+
+The deployment whose QNX-resident safety partition is real (EPIC #270) — and, specifically,
+the hardware on which the **certified-WCET** numbers that discharge an FTTI claim are
+measured — is an NVIDIA **DRIVE** platform: **DRIVE AGX Orin** or **DRIVE AGX Thor**,
+running **NVIDIA DRIVE OS** with **QNX OS for Safety** (pre-certified ISO 26262 ASIL-D /
+ISO 21434). It is **not** an NVIDIA **Jetson** module — Jetson Orin NX, Jetson AGX Orin, or
+Jetson Thor — which run **L4T / Jetson Linux** and for which **NVIDIA does not provide or
+support a QNX BSP**.
+
+The naming collides on purpose-of-confusion: "AGX Orin" and "Thor" each name *both* a DRIVE
+(automotive, QNX-capable) part and a Jetson (edge/robotics, Linux-only) part. The
+QNX-capable members are the **DRIVE** ones.
+
+### Why it is load-bearing
+
+The hard invariant of the EPIC #270 timing strategy is **host timing is INDICATIVE, never
+WCET; only QNX-target-under-FIFO numbers feed an FTTI claim** (`WCET_MEASUREMENT_METHODOLOGY`,
+`tools/qnx-rtm-harness`). The "QNX target" in that sentence is therefore a hardware
+precondition, not a build detail: a Jetson dev box (e.g. the Orin NX used for the parko
+inference bring-up) **cannot** produce a certified-WCET row — it runs Linux, not QNX. The
+harness CSV encodes this as the constant `wcet_status = TBD-QNX-TARGET`, which stays TBD
+until DRIVE AGX Orin / Thor hardware exists. Mistaking the Jetson dev box for the QNX target
+would silently substitute host-indicative numbers for WCET evidence — the exact
+evidence-drift the methodology forbids.
+
+### Verification status — **AoU-GAP** (pre-production hardware gate; vendor-fixed)
+
+This is a fixed property of the NVIDIA / QNX product matrix, confirmed 2026-06: QNX OS for
+Safety 8 is integrated in the **DRIVE AGX Thor** developer kit at GA (Aug 2025) and is
+available on **DRIVE AGX Orin** via DRIVE OS; NVIDIA states there is **no plan** to bring
+QNX to the Jetson line. The discharge is procurement (DRIVE hardware), not engineering —
+hence informational, but recorded so the WCET target is never assumed to be the Jetson box.
+
+### Consequence if violated
+
+Presenting Jetson (Linux) timing as the QNX-target WCET would make the FTTI / `TBD-QNX-TARGET`
+claim unsound (host scheduling ≠ QNX FIFO; different SoC, OS, and partition isolation). The
+parko inference work (Linux/Jetson) and the host-indicative harness development are
+**unaffected** — those are correctly Jetson-side; only the certified-WCET evidence step is
+gated on DRIVE hardware.
+
+### Cross-references
+- `tools/qnx-rtm-harness/` (#271/#272) and `QNX_MAPPING.md` — the `TBD-QNX-TARGET` WCET
+  placeholder and the `aarch64-unknown-nto-qnx8_0_0` cross-target.
+- `docs/adr/KIRRA_QNX_CROSSCOMPILE.md` §0 — names the aarch64 QNX tuple "for **DRIVE Orin**
+  later"; the x86-64 prototype runs on a dev host, not a Jetson.
+- `parko/QNX_BACKEND_SELECTION.md` — Jetson is the Linux/off-QNX path ("existing Linux/Jetson
+  users see zero difference"); parko is the guest doer, not QNX-resident, in the reference topology.
+- `WCET_MEASUREMENT_METHODOLOGY` (KIRRA-OCCY-WCET-METH-001, #274) — the host-indicative-vs-WCET rule.
+- **EPIC #270**; **AOU-TIMESYNC-001** (the boundary-clock-domain sibling, also #274/#278).
+- Sources (2026-06): QNX OS for Safety in DRIVE AGX Thor GA; NVIDIA "no QNX on Jetson"
+  (developer forums; DRIVE AGX FAQ).
