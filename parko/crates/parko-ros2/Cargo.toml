@@ -30,7 +30,17 @@ default = []
 
 # Enable the r2r-backed node and the binary entry point. Requires a
 # sourced ROS 2 environment (Humble/Jazzy/Kilted per r2r 0.9.5 support).
-ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures"]
+# Everything this lane touches is BASE-jazzy (sensor_msgs / std_msgs /
+# nav_msgs / geometry_msgs, plus untyped subscriptions whose payload is a
+# `serde_json::Value`), so no curated message workspace is needed.
+ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:serde_json"]
+
+# Opt-in: the DEFERRED typed r2r radar adapter (`radar_scan_msg_to_detections`),
+# which references `r2r::radar_msgs::msg::RadarScan`. `radar_msgs` is NOT a
+# base-jazzy package, so this is gated OUT of the plain `ros2` lane (keeping that
+# lane base-jazzy-only); enable it together with a ROS env that provides
+# `radar_msgs` (e.g. `ros-jazzy-radar-msgs`) when the radar path is wired.
+radar-ros2 = ["ros2"]
 
 # Pull in parko-onnx (the production CPU backend). Optional so the
 # default unit-test lane doesn't require libonnxruntime on the build
@@ -74,6 +84,11 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # futures Stream / StreamExt for consuming r2r's untyped subscription
 # streams in the drain tasks. Same pattern as the adapter.
 futures = { version = "0.3", optional = true }
+
+# r2r's untyped subscriptions/publishers exchange `serde_json::Value`; the node
+# builds the geometry_msgs/Twist envelope with `json!`. ros2-only (the default
+# unit-test lane has no r2r and never touches it), hence optional + the feature.
+serde_json = { version = "1", optional = true }
 
 # Optional ONNX backend. The integrator opts in when ORT is installed.
 parko-onnx = { path = "../parko-onnx", optional = true }
