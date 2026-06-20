@@ -37,6 +37,13 @@ ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures"]
 # host.
 onnx-backend = ["dep:parko-onnx"]
 
+# Pull in parko-tensorrt (the NVIDIA Jetson backend). Optional + load-dynamic,
+# so it builds with no CUDA/TensorRT present (the EP is resolved at runtime,
+# fail-closed). TensorRT takes precedence over onnx-backend when both are on
+# (see backend_select). The on-Jetson install selects this via the installer's
+# `--target tensorrt` (which builds with --features ros2,tensorrt-backend).
+tensorrt-backend = ["dep:parko-tensorrt"]
+
 [dependencies]
 # Shared core (sensor model, scheduler, ControlCommand, SafetyGovernor
 # trait, MockBackend).
@@ -70,6 +77,10 @@ futures = { version = "0.3", optional = true }
 
 # Optional ONNX backend. The integrator opts in when ORT is installed.
 parko-onnx = { path = "../parko-onnx", optional = true }
+
+# Optional TensorRT (Jetson) backend. load-dynamic, so building it needs no
+# CUDA/TRT libs; the EP is resolved against the dlopened ORT at runtime.
+parko-tensorrt = { path = "../parko-tensorrt", optional = true }
 
 [dev-dependencies]
 # State-machine tests use parko-core's MockBackend (no ORT, no ROS).

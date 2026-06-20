@@ -2,12 +2,43 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed** |
+| Status | **Accepted — A1 (ort TRT EP; measured decision-agreement). A2 deferred, data-gated.** |
 | Date | 2026-06-19 |
-| Deciders | Project owner (pending) |
+| Deciders | Project / safety-case owner |
 | Issues | #415 (remaining PARK-021 jetson-gated items), #414 (on-hardware validation, closed) |
 | Code | `parko/crates/parko-tensorrt/src/lib.rs` (`Tf32Control`, `TrtPosture`, `park021_jetson_gated` #3) |
 | Evidence | `tests/tf32_probe.rs`, `tests/equivalence_probe.rs` (Jetson Orin NX, JP6.2, ORT 1.23.0) |
+
+## Decision: A1 accepted
+
+**Stay on A1 (ort TRT EP); do NOT build A2 (native nvinfer) now.** The decisive argument
+is architectural, not just the measured drift: **the Kirra Governor is the independent
+safety channel** — it clamps the actuator to the kinematic envelope regardless of what
+the model emits. So the inference backend's bit-precision bears on *decision quality /
+availability*, **not** the hard safety boundary, which the Governor owns. A *measured
+decision-agreement* bound (the TRT-vs-CPU-baseline argmax, with the logit drift recorded)
+is therefore the proportionate evidence; `full_precision_guaranteed()` stays honestly
+`false`, accepted because no safety requirement is allocated to the raw inference output.
+
+For an assessor, the precision decision is **explicitly a consequence of the
+doer/checker independence architecture**, not an isolated numerical judgement: the model
+(doer) proposes; the Governor (checker) — a structurally independent channel with its own
+diverse implementation and its own envelope — disposes. A precision deficiency in the doer
+can degrade *what is proposed* but cannot breach the actuator envelope the checker
+enforces. That is precisely why the inference backend's bit-precision sits **outside** the
+hard safety case, and why A1's measured-agreement evidence is sufficient unless the
+independence argument itself is weakened (see triggers).
+
+**A2 is reconsidered only if a trigger fires** — this acceptance is data-gated, not
+permanent: (1) on a production-representative model the equivalence probe shows TF32-scale
+drift (~1e-3) that flips the governed decision; or (2) a future HARA/DFA allocates a
+positive full-precision requirement to the inference output itself (then A2 / `kTF32=false`
+is mandatory regardless of measurements), which **supersedes** this ADR.
+
+**Standing obligation:** tonight's supporting data (drift 2.98e-7 ≈ fp32 ε, TF32 not
+engaged) is from MNIST; re-run the trigger-(1) equivalence/TF32 measurement on the
+production-representative model (#415 #4) to confirm A1 holds there — tracked, not blocking
+this acceptance.
 
 ## Context
 

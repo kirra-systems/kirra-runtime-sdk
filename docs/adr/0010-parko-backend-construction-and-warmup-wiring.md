@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Partially accepted** — warm-up *hook* wired; backend *construction* home still open |
+| Status | **Accepted** — warm-up *hook* wired (PR #418) + backend *construction/selection* implemented (`parko_ros2::backend_select`) |
 | Date | 2026-06-19 |
 | Deciders | Project owner (pending on the construction/selection half) |
 | Issues | #415 (PARK-021 #2 — engine warm-up) |
@@ -24,10 +24,44 @@ warm-up was wired as a **lifecycle hook on the `InferenceBackend` trait** instea
 - `parko-ros2`: `build_loop` calls `backend.warm_up(&model)` right after `load_model`,
   **fail-closed** (exit 4) — the node refuses to serve against an unbuilt engine.
 
-No `parko-kirra` factory and no new crate were needed for the hook. The **remaining
-open question** is narrower than first framed: only *where the concrete `TrtBackend`
-gets constructed/selected* in the node (it currently builds only mock / CPU-ORT). The
-trait hook means whoever constructs it gets warm-up for free.
+No `parko-kirra` factory and no new crate were needed for the hook.
+
+## Update 2 (implemented) — backend construction/selection: `parko_ros2::backend_select`
+
+The construction/selection half is now resolved too — as a **compile-time, fail-closed,
+feature-gated** selector in the `parko-ros2` *lib* (NOT ros2-gated, so it builds and is
+CI-verified without a ROS 2 distro):
+
+Two explicit gates, both fail-closed, both must agree:
+
+- **Compile-time (authoritative):** `(no feature)` → `MockBackend` (dev only) ·
+  `onnx-backend` → `parko-onnx OrtBackend` · `tensorrt-backend` → `parko-tensorrt
+  TrtBackend` (takes precedence when both on). Exactly one backend compiles in.
+- **Runtime (operator declaration):** if `PARKO_BACKEND` is set it MUST name the
+  compiled-in backend (`mock` / `onnx` / `tensorrt`, case-insensitive) — else the node
+  refuses to start (`verify_backend_env`). It is a cross-check, never a switch (only one
+  backend is compiled in); it catches "deployed the wrong binary". Unset → the
+  compile-time gate stands. This is the "feature **+** explicit env" selection the project
+  owner chose (PARK-021 Q1).
+- A real backend whose runtime/EP is unavailable returns `Err` and the node REFUSES to
+  start (no silent substitution) — mirrors the installer's explicit `--target` and
+  `parko-core::backend_selector`'s "selection is explicit" rule.
+- `parko_ros2_node::main` calls `select_backend(&model_path)` (fail-closed, exit 2), then
+  `build_loop` calls the `warm_up` hook (fail-closed, exit 4). The installer's
+  `--target tensorrt` maps to building `--features ros2,tensorrt-backend`.
+
+**Verified:** all three lanes build (`cargo build -p parko-ros2 --features {onnx,tensorrt}-backend`),
+mock-lane tests pass, runtime-isolation guard still passes (the `parko-tensorrt` dep is
+optional, so `parko-ros2` stays off the runtime-dependent list).
+
+**CI coverage (both halves, closed in this PR):**
+- `parko-ros2-backends` job — compiles the `backend_select` *module* on the onnx + tensorrt
+  lanes (no ROS 2 / no ORT runtime).
+- `ros2-adapter-build` job (jazzy sourced) — now also builds the `parko_ros2_node` *binary*
+  on the `ros2,onnx-backend` and `ros2,tensorrt-backend` lanes, compiling the node call
+  sites (`main` → `select_backend` → `build_loop` → `warm_up`). This closes the earlier
+  evidence-drift gap: a break in the wiring that makes warm-up real in the node now turns
+  CI red instead of silently passing.
 
 ## Context
 
