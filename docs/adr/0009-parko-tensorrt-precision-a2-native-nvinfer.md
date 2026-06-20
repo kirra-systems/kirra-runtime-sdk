@@ -2,36 +2,38 @@
 
 | Field | Value |
 |---|---|
-| Status | **Accepted — A1 (measured decision-agreement); A2 deferred, data-gated.** Ratify in the safety case. |
+| Status | **Pending safety-case review** — decision deferred to the safety-case owner; neither A1 nor A2 is committed. Engineering recommendation below leans A1, but the choice turns on the certification target's precision allocation. |
 | Date | 2026-06-19 |
-| Deciders | Project owner |
+| Deciders | Safety-case owner (pending) |
 | Issues | #415 (remaining PARK-021 jetson-gated items), #414 (on-hardware validation, closed) |
 | Code | `parko/crates/parko-tensorrt/src/lib.rs` (`Tf32Control`, `TrtPosture`, `park021_jetson_gated` #3) |
 | Evidence | `tests/tf32_probe.rs`, `tests/equivalence_probe.rs` (Jetson Orin NX, JP6.2, ORT 1.23.0) |
 
-## Decision (accepted)
+## Decision: deferred to safety-case review
 
-**Stay on A1 (ort TRT EP); do NOT build A2 (native nvinfer) now.** The decisive
-argument is architectural, not just the measured drift: **the Kirra Governor is the
-independent safety channel** — it clamps the actuator to the kinematic envelope
-regardless of what the model emits. So the inference backend's bit-precision bears on
-*decision quality / availability*, **not** the hard safety boundary, which the Governor
-owns. A *measured decision-agreement* bound (the TRT-vs-CPU-baseline argmax, with the
-logit drift recorded) is therefore the proportionate evidence; `full_precision_guaranteed()`
-stays honestly `false`, and that is acceptable because no safety requirement is allocated
-to the raw inference output.
+This choice is **not** made unilaterally in engineering — it is **flagged for the
+safety-case owner**, because A1-vs-A2 turns on whether the certification target allocates
+a positive full-precision requirement to the raw inference output. Neither option is
+committed until that review lands. The two triggers below frame the decision.
 
-A2 is reconsidered **only** if either trigger fires: (1) on a production-representative
+## Engineering recommendation (input to that review — leans A1)
+
+**Lean A1 (ort TRT EP); don't build A2 (native nvinfer) speculatively.** The argument is
+architectural, not just the measured drift: **the Kirra Governor is the independent
+safety channel** — it clamps the actuator to the kinematic envelope regardless of what
+the model emits. So the inference backend's bit-precision bears on *decision quality /
+availability*, **not** the hard safety boundary, which the Governor owns. *If* the safety
+case concurs that no requirement is allocated to the raw inference output, a *measured
+decision-agreement* bound (the TRT-vs-CPU-baseline argmax, with the logit drift recorded)
+is the proportionate evidence and `full_precision_guaranteed()` stays honestly `false`.
+
+**A2 becomes the answer if either trigger fires:** (1) on a production-representative
 model the equivalence probe shows TF32-scale drift (~1e-3) that flips the governed
-decision; or (2) the safety case explicitly allocates a positive full-precision
-requirement to the inference output itself. Tonight's data (drift 2.98e-7 ≈ fp32 ε,
-TF32 not engaged on MNIST) is consistent with A1; the trigger measurement is re-run when
-a representative model exists.
-
-**Caveat:** this is the engineering decision; it must be **ratified by the safety-case
-owner** against the certification target before it is load-bearing in the assurance
-argument. If a future HARA/DFA allocates a precision requirement to the model output,
-this ADR is superseded by an A2 decision.
+decision; or (2) the safety case allocates a positive full-precision requirement to the
+inference output itself (then A2 / `kTF32=false` is mandatory regardless of measurements).
+Tonight's data (drift 2.98e-7 ≈ fp32 ε, TF32 not engaged on MNIST) is consistent with A1,
+but is from MNIST — the trigger-(1) measurement must be re-run on a representative model
+before the recommendation is load-bearing.
 
 ## Context
 

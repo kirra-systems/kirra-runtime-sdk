@@ -32,11 +32,20 @@ The construction/selection half is now resolved too — as a **compile-time, fai
 feature-gated** selector in the `parko-ros2` *lib* (NOT ros2-gated, so it builds and is
 CI-verified without a ROS 2 distro):
 
-- `(no feature)` → `MockBackend` (dev only) · `onnx-backend` → `parko-onnx OrtBackend`
-  · `tensorrt-backend` → `parko-tensorrt TrtBackend` (takes precedence when both on).
-- Exactly one backend compiles in; a real backend whose runtime/EP is unavailable returns
-  `Err` and the node REFUSES to start (no silent substitution) — mirrors the installer's
-  explicit `--target` and `parko-core::backend_selector`'s "selection is explicit" rule.
+Two explicit gates, both fail-closed, both must agree:
+
+- **Compile-time (authoritative):** `(no feature)` → `MockBackend` (dev only) ·
+  `onnx-backend` → `parko-onnx OrtBackend` · `tensorrt-backend` → `parko-tensorrt
+  TrtBackend` (takes precedence when both on). Exactly one backend compiles in.
+- **Runtime (operator declaration):** if `PARKO_BACKEND` is set it MUST name the
+  compiled-in backend (`mock` / `onnx` / `tensorrt`, case-insensitive) — else the node
+  refuses to start (`verify_backend_env`). It is a cross-check, never a switch (only one
+  backend is compiled in); it catches "deployed the wrong binary". Unset → the
+  compile-time gate stands. This is the "feature **+** explicit env" selection the project
+  owner chose (PARK-021 Q1).
+- A real backend whose runtime/EP is unavailable returns `Err` and the node REFUSES to
+  start (no silent substitution) — mirrors the installer's explicit `--target` and
+  `parko-core::backend_selector`'s "selection is explicit" rule.
 - `parko_ros2_node::main` calls `select_backend(&model_path)` (fail-closed, exit 2), then
   `build_loop` calls the `warm_up` hook (fail-closed, exit 4). The installer's
   `--target tensorrt` maps to building `--features ros2,tensorrt-backend`.
