@@ -153,7 +153,7 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
         // an UNSAFE control state. `last_validated_scalar` is intentionally NOT
         // advanced to a tainted value. (#404 — this scalar/FFI ingress was the one
         // path that treated `NaN` as nominal; the vehicle path already guards.)
-        if !proposed_demand.is_finite() || !dt.is_finite() {
+        if !crate::governor_guard::all_finite(&[proposed_demand, dt]) {
             self.trust_engine.decay_trust(30);
             return GovernorInterceptResult {
                 sanitized_scalar: self.contract.fallback(),

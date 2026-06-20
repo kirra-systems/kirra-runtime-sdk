@@ -25,7 +25,7 @@ pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) 
         // `NaN` would be forwarded to the actuator unclamped (#404). Command zero
         // angular rate and decay trust. (`kirra_filter_move_velocity` is fixed
         // transitively — it routes through `evaluate`'s Priority-0 guard.)
-        if !proposed_angular.is_finite() {
+        if !crate::governor_guard::all_finite(&[proposed_angular]) {
             g.trust_engine.decay_trust(30);
             return 0.0;
         }

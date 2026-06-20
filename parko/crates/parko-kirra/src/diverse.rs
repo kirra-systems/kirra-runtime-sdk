@@ -287,7 +287,7 @@ impl DiverseKirraGovernor {
         // offending field; the comparator compares physical EFFECT (a hard
         // stop is a hard stop), so a single combined guard with a generic
         // reason is the diverse — and equivalent — form.
-        if !v.is_finite() || !current.is_finite() || !delta_time_s.is_finite() {
+        if !kirra_runtime_sdk::governor_guard::all_finite(&[v, current, delta_time_s]) {
             return EnforcementAction::Deny {
                 reason: "DiverseKirraGovernor: non-finite command input — hard stop".to_string(),
             };
