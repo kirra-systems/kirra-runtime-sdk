@@ -18,6 +18,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Cargo network resilience. crates.io downloads on GitHub runners
+# intermittently die with curl "[16] Error in the HTTP2 framing layer"
+# mid-transfer. The repo convention is no rust-cache, so every run fetches
+# from scratch and is fully exposed to the flake. Disabling HTTP/2
+# multiplexing (fall back to HTTP/1.1) removes the framing-layer fault, and
+# the retries absorb any remaining transient blips. Applies to all jobs.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   test:
     name: Test

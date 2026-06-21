@@ -8,6 +8,13 @@ tools/iceoryx2-spike/Cargo.lock
 data/outputs/
 node_modules/
 dashboard/dist/
+
+# Next.js operator-console build artifacts (console/ source is tracked on
+# main; these are generated locally and must never be committed)
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
 __pycache__/
 *.pyc
 *.proptest-regressions
