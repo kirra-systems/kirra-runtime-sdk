@@ -411,7 +411,23 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - uses: ros-tooling/setup-ros@v0.7
+      - id: setup_ros
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+        # setup-ros installs the new `ros2-apt-source` deb, resolving its version
+        # via an UNAUTHENTICATED api.github.com call (60/hr, per shared runner IP).
+        # When that rate-limits, the version comes back empty -> the deb URL 404s
+        # -> `curl --fail` exits 22 -> the action fails. It is transient, so the
+        # first attempt is tolerant and we retry once after a short delay; the
+        # retry is authoritative (a persistent failure still reds the job).
+        continue-on-error: true
+      - name: setup-ros delay before retry (transient ros-apt-source rate-limit)
+        if: steps.setup_ros.outcome == 'failure'
+        run: sleep 90
+      - name: setup-ros (retry)
+        if: steps.setup_ros.outcome == 'failure'
+        uses: ros-tooling/setup-ros@v0.7
         with:
           required-ros-distributions: jazzy
       - name: Build curated message workspace
