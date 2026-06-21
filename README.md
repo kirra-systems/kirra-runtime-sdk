@@ -13,6 +13,22 @@ A distributed runtime legitimacy engine and safety governor for AI-driven roboti
 
 ---
 
+## The Kirra Stack (named components)
+
+The runtime is built as a **doer / checker** architecture — untrusted components *propose*, the governor *disposes*:
+
+| Component | Role |
+|---|---|
+| **Mick** | the LLM brain — System-2 cognition / LLM-as-planner. *Proposes* intent; never touches the actuator. |
+| **Taj** | perception — sensors → the Kirra perception input contract (objects + drivable corridor + per-output health). |
+| **Occy** (`kirra-planner`) | the formal autonomy planner — proposes trajectories the governor checks (Option-B, #131). |
+| **Kirra** | the fail-closed **governor / checker** — the sole authority that may pass a command to an actuator. |
+| **Parko** (`parko-core`) | vendor-neutral ML inference substrate (TensorRT / ONNX / OpenVINO / QNN / …) that Taj's ML phase runs on. |
+
+**The rule:** Mick reasons / Occy plans → they *propose* typed claims → **Kirra** validates against posture + the kinematic envelope + RSS/containment → only a clamped, safe command reaches the chassis. See `docs/adr/0014`–`0015` for the Rosmaster R2 + Jetson Orin NX reference integration.
+
+---
+
 ## AI Safety Integration
 
 Kirra is the enforcement layer that prevents LLM hallucinations from reaching physical actuators — drop it between your AI agent and your robot fleet in minutes.
