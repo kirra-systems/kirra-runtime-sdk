@@ -6,7 +6,7 @@
 | Date | 2026-06-21 |
 | Deciders | Project / safety-case owner |
 | Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
-| Stack | **Taj** (perception) · **Occy** / LLM (planner) · **KIRRA** governor + verifier + console · **Parko** (vendor-neutral inference substrate) |
+| Stack | **Taj** (perception) · **Occy** (planner) / **Mick** (LLM) · **KIRRA** governor + verifier + console · **Parko** (vendor-neutral inference substrate) |
 | Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), ADR-0015 (R2 perception layer), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
@@ -17,7 +17,7 @@ layer, a planner, and KIRRA**, organized as the "Fast vs. Slow" dual-system arch
 
 That dual-system framing maps almost 1:1 onto KIRRA's existing **doer / checker** split:
 
-- **System 2 (slow, QM-domain, untrusted):** perception + planning + LLM reasoning — the
+- **System 2 (slow, QM-domain, untrusted):** perception + planning + Mick (LLM) reasoning — the
   *doer*. Proposes intent.
 - **System 1 (fast, real-time):** motor/servo driver, IMU, the hardwired E-stop.
 - **KIRRA (the boundary between them):** the fail-closed *checker* — the only authority that
@@ -28,14 +28,14 @@ That dual-system framing maps almost 1:1 onto KIRRA's existing **doer / checker*
 Adopt the dual-system stack with **KIRRA as the safety boundary**, under one non-negotiable
 rule that defines the whole integration:
 
-> **The planner/LLM PROPOSES a typed claim; the KIRRA governor DISPOSES; only a validated,
-> clamped command reaches the actuator. The LLM never touches the chassis.**
+> **The planner/Mick PROPOSES a typed claim; the KIRRA governor DISPOSES; only a validated,
+> clamped command reaches the actuator. Mick never touches the chassis.**
 
-Concretely, the proposal path is **not** an `exec()` / dynamic-eval of LLM output. It is:
+Concretely, the proposal path is **not** an `exec()` / dynamic-eval of Mick's output. It is:
 
 ```
-LLM / planner output
-  → action_policy::UnstructuredTextParser   (LLM JSON → a TYPED AgentAction; no code-eval)
+Mick / planner output
+  → action_policy::UnstructuredTextParser   (Mick's JSON → a TYPED AgentAction; no code-eval)
   → action_filter::evaluate_action_claim     (claim vs fleet/node posture)
   → gateway::kinematics_contract::validate_vehicle_command
                                               (Ackermann bicycle-model clamp:
@@ -50,7 +50,7 @@ LLM / planner output
 ```
  SYSTEM 2 — QM / untrusted (Orin NX, slow)
    Perception (Parko: Astra depth + camera → detector via TensorRT backend)
-   Planner    (Occy, or the LLM-as-planner)      → PROPOSES typed ActionClaim / trajectory
+   Planner    (Occy, or Mick the LLM)            → PROPOSES typed ActionClaim / trajectory
  ───────────────────────────────────────────────────────────────────────────
    ▼  (typed claim — NEVER exec())
  ╔═════════════════════════════════════════════════════════════════════════╗
@@ -72,18 +72,18 @@ real state flows out.
 | Stack element | Maps to |
 |---|---|
 | Perception layer — **Taj** | **Taj** produces the KIRRA **perception input contract** — `PerceivedObject` + `Corridor` + `PerceptionOutput`, all **health-bearing** — feeding RSS/SG1, containment/SG2, the PMON derate. Geometric Phase A (no ML) → Parko-ML Phase B. No model yet → fail-closed degraded. **Detail: ADR-0015.** |
-| Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** the LLM-as-planner. KIRRA governs either identically — the brain can swap without touching the safety case. |
+| Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** **Mick** (the LLM). KIRRA governs either identically — the brain can swap without touching the safety case. |
 | Governor / safety | **KIRRA** — `action_filter` + `action_policy` + `kinematics_contract` + RSS/containment. |
 | Ackermann steering | KIRRA's `VehicleKinematicsContract` **already** uses the bicycle model (`a_lat = v²·tan(δ)/L`). Configure it with the R2's wheelbase + steering limits — KIRRA *is* the Ackermann-aware safety translator. |
 | Taj Phase A (lidar / depth, geometric) | **No ML model** — lidar/depth → objects + corridor + health → SG1 RSS + SG2 containment + the `perception_monitor` derate **live on real data without a model**. Taj Phase B = the Parko ML detector. See ADR-0015. |
-| Sensors → three consumers (don't conflate) | Same raw sensors, **three** trust-distinct paths: (1) **LLM text** — System-2 cognition, QM/untrusted, *not* a safety input; (2) **health → verifier `/fleet/diagnostics/report`** → posture / trust / recovery hysteresis; (3) **safety perception** → the KIRRA contract (ADR-0015). |
+| Sensors → three consumers (don't conflate) | Same raw sensors, **three** trust-distinct paths: (1) **Mick (LLM) text** — System-2 cognition, QM/untrusted, *not* a safety input; (2) **health → verifier `/fleet/diagnostics/report`** → posture / trust / recovery hysteresis; (3) **safety perception** → the KIRRA contract (ADR-0015). |
 | Console live data | Register the R2 as a verifier node + report → `/console/runtime|sites|versions|fleet` flip `demo → live` (#394). |
-| E-stop | **request-not-command** (ADR-0013): operator/LLM *requests* stop → governor commands MRC. Plus a hardwired physical E-stop as the certifiable one. |
-| LLM "dream"/personality loop | QM cognition, **off the safety path** — KIRRA does not touch it. |
+| E-stop | **request-not-command** (ADR-0013): operator/Mick *requests* stop → governor commands MRC. Plus a hardwired physical E-stop as the certifiable one. |
+| Mick "dream"/personality loop | QM cognition, **off the safety path** — KIRRA does not touch it. |
 
 ## Rejected alternative (the anti-pattern)
 
-**LLM output `exec()`'d / dynamically evaluated onto the chassis** (the blueprint's "safe
+**Mick's output `exec()`'d / dynamically evaluated onto the chassis** (the blueprint's "safe
 `exec()` loop"). There is no safe `exec()` of model output onto a moving vehicle — a
 hallucination, prompt injection, or malformed block then drives the car. This is precisely the
 failure mode KIRRA exists to remove (*"prevent unsafe commands reaching actuators regardless of
@@ -97,14 +97,14 @@ what an LLM output instructs"*). Forbidden.
   BSP with CUDA / TensorRT (Parko) and the Autoware / `r2r` target. **Not Ubuntu 24.04** — there
   is no Orin JetPack on 24.04, so it loses CUDA/TensorRT (the reason to have the Jetson). The Pi
   governor (no CUDA/ROS2) runs **Pi OS Bookworm + PREEMPT_RT** — OS choice is independent per box.
-- **The tight resource is System 2**, not KIRRA: a **Q4 ~8B LLM (~5–6 GB) + a small TensorRT
+- **The tight resource is System 2**, not KIRRA: **Mick (a Q4 ~8B local LLM, ~5–6 GB) + a small TensorRT
   detector (~1–2 GB) + ROS2 + buffers** fits 16 GB unified but must be managed; a *heavy lidar
-  DNN* run concurrently is where it breaks. The **cloud-bridge for slow LLM reasoning**
+  DNN* run concurrently is where it breaks. The **cloud-bridge for Mick's slow reasoning**
   (e.g. Gemini Flash) keeps local headroom for perception + the real-time path.
 - **Fail-closed covers a slow/cloud brain:** if System 2 stalls or the link drops, the governor
   holds (degraded/MRC). A laggy brain is *safe*, not a crash.
 - Power: Orin NX 10–25 W alongside drive motors on the R2's 12.6 V pack — use `nvpmodel`. Orthogonal to KIRRA.
-- **This stack is NX-16GB-viable *because* it is Parko + Occy/LLM + KIRRA, not Autoware.** Full
+- **This stack is NX-16GB-viable *because* it is Parko + Occy/Mick + KIRRA, not Autoware.** Full
   Autoware Universe would push to AGX Orin; you don't need it — KIRRA governs your own planner.
 
 ## Compute topology — single-box vs. two-box (isolated governor)
@@ -157,17 +157,17 @@ is a **prototype / FFI demonstrator** and a stepping stone to QNX, not the final
 ## Phasing
 
 - **Phase 1 — perception-free, works now.** R2 `cmd_vel` + IMU/heartbeat → register as a
-  verifier node → KIRRA governs `cmd_vel` (Ackermann envelope + posture + LLM-claim filtering)
+  verifier node → KIRRA governs `cmd_vel` (Ackermann envelope + posture + Mick-claim filtering)
   → **live data in the console.** A complete governed-robot loop with no perception model, no
   Autoware, light Jetson load. (A geometric lidar safety buffer can be added here.)
 - **Phase 2 — perception.** Parko runs a detector (TensorRT) → world model → RSS / SG2
   object-aware goals go live (geometric Phase A first, then ML; full detail in **ADR-0015**;
   SG2 live-wiring tracked at #128).
-- **Planner evolution.** LLM-as-planner first (governed), Occy as it matures — identical
+- **Planner evolution.** Mick (LLM) first (governed), Occy as it matures — identical
   governance either way.
 
 ## Status
 
 **Proposed — for owner sign-off** (merge ratifies, as with ADR-0011 / 0012 / 0013). Records the
 **propose→govern→actuate** integration before wiring, so the build can't drift into the
-LLM→`exec()`→actuator anti-pattern. End-to-end validation is hardware-gated (R2 + Orin NX).
+Mick→`exec()`→actuator anti-pattern. End-to-end validation is hardware-gated (R2 + Orin NX).
