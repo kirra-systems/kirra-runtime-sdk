@@ -349,6 +349,18 @@ impl KirraClient {
                 enforced_steering_angle_deg: 0.0,
                 denial_reason: Some("FLEET_LOCKED_OUT".to_string()),
             }),
+            // Degraded posture (or any posture-routing denial) returns 503 from
+            // the outer `enforce_posture_routing` gate before the actuator handler
+            // runs. Treat it like every other deny-shaped response: author an
+            // explicit safe-stop command rather than letting the caller fall to
+            // the Err branch and hold the last commanded velocity (ADR-0011 #405
+            // safety floor — every deny authors a safe command).
+            503 => Ok(MotionCommandResponse {
+                action: "DenyBreach".to_string(),
+                enforced_linear_velocity_mps: 0.0,
+                enforced_steering_angle_deg: 0.0,
+                denial_reason: Some("POSTURE_ROUTING_DENIED".to_string()),
+            }),
             s => Err(format!("submit_motion_command: unexpected status {s}")),
         }
     }
