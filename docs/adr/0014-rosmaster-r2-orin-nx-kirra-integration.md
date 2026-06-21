@@ -93,6 +93,10 @@ what an LLM output instructs"*). Forbidden.
 
 - **KIRRA's footprint is ~zero** — Rust, no ROS/tokio in the governor core; it adds nothing to
   the compute/memory budget.
+- **OS / software stack:** Orin NX → **JetPack 6.x (Ubuntu 22.04) + ROS2 Humble** — the supported
+  BSP with CUDA / TensorRT (Parko) and the Autoware / `r2r` target. **Not Ubuntu 24.04** — there
+  is no Orin JetPack on 24.04, so it loses CUDA/TensorRT (the reason to have the Jetson). The Pi
+  governor (no CUDA/ROS2) runs **Pi OS Bookworm + PREEMPT_RT** — OS choice is independent per box.
 - **The tight resource is System 2**, not KIRRA: a **Q4 ~8B LLM (~5–6 GB) + a small TensorRT
   detector (~1–2 GB) + ROS2 + buffers** fits 16 GB unified but must be managed; a *heavy lidar
   DNN* run concurrently is where it breaks. The **cloud-bridge for slow LLM reasoning**
