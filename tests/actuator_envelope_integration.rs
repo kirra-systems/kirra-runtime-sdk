@@ -42,6 +42,7 @@ fn build_state_with_posture(posture: FleetPosture) -> Arc<ServiceState> {
     Arc::new(ServiceState {
         app,
         posture_cache,
+        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -461,6 +462,7 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
     let svc = Arc::new(ServiceState {
         app: app_state,
         posture_cache,
+        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -514,6 +516,7 @@ async fn test_perception_cap_enabled_stale_controlled_stop() {
     let svc = Arc::new(ServiceState {
         app: app_state,
         posture_cache,
+        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -569,6 +572,7 @@ fn build_state_with_capture()
     let svc = Arc::new(ServiceState {
         app,
         posture_cache,
+        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
