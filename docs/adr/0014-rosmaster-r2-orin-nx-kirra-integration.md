@@ -7,7 +7,7 @@
 | Deciders | Project / safety-case owner |
 | Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
 | Stack | Perception (Parko) · Planner (Occy / LLM) · KIRRA governor + verifier + console |
-| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
+| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), ADR-0015 (R2 perception layer), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
 
@@ -71,12 +71,12 @@ real state flows out.
 
 | Stack element | Maps to |
 |---|---|
-| Perception layer | **Parko** (`parko-core` vendor-neutral inference; TensorRT backend on the Orin). No model yet → absent perception → KIRRA fail-closes to degraded/MRC (safe). |
+| Perception layer | **Parko** (`parko-core` / TensorRT) for ML + a geometric Phase-A layer. Produces the KIRRA **perception input contract** — `PerceivedObject` + `Corridor` + `PerceptionOutput`, all **health-bearing** — feeding RSS/SG1, containment/SG2, the PMON derate. No model yet → fail-closed degraded. **Detail: ADR-0015.** |
 | Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** the LLM-as-planner. KIRRA governs either identically — the brain can swap without touching the safety case. |
 | Governor / safety | **KIRRA** — `action_filter` + `action_policy` + `kinematics_contract` + RSS/containment. |
 | Ackermann steering | KIRRA's `VehicleKinematicsContract` **already** uses the bicycle model (`a_lat = v²·tan(δ)/L`). Configure it with the R2's wheelbase + steering limits — KIRRA *is* the Ackermann-aware safety translator. |
-| Lidar safety buffer | A **geometric** distance buffer needs **no ML model** — feed it now as an RSS / `perception_monitor` speed-derate input. ML object detection is the Parko-model phase. |
-| IMU / sensor health | Feed System 2's world model **and** the verifier `/fleet/diagnostics/report` → drives posture / trust / recovery hysteresis. |
+| Lidar / depth perception (Phase A) | **Geometric, no ML model** — lidar/depth → objects + corridor + health → SG1 RSS + SG2 containment + the `perception_monitor` derate **live on real data without a model**. ML object detection (Parko) is Phase B. See ADR-0015. |
+| Sensors → three consumers (don't conflate) | Same raw sensors, **three** trust-distinct paths: (1) **LLM text** — System-2 cognition, QM/untrusted, *not* a safety input; (2) **health → verifier `/fleet/diagnostics/report`** → posture / trust / recovery hysteresis; (3) **safety perception** → the KIRRA contract (ADR-0015). |
 | Console live data | Register the R2 as a verifier node + report → `/console/runtime|sites|versions|fleet` flip `demo → live` (#394). |
 | E-stop | **request-not-command** (ADR-0013): operator/LLM *requests* stop → governor commands MRC. Plus a hardwired physical E-stop as the certifiable one. |
 | LLM "dream"/personality loop | QM cognition, **off the safety path** — KIRRA does not touch it. |
@@ -161,7 +161,8 @@ is a **prototype / FFI demonstrator** and a stepping stone to QNX, not the final
   → **live data in the console.** A complete governed-robot loop with no perception model, no
   Autoware, light Jetson load. (A geometric lidar safety buffer can be added here.)
 - **Phase 2 — perception.** Parko runs a detector (TensorRT) → world model → RSS / SG2
-  object-aware goals go live (SG2 live-wiring tracked at #128).
+  object-aware goals go live (geometric Phase A first, then ML; full detail in **ADR-0015**;
+  SG2 live-wiring tracked at #128).
 - **Planner evolution.** LLM-as-planner first (governed), Occy as it matures — identical
   governance either way.
 
