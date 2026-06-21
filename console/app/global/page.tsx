@@ -6,12 +6,18 @@ import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { DemoBadge } from '@/components/ui/demo-badge'
 import { GlobalMap } from '@/components/ui/global-map'
 import { sites, weatherZones, geofences, crossSiteAlerts, regionRisk, totals } from '@/lib/global'
+import { useSites } from '@/lib/api/hooks'
 import type { Tone } from '@/lib/types'
 
 export default function GlobalPage() {
   const [heatmap, setHeatmap] = useState(true)
   const [risk, setRisk] = useState(true)
   const [network, setNetwork] = useState(false)
+  // Live fleet-distribution rollup (GET /console/sites, #397). Only the Fleet
+  // Distribution panel is wired; the map / weather / geofence overlays stay mock
+  // (out of #397 mandate).
+  const { data: siteData, source: siteSource } = useSites(15000)
+  const liveTotal = siteData.sites.reduce((a, s) => a + s.total, 0) + siteData.unassigned
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-6 p-6">
@@ -102,18 +108,35 @@ export default function GlobalPage() {
           </div>
         </Panel>
 
-        <Panel title="Fleet Distribution" subtitle="assets by site" dense>
+        <Panel
+          title="Fleet Distribution"
+          subtitle="nodes by site · posture rollup"
+          action={siteSource === 'live' ? <Pill tone="safe">live</Pill> : <Pill tone="warn">demo</Pill>}
+          dense
+        >
           <ul className="px-4 py-2">
-            {sites.map((s) => (
-              <li key={s.id} className="border-b border-line py-3 last:border-0">
+            {siteData.sites.map((s) => {
+              const tone: Tone = s.lockedout > 0 ? 'crit' : s.degraded > 0 ? 'warn' : 'safe'
+              return (
+                <li key={s.site} className="border-b border-line py-3 last:border-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-2 text-[12px] text-ink"><StatusDot tone={tone} />{s.site}</span>
+                    <span className="font-mono text-[11px] text-muted">{s.total}</span>
+                  </div>
+                  <div className="mt-2"><Meter value={liveTotal ? (s.total / liveTotal) * 100 : 0} tone={tone} /></div>
+                  <div className="mt-1 font-mono text-[10px] text-faint">{s.nominal} nominal · {s.degraded} degraded · {s.lockedout} locked out</div>
+                </li>
+              )
+            })}
+            {siteData.unassigned > 0 && (
+              <li className="border-b border-line py-3 last:border-0">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="flex items-center gap-2 text-[12px] text-ink"><StatusDot tone={s.tone} />{s.name}</span>
-                  <span className="font-mono text-[11px] text-muted">{s.assets}</span>
+                  <span className="flex items-center gap-2 text-[12px] text-ink"><StatusDot tone="muted" />Unassigned</span>
+                  <span className="font-mono text-[11px] text-muted">{siteData.unassigned}</span>
                 </div>
-                <div className="mt-2"><Meter value={(s.assets / totals.assets) * 100} tone={s.tone} /></div>
-                <div className="mt-1 font-mono text-[10px] text-faint">{s.weather} · net {s.network} · {s.interventions} interventions/24h</div>
+                <div className="mt-1 font-mono text-[10px] text-faint">nodes with no site assignment</div>
               </li>
-            ))}
+            )}
           </ul>
         </Panel>
       </div>

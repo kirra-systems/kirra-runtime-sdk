@@ -116,6 +116,80 @@ export interface FabricState {
   computed_at_ms: number
 }
 
+// Console runtime health — GET /console/runtime (#395). Single-snapshot view of
+// the verifier's operational state: mode, uptime, posture-engine generation /
+// cache, fabric denial rate, audit size, SSE subscribers, HA heartbeat age.
+export interface ConsoleRuntime {
+  mode: 'Active' | 'PassiveStandby'
+  uptime_ms: number
+  posture_generation: number
+  last_recalc_ms: number
+  posture_cache_ttl_ms: number
+  total_nodes: number
+  fabric_assets: number
+  fabric_denial_rate: number
+  audit_entries: number
+  broadcast_subscribers: number
+  ha_heartbeat_age_ms: number | null
+}
+
+// Console analytics — GET /console/analytics?window_ms= (#396). Historical
+// (NOT forecast) trend series over the requested window: bucketed posture
+// transitions, denial-rate series, per-asset interventions, and flapping nodes.
+export interface PostureTransitionBucket {
+  bucket_start_ms: number
+  to_degraded: number
+  to_lockedout: number
+  to_nominal: number
+}
+export interface DenialRatePoint {
+  bucket_start_ms: number
+  denial_rate: number
+}
+export interface InterventionByAsset {
+  asset_id: string
+  clamps: number
+  denies: number
+}
+export interface FlappingNode {
+  node_id: string
+  transitions: number
+}
+export interface ConsoleAnalytics {
+  window_ms: number
+  posture_transitions: PostureTransitionBucket[]
+  denial_rate_series: DenialRatePoint[]
+  interventions_by_asset: InterventionByAsset[]
+  flapping_top: FlappingNode[]
+}
+
+// Console site distribution — GET /console/sites (#397). Fleet posture rolled up
+// per site, plus the count of nodes with no site assignment.
+export interface SiteDistribution {
+  site: string
+  total: number
+  nominal: number
+  degraded: number
+  lockedout: number
+}
+export interface ConsoleSites {
+  sites: SiteDistribution[]
+  unassigned: number
+}
+
+// Console version adoption — GET /console/versions (#398). Software-version
+// share across the fleet, plus the nodes reporting an unknown version.
+export interface VersionShareEntry {
+  version: string
+  count: number
+  pct: number
+}
+export interface ConsoleVersions {
+  versions: VersionShareEntry[]
+  total: number
+  unknown: number
+}
+
 export function trustLabel(s: NodeTrustState): string {
   return typeof s === 'string' ? s : 'Untrusted'
 }

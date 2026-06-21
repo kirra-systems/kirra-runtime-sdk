@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { kirra, DemoMode } from './client'
-import type { AuditEntry, AuditVerify, AssetPosture, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
+import type { AuditEntry, AuditVerify, AssetPosture, ConsoleAnalytics, ConsoleRuntime, ConsoleSites, ConsoleVersions, FabricTelemetry, FederatedReport, FleetNodePosture, FleetPostureState, NodeHistoryEntry, PostureStreamEvent } from './types'
 import { robots } from '@/lib/mock'
 import { log as demoEvents, sources as demoSources } from '@/lib/events'
 import { incidents as demoIncidents } from '@/lib/incidents'
@@ -24,7 +24,7 @@ export type LinkStatus = 'connecting' | 'ok' | 'down' | 'demo'
 const isDemo = (e: unknown) => e instanceof DemoMode
 const isAbort = (e: unknown) => (e as { name?: string })?.name === 'AbortError'
 
-// ── Demo fallbacks (shaped exactly like the wire types) ────────────────────
+// ── Demo fallbacks (shaped exactly like the wire types) ─────────────────────
 function demoFleet(): FleetNodePosture[] {
   return robots.map((r) => ({
     node_id: r.name,
@@ -62,7 +62,7 @@ function mkEvent(p: FleetNodePosture, type: string): PostureStreamEvent {
   return { event_type: type, node_id: p.node_id, emitted_at_ms: Date.now(), posture: p }
 }
 
-// ── Hooks ─────────────────────────────────────────────────
+// ── Hooks ────────────────────────────────────
 
 // Polls /health through the proxy for the shell connection indicator.
 export function useHealth(pollMs = 10000): { status: LinkStatus } {
@@ -532,4 +532,184 @@ export function useDecisions(limit = 60): { recent: DecisionRow[]; tally: Decisi
   }, [limit])
 
   return { recent, tally, source }
+}
+
+// ── Console aggregate endpoints (#394) ───────────────────────────────
+// Four read-only console rollups served by the verifier. Each follows the same
+// poll/abort/demo-fallback shape as the hooks above: a bundled demo snapshot is
+// the initial state and the fallback whenever the proxy is in demo mode or the
+// backend is unreachable.
+
+// Runtime health — GET /console/runtime (#395). Operational snapshot of the
+// verifier: mode, uptime, posture generation/cache, fabric denial rate, etc.
+const DEMO_RUNTIME: ConsoleRuntime = {
+  mode: 'Active',
+  uptime_ms: 1000 * 60 * 60 * 73 + 1000 * 60 * 14,
+  posture_generation: 4471,
+  last_recalc_ms: Date.now() - 2200,
+  posture_cache_ttl_ms: 5000,
+  total_nodes: 38,
+  fabric_assets: 8,
+  fabric_denial_rate: 0.012,
+  audit_entries: 184220,
+  broadcast_subscribers: 3,
+  ha_heartbeat_age_ms: 1840,
+}
+
+export function useRuntimeHealth(pollMs = 8000): { data: ConsoleRuntime; source: Source } {
+  const [data, setData] = useState<ConsoleRuntime>(DEMO_RUNTIME)
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const r = await kirra.runtime(ctrl.signal)
+        setData(r); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setSource('demo'); return }
+        setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [pollMs])
+
+  return { data, source }
+}
+
+// Analytics — GET /console/analytics?window_ms= (#396). Historical trend (NOT a
+// forecast): bucketed posture transitions, denial-rate series, per-asset
+// interventions, flapping nodes over the requested window.
+function demoAnalytics(windowMs: number): ConsoleAnalytics {
+  const now = Date.now()
+  const buckets = 12
+  const step = Math.max(1, Math.floor(windowMs / buckets))
+  const posture_transitions = Array.from({ length: buckets }).map((_, i) => ({
+    bucket_start_ms: now - (buckets - i) * step,
+    to_degraded: Math.round(Math.abs(Math.sin(i / 2)) * 3),
+    to_lockedout: i % 5 === 0 ? 1 : 0,
+    to_nominal: Math.round(Math.abs(Math.cos(i / 2)) * 3),
+  }))
+  const denial_rate_series = Array.from({ length: buckets }).map((_, i) => ({
+    bucket_start_ms: now - (buckets - i) * step,
+    denial_rate: Math.round((0.008 + Math.abs(Math.sin(i / 3)) * 0.02) * 1000) / 1000,
+  }))
+  return {
+    window_ms: windowMs,
+    posture_transitions,
+    denial_rate_series,
+    interventions_by_asset: [
+      { asset_id: 'KIRRA-13', clamps: 14, denies: 6 },
+      { asset_id: 'KIRRA-10', clamps: 9, denies: 2 },
+      { asset_id: 'KIRRA-09', clamps: 3, denies: 0 },
+    ],
+    flapping_top: [
+      { node_id: 'KIRRA-13', transitions: 11 },
+      { node_id: 'KIRRA-10', transitions: 5 },
+    ],
+  }
+}
+
+export function useAnalytics(windowMs = 30 * 24 * 60 * 60 * 1000, pollMs = 30000): { data: ConsoleAnalytics; source: Source } {
+  const [data, setData] = useState<ConsoleAnalytics>(() => demoAnalytics(windowMs))
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const a = await kirra.analytics(windowMs, ctrl.signal)
+        setData(a); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setData(demoAnalytics(windowMs)); setSource('demo'); return }
+        setData(demoAnalytics(windowMs)); setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [windowMs, pollMs])
+
+  return { data, source }
+}
+
+// Site distribution — GET /console/sites (#397). Fleet posture rolled up per
+// site, plus the count of nodes with no site assignment.
+const DEMO_SITES: ConsoleSites = {
+  sites: [
+    { site: 'San Francisco', total: 142, nominal: 131, degraded: 9, lockedout: 2 },
+    { site: 'Austin', total: 88, nominal: 86, degraded: 2, lockedout: 0 },
+    { site: 'Rotterdam', total: 64, nominal: 63, degraded: 1, lockedout: 0 },
+    { site: 'Singapore', total: 51, nominal: 47, degraded: 4, lockedout: 0 },
+    { site: 'Tokyo', total: 37, nominal: 36, degraded: 1, lockedout: 0 },
+  ],
+  unassigned: 0,
+}
+
+export function useSites(pollMs = 15000): { data: ConsoleSites; source: Source } {
+  const [data, setData] = useState<ConsoleSites>(DEMO_SITES)
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const s = await kirra.sites(ctrl.signal)
+        setData(s); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setSource('demo'); return }
+        setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [pollMs])
+
+  return { data, source }
+}
+
+// Version adoption — GET /console/versions (#398). Software-version share across
+// the fleet, plus the nodes reporting an unknown version.
+const DEMO_VERSIONS: ConsoleVersions = {
+  versions: [
+    { version: 'v2.4.1', count: 271, pct: 71 },
+    { version: 'v2.4.0', count: 99, pct: 26 },
+    { version: 'v2.3.6', count: 11, pct: 3 },
+  ],
+  total: 382,
+  unknown: 1,
+}
+
+export function useVersions(pollMs = 20000): { data: ConsoleVersions; source: Source } {
+  const [data, setData] = useState<ConsoleVersions>(DEMO_VERSIONS)
+  const [source, setSource] = useState<Source>('demo')
+
+  useEffect(() => {
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const load = async () => {
+      try {
+        const v = await kirra.versions(ctrl.signal)
+        setData(v); setSource('live')
+        timer = setTimeout(load, pollMs)
+      } catch (e) {
+        if (isAbort(e)) return
+        if (isDemo(e)) { setSource('demo'); return }
+        setSource('demo'); timer = setTimeout(load, pollMs)
+      }
+    }
+    load()
+    return () => { ctrl.abort(); clearTimeout(timer) }
+  }, [pollMs])
+
+  return { data, source }
 }
