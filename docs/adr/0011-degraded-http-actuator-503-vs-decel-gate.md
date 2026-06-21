@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | **Open** — decision pending owner HARA/DFA + ADR sign-off. Not a free A-vs-B choice (see Finding). |
-| Date | 2026-06-20 |
-| Deciders | Project / safety-case owner (pending) |
-| Issues | #405 (this), #406 (sequenced behind — MRC divergence), #70 (Degraded decel-to-stop-and-HOLD design) |
+| Status | **Proposed resolution (2026-06-21)** — owner direction set; ratified on merge. Supersedes the prior "Open / deferred" status (see Decision). |
+| Date | 2026-06-20 (finding) · 2026-06-21 (resolution) |
+| Deciders | Project / safety-case owner |
+| Issues | #405 (this), #406 (sequenced behind — MRC divergence, ADR-0012), #70 (Degraded decel-to-stop-and-HOLD design) |
 | Code | `src/bin/kirra_verifier_service.rs` (router assembly), `src/gateway/policy_layer.rs`, `src/posture_cache.rs` (`should_route_command`), `src/bin/kirra_carla_client.rs` (the actuator consumer) |
 
 ## Context
@@ -58,7 +58,9 @@ catch-all `Err`, and the consumer holds the last command (no decel). The ROS int
 Degraded command is denied with 503 and **nothing converts that to a decel-to-stop** — the
 vehicle holds its pre-Degraded speed until a separate watchdog fires. That is the **opposite**
 of Issue #70's intent (Cruise SF Oct-2023 pullover-drag lesson) and a latent hazard. So this
-is **not** a free choice between A and B — there is a **gap to close** regardless.
+is **not** a free choice between A and B — there is a **gap to close** regardless. The client
+*creates* the no-command condition on 503 (it does not resolve it), whereas on 400/403 it
+actively authors a zero command — an asymmetry in the consumer's deny handling.
 
 ## Options (owner decision)
 
@@ -86,13 +88,42 @@ becomes live under Option A (or any non-HTTP caller). Reconciling it needs (a) a
 authoritative-MRC decision and (b) **per-platform derate factors derived from the HARA /
 safety case** — the 5.0 m/s figure is load-bearing (CLAUDE.md / `SAFE_STATE_SPECIFICATION`
 SS-002) and must not be chosen for convenience. #406 stays blocked behind #405 and its numbers
-come from the safety case.
+come from the safety case. The #406 decision is recorded in **ADR-0012**.
 
 ## Decision
 
-**Deferred to the safety-case owner** (HARA/DFA + ADR sign-off). The verified finding above —
-not an opinion — is the input: the conservative interim reading is that the gap (503 →
-hold-last-command, no decel) should be closed regardless of A vs B⁺, but even the stopgap
-(consumers fail-closed to a stop on 503) is a behavioral change pending owner direction. This
-ADR exists so that "why does Degraded deny the HTTP actuator path?" has a recorded answer for
-an assessor, and so the relaxation of a deliberate invariant is never done silently.
+> The prior status was **Open / deferred to the safety-case owner**. The owner direction below
+> was set on 2026-06-21 following the verified egress trace; **merging this ADR ratifies it.**
+> A deliberate fail-closed invariant is never relaxed silently — the decision lives here, in
+> the open, for any assessor reading the trail.
+
+**Resolution (2026-06-21) — owner direction:**
+
+1. **The `503 → controlled-stop` consumer fix is the SAFETY FLOOR — do it first, independent
+   of A vs B.** Map `503` in the actuator consumer to an `enforced 0.0 / 0.0` controlled stop,
+   exactly as `400` / `403` already are (`src/bin/kirra_carla_client.rs`, and the production
+   interceptor as its mirror). This removes the hazard **at the layer the kernel controls**,
+   restores the consumer invariant *"every deny-shaped response authors a safe command,"* and
+   does **not** depend on the integrator-owned DBW. It is correct under either A or B and is
+   therefore not an A/B question — it is just correct.
+2. **Option A becomes a follow-on DESIGN choice, not a safety requirement.** Once the consumer
+   safe-stops on 503, A only upgrades a flat-zero stop to a richer *converging-decel* stop. If
+   adopted it is still HARA/DFA-gated (it relaxes the documented "Degraded = ReadTelemetry
+   only" invariant), but it is no longer load-bearing for the safety floor.
+3. **Bare B (document the 503 contract + annotate dead branches, no consumer fix) is
+   REJECTED.** It parks the hazard on the unconfirmed DBW no-fresh-command watchdog (Dataspeed
+   command-freshness spec) — an integrator/hardware assumption, not a kernel guarantee.
+4. **DBW watchdog = defense-in-depth, not the safety floor.** Confirm the Dataspeed
+   command-freshness behavior and record it as an Assumption of Use, but the `503 → 0.0` fix
+   is what lets the safety case stop depending on it.
+
+**Evidence:** the verified in-repo egress trace (Finding above) — full four-way client trace
+and the contrast with the fail-safe ROS2/parko path (which publishes an affirmative MRC
+command on any deny, but bypasses the HTTP posture gate) is recorded on issue #405:
+https://github.com/kirra-systems/kirra-runtime-sdk/issues/405#issuecomment-4761893645
+
+**Still required either way:** the assembled-router (`build_app`) Degraded actuator test, and
+the CLAUDE.md "wired at all four points" correction.
+
+**Implementation** (the consumer `503 → 0.0` fix + the test) lands from a laptop (large
+governor sources; web `git push` unavailable). This ADR records the decision, which does not.
