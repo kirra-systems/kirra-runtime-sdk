@@ -23,6 +23,13 @@ That dual-system framing maps almost 1:1 onto KIRRA's existing **doer / checker*
 - **KIRRA (the boundary between them):** the fail-closed *checker* — the only authority that
   may pass a command to System 1.
 
+## Scope boundary — robotics lane vs. NSF Phase I
+
+**Mick / Taj / Linux** constitute the **robotics-product lane** (development + demonstration).
+The **NSF Phase I scope** is exactly two planners — **Occy** (classical) + **TCP** (neural) —
+governed by the **Kirra checker** on **CARLA + Jetson Orin / QNX**. These are **distinct lanes**;
+the Phase I safety artifact is the **Kirra checker on QNX**, not the Linux / Pi demonstrator.
+
 ## Decision
 
 Adopt the dual-system stack with **KIRRA as the safety boundary**, under one non-negotiable
