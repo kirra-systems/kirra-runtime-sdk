@@ -6,7 +6,7 @@
 | Date | 2026-06-21 |
 | Deciders | Project / safety-case owner |
 | Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
-| Stack | Perception (Parko) · Planner (Occy / LLM) · KIRRA governor + verifier + console |
+| Stack | **Taj** (perception) · **Occy** / LLM (planner) · **KIRRA** governor + verifier + console · **Parko** (vendor-neutral inference substrate) |
 | Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), ADR-0015 (R2 perception layer), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
@@ -71,11 +71,11 @@ real state flows out.
 
 | Stack element | Maps to |
 |---|---|
-| Perception layer | **Parko** (`parko-core` / TensorRT) for ML + a geometric Phase-A layer. Produces the KIRRA **perception input contract** — `PerceivedObject` + `Corridor` + `PerceptionOutput`, all **health-bearing** — feeding RSS/SG1, containment/SG2, the PMON derate. No model yet → fail-closed degraded. **Detail: ADR-0015.** |
+| Perception layer — **Taj** | **Taj** produces the KIRRA **perception input contract** — `PerceivedObject` + `Corridor` + `PerceptionOutput`, all **health-bearing** — feeding RSS/SG1, containment/SG2, the PMON derate. Geometric Phase A (no ML) → Parko-ML Phase B. No model yet → fail-closed degraded. **Detail: ADR-0015.** |
 | Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** the LLM-as-planner. KIRRA governs either identically — the brain can swap without touching the safety case. |
 | Governor / safety | **KIRRA** — `action_filter` + `action_policy` + `kinematics_contract` + RSS/containment. |
 | Ackermann steering | KIRRA's `VehicleKinematicsContract` **already** uses the bicycle model (`a_lat = v²·tan(δ)/L`). Configure it with the R2's wheelbase + steering limits — KIRRA *is* the Ackermann-aware safety translator. |
-| Lidar / depth perception (Phase A) | **Geometric, no ML model** — lidar/depth → objects + corridor + health → SG1 RSS + SG2 containment + the `perception_monitor` derate **live on real data without a model**. ML object detection (Parko) is Phase B. See ADR-0015. |
+| Taj Phase A (lidar / depth, geometric) | **No ML model** — lidar/depth → objects + corridor + health → SG1 RSS + SG2 containment + the `perception_monitor` derate **live on real data without a model**. Taj Phase B = the Parko ML detector. See ADR-0015. |
 | Sensors → three consumers (don't conflate) | Same raw sensors, **three** trust-distinct paths: (1) **LLM text** — System-2 cognition, QM/untrusted, *not* a safety input; (2) **health → verifier `/fleet/diagnostics/report`** → posture / trust / recovery hysteresis; (3) **safety perception** → the KIRRA contract (ADR-0015). |
 | Console live data | Register the R2 as a verifier node + report → `/console/runtime|sites|versions|fleet` flip `demo → live` (#394). |
 | E-stop | **request-not-command** (ADR-0013): operator/LLM *requests* stop → governor commands MRC. Plus a hardwired physical E-stop as the certifiable one. |
