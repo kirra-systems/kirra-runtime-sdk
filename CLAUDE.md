@@ -237,10 +237,17 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
   (c) no re-initiation — if `|current| <= STOP_EPSILON_MPS` (0.05), any `|proposed| > STOP_EPSILON_MPS`
   → `DenyCode::DegradedReinitiationDenied` (HOLD at zero); a reversal through a stop is also re-initiation.
 - A denied command → MRC controlled stop; the Governor never authors re-acceleration.
-- Wired at ALL four enforcement points: gateway `enforce_actuator_safety_envelope`,
+- Implemented at four enforcement points: gateway `enforce_actuator_safety_envelope`,
   fabric `AssetGovernor::evaluate_command`, ros2-adapter `validate_trajectory_slow`,
   parko-kirra `KirraGovernor::apply_mrc_profile` (the last also gates an independent
-  angular-velocity channel via `STOP_EPSILON_RAD_S` for differential drive).
+  angular-velocity channel via `STOP_EPSILON_RAD_S` for differential drive). **REACHABILITY
+  CAVEAT (#405 / ADR-0011):** the three *direct* callers (fabric / parko-kirra / ros2-adapter)
+  invoke the gate directly and ARE reachable. The gateway `enforce_actuator_safety_envelope`
+  branch is currently **UNREACHABLE on the HTTP `/actuator/motion/command` path** — the outer
+  `enforce_posture_routing` gate 503s Degraded `WriteState` before the inner envelope runs, so
+  the decel-to-stop branch is dead code there. Resolution recorded in ADR-0011 (the `503 → 0.0`
+  consumer fix is the safety floor; relaxing the outer gate is a follow-on design choice). Do
+  not cite the gateway HTTP path as a live decel-to-stop enforcement point until that lands.
 - The Nominal WCET-critical `validate_vehicle_command` path is UNCHANGED.
 - "MRC" disambiguation: Degraded MRC = decel-to-stop *envelope* (bounds a converging
   command); LockedOut MRC fallback = safe-stop *maneuver* (all commands denied).
