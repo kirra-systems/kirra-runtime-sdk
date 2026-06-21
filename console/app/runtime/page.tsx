@@ -4,6 +4,7 @@ import { Spark } from '@/components/charts/charts'
 import { LatencyLines } from '@/components/charts/extra'
 import { TopologyMap } from '@/components/ui/topology-map'
 import { FabricTelemetryPanel } from '@/components/ui/fabric-telemetry'
+import { RuntimeHealthPanel } from '@/components/ui/runtime-health'
 import { resources, latency, network, partitions, nodes, ddsTopics, ddsPeers, topoNodes, topoEdges } from '@/lib/runtime'
 import type { Tone } from '@/lib/types'
 
@@ -20,6 +21,9 @@ export default function RuntimePage() {
           <Pill tone="safe">All partitions enforced</Pill>
         </div>
       </div>
+
+      {/* ── Live verifier runtime snapshot (GET /console/runtime, #395) ── */}
+      <RuntimeHealthPanel />
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         {resources.map((r) => (

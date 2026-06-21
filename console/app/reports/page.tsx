@@ -2,7 +2,8 @@ import { Download, FileText, ShieldCheck } from 'lucide-react'
 import { Panel, Pill, Meter, StatusDot } from '@/components/ui/primitives'
 import { DemoBadge } from '@/components/ui/demo-badge'
 import { AuditEvidence } from '@/components/ui/audit-evidence'
-import { reports, scheduled, rollout, rolloutVersion, versionShare } from '@/lib/reports'
+import { VersionAdoptionBar } from '@/components/ui/version-adoption'
+import { reports, scheduled, rollout, rolloutVersion } from '@/lib/reports'
 import type { Tone } from '@/lib/types'
 
 export default function ReportsPage() {
@@ -87,27 +88,11 @@ export default function ReportsPage() {
           ))}
         </div>
 
-        <div className="mt-5 border-t border-line pt-4">
-          <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-faint">Fleet version adoption</div>
-          <div className="flex h-3 overflow-hidden rounded-full bg-white/5">
-            {versionShare.map((v) => (
-              <div key={v.version} className={dotBg(v.tone)} style={{ width: `${v.pct}%` }} title={`${v.version} ${v.pct}%`} />
-            ))}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-4 font-mono text-[11px]">
-            {versionShare.map((v) => (
-              <span key={v.version} className="flex items-center gap-1.5">
-                <span className={`h-2 w-2 rounded-full ${dotBg(v.tone)}`} />
-                <span className="text-ink">{v.version}</span>
-                <span className="text-faint">{v.pct}%</span>
-              </span>
-            ))}
-          </div>
-        </div>
+        {/* ── Live fleet version-adoption (GET /console/versions, #398) ── */}
+        <VersionAdoptionBar />
       </Panel>
     </div>
   )
 }
 
-function dotBg(t: Tone) { return t === 'safe' ? 'bg-safe' : t === 'warn' ? 'bg-warn' : t === 'crit' ? 'bg-crit' : t === 'ice' ? 'bg-ice' : 'bg-muted' }
 function badge(t: Tone) { return t === 'safe' ? 'bg-safe/15 text-safe' : t === 'warn' ? 'bg-warn/15 text-warn' : t === 'crit' ? 'bg-crit/15 text-crit' : t === 'ice' ? 'bg-ice/15 text-ice' : 'bg-white/5 text-muted' }

@@ -1,5 +1,5 @@
 import { PROXY_BASE } from './config'
-import type { AuditPage, AuditVerify, FabricState, FabricTelemetry, FederationReports, FleetNodePosture, HealthResponse, NodeHistory } from './types'
+import type { AuditPage, AuditVerify, ConsoleAnalytics, ConsoleRuntime, ConsoleSites, ConsoleVersions, FabricState, FabricTelemetry, FederationReports, FleetNodePosture, HealthResponse, NodeHistory } from './types'
 
 // Sentinel thrown when the proxy reports demo mode (no backend configured).
 // Distinguishes "intentionally offline" from "backend down" for labeling.
@@ -32,4 +32,9 @@ export const kirra = {
   federationReports: (assetId: string, signal?: AbortSignal) =>
     getJSON<FederationReports>(`/federation/reports/${encodeURIComponent(assetId)}`, signal),
   fabricState: (signal?: AbortSignal) => getJSON<FabricState>('/fabric/state', signal),
+  runtime: (signal?: AbortSignal) => getJSON<ConsoleRuntime>('/console/runtime', signal),
+  analytics: (windowMs: number, signal?: AbortSignal) =>
+    getJSON<ConsoleAnalytics>(`/console/analytics?window_ms=${windowMs}`, signal),
+  sites: (signal?: AbortSignal) => getJSON<ConsoleSites>('/console/sites', signal),
+  versions: (signal?: AbortSignal) => getJSON<ConsoleVersions>('/console/versions', signal),
 }
