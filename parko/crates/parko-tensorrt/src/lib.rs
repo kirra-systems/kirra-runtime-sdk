@@ -25,6 +25,7 @@
 // (hardware-measured)", logged — not a bitwise-determinism claim.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use ort::ep::TensorRT;
@@ -145,6 +146,11 @@ pub fn resolve_engine_cache_path(explicit: Option<&str>) -> String {
 pub struct TrtBackend {
     core: OrtRunCore,
     posture: TrtPosture,
+    /// SHA-256 of the serialized engine, captured by `warm_up` once an engine
+    /// exists on disk. Interior-mutable so warm-up can run through a shared
+    /// `&self` (backends are held behind `Arc` in the runtime node) and set it
+    /// exactly once.
+    warmed_engine_sha: OnceLock<String>,
 }
 
 impl TrtBackend {
@@ -200,6 +206,7 @@ impl TrtBackend {
         Ok(Self {
             core: OrtRunCore::new(session, "ort_trt"),
             posture,
+            warmed_engine_sha: OnceLock::new(),
         })
     }
 
@@ -209,18 +216,28 @@ impl TrtBackend {
         &self.posture
     }
 
+    /// The SHA-256 of the cached engine captured by [`Self::warm_up_report`] (or
+    /// the trait [`InferenceBackend::warm_up`]). `None` until warm-up has run and
+    /// an engine exists on disk.
+    #[must_use]
+    pub fn engine_sha(&self) -> Option<&str> {
+        self.warmed_engine_sha.get().map(String::as_str)
+    }
+
     /// Force the per-model/shape TensorRT engine to build (or deserialize from the
     /// on-disk cache) NOW — at startup — so the multi-second first-build never lands
     /// on the first real command (PARK-021 #2). Runs ONE inference with a
     /// shape-correct zero input (output discarded; the engine build depends on the
-    /// input SHAPE, not its values), then captures the cached engine's SHA-256 into
-    /// `TrtPosture.engine_sha`. Idempotent: against a warm cache it only
-    /// deserializes. Measured cold build on a Jetson Orin (MNIST) is ~2.2 s — the
-    /// budget this moves off the hot path; bigger models cost more.
+    /// input SHAPE, not its values), then captures the cached engine's SHA-256 (see
+    /// [`Self::engine_sha`]). Idempotent: against a warm cache it only deserializes.
+    /// Measured cold build on a Jetson Orin (MNIST) is ~2.2 s — the budget this moves
+    /// off the hot path; bigger models cost more.
     ///
-    /// Takes `&mut self` because it populates the posture's `engine_sha`. The
-    /// Nominal `run` hot path is unchanged.
-    pub fn warm_up(&mut self, model: &ModelHandle) -> Result<WarmUpReport, BackendError> {
+    /// Takes `&self` (interior-mutable SHA capture) so it can run through the `Arc`
+    /// the runtime node holds the backend behind. The Nominal `run` hot path is
+    /// unchanged. The trait hook [`InferenceBackend::warm_up`] calls this and
+    /// discards the report; use this method directly when the report is wanted.
+    pub fn warm_up_report(&self, model: &ModelHandle) -> Result<WarmUpReport, BackendError> {
         if model.input_shapes.is_empty() {
             return Err(BackendError::InitializationError(
                 "warm_up: model declares no inputs — cannot synthesize a warm-up batch".into(),
@@ -239,12 +256,13 @@ impl TrtBackend {
         let _ = self.run(model, &batch)?;
         let warmed_ms = t0.elapsed().as_millis();
 
-        // Capture the serialized engine's SHA-256 → engine_sha (the #2 hook: the SHA
-        // is None until an engine actually exists on hardware).
+        // Capture the serialized engine's SHA-256 (the #2 hook: None until an engine
+        // actually exists on hardware). Stored once via the OnceLock so the capture
+        // survives through the shared `&self`; a second warm-up keeps the first SHA.
         let (engine_file, engine_sha256, engine_bytes) =
             sha256_cached_engine(&self.posture.engine_cache_path);
         if let Some(sha) = &engine_sha256 {
-            self.posture.engine_sha = Some(sha.clone());
+            let _ = self.warmed_engine_sha.set(sha.clone());
         }
 
         tracing::info!(
@@ -266,7 +284,7 @@ impl TrtBackend {
     }
 }
 
-/// Outcome of [`TrtBackend::warm_up`] — the engine was forced to build/deserialize
+/// Outcome of [`TrtBackend::warm_up_report`] — the engine was forced to build/deserialize
 /// before any real command, and the cached engine fingerprinted for the audit log.
 #[derive(Debug, Clone)]
 pub struct WarmUpReport {
@@ -348,6 +366,15 @@ impl InferenceBackend for TrtBackend {
         self.core.run(model, inputs)
     }
 
+    /// The startup lifecycle hook (PARK-021 #2): build/cache the TRT engine now so
+    /// the cold build never lands on the first real command. Delegates to
+    /// [`Self::warm_up_report`] and discards the detailed report (the report is
+    /// logged inside; `engine_sha()` exposes the captured SHA). Fail-closed: a
+    /// build failure propagates so the node refuses to advertise ready.
+    fn warm_up(&self, model: &ModelHandle) -> Result<(), BackendError> {
+        self.warm_up_report(model).map(|_| ())
+    }
+
     fn descriptor(&self) -> BackendDescriptor {
         BackendDescriptor::TensorRT
     }
@@ -373,12 +400,13 @@ impl InferenceBackend for TrtBackend {
 /// 1. **Real `load_model`/`run` output** — DONE (#414). `tests/positive_probe.rs`
 ///    is green on the Orin: `with_config` Ok, descriptor TensorRT, MNIST runs.
 ///    The inference path is shared (`OrtRunCore`).
-/// 2. **Engine build / cache + warm-up** — IMPLEMENTED ([`TrtBackend::warm_up`],
-///    #415). Forces the per-model/shape engine build at startup and captures the
-///    serialized engine's SHA-256 into `TrtPosture.engine_sha`.
-///    `tests/engine_cache_probe.rs` measured ~2.2 s cold build vs warm cache reuse
-///    on the Orin (the budget warm-up moves off the hot path); the cache key
-///    includes the GPU arch (`…_sm87.engine`). `tests/warmup_probe.rs` validates it.
+/// 2. **Engine build / cache + warm-up** — IMPLEMENTED + WIRED (#415, ADR-0010).
+///    The [`InferenceBackend::warm_up`] trait hook (default no-op) is overridden here
+///    via [`TrtBackend::warm_up_report`] to force the per-model/shape engine build at
+///    startup and capture the engine's SHA-256 (see [`TrtBackend::engine_sha`]).
+///    `parko_ros2_node` calls it after `load_model`, fail-closed. `engine_cache_probe`
+///    measured ~2.2 s cold vs warm reuse on the Orin; cache key includes the GPU arch
+///    (`…_sm87.engine`). `tests/warmup_probe.rs` validates it.
 /// 3. **Precision validation / TF32** — MEASURED (#415). `tests/tf32_probe.rs`
 ///    (one-shot differential): `NVIDIA_TF32_OVERRIDE=0` is INERT for the ort TRT
 ///    EP, and #4's drift is fp32-epsilon scale (~3e-7, ~3000× below TF32 ε), i.e.

@@ -20,11 +20,9 @@
 
 #![cfg(feature = "ros2")]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use parko_core::backend::{BackendDescriptor, InferenceBackend};
-use parko_core::backends::mock::MockBackend;
+use parko_core::backend::InferenceBackend;
 use parko_core::commands::ControlCommand;
 use parko_core::safety::SafetyPosture;
 use parko_core::scheduler::InferenceLoop;
@@ -48,18 +46,6 @@ fn init_tracing() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
-}
-
-fn build_dev_backend() -> Arc<MockBackend> {
-    tracing::warn!(
-        "parko-ros2: using MockBackend (no PARKO_MODEL_PATH set / onnx-backend feature off). \
-         This is DEVELOPMENT-ONLY — the node will emit a fixed zero command. \
-         Set PARKO_MODEL_PATH and rebuild with --features ros2,onnx-backend for the production path."
-    );
-    let mut outputs: HashMap<String, Vec<f32>> = HashMap::new();
-    outputs.insert("cmd_vel_linear".to_string(),  vec![0.0]);
-    outputs.insert("cmd_vel_angular".to_string(), vec![0.0]);
-    Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu))
 }
 
 /// CERT-006: resolve the comparator divergence sink from the environment,
@@ -225,6 +211,17 @@ where
             std::process::exit(3);
         });
 
+    // PARK-021 #2: warm up the backend BEFORE the loop serves any command, so a
+    // multi-second first-use cost (e.g. the TensorRT engine build) never lands on
+    // the first real command. No-op for backends that need no warm-up (mock, CPU
+    // ORT). FAIL-CLOSED: if warm-up fails the backend is not ready, so refuse to
+    // start rather than serve against an unbuilt/cold engine.
+    backend.warm_up(&model)
+        .unwrap_or_else(|e| {
+            eprintln!("parko_ros2_node: backend.warm_up failed — refusing to start (fail-closed): {e:?}");
+            std::process::exit(4);
+        });
+
     let (actuator_tx, mut actuator_rx) = mpsc::channel::<ControlCommand>(8);
 
     // The scheduler's actuator_tx receives the post-governor command
@@ -323,14 +320,27 @@ async fn main() {
     let config = Arc::new(build_config());
     tracing::info!(?config, "parko_ros2_node starting");
 
-    // Pick a backend. Today's binary only carries the MockBackend
-    // path; production deployments override this with the
-    // `onnx-backend` feature + `PARKO_MODEL_PATH`. The feature-flag
-    // dispatch is a deliberate compile-time gate so a misconfigured
-    // production build can't accidentally fall through to MockBackend.
+    // Pick the backend compiled into THIS build (compile-time feature gate, so a
+    // misconfigured production build can't fall through to the mock). The mock lane
+    // tolerates the dev sentinel; the onnx/tensorrt lanes require a real
+    // PARKO_MODEL_PATH and FAIL-CLOSED if their runtime/EP is absent — never a
+    // silent substitution. See `parko_ros2::backend_select`.
     let model_path = std::env::var("PARKO_MODEL_PATH")
         .unwrap_or_else(|_| "mock://development".to_string());
-    let backend = build_dev_backend();
+    tracing::info!(
+        backend = parko_ros2::backend_select::SELECTED_BACKEND,
+        %model_path,
+        "parko-ros2: selected backend"
+    );
+    let backend = parko_ros2::backend_select::select_backend(&model_path)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "parko_ros2_node: backend construction failed ({}) for {model_path:?} — refusing to \
+                 start (fail-closed, no fallback): {e:?}",
+                parko_ros2::backend_select::SELECTED_BACKEND,
+            );
+            std::process::exit(2);
+        });
     let infer = build_loop(backend, &model_path, config.tick_period_s);
 
     // M2 posture: static, defaults to Nominal. M1b's `PostureTracker`

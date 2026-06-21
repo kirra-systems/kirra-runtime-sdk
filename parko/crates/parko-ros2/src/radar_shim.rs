@@ -2,7 +2,7 @@
 //
 // radar_msgs/RadarScan → Vec<RadarDetection> extraction shim — the deferred ROS
 // half of the radar mapping. PURE field-copy CORE (no r2r, always compiled,
-// unit-tested) + a THIN r2r ADAPTER (`#[cfg(feature = "ros2")]`, extraction
+// unit-tested) + a THIN r2r ADAPTER (`#[cfg(feature = "radar-ros2")]`, extraction
 // only).
 //
 // SAFETY FRAMING. Upstream of the radar transform → model → governor. The
@@ -65,8 +65,14 @@ pub fn radar_scan_to_detections(returns: &[RadarReturnRaw]) -> Vec<RadarDetectio
     returns.iter().map(radar_return_to_detection).collect()
 }
 
-/// THIN r2r ADAPTER — extraction only. Compiles only under `--features ros2`.
-#[cfg(feature = "ros2")]
+/// THIN r2r ADAPTER — extraction only. Gated on the dedicated `radar-ros2`
+/// feature (which implies `ros2`), NOT plain `ros2`: it references
+/// `r2r::radar_msgs::msg::RadarScan`, and `radar_msgs` is not a base-jazzy
+/// package, so the base `ros2` node-binary lane (base jazzy only) must not
+/// compile it. This adapter is the DEFERRED radar half and currently has no
+/// caller; enable `radar-ros2` alongside a ROS env that provides `radar_msgs`
+/// when the radar path is wired.
+#[cfg(feature = "radar-ros2")]
 pub fn radar_scan_msg_to_detections(
     msg: &r2r::radar_msgs::msg::RadarScan,
 ) -> Vec<RadarDetection> {

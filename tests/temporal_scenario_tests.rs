@@ -98,6 +98,8 @@ async fn build_av_test_infrastructure() -> (
             last_trust_update_ms: 0,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         });
     }
 

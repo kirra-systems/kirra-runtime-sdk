@@ -150,6 +150,9 @@ pub type SharedPostureCache = std::sync::Arc<std::sync::RwLock<Option<CachedFlee
 pub struct ServiceState {
     pub app: Arc<AppState>,
     pub posture_cache: SharedPostureCache,
+    /// #395 console runtime — boot timestamp (ms since epoch) captured once at
+    /// `main` startup. Read-only; powers the live console `uptime_ms`.
+    pub started_at_ms: u64,
     pub audit_verifying_key: Option<VerifyingKey>,
     pub fabric_router: Arc<FabricRouter>,
     pub fabric_telemetry: Arc<FabricTelemetry>,

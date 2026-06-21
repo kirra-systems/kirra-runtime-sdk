@@ -181,7 +181,7 @@ No issue was bucketed `NEEDS-TRIAGE` — all 77 had enough evidence to place. **
 - **Labels** — the brief asked for `aou-tracker`, `done-pending-close`, `needs-triage` to be created if missing. **None exist on the repo today.** The GitHub MCP exposes `get_label` but no `create_label` tool. Two options for the human follow-up:
   - Run `gh label create aou-tracker --color BFD4F2`, `gh label create done-pending-close --color 0E8A16`, `gh label create needs-triage --color FBCA04` (or via web UI).
   - Once created, apply via the per-issue `recommended-action` column above. The MCP `issue_write` can apply labels that already exist, but GitHub's REST API rejects unknown label names — I deliberately did NOT attempt blanket application against the as-yet-uncreated labels.
-- **Project board** — the GitHub MCP exposes no Projects v2 tools. If a board exists at `gh project list --owner justinlooney`, the human can add the REAL-WORK items via `gh project item-add`. If no board exists, recommend creating "KIRRA Occy / Pilot" with columns Todo / In-Progress / Blocked / Done and Priority field {P0, P1, P2}.
+- **Project board** — the GitHub MCP exposes no Projects v2 tools. If a board exists at `gh project list --owner kirra-systems`, the human can add the REAL-WORK items via `gh project item-add`. If no board exists, recommend creating "KIRRA Occy / Pilot" with columns Todo / In-Progress / Blocked / Done and Priority field {P0, P1, P2}.
 
 ## Confirmation
 

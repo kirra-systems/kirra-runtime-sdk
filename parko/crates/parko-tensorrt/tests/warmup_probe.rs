@@ -39,7 +39,8 @@ fn trt_warm_up_builds_engine_and_populates_engine_sha() {
     let _ = std::fs::remove_dir_all(&cache);
     let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
 
-    let mut backend = match TrtBackend::with_config(model_path, &cfg) {
+    // &self warm-up (runs through Arc in the node) — no `mut` needed.
+    let backend = match TrtBackend::with_config(model_path, &cfg) {
         Ok(b) => b,
         Err(e) => {
             assert!(
@@ -51,40 +52,43 @@ fn trt_warm_up_builds_engine_and_populates_engine_sha() {
         }
     };
 
-    // engine_sha is None until an engine actually exists on hardware.
+    // engine_sha is None until warm-up has built/located an engine on disk.
     assert_eq!(
-        backend.posture().engine_sha,
+        backend.engine_sha(),
         None,
-        "engine_sha must be None before warm-up (no engine built yet)",
+        "engine_sha() must be None before warm-up (no engine built yet)",
     );
 
     let model = backend.load_model(model_path).expect("MNIST model introspection failed");
 
     // COLD warm-up — forces the engine build and captures its SHA-256.
-    let cold = backend.warm_up(&model).expect("cold warm_up failed");
+    let cold = backend.warm_up_report(&model).expect("cold warm_up failed");
     let sha = cold
         .engine_sha256
         .clone()
         .expect("warm_up must capture the engine SHA-256 after a cold build");
     assert_eq!(sha.len(), 64, "SHA-256 hex must be 64 chars, got {}", sha.len());
     assert_eq!(
-        backend.posture().engine_sha.as_deref(),
+        backend.engine_sha(),
         Some(sha.as_str()),
-        "warm_up must mirror the engine SHA into the posture",
+        "warm_up must capture the engine SHA into the backend (engine_sha())",
     );
     assert!(cold.engine_bytes.unwrap_or(0) > 0, "engine file must be non-empty");
 
-    // WARM warm-up — idempotent: same on-disk engine ⇒ identical SHA.
-    let warm = backend.warm_up(&model).expect("warm warm_up failed");
+    // WARM warm-up — idempotent: same on-disk engine ⇒ identical SHA. Also exercise
+    // the trait hook (returns ()), proving the generic startup path works.
+    let warm = backend.warm_up_report(&model).expect("warm warm_up failed");
     assert_eq!(
         warm.engine_sha256.as_deref(),
         Some(sha.as_str()),
         "a second warm-up against the warm cache must yield the SAME engine_sha (idempotent)",
     );
+    InferenceBackend::warm_up(&backend, &model).expect("trait warm_up hook must succeed when EP is present");
+    assert_eq!(backend.engine_sha(), Some(sha.as_str()), "engine_sha() stable across the trait hook");
 
     println!(
         "WARM-UP PROBE PASSED — cold warm_up {} ms, warm warm_up {} ms. \
-         engine '{}' {} B, engine_sha256={} (mirrored into posture; idempotent across both runs).",
+         engine '{}' {} B, engine_sha256={} (captured via engine_sha(); idempotent; trait hook ok).",
         cold.warmed_ms,
         warm.warmed_ms,
         cold.engine_file.as_deref().unwrap_or("<none>"),

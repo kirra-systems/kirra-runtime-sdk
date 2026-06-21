@@ -46,6 +46,38 @@ fn finite_positive(x: f64) -> bool {
 /// `RSS_FAILSAFE_DISTANCE_M`. This is defence in depth — the primary
 /// defence is validating the asset profile at load time (see module-level
 /// note about the absence of a profile loader as of this writing).
+///
+/// # IEEE 2846 fidelity notes (tracked: #408 — safety-case decisions pending)
+///
+/// These are documented limitations of the lateral primitive, NOT bugs: the
+/// math below is internally correct and fail-closed. They are recorded here so
+/// each is an EXPLICIT safety-case decision rather than an implicit gap.
+///
+/// 1. **A single `lat_accel_max` collapses the two IEEE 2846-2022 §5.2 lateral
+///    parameters.** The standard distinguishes `a_lat,accel,max` (max lateral
+///    accel *during* the response phase) from `a_lat,brake,min` (min lateral
+///    *braking* decel *after* it). This function uses one value for both the
+///    accel role (`d_reaction`, `v_after`) and the brake role (`d_brake`). The
+///    conservative worst case wants the LARGEST value for the accel role (max
+///    drift toward the other actor) but the SMALLEST for the brake role (weakest
+///    braking -> larger required distance), so no single value is worst-case for
+///    both. The per-actor stop distance
+///    `total(v) = 2*v*rt + a*rt^2 + v^2/(2a)`   (a = lat_accel_max, rt = reaction_time)
+///    is NON-MONOTONIC in `a`: `d(total)/da = rt^2 - v^2/(2*a^2)`, which is zero
+///    at `a = v/(rt*sqrt(2))`. Below that threshold, INCREASING `a` DECREASES the
+///    required distance — so a value chosen to be conservative for the accel role
+///    can be non-conservative for the brake role, and vice-versa. Resolving this
+///    by splitting the signature into (`lat_accel_max`, `lat_brake_min`) with
+///    each used in its phase (#408 Option A) needs a safety-case-derived
+///    `lat_brake_min`; until then the single-parameter regime — which role the
+///    value represents and why the other role's under-estimate is bounded — must
+///    be justified in the safety case.
+///
+/// 2. **No lateral position-uncertainty margin (`mu = 0`).** IEEE 2846 lateral
+///    RSS adds a `mu` term for lateral-fluctuation uncertainty; the per-actor sum
+///    here omits it, making the required separation slightly SMALLER (less
+///    conservative). The omission is likely intentional and small, but must be an
+///    explicit safety-case decision rather than an implicit `mu = 0`.
 // SAFETY: SG1 SG9 | REQ: rss-lateral-distance-failsafe | TEST: test_lat_zero_accel_is_failsafe,test_lat_nan_input_is_failsafe,test_rss_zero_ego_velocity,test_rss_result_is_finite_and_nonnegative
 // (≅ Occy SG1 RSS over horizon. Non-finite or non-positive input returns
 //  RSS_FAILSAFE_DISTANCE_M — defence-in-depth fail-closed for SG9.)
@@ -105,6 +137,21 @@ pub fn lateral_safe_distance(
 ///
 /// On any invalid input (non-finite, or `brake_min <= 0`, or
 /// `brake_max <= 0`) returns `RSS_FAILSAFE_DISTANCE_M`.
+///
+/// # Contract: SAME-DIRECTION (lead-ahead) primitive only (tracked: #408 Obs 3)
+///
+/// `lead_vel` is the lead vehicle's longitudinal velocity in the EGO's direction
+/// of travel: this models a lead AHEAD moving the SAME direction. The lead's
+/// braking term `lead_vel^2 / (2*brake_max)` SQUARES the velocity, so its SIGN is
+/// discarded. Passing an *oncoming* (negative) `lead_vel` would therefore treat
+/// the oncoming actor as braking to a stop and SUBTRACT its braking distance,
+/// silently UNDER-estimating the required gap. Callers MUST pass a same-direction
+/// `lead_vel`; oncoming-actor geometry is out of scope for this primitive and
+/// must be handled by a dedicated formula. (No `debug_assert!` enforces the sign:
+/// consistent with this module's deliberate fail-closed, panic-free stance —
+/// see the note in `lateral_safe_distance` — the contract is by documentation.
+/// The pairwise caller `compute_scene_rss` is itself rigorously fail-closed, so
+/// this is a primitive-contract note, not an exploited path.)
 // SAFETY: SG1 SG9 | REQ: rss-longitudinal-distance-failsafe | TEST: test_rss_equal_speeds,test_rss_ego_faster,test_long_nan_input_is_failsafe,test_long_zero_brake_min_is_failsafe_not_zero,test_long_zero_brake_max_is_failsafe_not_zero,test_long_negative_brake_min_is_failsafe
 // (≅ Occy SG1 longitudinal collision RSS. Non-finite or non-positive
 //  brake/accel returns RSS_FAILSAFE_DISTANCE_M — fail-closed via SG9.)

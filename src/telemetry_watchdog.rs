@@ -430,6 +430,8 @@ mod watchdog_di_tests {
                 last_trust_update_ms: registered_at_ms,
                 ak_public_pem: None,
                 expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
             },
         );
     }
@@ -671,6 +673,8 @@ mod sg_003_cert_tests {
                 last_trust_update_ms: last_seen_ms,
                 ak_public_pem: None,
                 expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
             },
         );
         app

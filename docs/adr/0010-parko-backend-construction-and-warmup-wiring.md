@@ -2,11 +2,66 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed** |
+| Status | **Accepted** — warm-up *hook* wired (PR #418) + backend *construction/selection* implemented (`parko_ros2::backend_select`) |
 | Date | 2026-06-19 |
-| Deciders | Project owner (pending) |
+| Deciders | Project owner (pending on the construction/selection half) |
 | Issues | #415 (PARK-021 #2 — engine warm-up) |
-| Code | `parko/crates/parko-tensorrt/src/lib.rs` (`TrtBackend::warm_up`, `WarmUpReport`), `parko/crates/parko-core/src/backend_selector.rs` |
+| Code | `parko-core::backend::InferenceBackend::warm_up` (hook), `parko-tensorrt` (`warm_up_report`/`engine_sha`/trait impl), `parko-ros2` `parko_ros2_node::build_loop` (call site) |
+
+## Update (implemented) — the warm-up wiring is a TRAIT HOOK, not a parko-kirra factory
+
+This ADR originally guessed the wiring belonged in a `parko-kirra` integration
+factory. Inspection corrected that: `parko-kirra` constructs no backends, and the
+real runtime entrypoint is the `parko_ros2_node` binary, which holds the backend
+behind an `Arc<B: InferenceBackend>` and calls `load_model` in `build_loop`. So the
+warm-up was wired as a **lifecycle hook on the `InferenceBackend` trait** instead:
+
+- `parko-core`: `fn warm_up(&self, &ModelHandle) -> Result<(), BackendError>` with a
+  default **no-op** (CPU/OpenVINO/mock need no warm-up). `&self` because backends are
+  shared behind `Arc`.
+- `parko-tensorrt`: overrides it to force the engine build; `warm_up_report` (now
+  `&self`, SHA captured via a `OnceLock` exposed by `engine_sha()`) carries the detail.
+- `parko-ros2`: `build_loop` calls `backend.warm_up(&model)` right after `load_model`,
+  **fail-closed** (exit 4) — the node refuses to serve against an unbuilt engine.
+
+No `parko-kirra` factory and no new crate were needed for the hook.
+
+## Update 2 (implemented) — backend construction/selection: `parko_ros2::backend_select`
+
+The construction/selection half is now resolved too — as a **compile-time, fail-closed,
+feature-gated** selector in the `parko-ros2` *lib* (NOT ros2-gated, so it builds and is
+CI-verified without a ROS 2 distro):
+
+Two explicit gates, both fail-closed, both must agree:
+
+- **Compile-time (authoritative):** `(no feature)` → `MockBackend` (dev only) ·
+  `onnx-backend` → `parko-onnx OrtBackend` · `tensorrt-backend` → `parko-tensorrt
+  TrtBackend` (takes precedence when both on). Exactly one backend compiles in.
+- **Runtime (operator declaration):** if `PARKO_BACKEND` is set it MUST name the
+  compiled-in backend (`mock` / `onnx` / `tensorrt`, case-insensitive) — else the node
+  refuses to start (`verify_backend_env`). It is a cross-check, never a switch (only one
+  backend is compiled in); it catches "deployed the wrong binary". Unset → the
+  compile-time gate stands. This is the "feature **+** explicit env" selection the project
+  owner chose (PARK-021 Q1).
+- A real backend whose runtime/EP is unavailable returns `Err` and the node REFUSES to
+  start (no silent substitution) — mirrors the installer's explicit `--target` and
+  `parko-core::backend_selector`'s "selection is explicit" rule.
+- `parko_ros2_node::main` calls `select_backend(&model_path)` (fail-closed, exit 2), then
+  `build_loop` calls the `warm_up` hook (fail-closed, exit 4). The installer's
+  `--target tensorrt` maps to building `--features ros2,tensorrt-backend`.
+
+**Verified:** all three lanes build (`cargo build -p parko-ros2 --features {onnx,tensorrt}-backend`),
+mock-lane tests pass, runtime-isolation guard still passes (the `parko-tensorrt` dep is
+optional, so `parko-ros2` stays off the runtime-dependent list).
+
+**CI coverage (both halves, closed in this PR):**
+- `parko-ros2-backends` job — compiles the `backend_select` *module* on the onnx + tensorrt
+  lanes (no ROS 2 / no ORT runtime).
+- `ros2-adapter-build` job (jazzy sourced) — now also builds the `parko_ros2_node` *binary*
+  on the `ros2,onnx-backend` and `ros2,tensorrt-backend` lanes, compiling the node call
+  sites (`main` → `select_backend` → `build_loop` → `warm_up`). This closes the earlier
+  evidence-drift gap: a break in the wiring that makes warm-up real in the node now turns
+  CI red instead of silently passing.
 
 ## Context
 

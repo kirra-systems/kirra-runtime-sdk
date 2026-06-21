@@ -20,6 +20,15 @@ pub extern "C" fn kirra_filter_move_velocity(proposed_velocity: f64, dt: f64) ->
 pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) -> f64 {
     if let Ok(mut g) = GLOBAL_GOVERNOR.lock() {
         let max = g.contract.max_angular_rate();
+        // Fail-closed on non-finite input: this shim clamps inline (it does NOT go
+        // through `evaluate`), and `NaN.abs() > max` is `false`, so an unguarded
+        // `NaN` would be forwarded to the actuator unclamped (#404). Command zero
+        // angular rate and decay trust. (`kirra_filter_move_velocity` is fixed
+        // transitively — it routes through `evaluate`'s Priority-0 guard.)
+        if !crate::governor_guard::all_finite(&[proposed_angular]) {
+            g.trust_engine.decay_trust(30);
+            return 0.0;
+        }
         if proposed_angular.abs() > max {
             g.trust_engine.decay_trust(30);
             proposed_angular.clamp(-max, max)
@@ -173,5 +182,34 @@ mod reset_clock_tests {
             now > 1_600_000_000_000,
             "supervisor reset must use real wall-clock ms (got {now}), never a frozen 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod ffi_nonfinite_tests {
+    use super::*;
+
+    // #404: both C-ABI shims must fail-closed on non-finite input. The returns are
+    // invariant of prior GLOBAL_GOVERNOR trust state (the non-finite guards short-
+    // circuit before any trust-mode branching), so these are deterministic even
+    // though they share the process-wide governor.
+
+    #[test]
+    fn rotate_velocity_rejects_nonfinite_to_zero() {
+        // Clamps inline (NOT via `evaluate`): NaN.abs() > max is false, so without
+        // the guard a NaN would be forwarded unclamped. Must command zero.
+        assert_eq!(kirra_filter_rotate_velocity(f64::NAN, 0.05), 0.0);
+        assert_eq!(kirra_filter_rotate_velocity(f64::INFINITY, 0.05), 0.0);
+        assert_eq!(kirra_filter_rotate_velocity(f64::NEG_INFINITY, 0.05), 0.0);
+    }
+
+    #[test]
+    fn move_velocity_rejects_nonfinite_to_finite_fallback() {
+        // Fixed transitively by `evaluate`'s Priority-0 guard → contract fallback.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let out = kirra_filter_move_velocity(bad, 0.05);
+            assert!(out.is_finite(), "move shim must never return non-finite (got {out})");
+            assert_eq!(out, 0.0);
+        }
     }
 }

@@ -14,6 +14,7 @@ name = "kirra-governor-service"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal UDP KIRRA governor (two-box prototype); wraps the verdict core verbatim. serde + bincode + std only — no ROS/async."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 

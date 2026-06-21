@@ -57,6 +57,7 @@ stale. Any integrator still exporting `AEGIS_*` must switch:
 | system user/group `aegis` | `kirra` |
 | docker-compose services/volumes `aegis-verifier`, `aegis-data` | `kirra-verifier`, `kirra-data` |
 | npm package `aegis-dashboard` | `kirra-dashboard` |
+| GitHub repo `kirra-systems/aegis` | `kirra-systems/kirra-runtime-sdk` |
 | GitHub repo `justinlooney/aegis` | `kirra-systems/kirra-runtime-sdk` |
 | ROS 2 package refs `aegis_safety` (scripts) | `kirra_safety` |
 

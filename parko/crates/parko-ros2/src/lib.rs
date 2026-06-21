@@ -24,6 +24,7 @@
 // subset as an aligned list the markdown-nesting lint would reformat.
 #![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
+pub mod backend_select;
 pub mod clearance_gate;
 pub mod command_mapping;
 pub mod comparator_adapter;

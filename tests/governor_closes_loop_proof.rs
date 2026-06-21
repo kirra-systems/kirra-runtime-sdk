@@ -74,6 +74,7 @@ fn service_state_from(app: Arc<AppState>, cache: SharedPostureCache) -> Arc<Serv
     Arc::new(ServiceState {
         app,
         posture_cache: cache,
+        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -329,6 +330,8 @@ fn register_av_infra(app: &Arc<AppState>) {
             last_trust_update_ms: 0,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         });
     }
 }

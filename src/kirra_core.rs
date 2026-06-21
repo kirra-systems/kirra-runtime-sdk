@@ -145,6 +145,24 @@ impl<C: SafetyContract> KirraKernelGovernor<C> {
 
 impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
     fn evaluate(&mut self, proposed_demand: f64, mut dt: f64) -> GovernorInterceptResult {
+        // Priority 0 (fail-closed): non-finite input. IEEE-754 `NaN` compares
+        // `false` against every envelope/rate threshold, so an unguarded `NaN`
+        // would fall straight through the `ExecuteUnrestricted` passthrough as a
+        // "safe" command (and a `NaN`/`Inf` `dt` would poison the rate check).
+        // Reject explicitly: command the contract fallback, decay trust, and report
+        // an UNSAFE control state. `last_validated_scalar` is intentionally NOT
+        // advanced to a tainted value. (#404 — this scalar/FFI ingress was the one
+        // path that treated `NaN` as nominal; the vehicle path already guards.)
+        if !crate::governor_guard::all_finite(&[proposed_demand, dt]) {
+            self.trust_engine.decay_trust(30);
+            return GovernorInterceptResult {
+                sanitized_scalar: self.contract.fallback(),
+                asset_in_safe_control_state: false,
+                mitigation_narrative: "NONFINITE_INPUT_REJECTED_FAILSAFE".to_string(),
+                was_unsafe_attempt: true,
+                was_rate_breached: false,
+            };
+        }
         if dt <= 0.001 { dt = 0.050; }
 
         let prior_trust_mode = self.trust_mode();
@@ -260,5 +278,74 @@ impl CausalFlightRecorder {
             score: entry.score, system_state: entry.state, trust_mode: entry.mode, operator_narrative: entry.narrative,
         });
         if self.journal.len() > 100 { self.journal.pop_front(); }
+    }
+}
+
+#[cfg(test)]
+mod governor_nonfinite_tests {
+    // #404 — the scalar KirraKernelGovernor must fail-closed on non-finite input
+    // (NaN compares false against every threshold, so an unguarded NaN/Inf would
+    // pass through as a "safe" command). kirra_core.rs previously had no tests.
+    use super::KirraKernelGovernor;
+    use crate::kinematics_contract::KinematicContract;
+    use crate::{SafetyContract, SafetyGovernor};
+
+    fn gov() -> KirraKernelGovernor<KinematicContract> {
+        let contract = KinematicContract {
+            max_linear_velocity: 2.0,
+            max_angular_velocity: 1.0,
+            max_linear_acceleration: 10.0,
+            fallback_linear_speed: 0.0,
+        };
+        KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0)
+    }
+
+    #[test]
+    fn nan_demand_is_rejected_failsafe_not_passed_through() {
+        let mut g = gov();
+        let out = g.evaluate(f64::NAN, 0.05);
+        assert!(out.sanitized_scalar.is_finite(), "must never return NaN to an actuator");
+        assert_eq!(out.sanitized_scalar, g.contract.fallback());
+        assert!(!out.asset_in_safe_control_state, "NaN must not read as a safe control state");
+        assert!(out.was_unsafe_attempt);
+    }
+
+    #[test]
+    fn inf_demand_is_rejected_failsafe() {
+        let mut g = gov();
+        for demand in [f64::INFINITY, f64::NEG_INFINITY] {
+            let out = g.evaluate(demand, 0.05);
+            assert!(out.sanitized_scalar.is_finite());
+            assert_eq!(out.sanitized_scalar, g.contract.fallback());
+            assert!(!out.asset_in_safe_control_state);
+        }
+    }
+
+    #[test]
+    fn nan_dt_is_rejected_failsafe() {
+        let mut g = gov();
+        let out = g.evaluate(1.0, f64::NAN);
+        assert!(out.sanitized_scalar.is_finite());
+        assert!(!out.asset_in_safe_control_state);
+    }
+
+    #[test]
+    fn nonfinite_does_not_advance_last_validated_scalar() {
+        let mut g = gov();
+        let before = g.last_validated_scalar;
+        let _ = g.evaluate(f64::NAN, 0.05);
+        assert_eq!(g.last_validated_scalar, before, "tainted value must not be retained");
+    }
+
+    #[test]
+    fn finite_in_envelope_still_passes() {
+        // A genuinely nominal command: in-envelope (|0.4| < 2.0) AND within the
+        // rate limit (0.4 / 0.05 = 8 m/s^2 < the 10 m/s^2 accel cap), so it is a
+        // clean passthrough — distinct from the rate-clamped or fail-closed paths.
+        let mut g = gov();
+        let out = g.evaluate(0.4, 0.05);
+        assert!(out.asset_in_safe_control_state, "a nominal in-envelope, in-rate command must read safe");
+        assert!(!out.was_unsafe_attempt);
+        assert!((out.sanitized_scalar - 0.4).abs() < 1e-9, "got {}", out.sanitized_scalar);
     }
 }

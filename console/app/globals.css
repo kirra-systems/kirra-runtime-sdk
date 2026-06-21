@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 8 10 16;
+  --surface: 11 14 22;
+  --panel: 16 20 30;
+  --elevated: 22 27 39;
+  --ink: 233 237 246;
+  --muted: 154 166 189;
+  --faint: 105 114 138;
+  --safe: 47 230 166;
+  --warn: 255 176 32;
+  --crit: 255 84 104;
+  --ice: 92 198 255;
+}
+
+@layer base {
+  html, body { height: 100%; }
+  body {
+    background: rgb(var(--bg));
+    color: rgb(var(--ink));
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(150,166,198,0.18); border-radius: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+}
+
+/* Horizontal scroll-shadow affordance for wide tables on narrow viewports.
+   Pure CSS (background-attachment: local): the solid "cover" gradients (panel
+   colour) hide the edge shadows when scrolled to that edge, so a shadow only
+   shows when more table is off-screen — signalling swipe-to-reveal. Scoped to
+   table scroll wrappers via :has(> table); degrades to a plain scroll where
+   :has is unsupported. */
+.overflow-x-auto:has(> table) {
+  background:
+    linear-gradient(to right, rgb(var(--panel)) 30%, rgb(var(--panel) / 0)) left center,
+    linear-gradient(to left, rgb(var(--panel)) 30%, rgb(var(--panel) / 0)) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) right center;
+  background-repeat: no-repeat;
+  background-size: 44px 100%, 44px 100%, 16px 100%, 16px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* Subtle mission-control environmental layer (grid + glow), restrained. */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 560px at 8% -8%, rgba(47, 230, 166, 0.05), transparent 60%),
+    radial-gradient(1000px 680px at 102% 108%, rgba(92, 198, 255, 0.045), transparent 60%);
+}
+.app-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(150, 166, 198, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(150, 166, 198, 0.035) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 24%, #000 28%, transparent 86%);
+}
+
+::selection { background: rgb(var(--safe)); color: #04130d; }
