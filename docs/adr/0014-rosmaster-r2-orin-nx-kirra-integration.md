@@ -135,6 +135,13 @@ The governor needs **no GPU and almost no compute** (Rust, serde + bincode + std
 **Verdict: the Raspberry Pi is the better governor box** — you're paying for *isolation and
 clean I/O*, not TOPS, and the Pi delivers both more cheaply.
 
+**Build spec (concrete):** Raspberry Pi 5 · **4GB** · headless Raspberry Pi OS with PREEMPT_RT ·
+**swap disabled** (no paging on the safety path — the governor must never page) · governor binary
+**cross-compiled** on the dev host, not built on-device. 2GB suffices for runtime-only; 8GB is
+wasted on a deliberately minimal box. (Any of these is astronomically more than the governor
+*needs* — the choice is OS comfort + timing margin, not the governor; the real cert target is a
+tiny QNX/MCU.)
+
 ### Cert-correctness caveat
 
 Neither a Pi nor a Nano running Linux is the **certifiable** governor target — that remains QNX
