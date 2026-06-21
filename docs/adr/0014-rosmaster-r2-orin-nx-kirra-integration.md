@@ -5,9 +5,9 @@
 | Status | **Proposed (integration design note)** — for owner sign-off; ratified on merge. |
 | Date | 2026-06-21 |
 | Deciders | Project / safety-case owner |
-| Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) |
+| Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
 | Stack | Perception (Parko) · Planner (Occy / LLM) · KIRRA governor + verifier + console |
-| Cross-refs | ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
+| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
 
@@ -102,6 +102,46 @@ what an LLM output instructs"*). Forbidden.
 - Power: Orin NX 10–25 W alongside drive motors on the R2's 12.6 V pack — use `nvpmodel`. Orthogonal to KIRRA.
 - **This stack is NX-16GB-viable *because* it is Parko + Occy/LLM + KIRRA, not Autoware.** Full
   Autoware Universe would push to AGX Orin; you don't need it — KIRRA governs your own planner.
+
+## Compute topology — single-box vs. two-box (isolated governor)
+
+KIRRA already supports a **two-box** topology: `kirra-governor-service` is *"a minimal UDP
+governor for the two-box governed-car prototype"* (Proposal car→governor / Verdict
+governor→car over UDP; `kirra-wire-client` is the client mirror; ADR-0001). Two choices:
+
+- **Single-box (simplest bring-up).** Everything on the Orin NX; the governor shares silicon
+  with System 2, so freedom-from-interference rests on hypervisor / partition isolation (the
+  #270 / #278 QNX path). Fine for Phase 1.
+- **Two-box (stronger separation — recommended for the safety demo).** System 2
+  (perception + planner) on the Orin NX; the **KIRRA governor on a separate small board**,
+  linked by the `kirra-governor-service` UDP wire. A memory / GPU / thermal fault in System 2
+  then **physically cannot** starve the governor — the freedom-from-interference property
+  (#279) bought with a wire instead of a hypervisor.
+
+### Governor-box hardware — Raspberry Pi vs. 4GB Jetson Nano
+
+The governor needs **no GPU and almost no compute** (Rust, serde + bincode + std). So:
+
+- **Raspberry Pi (4 / 5) — preferred.** The governor uses zero GPU, so the Nano's only edge is
+  wasted. A Pi is lower-power (~3–7 W), cheaper, faster on the CPU side (Pi 5 = A76 @ 2.4 GHz
+  vs the Nano's A57 @ 1.43 GHz), better-supported (current Debian / Ubuntu; PREEMPT_RT
+  available), and its **GPIO** is genuinely useful on the *safety* box — read the physical
+  E-stop state for the audit chain, status LEDs, and drive a **supplementary** MRC relay. A
+  cleaner instance of "a minimal isolated safety box."
+- **4GB Jetson Nano — also fine, no edge.** Works as the governor box and shares NVIDIA tooling
+  with the NX, but its GPU sits idle, it's older / slower (A57, L4T / Ubuntu-18.04-era), and
+  draws more for no benefit here.
+
+**Verdict: the Raspberry Pi is the better governor box** — you're paying for *isolation and
+clean I/O*, not TOPS, and the Pi delivers both more cheaply.
+
+### Cert-correctness caveat
+
+Neither a Pi nor a Nano running Linux is the **certifiable** governor target — that remains QNX
+on a safety MCU / partition (ADR-0001, ADR-0006, #270). And per ADR-0013 the **certifiable
+E-stop is a hardwired button→relay circuit independent of compute** — the Pi's GPIO drives only
+the *supplementary*, governor-commanded safe-state, never the primary cut. The two-box Pi setup
+is a **prototype / FFI demonstrator** and a stepping stone to QNX, not the final safety artifact.
 
 ## Phasing
 
