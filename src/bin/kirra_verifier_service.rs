@@ -3983,6 +3983,35 @@ mod posture_gate_real_router_tests {
         );
     }
 
+    /// ADR-0011 reachability pin: under **Degraded** the OUTER posture gate
+    /// 503s the actuator WRITE before the inner `enforce_actuator_safety_envelope`
+    /// decel-to-stop branch can run — `should_route_command` admits only
+    /// `ReadTelemetry` in Degraded, and a POST to `/actuator/motion/command`
+    /// classifies as `WriteState`. So on the HTTP `/actuator/motion/command`
+    /// path that decel-to-stop branch is dead code; the real Degraded safety
+    /// floor is the consumer-side `503 → 0.0` safe-stop (#405), not the inner
+    /// envelope. This test pins the gate behavior: Degraded WriteState is denied
+    /// 503 on the real assembled router, identically to LockedOut — the exact
+    /// 503 the #405 client now maps to an explicit safe-stop. Do NOT cite the
+    /// gateway HTTP path as a live decel-to-stop enforcement point while this
+    /// holds (ADR-0011).
+    #[tokio::test]
+    async fn degraded_blocks_actuator_write_on_real_router() {
+        let status = status_through_real_app(
+            state_with(FleetPosture::Degraded),
+            "POST",
+            "/actuator/motion/command",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the real router must deny POST /actuator/motion/command under Degraded \
+             (outer posture gate 503s WriteState before the inner envelope runs, \
+             ADR-0011); got {status}"
+        );
+    }
+
     /// Exemption wiring on the real assembly: `/health` stays reachable under
     /// LockedOut (liveness is allowlisted by `is_posture_exempt`).
     #[tokio::test]
