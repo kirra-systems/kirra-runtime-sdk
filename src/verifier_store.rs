@@ -378,10 +378,26 @@ impl VerifierStore {
                 registered_at_ms           INTEGER NOT NULL DEFAULT 0,
                 last_trust_update_ms       INTEGER NOT NULL DEFAULT 0,
                 ak_public_pem              TEXT,
-                expected_pcr16_digest_hex  TEXT
+                expected_pcr16_digest_hex  TEXT,
+                site                       TEXT,
+                firmware_version           TEXT
             )",
             [],
         )?;
+        // #397/#398 console rollups — additive, NULLABLE columns. Idempotent
+        // ADD-COLUMN migration upgrading a pre-existing `nodes` table; tolerates
+        // the "duplicate column name" error on re-run (mirrors the audit_log_chain
+        // / clearance_grants convention). Never altered/dropped existing columns.
+        for col_sql in [
+            "ALTER TABLE nodes ADD COLUMN site TEXT",
+            "ALTER TABLE nodes ADD COLUMN firmware_version TEXT",
+        ] {
+            if let Err(e) = conn.execute(col_sql, []) {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(e);
+                }
+            }
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS dependencies (
@@ -1044,8 +1060,8 @@ impl VerifierStore {
         self.conn.execute(
             "INSERT OR REPLACE INTO nodes
              (node_id, status_json, registered_at_ms, last_trust_update_ms,
-              ak_public_pem, expected_pcr16_digest_hex)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+              ak_public_pem, expected_pcr16_digest_hex, site, firmware_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 node.node_id,
                 status_json,
@@ -1053,6 +1069,8 @@ impl VerifierStore {
                 node.last_trust_update_ms as i64,
                 node.ak_public_pem,
                 node.expected_pcr16_digest_hex,
+                node.site,
+                node.firmware_version,
             ],
         )?;
 
@@ -1062,7 +1080,7 @@ impl VerifierStore {
     pub fn load_nodes(&self) -> Result<Vec<RegisteredNode>> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, status_json, registered_at_ms, last_trust_update_ms,
-                    ak_public_pem, expected_pcr16_digest_hex
+                    ak_public_pem, expected_pcr16_digest_hex, site, firmware_version
              FROM nodes",
         )?;
 
@@ -1078,6 +1096,8 @@ impl VerifierStore {
                 last_trust_update_ms: row.get::<_, i64>(3)? as u64,
                 ak_public_pem: row.get(4)?,
                 expected_pcr16_digest_hex: row.get(5)?,
+                site: row.get(6)?,
+                firmware_version: row.get(7)?,
             })
         })?;
 
@@ -1093,7 +1113,7 @@ impl VerifierStore {
         self.conn
             .query_row(
                 "SELECT node_id, status_json, registered_at_ms, last_trust_update_ms,
-                        ak_public_pem, expected_pcr16_digest_hex
+                        ak_public_pem, expected_pcr16_digest_hex, site, firmware_version
                  FROM nodes WHERE node_id = ?1",
                 params![node_id],
                 |row| {
@@ -1107,6 +1127,8 @@ impl VerifierStore {
                         last_trust_update_ms: row.get::<_, i64>(3)? as u64,
                         ak_public_pem: row.get(4)?,
                         expected_pcr16_digest_hex: row.get(5)?,
+                        site: row.get(6)?,
+                        firmware_version: row.get(7)?,
                     })
                 },
             )
@@ -1204,6 +1226,53 @@ impl VerifierStore {
             params![node_id, since_ms as i64],
             |row| row.get(0),
         )
+    }
+
+    /// #395 console runtime — total rows in the tamper-evident audit chain.
+    /// Read-only `COUNT(*)`; surfaces the ledger depth for the live console.
+    pub fn audit_chain_len(&self) -> Result<u64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// #396 console analytics — posture-transition rows since `since_ms`, each
+    /// carrying its `posture_json` (the resulting `FleetPosture`) and the row
+    /// timestamp. The handler buckets these client-side over the window. Pure
+    /// read; no new data class. Returns `(created_at_ms, posture_json)` ASC.
+    pub fn load_posture_events_since(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(u64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at_ms, posture_json FROM posture_events
+             WHERE created_at_ms >= ?1
+             ORDER BY created_at_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![since_ms as i64], |row| {
+            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// #396 console analytics — per-node posture-event counts since `since_ms`,
+    /// the "flapping" leaderboard input. `(node_id, count)` DESC by count.
+    pub fn count_posture_events_by_node_since(
+        &self,
+        since_ms: u64,
+    ) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, COUNT(*) AS c FROM posture_events
+             WHERE created_at_ms >= ?1
+             GROUP BY node_id
+             ORDER BY c DESC",
+        )?;
+        let rows = stmt.query_map(params![since_ms as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect()
     }
 
     // --- v0.9.8 HA probes & backup export ---
@@ -3340,6 +3409,59 @@ mod standby_store_tests {
         store.save_engine_state("key", "first").unwrap();
         store.save_engine_state("key", "second").unwrap();
         assert_eq!(store.load_engine_state("key").unwrap(), Some("second".to_string()));
+    }
+
+    // --- #394 console rollups -----------------------------------------------
+
+    #[test]
+    fn test_audit_chain_len_empty_is_zero() {
+        let store = in_memory();
+        assert_eq!(store.audit_chain_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_node_site_and_firmware_round_trip() {
+        // #397/#398: the additive nullable columns persist and reload.
+        let store = in_memory();
+        store
+            .save_node(&RegisteredNode {
+                node_id: "n1".into(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms: 1,
+                last_trust_update_ms: 1,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+                site: Some("dock-7".into()),
+                firmware_version: Some("v2.3".into()),
+            })
+            .unwrap();
+        let loaded = store.load_node("n1").unwrap().expect("node present");
+        assert_eq!(loaded.site.as_deref(), Some("dock-7"));
+        assert_eq!(loaded.firmware_version.as_deref(), Some("v2.3"));
+    }
+
+    #[test]
+    fn test_posture_event_analytics_queries() {
+        // #396: window/group queries return the expected rows.
+        let store = in_memory();
+        let nominal = serde_json::to_string(&crate::verifier::FleetPosture::Nominal).unwrap();
+        let degraded = serde_json::to_string(&crate::verifier::FleetPosture::Degraded).unwrap();
+        store.save_posture_event("a", "E", &nominal, None, 1_000).unwrap();
+        store.save_posture_event("a", "E", &degraded, None, 2_000).unwrap();
+        store.save_posture_event("b", "E", &nominal, None, 3_000).unwrap();
+        // An old event outside the window is excluded.
+        store.save_posture_event("c", "E", &nominal, None, 10).unwrap();
+
+        let since = 500;
+        let events = store.load_posture_events_since(since).unwrap();
+        assert_eq!(events.len(), 3, "the pre-window event is excluded");
+        assert!(events.iter().all(|(ts, _)| *ts >= since));
+
+        let by_node = store.count_posture_events_by_node_since(since).unwrap();
+        let a = by_node.iter().find(|(n, _)| n == "a").unwrap();
+        assert_eq!(a.1, 2, "node a has two in-window events");
+        // DESC by count → node "a" leads.
+        assert_eq!(by_node[0].0, "a");
     }
 
     #[test]
