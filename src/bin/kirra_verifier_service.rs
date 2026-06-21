@@ -678,6 +678,87 @@ async fn get_node_posture(
     Json(posture)
 }
 
+#[derive(Serialize)]
+struct AvSubsystemView {
+    node_id: String,
+    subsystem_type: String,
+    hardware_id: String,
+    confidence_floor: f64,
+    last_telemetry_ms: u64,
+    recovery_streak_count: u32,
+    recovery_streak_start_ms: u64,
+}
+
+/// Read-only listing of registered AV subsystem diagnostics (confidence floor,
+/// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
+async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    match svc.app.store.lock() {
+        Ok(store) => match store.load_av_subsystems() {
+            Ok(rows) => {
+                let subsystems: Vec<AvSubsystemView> = rows
+                    .into_iter()
+                    .map(|r| AvSubsystemView {
+                        node_id: r.node_id,
+                        subsystem_type: r.subsystem_type,
+                        hardware_id: r.hardware_id,
+                        confidence_floor: r.confidence_floor,
+                        last_telemetry_ms: r.last_telemetry_ms,
+                        recovery_streak_count: r.recovery_streak_count,
+                        recovery_streak_start_ms: r.recovery_streak_start_ms,
+                    })
+                    .collect();
+                let total = subsystems.len();
+                Json(json!({ "subsystems": subsystems, "total": total })).into_response()
+            }
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                       Json(json!({ "error": "failed to load av subsystems" }))).into_response(),
+        },
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
+                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    }
+}
+
+#[derive(Serialize)]
+struct OperatorView {
+    operator_id: String,
+    operator_key_fingerprint: String,
+    registered_at_ms: u64,
+    revoked_at_ms: Option<u64>,
+    active: bool,
+}
+
+/// Read-only listing of registered operators. Admin-gated. Exposes only the
+/// public-key FINGERPRINT (never the PEM), matching the write-side convention. (#385)
+async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    match svc.app.store.lock() {
+        Ok(store) => match store.load_operators() {
+            Ok(rows) => {
+                let operators: Vec<OperatorView> = rows
+                    .into_iter()
+                    .map(|r| {
+                        let active = r.is_active();
+                        OperatorView {
+                            operator_key_fingerprint:
+                                kirra_runtime_sdk::attestation::operator_key_fingerprint(&r.pubkey_pem)
+                                    .unwrap_or_else(|| "unparseable".to_string()),
+                            operator_id: r.operator_id,
+                            registered_at_ms: r.registered_at_ms,
+                            revoked_at_ms: r.revoked_at_ms,
+                            active,
+                        }
+                    })
+                    .collect();
+                let total = operators.len();
+                Json(json!({ "operators": operators, "total": total })).into_response()
+            }
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                       Json(json!({ "error": "failed to load operators" }))).into_response(),
+        },
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
+                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    }
+}
+
 async fn register_dependencies(
     State(svc): State<Arc<ServiceState>>,
     Json(req): Json<RegisterDependenciesRequest>,
@@ -3222,6 +3303,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fleet/dependencies", post(register_dependencies))
         .route("/fleet/diagnostics/report", post(handle_sensor_fault_report))
         .route("/fleet/assets/register", post(handle_register_av_asset))
+        .route("/fleet/av-subsystems", get(list_av_subsystems))
         .route("/system/backup/export", post(export_backup))
         .route("/system/audit/verify", get(verify_audit_chain))
         .route("/system/audit/causal/verify", get(verify_causal_chain))
@@ -3231,7 +3313,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/attestation/identity/register", post(register_node_identity))
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the
         // supervisor key); posture-exempt by the /console/ path prefix.
-        .route("/console/operators", post(register_operator))
+        .route("/console/operators", post(register_operator).get(list_operators))
         .route("/console/operators/{operator_id}/revoke", post(revoke_operator))
         .route("/fabric/assets/register", post(handle_register_fabric_asset))
         .route("/fabric/assets", get(handle_list_fabric_assets))
