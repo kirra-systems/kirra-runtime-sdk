@@ -103,6 +103,8 @@ fn seed(store: &mut VerifierStore, now: u64) -> rusqlite::Result<SeedSummary> {
             last_trust_update_ms: t,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         })?;
         // A background attestation event per node (real type) so the feed is alive.
         store.save_posture_event_chained(

@@ -416,6 +416,12 @@ struct RegisterNodeRequest {
     ak_public_pem: Option<String>,
     #[serde(default)]
     expected_pcr16_digest_hex: Option<String>,
+    /// #397 console — optional site/location label captured at registration.
+    #[serde(default)]
+    site: Option<String>,
+    /// #398 console — optional firmware version label captured at registration.
+    #[serde(default)]
+    firmware_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -521,6 +527,8 @@ async fn register_node(
         last_trust_update_ms: 0,
         ak_public_pem: req.ak_public_pem,
         expected_pcr16_digest_hex: req.expected_pcr16_digest_hex,
+        site: req.site,
+        firmware_version: req.firmware_version,
     };
 
     if svc.app.persist_and_insert_node(node).is_err() {
@@ -611,6 +619,8 @@ async fn verify_attestation(
             last_trust_update_ms: now,
             ak_public_pem: existing.ak_public_pem.clone(),
             expected_pcr16_digest_hex: existing.expected_pcr16_digest_hex.clone(),
+            site: existing.site.clone(),
+            firmware_version: existing.firmware_version.clone(),
         },
         None => return (StatusCode::NOT_FOUND,
                         Json(json!({ "error": "node not registered" }))).into_response(),
@@ -1677,6 +1687,8 @@ async fn handle_sensor_fault_report(
                 last_trust_update_ms: now,
                 ak_public_pem:        n.ak_public_pem.clone(),
                 expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
+                site:                 n.site.clone(),
+                firmware_version:     n.firmware_version.clone(),
             },
             None => return (StatusCode::NOT_FOUND,
                             Json(json!({ "error": "node not found" }))).into_response(),
@@ -1751,6 +1763,8 @@ async fn handle_sensor_fault_report(
                     last_trust_update_ms: now,
                     ak_public_pem:        n.ak_public_pem.clone(),
                     expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
+                    site:                 n.site.clone(),
+                    firmware_version:     n.firmware_version.clone(),
                 },
                 None => return (StatusCode::NOT_FOUND,
                                 Json(json!({ "error": "node not found" }))).into_response(),
@@ -2335,6 +2349,8 @@ async fn main() {
     let svc_state = Arc::new(ServiceState {
         app: app_state,
         posture_cache: Arc::new(std::sync::RwLock::new(None)),
+        // #395 console runtime — boot timestamp captured once at startup.
+        started_at_ms: now_ms(),
         audit_verifying_key,
         fabric_router: Arc::new(FabricRouter::new()),
         fabric_telemetry: Arc::new(FabricTelemetry::new()),
@@ -2854,6 +2870,306 @@ async fn console_escalations(State(svc): State<Arc<ServiceState>>) -> impl IntoR
     .into_response()
 }
 
+/// GET /console/runtime (#395) — public read-only runtime snapshot.
+///
+/// Composes live in-memory state (mode, uptime, generation, cache freshness,
+/// node/asset counts, broadcast fanout, HA heartbeat age) with two store reads
+/// (audit chain depth + the persisted heartbeat ms). Fail-closed: store-lock
+/// poison or query error → 500 json error (mirrors `console_audit`).
+async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    let now = now_ms();
+
+    // last_recalc_ms comes from the atomic posture-cache snapshot (0 if cold).
+    // `SharedPostureCache` is a std `RwLock`; a poisoned lock fails closed → 500.
+    let last_recalc_ms = match svc.posture_cache.read() {
+        Ok(guard) => guard.as_ref().map(|c| c.generated_at_ms).unwrap_or(0),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "posture cache lock poisoned" })),
+            )
+                .into_response()
+        }
+    };
+
+    // Two store reads under one lock acquisition: audit depth + HA heartbeat.
+    let (audit_entries, ha_heartbeat_age_ms) = match svc.app.store.lock() {
+        Ok(store) => {
+            let audit_entries = match store.audit_chain_len() {
+                Ok(n) => n,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "audit query failed" })),
+                    )
+                        .into_response()
+                }
+            };
+            // Heartbeat absent → null (no primary has written yet).
+            let hb = match store.load_engine_state(HEARTBEAT_KEY) {
+                Ok(opt) => opt
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|stored| now.saturating_sub(stored)),
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "engine state query failed" })),
+                    )
+                        .into_response()
+                }
+            };
+            (audit_entries, hb)
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store lock poisoned" })),
+            )
+                .into_response()
+        }
+    };
+
+    let mode = if svc.app.is_active() { "Active" } else { "PassiveStandby" };
+
+    Json(json!({
+        "mode": mode,
+        "uptime_ms": now.saturating_sub(svc.started_at_ms),
+        "posture_generation": kirra_runtime_sdk::posture_engine::POSTURE_GENERATION
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "last_recalc_ms": last_recalc_ms,
+        "posture_cache_ttl_ms": POSTURE_CACHE_TTL_MS,
+        "total_nodes": svc.app.nodes.len(),
+        "fabric_assets": svc.fabric_router.fabric_state().total_assets,
+        "fabric_denial_rate": svc.fabric_telemetry.summary().fabric_denial_rate,
+        "audit_entries": audit_entries,
+        "broadcast_subscribers": svc.app.posture_tx.receiver_count(),
+        "ha_heartbeat_age_ms": ha_heartbeat_age_ms,
+    }))
+    .into_response()
+}
+
+/// Query for #396 console analytics. `window_ms` defaults to 24h.
+#[derive(Deserialize)]
+struct ConsoleAnalyticsQuery {
+    #[serde(default)]
+    window_ms: Option<u64>,
+}
+
+/// GET /console/analytics?window_ms= (#396) — public read-only time-series view.
+///
+/// Buckets EXISTING `posture_events` rows over `[since_ms, now]` into 24 buckets
+/// (no new data class). Fail-closed: store-lock poison / query error → 500.
+///
+/// DATA-AVAILABILITY NOTES (honest about what is and isn't stored):
+///   - `posture_transitions`: real — bucketed from `posture_events.posture_json`
+///     (the resulting `FleetPosture`).
+///   - `denial_rate_series`: the store keeps NO per-bucket denial history. We
+///     therefore emit a SINGLE current-value point (the live fabric denial rate)
+///     rather than fabricate a fake series — the array shape is preserved.
+///   - `interventions_by_asset`: fabric telemetry tracks a per-asset `denial_rate`
+///     and `commands_per_minute`, NOT separate clamp/deny COUNTERS. `denies` is
+///     derived (rate × cpm, rounded); `clamps` is 0 — clamp counts are not stored.
+///   - `flapping_top`: real — per-node posture-event counts since `since_ms`.
+async fn console_analytics(
+    State(svc): State<Arc<ServiceState>>,
+    Query(params): Query<ConsoleAnalyticsQuery>,
+) -> impl IntoResponse {
+    const BUCKETS: u64 = 24;
+    const FLAPPING_TOP_N: usize = 10;
+
+    let now = now_ms();
+    let window_ms = params.window_ms.unwrap_or(86_400_000).max(1);
+    let since_ms = now.saturating_sub(window_ms);
+    let bucket_span = (window_ms / BUCKETS).max(1);
+
+    let (events, by_node) = match svc.app.store.lock() {
+        Ok(store) => {
+            let events = match store.load_posture_events_since(since_ms) {
+                Ok(e) => e,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "posture event query failed" })),
+                    )
+                        .into_response()
+                }
+            };
+            let by_node = match store.count_posture_events_by_node_since(since_ms) {
+                Ok(n) => n,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "posture event query failed" })),
+                    )
+                        .into_response()
+                }
+            };
+            (events, by_node)
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "store lock poisoned" })),
+            )
+                .into_response()
+        }
+    };
+
+    // Bucket posture transitions by resulting posture (parsed from posture_json).
+    let mut to_degraded = vec![0u64; BUCKETS as usize];
+    let mut to_lockedout = vec![0u64; BUCKETS as usize];
+    let mut to_nominal = vec![0u64; BUCKETS as usize];
+    for (created_at_ms, posture_json) in &events {
+        let idx = (created_at_ms.saturating_sub(since_ms) / bucket_span)
+            .min(BUCKETS - 1) as usize;
+        // posture_json serializes FleetPosture as "Nominal"/"Degraded"/"LockedOut"
+        // (or {"Untrusted": "..."} style for node states). Match the variant name.
+        let v: serde_json::Value =
+            serde_json::from_str(posture_json).unwrap_or(serde_json::Value::Null);
+        let label = v.as_str().map(|s| s.to_string()).unwrap_or_else(|| {
+            // Object-tagged form: take the first key.
+            v.as_object()
+                .and_then(|o| o.keys().next().cloned())
+                .unwrap_or_default()
+        });
+        match label.as_str() {
+            "Degraded" => to_degraded[idx] += 1,
+            "LockedOut" => to_lockedout[idx] += 1,
+            "Nominal" => to_nominal[idx] += 1,
+            _ => {}
+        }
+    }
+    let posture_transitions: Vec<serde_json::Value> = (0..BUCKETS as usize)
+        .map(|i| {
+            json!({
+                "bucket_start_ms": since_ms + (i as u64) * bucket_span,
+                "to_degraded": to_degraded[i],
+                "to_lockedout": to_lockedout[i],
+                "to_nominal": to_nominal[i],
+            })
+        })
+        .collect();
+
+    // denial_rate_series: no stored per-bucket history → single current point.
+    let denial_rate_series = json!([{
+        "bucket_start_ms": now,
+        "denial_rate": svc.fabric_telemetry.summary().fabric_denial_rate,
+    }]);
+
+    // interventions_by_asset: derive denies from rate × cpm; clamps not stored.
+    let interventions_by_asset: Vec<serde_json::Value> = svc
+        .fabric_telemetry
+        .all_snapshots()
+        .into_iter()
+        .map(|s| {
+            let denies = (s.denial_rate * s.commands_per_minute).round() as u64;
+            json!({
+                "asset_id": s.asset_id,
+                "clamps": 0, // clamp counts are not separately tracked (see doc)
+                "denies": denies,
+            })
+        })
+        .collect();
+
+    let flapping_top: Vec<serde_json::Value> = by_node
+        .into_iter()
+        .take(FLAPPING_TOP_N)
+        .map(|(node_id, transitions)| json!({
+            "node_id": node_id,
+            "transitions": transitions,
+        }))
+        .collect();
+
+    Json(json!({
+        "window_ms": window_ms,
+        "posture_transitions": posture_transitions,
+        "denial_rate_series": denial_rate_series,
+        "interventions_by_asset": interventions_by_asset,
+        "flapping_top": flapping_top,
+    }))
+    .into_response()
+}
+
+/// GET /console/sites (#397) — public read-only site rollup over in-memory nodes.
+///
+/// MAPPING CHOICE (documented): the rollup is by node TRUST STATUS, not DAG
+/// fleet posture. `NodeTrustState::Trusted` → nominal; `Unknown` → degraded
+/// bucket; `Untrusted(_)` → lockedout bucket. Nodes with a NULL `site` roll into
+/// `unassigned`. Pure in-memory read (no store lock); cannot fail-closed.
+async fn console_sites(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    use std::collections::BTreeMap;
+    // (total, nominal, degraded, lockedout)
+    let mut sites: BTreeMap<String, (u64, u64, u64, u64)> = BTreeMap::new();
+    let mut unassigned: u64 = 0;
+
+    for entry in svc.app.nodes.iter() {
+        let node = entry.value();
+        let bucket = match &node.status {
+            NodeTrustState::Trusted => 0,
+            NodeTrustState::Unknown => 1,
+            NodeTrustState::Untrusted(_) => 2,
+        };
+        match &node.site {
+            Some(site) => {
+                let e = sites.entry(site.clone()).or_insert((0, 0, 0, 0));
+                e.0 += 1;
+                match bucket {
+                    0 => e.1 += 1,
+                    1 => e.2 += 1,
+                    _ => e.3 += 1,
+                }
+            }
+            None => unassigned += 1,
+        }
+    }
+
+    let sites: Vec<serde_json::Value> = sites
+        .into_iter()
+        .map(|(site, (total, nominal, degraded, lockedout))| json!({
+            "site": site,
+            "total": total,
+            "nominal": nominal,
+            "degraded": degraded,
+            "lockedout": lockedout,
+        }))
+        .collect();
+
+    Json(json!({ "sites": sites, "unassigned": unassigned })).into_response()
+}
+
+/// GET /console/versions (#398) — public read-only firmware-version rollup over
+/// in-memory nodes. Nodes with a NULL `firmware_version` count toward `unknown`.
+/// `pct` = count/total*100 (guarded against divide-by-zero). Pure in-memory read.
+async fn console_versions(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    use std::collections::BTreeMap;
+    let mut versions: BTreeMap<String, u64> = BTreeMap::new();
+    let mut unknown: u64 = 0;
+    let mut total: u64 = 0;
+
+    for entry in svc.app.nodes.iter() {
+        total += 1;
+        match &entry.value().firmware_version {
+            Some(v) => *versions.entry(v.clone()).or_insert(0) += 1,
+            None => unknown += 1,
+        }
+    }
+
+    let versions: Vec<serde_json::Value> = versions
+        .into_iter()
+        .map(|(version, count)| {
+            let pct = if total > 0 {
+                (count as f64) / (total as f64) * 100.0
+            } else {
+                0.0
+            };
+            json!({ "version": version, "count": count, "pct": pct })
+        })
+        .collect();
+
+    Json(json!({ "versions": versions, "total": total, "unknown": unknown }))
+        .into_response()
+}
+
 /// Pure supervisor-key decision (testable without env — INV-13 forbids `set_var`
 /// in multithreaded tests). REUSES the #255 mechanism: the value is the
 /// `KIRRA_SUPERVISOR_RESET_KEY`, constant-time compared. Fail-closed:
@@ -3364,6 +3680,13 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/console/fleet", get(console_fleet))
         .route("/console/audit", get(console_audit))
         .route("/console/escalations", get(console_escalations))
+        // #394 live console — public read-only observability views (no auth
+        // layer, posture-exempt via `/console/` prefix). Mirror `console_audit`
+        // fail-closed shape: store-lock poison / query error → 500 json error.
+        .route("/console/runtime", get(console_runtime))
+        .route("/console/analytics", get(console_analytics))
+        .route("/console/sites", get(console_sites))
+        .route("/console/versions", get(console_versions))
         // #314 Phase 1 — operator clearance-challenge (unauthenticated; the nonce
         // alone grants nothing — only a valid signature over it does).
         .route("/console/clearance-challenge", get(clearance_challenge))
@@ -3570,7 +3893,7 @@ mod posture_gate_real_router_tests {
     use tower::ServiceExt; // for `oneshot`
 
     use kirra_runtime_sdk::posture_cache::{
-        CachedFleetPosture, ServiceState, SharedPostureCache,
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
     };
     use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_runtime_sdk::verifier_store::VerifierStore;
@@ -3584,6 +3907,7 @@ mod posture_gate_real_router_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -3723,6 +4047,7 @@ mod fabric_posture_feed_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -3838,7 +4163,7 @@ mod fabric_command_authoritative_tests {
     };
     use kirra_runtime_sdk::fabric::router::FabricRouter;
     use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
-    use kirra_runtime_sdk::posture_cache::{ServiceState, SharedPostureCache};
+    use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, SharedPostureCache};
     use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_runtime_sdk::verifier_store::VerifierStore;
 
@@ -3876,6 +4201,7 @@ mod fabric_command_authoritative_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -3998,6 +4324,8 @@ mod attestation_nonce_handler_tests {
             last_trust_update_ms: 0,
             ak_public_pem: Some(ak_pem),
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         })
         .expect("register node");
 
@@ -4005,6 +4333,7 @@ mod attestation_nonce_handler_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -4101,6 +4430,7 @@ mod local_asset_lockedout_seed_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -4183,7 +4513,7 @@ mod dnp3_mandatory_audit_tests {
     use axum::Json;
 
     use kirra_runtime_sdk::adapters::dnp3::{Dnp3Message, Dnp3Object, DNP3_BROADCAST_ADDRESS};
-    use kirra_runtime_sdk::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
     use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
     use kirra_runtime_sdk::verifier_store::VerifierStore;
 
@@ -4197,6 +4527,7 @@ mod dnp3_mandatory_audit_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -4328,7 +4659,9 @@ mod console_phase_a_tests {
     use axum::response::IntoResponse;
     use tower::ServiceExt; // oneshot
 
-    use kirra_runtime_sdk::posture_cache::{ServiceState, SharedPostureCache};
+    use kirra_runtime_sdk::posture_cache::{
+        now_ms, ServiceState, SharedPostureCache, POSTURE_CACHE_TTL_MS,
+    };
     use kirra_runtime_sdk::verifier::{
         AppState, NodeTrustState, RegisteredNode, VerifierOperationMode,
     };
@@ -4341,6 +4674,7 @@ mod console_phase_a_tests {
         Arc::new(ServiceState {
             app,
             posture_cache,
+            started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
@@ -4361,6 +4695,8 @@ mod console_phase_a_tests {
             last_trust_update_ms: 1_700_000_000_000,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         };
         svc.app.persist_and_insert_node(node).expect("seed node");
     }
@@ -4431,6 +4767,161 @@ mod console_phase_a_tests {
         // lock for `gateway::policy_layer::is_posture_exempt`.
         let (status, _) = get(build_state(), "/console/fleet").await;
         assert_eq!(status, StatusCode::OK, "the /console plane must be posture-exempt");
+    }
+
+    // --- #394 live console endpoints ----------------------------------------
+
+    /// Seed a node with explicit trust status + optional site/firmware. Reuses
+    /// the production write path (`persist_and_insert_node` — disk THEN memory).
+    fn seed_node_full(
+        svc: &Arc<ServiceState>,
+        node_id: &str,
+        status: NodeTrustState,
+        site: Option<&str>,
+        firmware_version: Option<&str>,
+    ) {
+        let node = RegisteredNode {
+            node_id: node_id.to_string(),
+            status,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: site.map(|s| s.to_string()),
+            firmware_version: firmware_version.map(|s| s.to_string()),
+        };
+        svc.app.persist_and_insert_node(node).expect("seed node");
+    }
+
+    fn parse(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("valid json")
+    }
+
+    #[test]
+    fn audit_chain_len_counts_rows() {
+        // #395 store-level: empty chain is 0; each chained write increments it.
+        let mut store = VerifierStore::new(":memory:").expect("store");
+        assert_eq!(store.audit_chain_len().expect("len"), 0);
+        store
+            .save_clearance_grant_chained("robot-01", "alice", 1_700_000_000_000)
+            .expect("record grant");
+        assert_eq!(store.audit_chain_len().expect("len"), 1);
+    }
+
+    #[tokio::test]
+    async fn console_runtime_reports_live_state() {
+        // #395: empty fleet → Active mode, 0 nodes, null heartbeat, 0 audit rows.
+        let svc = build_state();
+        let (status, body) = get(svc, "/console/runtime").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["mode"], "Active");
+        assert_eq!(v["total_nodes"], 0);
+        assert_eq!(v["audit_entries"], 0);
+        assert_eq!(v["posture_cache_ttl_ms"], POSTURE_CACHE_TTL_MS);
+        assert!(v["ha_heartbeat_age_ms"].is_null(), "no heartbeat written yet");
+        assert!(v["uptime_ms"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn console_sites_rolls_up_by_trust_status() {
+        // #397: Trusted→nominal, Unknown→degraded, Untrusted→lockedout; NULL site
+        // → unassigned. Two nodes at "alpha", one NULL-site node.
+        let svc = build_state();
+        seed_node_full(&svc, "n1", NodeTrustState::Trusted, Some("alpha"), None);
+        seed_node_full(
+            &svc,
+            "n2",
+            NodeTrustState::Untrusted("fault".into()),
+            Some("alpha"),
+            None,
+        );
+        seed_node_full(&svc, "n3", NodeTrustState::Unknown, None, None);
+
+        let (status, body) = get(svc, "/console/sites").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["unassigned"], 1, "the NULL-site node is unassigned");
+        let alpha = v["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["site"] == "alpha")
+            .expect("alpha site present");
+        assert_eq!(alpha["total"], 2);
+        assert_eq!(alpha["nominal"], 1, "Trusted maps to nominal");
+        assert_eq!(alpha["lockedout"], 1, "Untrusted maps to lockedout");
+        assert_eq!(alpha["degraded"], 0);
+    }
+
+    #[tokio::test]
+    async fn console_versions_rolls_up_with_pct() {
+        // #398: two nodes on v1.0, one NULL → unknown; total 3.
+        let svc = build_state();
+        seed_node_full(&svc, "n1", NodeTrustState::Trusted, None, Some("v1.0"));
+        seed_node_full(&svc, "n2", NodeTrustState::Trusted, None, Some("v1.0"));
+        seed_node_full(&svc, "n3", NodeTrustState::Trusted, None, None);
+
+        let (status, body) = get(svc, "/console/versions").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["total"], 3);
+        assert_eq!(v["unknown"], 1);
+        let v10 = v["versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["version"] == "v1.0")
+            .expect("v1.0 present");
+        assert_eq!(v10["count"], 2);
+        let pct = v10["pct"].as_f64().unwrap();
+        assert!((pct - (2.0 / 3.0 * 100.0)).abs() < 1e-9, "pct = count/total*100");
+    }
+
+    #[tokio::test]
+    async fn console_analytics_empty_and_seeded_do_not_panic() {
+        // #396: empty store → valid shape, no panic.
+        let svc = build_state();
+        let (status, body) = get(svc.clone(), "/console/analytics").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["window_ms"], 86_400_000u64);
+        assert!(v["posture_transitions"].as_array().unwrap().len() == 24);
+        assert!(v["denial_rate_series"].is_array());
+        assert!(v["interventions_by_asset"].is_array());
+        assert!(v["flapping_top"].as_array().unwrap().is_empty());
+
+        // Seed a real chained posture event, then re-query: flapping_top picks it
+        // up and a Nominal transition lands in a bucket.
+        {
+            let mut store = svc.app.store.lock().unwrap();
+            let posture_json =
+                serde_json::to_string(&kirra_runtime_sdk::verifier::FleetPosture::Nominal).unwrap();
+            store
+                .save_posture_event_chained(
+                    "robot-09",
+                    "ATTESTATION_TRUSTED",
+                    &posture_json,
+                    None,
+                    now_ms(),
+                )
+                .expect("seed posture event");
+        }
+        let (status, body) = get(svc, "/console/analytics?window_ms=86400000").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        let flap = v["flapping_top"].as_array().unwrap();
+        assert!(
+            flap.iter().any(|f| f["node_id"] == "robot-09"),
+            "the seeded node appears in flapping_top"
+        );
+        let total_nominal: u64 = v["posture_transitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["to_nominal"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total_nominal, 1, "one Nominal transition bucketed");
     }
 
     #[test]
@@ -4515,6 +5006,8 @@ mod console_phase_a_tests {
             last_trust_update_ms: 1_700_000_000_000,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         };
         app.persist_and_insert_node(node).expect("seed node");
     }

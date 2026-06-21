@@ -49,6 +49,12 @@ impl FabricTelemetry {
         self.snapshots.get(asset_id).map(|s| s.clone())
     }
 
+    /// #396 console analytics — all per-asset telemetry snapshots. Read-only
+    /// clone of the live map for the console's interventions-by-asset rollup.
+    pub fn all_snapshots(&self) -> Vec<AssetTelemetrySnapshot> {
+        self.snapshots.iter().map(|r| r.value().clone()).collect()
+    }
+
     pub fn summary(&self) -> FabricTelemetrySummary {
         let now = now_ms();
         let active_threshold_ms = 30_000u64;

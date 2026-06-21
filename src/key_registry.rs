@@ -196,6 +196,8 @@ mod tests {
                 last_trust_update_ms: 1,
                 ak_public_pem: pem,
                 expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
             })
             .expect("save node");
     }

@@ -42,6 +42,12 @@ pub struct RegisteredNode {
     pub ak_public_pem: Option<String>,
     /// Expected SHA-256 hex digest of PCR16 at attestation time.
     pub expected_pcr16_digest_hex: Option<String>,
+    /// #397 console — optional site/location label for fleet rollups. NULLABLE;
+    /// captured at registration. Never gates trust/posture.
+    pub site: Option<String>,
+    /// #398 console — optional firmware version label for version rollups.
+    /// NULLABLE; captured at registration. Never gates trust/posture.
+    pub firmware_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +603,8 @@ mod mark_node_untrusted_tests {
             last_trust_update_ms: 1,
             ak_public_pem: None,
             expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
         }
     }
 
