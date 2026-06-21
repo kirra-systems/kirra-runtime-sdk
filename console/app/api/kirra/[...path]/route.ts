@@ -22,6 +22,7 @@ const ALLOW: RegExp[] = [
   /^system\/audit\/verify$/, /^system\/audit\/causal\/verify$/, /^system\/audit\/export$/,
   /^fabric\/(assets|state|telemetry|causal-log)$/, /^fabric\/telemetry\/[^/]+$/, /^fabric\/causal-log\/[^/]+$/,
   /^console\/(fleet|audit|escalations)$/,
+  /^console\/(runtime|analytics|sites|versions)$/,
   /^system\/posture\/stream$/,
 ]
 
