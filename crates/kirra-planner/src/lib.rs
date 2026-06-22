@@ -83,6 +83,16 @@ pub struct Goal {
     pub target: Pose,
 }
 
+/// Per-object kinematic motion state the checker contract ([`PerceivedObject`])
+/// doesn't carry. Keyed by the object's `id`; supplies the **yaw rate** so the
+/// planner can predict a turning object on the CTRV model (matches the Taj
+/// tracker's estimate). `yaw_rate_rad_s = 0` reduces to constant-velocity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionState {
+    pub id: u64,
+    pub yaw_rate_rad_s: f64,
+}
+
 /// World-state input to [`Planner::plan`].
 ///
 /// `// PHASE-0 LOCKED` — derived from the checker's own consumed inputs: ego
@@ -107,6 +117,11 @@ pub struct PlanInput<'a> {
     /// crossing rules gate the lateral-avoidance maneuver: Occy will not route
     /// around an object across a solid line. An empty slice = unconstrained.
     pub lane_boundaries: &'a [LaneBoundary],
+    /// Per-object motion state (yaw rate) the checker contract can't carry — lets
+    /// predictive yielding roll objects forward on the turn-aware CTRV model
+    /// (from the Taj tracker) instead of constant-velocity. An object with no
+    /// entry (or an empty slice) predicts straight-line (CV), as before.
+    pub motion: &'a [MotionState],
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -414,14 +429,21 @@ impl GeometricPlanner {
         LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
     }
 
-    /// Predictive yield: roll a moving object forward at constant velocity and, if
-    /// it is currently OUT of the lane but will ENTER the path ahead within the
-    /// horizon (a crossing vehicle/pedestrian), return the arc-length at which it
-    /// crosses in — so the planner yields short of it. Objects already in the lane
-    /// are handled by stop-short/lead (skipped here). Conservative: it yields to
-    /// any predicted in-lane conflict ahead without reasoning about precise
-    /// temporal overlap. Returns `None` if there is no predicted conflict.
-    fn predict_yield_s(&self, obj: &PerceivedObject, guide: &[(f64, f64)], s_ego: f64) -> Option<f64> {
+    /// Predictive yield: roll a moving object forward (CTRV if a yaw rate is
+    /// supplied via `motion`, else constant-velocity) and, if it is currently OUT
+    /// of the lane but will ENTER the path ahead within the horizon (a crossing or
+    /// turning-in vehicle/pedestrian), return the arc-length at which it crosses in
+    /// — so the planner yields short of it. Objects already in the lane are handled
+    /// by stop-short/lead (skipped here). Conservative: yields to any predicted
+    /// in-lane conflict ahead without precise temporal-overlap reasoning. Returns
+    /// `None` if there is no predicted conflict.
+    fn predict_yield_s(
+        &self,
+        obj: &PerceivedObject,
+        motion: &[MotionState],
+        guide: &[(f64, f64)],
+        s_ego: f64,
+    ) -> Option<f64> {
         let (_, signed_now) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
         if signed_now.abs() <= self.cfg.object_lane_tolerance_m {
             return None; // already in-lane → stop-short / lead handles it
@@ -430,12 +452,19 @@ impl GeometricPlanner {
         if speed < self.cfg.crossing_speed_threshold_mps {
             return None; // not a mover worth predicting
         }
+        // Turn-aware: roll on CTRV using the object's yaw rate (0 → CV).
+        let yaw_rate = motion
+            .iter()
+            .find(|m| m.id == obj.id)
+            .map_or(0.0, |m| m.yaw_rate_rad_s);
         let dt = self.cfg.prediction_dt_s.max(0.05);
         let steps = (self.cfg.prediction_horizon_s / dt).ceil() as usize;
-        for i in 1..=steps {
-            let t = i as f64 * dt;
-            let fx = obj.pos.x_m + obj.vel.x_m * t;
-            let fy = obj.pos.y_m + obj.vel.y_m * t;
+        let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
+        let (mut fx, mut fy) = (obj.pos.x_m, obj.pos.y_m);
+        for _ in 1..=steps {
+            heading += yaw_rate * dt;
+            fx += speed * heading.cos() * dt;
+            fy += speed * heading.sin() * dt;
             let (s_f, lateral_f) = project_signed(guide, fx, fy);
             if s_f > s_ego && lateral_f.abs() <= self.cfg.prediction_lane_half_m {
                 return Some(s_f); // first predicted entry into the lane ahead
@@ -534,7 +563,7 @@ impl Planner for GeometricPlanner {
         // the horizon → yield short of where it crosses (anticipates a cut-in /
         // crossing that the snapshot-only checks miss until it is already close).
         for obj in input.objects {
-            if let Some(s_conflict) = self.predict_yield_s(obj, &guide, s_ego) {
+            if let Some(s_conflict) = self.predict_yield_s(obj, input.motion, &guide, s_ego) {
                 let yield_s = s_conflict - self.cfg.object_stop_gap_m;
                 if yield_s < s_limit {
                     s_limit = yield_s;
@@ -885,6 +914,7 @@ mod tests {
             objects: &[],
             controls: &[],
             lane_boundaries: &[],
+            motion: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -952,6 +982,7 @@ mod tests {
             objects: &[],
             controls: &[],
             lane_boundaries: &[],
+            motion: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1224,6 +1255,7 @@ mod tests {
             objects,
             controls: &[],
             lane_boundaries: &[],
+            motion: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1465,6 +1497,7 @@ mod tests {
             objects: &[],
             controls,
             lane_boundaries: &[],
+            motion: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1569,6 +1602,7 @@ mod tests {
             objects,
             controls: &[],
             lane_boundaries: lanes,
+            motion: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1691,6 +1725,30 @@ mod tests {
 
         let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(max_x > 22.0, "won't enter the lane in time → no yield, got {max_x}");
+    }
+
+    #[test]
+    fn ctrv_yields_to_turning_in_object_where_cv_misses() {
+        // An object moving PARALLEL to the lane (+x) but turning INTO it. The
+        // constant-velocity predictor sees it stay out (no yield); the CTRV
+        // predictor (fed the yaw rate via the motion channel) sees the curve and
+        // yields. The win the Taj CTRV tracker enables on the planning side.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 4.0, 3.0, 0.0)];
+        let mut p = GeometricPlanner::default();
+
+        // CV (no motion state): object stays parallel → no predicted entry → drives on.
+        let cv = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+        let cv_max = cv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(cv_max > 22.0, "CV: parallel object → no yield, got {cv_max}");
+
+        // CTRV (yaw rate turning it into the lane): predicts the entry → yields.
+        let motion = [MotionState { id: 1, yaw_rate_rad_s: -0.4 }];
+        let inp = PlanInput { motion: &motion, ..input_with_objects(&corridor, 8.0, 35.0, &objs) };
+        let ctrv = p.plan(&inp);
+        let ctrv_max = ctrv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(ctrv_max < 21.0, "CTRV: predicts the turn-in → yields short, got {ctrv_max}");
+        assert!(ctrv_max < cv_max - 5.0, "CTRV yields meaningfully shorter than CV");
     }
 }
 
