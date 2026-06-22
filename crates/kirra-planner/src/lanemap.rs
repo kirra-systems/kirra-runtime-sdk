@@ -79,6 +79,12 @@ pub struct Lane {
     pub left_line: LineType,
     /// Marking on the -y (right) boundary — its crossing rule.
     pub right_line: LineType,
+    /// **Travel direction** of the lane, as a world-frame heading (radians). A
+    /// forward `+X` lane is `0.0`; an *oncoming* lane (opposite traffic) is `π`.
+    /// This is what distinguishes a same-direction lead from a head-on conflict —
+    /// the input the oncoming-traffic RSS bound consumes. Independent of the
+    /// centerline vertex ordering (which can advance either way).
+    pub heading_rad: f64,
     /// Connectivity (successors + lateral neighbors).
     pub edges: Vec<LaneEdge>,
 }
@@ -106,6 +112,7 @@ impl Lane {
             half_width_m,
             left_line,
             right_line,
+            heading_rad: 0.0, // forward (+X) by default; oncoming lanes set π
             edges: Vec::new(),
         }
     }
@@ -115,6 +122,35 @@ impl Lane {
     pub fn with_edge(mut self, edge: LaneEdge) -> Self {
         self.edges.push(edge);
         self
+    }
+
+    /// Builder: set the lane's travel direction (world heading, radians). Use `π`
+    /// (`std::f64::consts::PI`) for an oncoming lane.
+    #[must_use]
+    pub fn with_heading(mut self, heading_rad: f64) -> Self {
+        self.heading_rad = heading_rad;
+        self
+    }
+
+    /// Does `other` carry traffic in the **opposing** direction (head-on)? True
+    /// when the headings differ by more than a right angle — i.e. an oncoming
+    /// lane. The discriminator between a same-direction lead (use the
+    /// same-direction RSS) and a head-on conflict (needs the closing-speed bound).
+    #[must_use]
+    pub fn opposes(&self, other: &Lane) -> bool {
+        wrap_pi(self.heading_rad - other.heading_rad).abs() > std::f64::consts::FRAC_PI_2
+    }
+
+    /// Is world point `p` inside this lane's footprint (within the longitudinal
+    /// extent and `±half_width_m` of the centerline)? Straight-lane test.
+    #[must_use]
+    pub fn contains(&self, p: Point) -> bool {
+        if self.centerline.len() < 2 {
+            return false;
+        }
+        let x0 = self.centerline.iter().map(|q| q.x_m).fold(f64::INFINITY, f64::min);
+        let x1 = self.centerline.iter().map(|q| q.x_m).fold(f64::NEG_INFINITY, f64::max);
+        p.x_m >= x0 && p.x_m <= x1 && (p.y_m - self.mean_y()).abs() <= self.half_width_m
     }
 
     /// Longitudinal successors of this lane.
@@ -241,6 +277,27 @@ impl LaneGraph {
         self.lanes.get(&id)
     }
 
+    /// Which lane contains world point `p` (first match in id order), if any.
+    /// `None` = off the mapped road. Used to attribute a perceived object to a
+    /// lane so its travel direction can be compared against the ego's.
+    #[must_use]
+    pub fn lane_at(&self, p: Point) -> Option<u64> {
+        self.lanes.values().find(|l| l.contains(p)).map(|l| l.id)
+    }
+
+    /// Is world point `p` in a lane whose traffic **opposes** the ego lane (a
+    /// head-on conflict candidate)? `Some(true)` = oncoming, `Some(false)` =
+    /// same-direction (incl. the ego's own lane), `None` = `ego_lane` unknown or
+    /// `p` is off the mapped road (fail-closed: an unattributable object is not
+    /// silently classified same-direction). This is the discriminator the
+    /// oncoming-traffic RSS bound (the next piece) keys off.
+    #[must_use]
+    pub fn is_oncoming_at(&self, ego_lane: u64, p: Point) -> Option<bool> {
+        let ego = self.lanes.get(&ego_lane)?;
+        let other = self.lanes.get(&self.lane_at(p)?)?;
+        Some(other.opposes(ego))
+    }
+
     /// Number of lanes in the graph.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -347,9 +404,11 @@ impl LaneGraph {
             Lane::straight(ego_lane_id, ego_c, x0, x1, lane_half, LineType::Unmarked, LineType::Solid)
                 .with_edge(LaneEdge::LeftNeighbor { to: oncoming_lane_id }),
         );
-        // Oncoming (left half): road edge on the left, unmarked centerline on the right.
+        // Oncoming (left half): road edge on the left, unmarked centerline on the
+        // right, and travel OPPOSING the ego (heading π) — the head-on direction.
         g.add_lane(
             Lane::straight(oncoming_lane_id, onc_c, x0, x1, lane_half, LineType::Solid, LineType::Unmarked)
+                .with_heading(std::f64::consts::PI)
                 .with_edge(LaneEdge::RightNeighbor { to: ego_lane_id }),
         );
         Some(g)
@@ -362,6 +421,18 @@ impl LaneGraph {
         }
         lane_ids.iter().map(|id| self.lanes.get(id)).collect()
     }
+}
+
+/// Wrap an angle to `(-π, π]`.
+fn wrap_pi(a: f64) -> f64 {
+    use std::f64::consts::PI;
+    let mut x = a % (2.0 * PI);
+    if x > PI {
+        x -= 2.0 * PI;
+    } else if x <= -PI {
+        x += 2.0 * PI;
+    }
+    x
 }
 
 /// Mean lateral position of a boundary polyline.
@@ -548,6 +619,55 @@ mod tests {
             right: vec![Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 50.0, y_m: 5.0 }],
         };
         assert!(LaneGraph::from_undivided_corridor(&flipped, 1, 2).is_none());
+    }
+
+    #[test]
+    fn undivided_road_marks_the_oncoming_lane_opposing() {
+        use kirra_ros2_adapter::corridor::MockCorridorSource;
+        let road = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
+        let ego = g.lane(1).unwrap();
+        let onc = g.lane(2).unwrap();
+        assert_eq!(ego.heading_rad, 0.0, "ego travels forward (+X)");
+        assert!((onc.heading_rad - std::f64::consts::PI).abs() < 1e-9, "oncoming travels -X");
+        assert!(onc.opposes(ego), "oncoming lane opposes the ego");
+        assert!(ego.opposes(onc), "opposition is symmetric");
+        assert!(!ego.opposes(ego), "a lane never opposes itself");
+    }
+
+    #[test]
+    fn lane_at_attributes_points_to_their_half() {
+        use kirra_ros2_adapter::corridor::MockCorridorSource;
+        let road = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
+        // Right half (y<0) → ego lane 1; left half (y>0) → oncoming lane 2.
+        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: -2.5 }), Some(1));
+        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: 2.5 }), Some(2));
+        // Off the road (beyond the edge) or past the longitudinal extent → None.
+        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: 9.0 }), None);
+        assert_eq!(g.lane_at(Point { x_m: 200.0, y_m: -2.5 }), None);
+    }
+
+    #[test]
+    fn is_oncoming_at_discriminates_head_on_from_lead() {
+        use kirra_ros2_adapter::corridor::MockCorridorSource;
+        let road = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
+        // An object in the oncoming half is a head-on candidate; one in the ego
+        // half is same-direction (a lead). Off-road / unknown ego → None (fail-closed).
+        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: 2.5 }), Some(true));
+        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: -2.5 }), Some(false));
+        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: 20.0 }), None);
+        assert_eq!(g.is_oncoming_at(99, Point { x_m: 30.0, y_m: 2.5 }), None);
+    }
+
+    #[test]
+    fn marked_lanes_default_to_forward_travel() {
+        // The straight() constructor defaults to forward; with_heading overrides.
+        let fwd = Lane::straight(1, 0.0, 0.0, 50.0, 1.75, LineType::Solid, LineType::Broken);
+        assert_eq!(fwd.heading_rad, 0.0);
+        let back = fwd.clone().with_heading(std::f64::consts::PI);
+        assert!(fwd.opposes(&back) && !fwd.opposes(&fwd));
     }
 
     #[test]
