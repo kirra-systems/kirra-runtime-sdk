@@ -122,6 +122,11 @@ pub struct PlanInput<'a> {
     /// (from the Taj tracker) instead of constant-velocity. An object with no
     /// entry (or an empty slice) predicts straight-line (CV), as before.
     pub motion: &'a [MotionState],
+    /// Commanded lane change: a target lateral offset from the current path
+    /// centerline to shift to (e.g. the adjacent lane center). Honored only if the
+    /// lane-line rules permit crossing to that side and the corridor fits;
+    /// otherwise the planner stays in lane. `None` = no lane change.
+    pub lane_change_to_m: Option<f64>,
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -429,6 +434,41 @@ impl GeometricPlanner {
         LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
     }
 
+    /// Commanded lane change: a SUSTAINED lateral shift to `target` (ramp in, then
+    /// hold — unlike the route-around bump, which returns to center). Honored only
+    /// if the lane-line rules permit crossing to that side and the shifted path +
+    /// footprint stays inside the corridor; else `None` (stay in lane).
+    fn compute_lane_change_bump(
+        &self,
+        target: f64,
+        left: &[Point],
+        right: &[Point],
+        lane_boundaries: &[LaneBoundary],
+        s_ego: f64,
+    ) -> Option<LateralBump> {
+        if target.abs() <= 1e-3 {
+            return None;
+        }
+        // Lane-line rule: may we cross to the target side?
+        if !behavior::lateral_move_permitted(lane_boundaries, 0.0, target) {
+            return None;
+        }
+        // Corridor fit: the shifted path + footprint must stay inside, checked
+        // across the held region (a few stations past the ramp).
+        let ramp_len = (1.5 * target.abs() / self.cfg.lateral_ramp_slope.max(1e-3)).max(1.0);
+        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m;
+        for k in 0..=4 {
+            let x = s_ego + ramp_len + k as f64 * 2.0;
+            let cl = 0.5 * (boundary_y_at(left, x) + boundary_y_at(right, x));
+            let path_y = cl + target;
+            if path_y + fh > boundary_y_at(left, x) || path_y - fh < boundary_y_at(right, x) {
+                return None;
+            }
+        }
+        // Ramp in, then hold to the end of the horizon (hold_end → effectively ∞).
+        Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
+    }
+
     /// Predictive yield: roll a moving object forward (CTRV if a yaw rate is
     /// supplied via `motion`, else constant-velocity) and, if it is currently OUT
     /// of the lane but will ENTER the path ahead within the horizon (a crossing or
@@ -508,18 +548,30 @@ impl Planner for GeometricPlanner {
         let s_ego = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
         let s_goal = project_arc_length(&guide, input.goal.target.x_m, input.goal.target.y_m);
 
-        // Lateral avoidance: if an off-path object can be routed around within the
-        // corridor, compute a smooth lateral bump (applied per-sample below) so
-        // the object clears the checker's RSS band; else the bump is NONE and the
-        // object is handled by stop-short.
-        let bump = self.compute_bump(
-            &guide,
-            input.map.left_boundary(),
-            input.map.right_boundary(),
-            input.objects,
-            input.lane_boundaries,
-            s_ego,
-        );
+        // Lateral maneuver. A COMMANDED lane change (sustained shift to the target
+        // lane) takes precedence over route-around; otherwise, if an off-path
+        // object can be routed around within the corridor, compute the avoidance
+        // bump. Both are smooth lateral offsets applied per-sample below; NONE →
+        // stay centered (objects handled by stop-short).
+        let bump = match input.lane_change_to_m {
+            Some(target) => self
+                .compute_lane_change_bump(
+                    target,
+                    input.map.left_boundary(),
+                    input.map.right_boundary(),
+                    input.lane_boundaries,
+                    s_ego,
+                )
+                .unwrap_or(LateralBump::NONE),
+            None => self.compute_bump(
+                &guide,
+                input.map.left_boundary(),
+                input.map.right_boundary(),
+                input.objects,
+                input.lane_boundaries,
+                s_ego,
+            ),
+        };
 
         // Per-object handling, nearest-binding:
         //  - moving LEAD (forward velocity, within the lead lateral band) → MATCH
@@ -915,6 +967,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            lane_change_to_m: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -983,6 +1036,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            lane_change_to_m: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1256,6 +1310,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            lane_change_to_m: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1498,6 +1553,7 @@ mod tests {
             controls,
             lane_boundaries: &[],
             motion: &[],
+            lane_change_to_m: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1603,6 +1659,7 @@ mod tests {
             controls: &[],
             lane_boundaries: lanes,
             motion: &[],
+            lane_change_to_m: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1749,6 +1806,84 @@ mod tests {
         let ctrv_max = ctrv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(ctrv_max < 21.0, "CTRV: predicts the turn-in → yields short, got {ctrv_max}");
         assert!(ctrv_max < cv_max - 5.0, "CTRV yields meaningfully shorter than CV");
+    }
+
+    // --- Commanded lane change ---------------------------------------------
+
+    fn input_lane_change<'a>(
+        map: &'a dyn CorridorSource,
+        ego_x: f64,
+        goal_x: f64,
+        target: f64,
+        lanes: &'a [LaneBoundary],
+    ) -> PlanInput<'a> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 2.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            map,
+            objects: &[],
+            controls: &[],
+            lane_boundaries: lanes,
+            motion: &[],
+            lane_change_to_m: Some(target),
+            posture: FleetPosture::Nominal,
+        }
+    }
+
+    #[test]
+    fn commanded_lane_change_across_broken_line_shifts_and_holds() {
+        // Commanded shift to the right lane (-3 m) across a BROKEN line → permitted.
+        // The path ramps over and HOLDS the offset (does not return like a bump).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &broken));
+
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(min_y <= -2.5, "shifts toward the target lane, got min_y {min_y}");
+        // Held, not returned: the last point stays in the new lane.
+        assert!(
+            out.trajectory.last().unwrap().pose.y_m <= -2.0,
+            "lane change is sustained (held), got {}",
+            out.trajectory.last().unwrap().pose.y_m
+        );
+    }
+
+    #[test]
+    fn lane_change_blocked_by_solid_line_stays_in_lane() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &solid));
+
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(min_y > -0.5, "solid line → no lane change, stays in lane, got {min_y}");
+    }
+
+    #[test]
+    fn lane_change_is_checker_admissible() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &broken));
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits the lane-change trajectory, got {verdict:?}"
+        );
     }
 }
 
