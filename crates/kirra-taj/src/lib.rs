@@ -401,6 +401,20 @@ struct Track {
     id: u64,
     pos: Point,
     stamp_ms: u64,
+    /// Latest estimated ground velocity (m/s) — retained for CTRV prediction.
+    vel: Point,
+    /// Latest estimated yaw rate (rad/s) from the heading change across frames.
+    yaw_rate: f64,
+}
+
+/// A predicted future path for one tracked object (constant-turn-rate,
+/// constant-velocity rollout). `points` are successive positions at the rollout
+/// `dt`; `yaw_rate_rad_s` is the estimated turn rate (0 = straight-line / CV).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictedPath {
+    pub id: u64,
+    pub yaw_rate_rad_s: f64,
+    pub points: Vec<Point>,
 }
 
 /// Taj **temporal tracker** — wraps the Phase-A geometric pipeline and adds
@@ -463,7 +477,22 @@ impl TajTracker {
                     obj.vel = Point { x_m: vx, y_m: vy };
                     obj.velocity_mps = vx.hypot(vy);
                     obj.heading_rad = if obj.velocity_mps > 1e-6 { vy.atan2(vx) } else { 0.0 };
-                    next_tracks.push(Track { id: tr.id, pos: obj.pos, stamp_ms: now_ms });
+                    // Yaw rate from the heading change vs. the track's prior
+                    // velocity (needs two velocity estimates → a third frame).
+                    let prev_speed = tr.vel.x_m.hypot(tr.vel.y_m);
+                    let yaw_rate = if dt > 1e-3 && prev_speed > 1e-3 && obj.velocity_mps > 1e-3 {
+                        let prev_h = tr.vel.y_m.atan2(tr.vel.x_m);
+                        wrap_pi(obj.heading_rad - prev_h) / dt
+                    } else {
+                        0.0
+                    };
+                    next_tracks.push(Track {
+                        id: tr.id,
+                        pos: obj.pos,
+                        stamp_ms: now_ms,
+                        vel: obj.vel,
+                        yaw_rate,
+                    });
                 }
                 None => {
                     // New track — first sighting, no velocity yet.
@@ -473,13 +502,56 @@ impl TajTracker {
                     obj.velocity_mps = 0.0;
                     obj.vel = Point { x_m: 0.0, y_m: 0.0 };
                     obj.heading_rad = 0.0;
-                    next_tracks.push(Track { id, pos: obj.pos, stamp_ms: now_ms });
+                    next_tracks.push(Track {
+                        id,
+                        pos: obj.pos,
+                        stamp_ms: now_ms,
+                        vel: Point { x_m: 0.0, y_m: 0.0 },
+                        yaw_rate: 0.0,
+                    });
                 }
             }
         }
         self.tracks = next_tracks;
         perception
     }
+
+    /// Predict each tracked object's future path over `horizon_s` (sampled every
+    /// `dt`) using a **constant-turn-rate, constant-velocity (CTRV)** model — so a
+    /// turning object's prediction *curves* with its yaw rate, instead of the
+    /// straight-line constant-velocity guess. (`yaw_rate ≈ 0` → straight, i.e. CV.)
+    #[must_use]
+    pub fn predict(&self, horizon_s: f64, dt: f64) -> Vec<PredictedPath> {
+        let dt = dt.max(0.01);
+        let steps = (horizon_s / dt).ceil() as usize;
+        self.tracks
+            .iter()
+            .map(|t| {
+                let speed = t.vel.x_m.hypot(t.vel.y_m);
+                let mut heading = t.vel.y_m.atan2(t.vel.x_m);
+                let (mut x, mut y) = (t.pos.x_m, t.pos.y_m);
+                let mut points = Vec::with_capacity(steps);
+                for _ in 0..steps {
+                    heading += t.yaw_rate * dt;
+                    x += speed * heading.cos() * dt;
+                    y += speed * heading.sin() * dt;
+                    points.push(Point { x_m: x, y_m: y });
+                }
+                PredictedPath { id: t.id, yaw_rate_rad_s: t.yaw_rate, points }
+            })
+            .collect()
+    }
+}
+
+/// Wrap an angle to `(-π, π]`.
+fn wrap_pi(a: f64) -> f64 {
+    let mut a = a % (2.0 * core::f64::consts::PI);
+    if a > core::f64::consts::PI {
+        a -= 2.0 * core::f64::consts::PI;
+    } else if a <= -core::f64::consts::PI {
+        a += 2.0 * core::f64::consts::PI;
+    }
+    a
 }
 
 #[cfg(test)]
@@ -846,6 +918,66 @@ mod tests {
             out.corridor.left_boundary().last().unwrap().x_m,
             "an off-lane hazard does not clip the drivable corridor"
         );
+    }
+
+    // --- CTRV prediction (yaw-rate-aware) ----------------------------------
+
+    /// A blob cluster centred at `(bx, by)`.
+    fn point_blob_scan(bx: f64, by: f64, stamp_ms: u64) -> LaserScan {
+        let r0 = bx.hypot(by);
+        let th0 = by.atan2(bx);
+        scan_from(40.0, stamp_ms, |theta| if (theta - th0).abs() < 0.05 { Some(r0) } else { None })
+    }
+
+    /// Three frames of a left-turning object (its heading rotates toward +y).
+    fn turning_tracker() -> TajTracker {
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&point_blob_scan(10.0, 0.0, 0), 0);
+        let _ = taj.track(&point_blob_scan(12.0, 0.5, 200), 200);
+        let _ = taj.track(&point_blob_scan(14.0, 1.5, 400), 400);
+        taj
+    }
+
+    #[test]
+    fn tracker_estimates_yaw_rate_of_turning_object() {
+        let paths = turning_tracker().predict(2.0, 0.2);
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].yaw_rate_rad_s > 0.3,
+            "left turn → positive yaw rate, got {}",
+            paths[0].yaw_rate_rad_s
+        );
+    }
+
+    #[test]
+    fn ctrv_predicts_a_curved_path() {
+        let paths = turning_tracker().predict(2.0, 0.2);
+        let p = &paths[0];
+        let n = p.points.len();
+        assert!(n >= 3);
+        // Successive segment directions rotate → the path curves (not a CV line).
+        let seg_dir = |a: usize, b: usize| {
+            (p.points[b].y_m - p.points[a].y_m).atan2(p.points[b].x_m - p.points[a].x_m)
+        };
+        let first = seg_dir(0, 1);
+        let last = seg_dir(n - 2, n - 1);
+        assert!(
+            (last - first).abs() > 0.3,
+            "CTRV path curves with the yaw rate, got {first} -> {last}"
+        );
+    }
+
+    #[test]
+    fn straight_object_predicts_a_straight_line() {
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&point_blob_scan(10.0, 0.0, 0), 0);
+        let _ = taj.track(&point_blob_scan(12.0, 0.0, 200), 200);
+        let _ = taj.track(&point_blob_scan(14.0, 0.0, 400), 400);
+        let paths = taj.predict(2.0, 0.2);
+
+        assert!(paths[0].yaw_rate_rad_s.abs() < 0.1, "straight → ~0 yaw rate, got {}", paths[0].yaw_rate_rad_s);
+        let max_y = paths[0].points.iter().map(|p| p.y_m.abs()).fold(0.0, f64::max);
+        assert!(max_y < 1.0, "straight (CV) path stays near y≈0, got {max_y}");
     }
 }
 
