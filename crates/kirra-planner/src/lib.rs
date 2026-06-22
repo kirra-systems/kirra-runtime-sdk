@@ -43,7 +43,9 @@ use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 use kirra_runtime_sdk::gateway::containment::MAX_TRAJECTORY_HORIZON;
 
 pub mod behavior;
-pub use behavior::{Behavioral, BehaviorConfig, SignalState, TrafficControl};
+pub use behavior::{
+    Behavioral, BehaviorConfig, LaneBoundary, LineType, SignalState, TrafficControl,
+};
 
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
 /// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop` and
@@ -99,6 +101,10 @@ pub struct PlanInput<'a> {
     /// behavioral/legal layer (distinct from KIRRA's physical authority). An
     /// empty slice = no controls. See [`behavior`].
     pub controls: &'a [TrafficControl],
+    /// Lane-line boundaries (lateral offsets from the path centerline) whose
+    /// crossing rules gate the lateral-avoidance maneuver: Occy will not route
+    /// around an object across a solid line. An empty slice = unconstrained.
+    pub lane_boundaries: &'a [LaneBoundary],
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -337,6 +343,7 @@ impl GeometricPlanner {
         left: &[Point],
         right: &[Point],
         objects: &[PerceivedObject],
+        lane_boundaries: &[LaneBoundary],
         s_ego: f64,
     ) -> LateralBump {
         let ct = self.cfg.lateral_clearance_target_m;
@@ -366,6 +373,12 @@ impl GeometricPlanner {
         // Offset to the FAR side, minimal magnitude to reach `ct` clearance.
         let y_off = signed - ct * if signed >= 0.0 { 1.0 } else { -1.0 };
         if y_off.abs() > self.cfg.lateral_offset_max_m {
+            return LateralBump::NONE;
+        }
+        // Lane-line rule: never route around across a non-crossable line (e.g. a
+        // solid centerline). The legal constraint is Occy's; the collision shadow
+        // (oncoming traffic) stays KIRRA's. Falls back to stop-short.
+        if !behavior::lateral_move_permitted(lane_boundaries, 0.0, y_off) {
             return LateralBump::NONE;
         }
 
@@ -431,6 +444,7 @@ impl Planner for GeometricPlanner {
             input.map.left_boundary(),
             input.map.right_boundary(),
             input.objects,
+            input.lane_boundaries,
             s_ego,
         );
 
@@ -813,6 +827,7 @@ mod tests {
             map,
             objects: &[],
             controls: &[],
+            lane_boundaries: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -879,6 +894,7 @@ mod tests {
             map,
             objects: &[],
             controls: &[],
+            lane_boundaries: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1150,6 +1166,7 @@ mod tests {
             map,
             objects,
             controls: &[],
+            lane_boundaries: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1390,6 +1407,7 @@ mod tests {
             map,
             objects: &[],
             controls,
+            lane_boundaries: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1470,6 +1488,75 @@ mod tests {
         assert!(
             matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
             "checker admits the controlled stop at the line, got {verdict:?}"
+        );
+    }
+
+    // --- Lane-line lateral rules: gating route-around ----------------------
+
+    fn input_objs_lanes<'a>(
+        map: &'a dyn CorridorSource,
+        ego_x: f64,
+        goal_x: f64,
+        objects: &'a [PerceivedObject],
+        lanes: &'a [LaneBoundary],
+    ) -> PlanInput<'a> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 2.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            map,
+            objects,
+            controls: &[],
+            lane_boundaries: lanes,
+            posture: FleetPosture::Nominal,
+        }
+    }
+
+    #[test]
+    fn broken_line_permits_route_around() {
+        // Off-center object + a BROKEN line on the offset side → Occy may cross →
+        // routes around (offsets) and the checker admits it.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(20.0, 3.0)];
+        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &broken));
+
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(min_y <= -1.0, "broken line → routes around, got min_y {min_y}");
+    }
+
+    #[test]
+    fn solid_line_forbids_route_around_and_kirra_backstops() {
+        // Same object, but a SOLID line on the offset side: Occy must NOT cross it
+        // → no route-around (drives straight). Since it can't legally pass the
+        // obstacle, KIRRA (physical authority) rejects the straight path → the
+        // stack stops. Occy obeys the line; KIRRA enforces the collision safety.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(20.0, 3.0)];
+        let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &solid));
+
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(min_y > -0.5, "solid line → no route-around (no offset), got min_y {min_y}");
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "can't legally pass → KIRRA backstops the straight path, got {verdict:?}"
         );
     }
 }
