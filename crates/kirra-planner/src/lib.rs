@@ -130,6 +130,30 @@ pub struct PlanInput<'a> {
     /// lane-line rules permit crossing to that side and the corridor fits;
     /// otherwise the planner stays in lane. `None` = no lane change.
     pub lane_change_to_m: Option<f64>,
+    /// Object ids that must **NOT be passed** — chiefly a **stopped school bus**
+    /// actively loading/unloading (red lights flashing, stop arm extended). US law
+    /// (MUTCD §7D; every state's stop-for-school-bus statute) requires traffic to
+    /// **stop and not overtake** such a bus — on an undivided road in *both*
+    /// directions. This is a **LEGAL** constraint, so it lives in Occy's behavioral
+    /// layer, not KIRRA: passing a bus is not a *collision*, so the physical
+    /// governor never enforces it (cf. running a red light). The integrator /
+    /// perception flags the id; Occy then refuses any route-around or overtake of
+    /// it and holds behind it (stop-short). An empty slice = no such restriction.
+    ///
+    /// Scope (honest): this gates the *pass*; resuming when the bus's lights clear
+    /// is the integrator dropping the id. The divided-highway exception (oncoming
+    /// traffic may proceed past a median) is not modeled — fail-safe is to stop.
+    pub no_overtake_ids: &'a [u64],
+    /// Optional **drivable area** distinct from the reference corridor `map` — the
+    /// wider space an **overtake** may briefly borrow (e.g. the full undivided road
+    /// when `map` is just the ego lane). `map` stays the reference the path follows
+    /// and within-lane route-arounds fit; `drivable`, when present, is the extra
+    /// area a cross-centerline pass may use. `None` → no overtake is attempted and
+    /// behavior is identical to before (the reference corridor is the only space).
+    /// This is the planner-side of Autoware's *reference-path vs drivable-area*
+    /// split; the integrator must pass the SAME corridor to the checker so KIRRA
+    /// independently bounds the oncoming traffic the pass exposes (head-on RSS).
+    pub drivable: Option<&'a dyn CorridorSource>,
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -309,6 +333,14 @@ pub struct GeometricPlannerConfig {
     pub prediction_lane_half_m: f64,
     /// Min object speed to treat it as a moving "crosser" worth predicting.
     pub crossing_speed_threshold_mps: f64,
+    /// Cap on the lateral offset an **overtake** will take (a pass legitimately
+    /// crosses a full lane, so this exceeds `lateral_offset_max_m`). The overtake
+    /// reuses `lateral_clearance_target_m` for the pass clearance: that clearance
+    /// must exceed the checker's 4 m lateral-alignment band so the passed object is
+    /// RSS-filtered (#451) — which is also why a *narrow* road can't admit a pass
+    /// (>4 m clearance won't fit one oncoming lane). The DRIVABLE corridor fit is
+    /// the real bound; this is a sanity ceiling.
+    pub overtake_offset_max_m: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -337,6 +369,7 @@ impl Default for GeometricPlannerConfig {
             prediction_dt_s: 0.2,
             prediction_lane_half_m: 2.0,
             crossing_speed_threshold_mps: 0.5,
+            overtake_offset_max_m: 7.0,
         }
     }
 }
@@ -374,6 +407,7 @@ impl GeometricPlanner {
     /// IF the offset both fits the corridor (with footprint + margin) and has room
     /// to ramp in before the object. Otherwise [`LateralBump::NONE`] (the caller
     /// then stops short instead — never an unsafe squeeze).
+    #[allow(clippy::too_many_arguments)]
     fn compute_bump(
         &self,
         guide: &[(f64, f64)],
@@ -381,6 +415,7 @@ impl GeometricPlanner {
         right: &[Point],
         objects: &[PerceivedObject],
         lane_boundaries: &[LaneBoundary],
+        no_overtake: &[u64],
         s_ego: f64,
     ) -> LateralBump {
         let ct = self.cfg.lateral_clearance_target_m;
@@ -389,6 +424,11 @@ impl GeometricPlanner {
         // A moving LEAD is followed (speed-matched), not routed around — skip it.
         let mut best: Option<(f64, f64, f64)> = None; // (s_obj, signed_lateral, obj_x)
         for obj in objects {
+            // A no-pass object (stopped school bus) is never routed around — the
+            // ego must hold behind it (the per-object stop-short does that).
+            if no_overtake.contains(&obj.id) {
+                continue;
+            }
             let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
             if s_obj <= s_ego || signed.abs() >= ct {
                 continue;
@@ -432,6 +472,94 @@ impl GeometricPlanner {
         let hold_half = 1.0;
         let hold_start = (s_obj - s_ego) - hold_half;
         if hold_start - ramp_len < 0.0 {
+            return LateralBump::NONE;
+        }
+        LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
+    }
+
+    /// **Overtake** a stopped / slow in-lane object by crossing **left** (the
+    /// lawful pass side on a right-driving road) into the adjacent lane, holding
+    /// alongside, then returning — a route-around bump, but it specifically passes
+    /// on the left across a *crossable* centerline, uses a tight object-relative
+    /// clearance (vehicle + gap, not the wide roadside berth), and fits the
+    /// **drivable** area (the full road), not just the reference lane. Returns
+    /// `NONE` (→ stop short) unless the lane line permits the left crossing AND the
+    /// offset path + footprint stays inside `left`/`right` (the drivable boundaries).
+    ///
+    /// This is what Occy *proposes*; it never reasons about the oncoming traffic
+    /// the pass exposes — KIRRA's head-on RSS is the sole authority on whether the
+    /// oncoming lane is clear enough (the doer-checker split). A moving lead is
+    /// followed (speed-matched), never overtaken here.
+    #[allow(clippy::too_many_arguments)]
+    fn compute_overtake_bump(
+        &self,
+        guide: &[(f64, f64)],
+        left: &[Point],
+        right: &[Point],
+        objects: &[PerceivedObject],
+        lane_boundaries: &[LaneBoundary],
+        no_overtake: &[u64],
+        s_ego: f64,
+    ) -> LateralBump {
+        let band = self.cfg.object_lane_tolerance_m;
+        // Nearest stopped/slow object ahead and IN our lane (a pass candidate).
+        let mut best: Option<(f64, f64)> = None; // (s_obj, signed)
+        for obj in objects {
+            // A stopped school bus (or any flagged no-pass object) is NEVER
+            // overtaken — it is illegal. Hold behind it (stop-short) instead.
+            if no_overtake.contains(&obj.id) {
+                continue;
+            }
+            let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
+            if s_obj <= s_ego || signed.abs() > band {
+                continue;
+            }
+            let h = heading_at(guide, s_obj);
+            let lon_v = obj.vel.x_m * h.cos() + obj.vel.y_m * h.sin();
+            if lon_v > self.cfg.lead_speed_threshold_mps {
+                continue; // a moving lead → follow, don't overtake
+            }
+            if best.is_none_or(|(bs, _)| s_obj < bs) {
+                best = Some((s_obj, signed));
+            }
+        }
+        let (s_obj, signed) = match best {
+            Some(v) => v,
+            None => return LateralBump::NONE,
+        };
+
+        // Pass on the LEFT (+y): path goes to the object's left by the clearance
+        // target. It must exceed the checker's 4 m lateral band so the passed
+        // object is RSS-filtered (#451) — the same berth a within-lane route-around
+        // uses, here taken across the centerline into the drivable area.
+        let clearance = self.cfg.lateral_clearance_target_m;
+        let y_off = signed + clearance;
+        if y_off <= 0.0 || y_off.abs() > self.cfg.overtake_offset_max_m {
+            return LateralBump::NONE;
+        }
+        // Lane-line rule: the centerline must be crossable to the left.
+        if !behavior::lateral_move_permitted(lane_boundaries, 0.0, y_off) {
+            return LateralBump::NONE;
+        }
+        // Drivable fit at the object, GUIDE-relative: the path follows the guide
+        // (the ego lane), offset by `y_off`, and must stay inside the drivable area.
+        let (gx, gy) = point_at(guide, s_obj);
+        let path_y = gy + y_off;
+        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m;
+        if path_y + fh > boundary_y_at(left, gx) || path_y - fh < boundary_y_at(right, gx) {
+            return LateralBump::NONE;
+        }
+        // Commit EARLY: ramp from the ego over the whole run-up to the object, so
+        // the lateral clearance has cleared the checker's 4 m band BEFORE the ego
+        // closes within its longitudinal gap. A late, slope-fixed ramp (as the
+        // within-lane route-around uses) would still be sweeping through the band at
+        // close range and KIRRA would MRC the pass. Hold alongside; the return ramp
+        // runs past the horizon (a later cycle completes it — receding-horizon).
+        let hold_half = 1.5;
+        let hold_start = (s_obj - s_ego) - hold_half;
+        let ramp_len = hold_start; // start the lateral move at the ego (up0 = 0)
+        // Reject if the run-up is too short for a gentle (in-envelope) ramp.
+        if ramp_len < y_off.abs() / self.cfg.lateral_ramp_slope.max(1e-3) {
             return LateralBump::NONE;
         }
         LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
@@ -566,14 +694,33 @@ impl Planner for GeometricPlanner {
                     s_ego,
                 )
                 .unwrap_or(LateralBump::NONE),
-            None => self.compute_bump(
-                &guide,
-                input.map.left_boundary(),
-                input.map.right_boundary(),
-                input.objects,
-                input.lane_boundaries,
-                s_ego,
-            ),
+            None => {
+                // Within-lane route-around first (stays inside the reference
+                // corridor). If that can't clear the object AND the integrator has
+                // supplied a wider drivable area (an undivided road's full width),
+                // try an overtake that crosses the centerline into it.
+                let within = self.compute_bump(
+                    &guide,
+                    input.map.left_boundary(),
+                    input.map.right_boundary(),
+                    input.objects,
+                    input.lane_boundaries,
+                    input.no_overtake_ids,
+                    s_ego,
+                );
+                match input.drivable {
+                    Some(drivable) if within.y_off == 0.0 => self.compute_overtake_bump(
+                        &guide,
+                        drivable.left_boundary(),
+                        drivable.right_boundary(),
+                        input.objects,
+                        input.lane_boundaries,
+                        input.no_overtake_ids,
+                        s_ego,
+                    ),
+                    _ => within,
+                }
+            }
         };
 
         // Per-object handling, nearest-binding:
@@ -971,6 +1118,8 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1040,6 +1189,8 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1314,6 +1465,8 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1557,6 +1710,8 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1663,6 +1818,8 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }
@@ -1834,6 +1991,8 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             lane_change_to_m: Some(target),
+            no_overtake_ids: &[],
+            drivable: None,
             posture: FleetPosture::Nominal,
         }
     }

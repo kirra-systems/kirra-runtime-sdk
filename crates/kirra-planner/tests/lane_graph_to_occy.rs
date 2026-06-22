@@ -74,6 +74,8 @@ fn lane_change_across_broken_divider_admits() {
         lane_boundaries: &boundaries,
         motion: &[],
         lane_change_to_m: Some(-3.5),
+        no_overtake_ids: &[],
+        drivable: None,
         posture: FleetPosture::Nominal,
     };
     let mut planner = GeometricPlanner::default();
@@ -118,6 +120,8 @@ fn lane_change_across_solid_divider_is_refused() {
         lane_boundaries: &boundaries,
         motion: &[],
         lane_change_to_m: Some(3.5),
+        no_overtake_ids: &[],
+        drivable: None,
         posture: FleetPosture::Nominal,
     };
     let mut planner = GeometricPlanner::default();

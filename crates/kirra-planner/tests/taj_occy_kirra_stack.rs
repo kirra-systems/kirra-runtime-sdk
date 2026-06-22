@@ -94,6 +94,8 @@ fn run_stack(
         lane_boundaries: &[],
         motion: &[],
         lane_change_to_m: None,
+        no_overtake_ids: &[],
+        drivable: None,
         posture: posture.clone(),
     };
     let mut planner = GeometricPlanner::default();
@@ -185,6 +187,8 @@ fn route_around_in_corridor_object_admits() {
         lane_boundaries: &[],
         motion: &[],
         lane_change_to_m: None,
+        no_overtake_ids: &[],
+        drivable: None,
         posture: FleetPosture::Nominal,
     };
     let mut planner = GeometricPlanner::default();

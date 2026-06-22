@@ -1,0 +1,226 @@
+//! End-to-end: **overtake into the oncoming lane → Occy → KIRRA**.
+//!
+//! The sharpest form of the doer-checker split. On an undivided road, Occy passes
+//! a stopped car by crossing the (crossable) centerline into the oncoming lane and
+//! returning — but it never reasons about the oncoming traffic that pass exposes.
+//! **KIRRA's head-on RSS is the sole authority** on whether the oncoming lane is
+//! clear enough. Occy proposes the pass; KIRRA admits it on a clear road and
+//! refuses it when an oncoming vehicle is too close.
+//!
+//! This also exercises the `PlanInput` reference-path vs drivable-area decoupling:
+//! `map` is the ego LANE (the path Occy follows, keep-right) while `drivable` is
+//! the FULL road (the area a pass may borrow). The same `drivable` corridor is
+//! handed to KIRRA so its containment + RSS see the whole road.
+
+use kirra_planner::{
+    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneCorridor, LaneEdge, LaneGraph,
+    LineType, PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
+};
+use kirra_ros2_adapter::corridor::{CorridorSource, Point};
+use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+
+const LEN: f64 = 200.0;
+
+/// A wide undivided road: ego (right) lane center y=-2.5 half 2.5 → spans [-5, 0];
+/// oncoming (left) lane center y=+2.5 half 2.5 → [0, +5], travelling the opposite
+/// way (heading π). `center` is the centerline marking between them.
+fn road(center: LineType) -> LaneGraph {
+    LaneGraph::new()
+        .with_lane(
+            Lane::straight(1, -2.5, 0.0, LEN, 2.5, center, LineType::Solid)
+                .with_edge(LaneEdge::LeftNeighbor { to: 2 }),
+        )
+        .with_lane(
+            Lane::straight(2, 2.5, 0.0, LEN, 2.5, LineType::Solid, center)
+                .with_heading(std::f64::consts::PI)
+                .with_edge(LaneEdge::RightNeighbor { to: 1 }),
+        )
+}
+
+fn ego_corridor(g: &LaneGraph) -> LaneCorridor {
+    g.lane(1).unwrap().corridor(0.95, 5)
+}
+fn full_road(g: &LaneGraph) -> LaneCorridor {
+    g.corridor_over(&[1, 2], 0.95, 5).unwrap()
+}
+
+/// A stopped car in the ego lane, positioned to the right of the lane centerline
+/// (near the road's right edge) so the left pass needs a modest offset.
+fn stopped_car(x_m: f64) -> PerceivedObject {
+    PerceivedObject {
+        id: 1,
+        pos: Point { x_m, y_m: -4.4 },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }
+}
+
+/// An oncoming vehicle in the oncoming lane closing on the ego (heading π).
+fn oncoming_car(x_m: f64, speed: f64) -> PerceivedObject {
+    PerceivedObject {
+        id: 2,
+        pos: Point { x_m, y_m: 2.0 },
+        velocity_mps: speed,
+        heading_rad: std::f64::consts::PI,
+        vel: Point { x_m: -speed, y_m: 0.0 },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_and_check(
+    g: &LaneGraph,
+    map: &dyn CorridorSource,
+    drivable: &dyn CorridorSource,
+    objects: &[PerceivedObject],
+    with_drivable: bool,
+) -> (kirra_planner::PlanOutput, TrajectoryVerdict) {
+    let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+    let input = PlanInput {
+        ego: EgoState {
+            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        map,
+        objects,
+        controls: &[],
+        lane_boundaries: &boundaries,
+        motion: &[],
+        lane_change_to_m: None,
+        no_overtake_ids: &[],
+        drivable: with_drivable.then_some(drivable),
+        posture: FleetPosture::Nominal,
+    };
+    let mut planner = GeometricPlanner::default();
+    let plan = planner.plan(&input);
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory, drivable, objects, &VehicleConfig::default_urban(), None,
+        FleetPosture::Nominal,
+    );
+    (plan, verdict)
+}
+
+#[test]
+fn occy_proposes_an_overtake_across_the_crossable_centerline() {
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let cars = [stopped_car(24.0)];
+    let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, true);
+
+    assert_eq!(plan.kind, ProposalKind::Motion, "Occy moves to pass, not stops");
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y > 0.0, "the pass crosses into the oncoming half, got max_y {max_y}");
+}
+
+#[test]
+fn solid_centerline_forbids_the_overtake() {
+    let g = road(LineType::Solid);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let cars = [stopped_car(24.0)];
+    let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, true);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y <= 0.0, "a solid centerline → no pass into oncoming, got max_y {max_y}");
+}
+
+#[test]
+fn no_drivable_area_means_no_overtake() {
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let cars = [stopped_car(24.0)];
+    // drivable not provided → opt-out → prior behavior (no cross-centerline pass).
+    let (plan, _) = plan_and_check(&g, &map, &drivable, &cars, false);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y <= 0.0, "without a drivable area Occy does not overtake, got max_y {max_y}");
+}
+
+#[test]
+fn kirra_admits_the_pass_when_the_oncoming_lane_is_clear() {
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let cars = [stopped_car(24.0)];
+    let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
+
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a clear oncoming lane → KIRRA admits the pass, got {verdict:?}"
+    );
+}
+
+#[test]
+fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
+    // Identical to the admitted clear-pass scene, plus a closing oncoming vehicle in
+    // the oncoming lane. Occy still proposes the pass (it never reasons about
+    // oncoming); KIRRA refuses. Because the clear case ABOVE admits, the added
+    // oncoming vehicle is the cause — and the checker evaluates the longitudinal
+    // (head-on, opposite-direction) bound FIRST, which fires on the closing
+    // vehicle (~31 m required vs the dozen-metre gap). The checker, not the
+    // planner, owns the decision.
+    //
+    // (Direction-isolation — that the *oncoming* heading specifically is what
+    // triggers the head-on bound vs. a same-direction lead — is proven cleanly at
+    // the checker unit level in the adapter's `validation_tests` (#469); here it is
+    // confounded by the adapter's conservative *lateral* RSS, which MRCs any fast
+    // adjacent-lane vehicle during the angled ramp regardless of direction — a
+    // tracked over-conservatism, COMPETITIVE_PLANNER_ANALYSIS §4.)
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let cars = [stopped_car(24.0), oncoming_car(38.0, 12.0)];
+    let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
+
+    assert_eq!(
+        verdict, TrajectoryVerdict::MRCFallback,
+        "oncoming traffic too close → KIRRA refuses the pass, got {verdict:?}"
+    );
+}
+
+#[test]
+fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
+    // Identical to `occy_proposes_an_overtake...` (which DOES pass the same object),
+    // but the stopped object is flagged a school bus loading children (`no_overtake_
+    // ids`). It is ILLEGAL to pass — so Occy must NOT cross into the oncoming lane
+    // and must hold behind it, even though the centerline is crossable and the pass
+    // is otherwise admissible. The legal rule lives in Occy; KIRRA never enforces it.
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+    let bus = stopped_car(24.0); // id == 1
+    let cars = [bus];
+
+    let input = PlanInput {
+        ego: EgoState {
+            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        map: &map,
+        objects: &cars,
+        controls: &[],
+        lane_boundaries: &boundaries,
+        motion: &[],
+        lane_change_to_m: None,
+        no_overtake_ids: &[1], // the bus
+        drivable: Some(&drivable),
+        posture: FleetPosture::Nominal,
+    };
+    let mut planner = GeometricPlanner::default();
+    let plan = planner.plan(&input);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y <= 0.0, "school bus → no pass into oncoming, got max_y {max_y}");
+    // And it HOLDS behind: a controlled decel-to-stop short of the bus (id 1 at
+    // x=24, stop gap 5 → stop ~x=19), never reaching/passing it. (The full stop
+    // completes over the receding horizon; here it is still decelerating in.)
+    let max_x = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+    assert!(max_x < 20.0, "ego stays behind the bus's stop line, got max_x {max_x}");
+    assert!(
+        plan.trajectory.last().unwrap().velocity_mps <= 2.0,
+        "approaching at the slow object-approach speed (decel-to-stop), not cruising"
+    );
+}
