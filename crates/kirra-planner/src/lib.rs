@@ -664,4 +664,111 @@ mod tests {
         assert!(out.trajectory.len() <= 21, "horizon cap respected");
         assert!(out.trajectory.len() >= 2);
     }
+
+    // --- Independence: KIRRA judges Occy, it does not rubber-stamp it -------
+    //
+    // The `geometric_planner_output_is_checker_admissible` test proves the
+    // checker ADMITS a good proposal. These prove the converse — that the same
+    // test *can fail* — by feeding the REAL checker hand-built trajectories
+    // standing in for a MISBEHAVING planner. They show the checker exercises
+    // judgment on Occy's output and backstops it independently of Occy's own
+    // good behavior (the safety argument rests on the checker, not on Occy).
+
+    #[test]
+    fn checker_rejects_out_of_corridor_trajectory() {
+        // A trajectory leaving the 5 m corridor (y = 10) → hard reject. Proves
+        // the admissibility check is not a rubber stamp.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let traj = vec![
+            TrajectoryPoint {
+                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 2.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: Pose { x_m: 12.0, y_m: 10.0, heading_rad: 1.3 },
+                velocity_mps: 2.0,
+                time_from_start_s: 1.0,
+            },
+        ];
+        let verdict = validate_trajectory_slow(
+            &traj,
+            &corridor,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "checker must reject a departure from the drivable corridor"
+        );
+    }
+
+    #[test]
+    fn checker_does_not_clean_accept_overspeed_trajectory() {
+        // In-corridor but at 50 m/s (> 35 max): the checker derates (Clamp) or
+        // refuses — it never clean-Accepts. Proves the checker judges speed.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let traj = vec![
+            TrajectoryPoint {
+                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 50.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: Pose { x_m: 15.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 50.0,
+                time_from_start_s: 0.1,
+            },
+        ];
+        let verdict = validate_trajectory_slow(
+            &traj,
+            &corridor,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_ne!(
+            verdict,
+            TrajectoryVerdict::Accept,
+            "checker must not clean-Accept an overspeed trajectory, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn checker_catches_reacceleration_in_degraded() {
+        // INDEPENDENCE: if Occy (wrongly) re-accelerated in Degraded, the
+        // checker's Degraded non-increasing gate (#70) catches it — proving the
+        // safety property holds even when the planner violates its own
+        // Conservative contract. In-corridor but speed-INCREASING (2 → 5 m/s).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let traj = vec![
+            TrajectoryPoint {
+                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 2.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: Pose { x_m: 10.5, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 5.0,
+                time_from_start_s: 0.1,
+            },
+        ];
+        let verdict = validate_trajectory_slow(
+            &traj,
+            &corridor,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Degraded,
+        );
+        assert_ne!(
+            verdict,
+            TrajectoryVerdict::Accept,
+            "checker must not Accept re-acceleration in Degraded, got {verdict:?}"
+        );
+    }
 }
