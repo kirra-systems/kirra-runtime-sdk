@@ -1,0 +1,33 @@
+# crates/kirra-taj/Cargo.toml
+#
+# Taj — Rosmaster R2 perception layer (ADR-0015), Phase A (geometric, model-free).
+#
+# Taj PRODUCES the Kirra perception input contract — a `CorridorSource` (drivable
+# corridor) + `Vec<PerceivedObject>` (obstacles) + per-output health — from raw
+# range data. It IMPORTS those contract types from `kirra-ros2-adapter` and NEVER
+# redefines them (the same "derivation, not invention" discipline as
+# `kirra-planner`): Taj is a *producer* of the same contract the #131 checker
+# consumes. Phase B (the Parko ML detector) is later work; this crate is the
+# geometric Phase-A scaffold.
+#
+# `default-features = false` keeps ROS / r2r out of the build (the adapter's
+# `default = []`); the geometric pipeline is pure compute, sim-testable with
+# synthetic scans and no R2 hardware.
+[package]
+name = "kirra-taj"
+version = "0.1.0"
+edition = "2021"
+description = "Taj — R2 perception layer (ADR-0015) Phase A: raw range data → the Kirra perception input contract (corridor + objects + health). Geometric, model-free."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The perception-input contract types Taj produces: CorridorSource + Point and
+# PerceivedObject. default-features = false → no ROS (adapter `default = []`).
+kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+
+[dev-dependencies]
+# Integration test only: prove Taj's corridor output feeds the real #131 checker.
+# FleetPosture lives in the SDK; the checker entry + config in the adapter.
+kirra-runtime-sdk = { path = "../.." }
