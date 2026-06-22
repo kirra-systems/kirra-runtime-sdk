@@ -79,7 +79,7 @@ fn run_stack(
     let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
     let perception = taj.process(scan, 2);
 
-    // 2) Planning — Occy consumes Taj's corridor directly.
+    // 2) Planning — Occy consumes Taj's corridor AND objects directly.
     let input = PlanInput {
         ego: EgoState {
             pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
@@ -89,6 +89,7 @@ fn run_stack(
         },
         goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
         map: &perception.corridor,
+        objects: &perception.objects,
         posture: posture.clone(),
     };
     let mut planner = GeometricPlanner::default();
@@ -122,16 +123,18 @@ fn clear_corridor_nominal_stack_admits() {
 
 #[test]
 fn obstacle_in_path_stack_fails_closed() {
-    // Same corridor but a blob dead ahead at ~4 m. Taj reports the obstacle (and
-    // a narrowed corridor); Occy still proposes centerline motion (it is NOT the
-    // safety authority); KIRRA REJECTS — the stack fails closed end-to-end.
+    // Same corridor but a blob dead ahead at ~4 m. Defense in depth, both layers
+    // active: Occy is now obstacle-aware so it brakes/HOLDs short of the object
+    // (a controlled stop, not driving in), AND KIRRA independently MRCs the
+    // lane-blocking object (it is the safety authority). The stack fails closed
+    // end-to-end regardless of which layer you trust.
     let scan = corridor_scan(5.0, Some((4.0, 0.12)));
     let (_kind, verdict) = run_stack(&scan, 2.0, 6.0, FleetPosture::Nominal);
 
     assert_eq!(
         verdict,
         TrajectoryVerdict::MRCFallback,
-        "perception sees a hazard → KIRRA stops the plan, got {verdict:?}"
+        "lane-blocking hazard → KIRRA stops the plan, got {verdict:?}"
     );
 }
 

@@ -33,7 +33,7 @@
 // Import (never redefine) the locked upstream types. Re-exported so a Phase-1
 // consumer names them from one place — but they remain the adapter's / SDK's
 // definitions.
-pub use kirra_ros2_adapter::state::{Pose, TrajectoryPoint, TrajectoryVerdict};
+pub use kirra_ros2_adapter::state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
 pub use kirra_runtime_sdk::verifier::FleetPosture;
 
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
@@ -76,6 +76,11 @@ pub struct PlanInput<'a> {
     pub goal: Goal,
     /// Drivable-space handle — the same `CorridorSource` the checker re-reads.
     pub map: &'a dyn CorridorSource,
+    /// Perceived obstacles — the **same** [`PerceivedObject`] slice the checker
+    /// runs RSS against. Phase-1 perception input (the Phase-0 lock predated an
+    /// obstacle-aware planner): [`GeometricPlanner`] decelerates to a controlled
+    /// stop short of the nearest in-path object. An empty slice = no obstacles.
+    pub objects: &'a [PerceivedObject],
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -207,6 +212,18 @@ pub struct GeometricPlannerConfig {
     pub max_points: usize,
     /// Travel remaining at/under which the goal is "reached" → controlled stop.
     pub goal_tolerance_m: f64,
+    /// Lateral distance from the path centerline within which an object counts as
+    /// "in my path" (→ stop short of it). Objects farther off-axis are ignored by
+    /// the planner (the checker's RSS still backstops them).
+    pub object_lane_tolerance_m: f64,
+    /// Longitudinal gap left between the controlled stop and the nearest in-path
+    /// object — the planner stops this far short of it.
+    pub object_stop_gap_m: f64,
+    /// Speed cap while an in-path object limits travel: the planner approaches a
+    /// hazard slowly so the RSS following distance stays satisfied the whole way
+    /// in (a planner that brakes only geometrically still over-speeds mid-approach
+    /// and the checker rejects it).
+    pub object_approach_speed_mps: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -219,6 +236,9 @@ impl Default for GeometricPlannerConfig {
             sample_dt_s: 0.1,
             max_points: 50,
             goal_tolerance_m: 0.5,
+            object_lane_tolerance_m: 2.0,
+            object_stop_gap_m: 5.0,
+            object_approach_speed_mps: 2.0,
         }
     }
 }
@@ -285,9 +305,32 @@ impl Planner for GeometricPlanner {
         // Travel window: ego projection → goal projection along the guide.
         let s_ego = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
         let s_goal = project_arc_length(&guide, input.goal.target.x_m, input.goal.target.y_m);
-        let dist = (s_goal - s_ego).max(0.0);
 
-        // Arrived, or the mode admits no forward speed → HOLD (never re-accelerate).
+        // Obstacle-aware: cap travel to a controlled stop short of the nearest
+        // in-path object ahead. An object counts as "in path" when its lateral
+        // offset from the guide is within `object_lane_tolerance_m`; the planner
+        // stops `object_stop_gap_m` short of it. (The checker's RSS still
+        // backstops every object independently — this just makes Occy propose a
+        // safe trajectory rather than driving in and relying on the veto.)
+        let mut s_limit = s_goal;
+        for obj in input.objects {
+            let (s_obj, lateral) = project_point(&guide, obj.pos.x_m, obj.pos.y_m);
+            if s_obj > s_ego && lateral <= self.cfg.object_lane_tolerance_m {
+                s_limit = s_limit.min(s_obj - self.cfg.object_stop_gap_m);
+            }
+        }
+        // When an in-path object limits travel, approach the hazard slowly so the
+        // RSS following distance stays satisfied the whole way in.
+        let object_limited = s_limit < s_goal - 1e-9;
+        let target = if object_limited {
+            target.min(self.cfg.object_approach_speed_mps)
+        } else {
+            target
+        };
+        let dist = (s_limit - s_ego).max(0.0);
+
+        // Arrived, blocked too close to advance, or the mode admits no forward
+        // speed → HOLD (never re-accelerate, never creep into the gap).
         if dist <= self.cfg.goal_tolerance_m || target <= STOP_EPSILON_MPS {
             return PlanOutput::safe_stop(input.ego.pose);
         }
@@ -336,12 +379,13 @@ impl Planner for GeometricPlanner {
             t += dt;
         }
 
-        // On reaching the goal, pin a clean zero-velocity hold at the goal
-        // projection (controlled stop-and-hold). On horizon truncation we leave
-        // the rolling-horizon tail as-is — the next plan cycle continues it.
+        // On reaching the stop limit (the goal, or short of an in-path object),
+        // pin a clean zero-velocity hold there (controlled stop-and-hold). On
+        // horizon truncation we leave the rolling-horizon tail as-is — the next
+        // plan cycle continues it.
         if reached && traj.last().is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS) {
-            let (gx, gy) = point_at(&guide, s_goal);
-            let gh = heading_at(&guide, s_goal);
+            let (gx, gy) = point_at(&guide, s_limit);
+            let gh = heading_at(&guide, s_limit);
             traj.push(TrajectoryPoint {
                 pose: Pose { x_m: gx, y_m: gy, heading_rad: gh },
                 velocity_mps: 0.0,
@@ -430,13 +474,13 @@ fn heading_at(poly: &[(f64, f64)], s: f64) -> f64 {
     (poly[n - 1].1 - poly[n - 2].1).atan2(poly[n - 1].0 - poly[n - 2].0)
 }
 
-/// Arc length of the point on the polyline nearest to `(qx, qy)`.
-fn project_arc_length(poly: &[(f64, f64)], qx: f64, qy: f64) -> f64 {
+/// Nearest point on the polyline to `(qx, qy)`, as `(arc_length, lateral_dist)`.
+fn project_point(poly: &[(f64, f64)], qx: f64, qy: f64) -> (f64, f64) {
     if poly.len() < 2 {
-        return 0.0;
+        return (0.0, f64::INFINITY);
     }
     let cum = cumulative(poly);
-    let mut best = (f64::INFINITY, 0.0_f64);
+    let mut best = (f64::INFINITY, 0.0_f64); // (lateral_dist, arc_length)
     for i in 1..poly.len() {
         let (ax, ay) = poly[i - 1];
         let (bx, by) = poly[i];
@@ -453,7 +497,12 @@ fn project_arc_length(poly: &[(f64, f64)], qx: f64, qy: f64) -> f64 {
             best = (d, cum[i - 1] + t * (cum[i] - cum[i - 1]));
         }
     }
-    best.1
+    (best.1, best.0)
+}
+
+/// Arc length of the point on the polyline nearest to `(qx, qy)`.
+fn project_arc_length(poly: &[(f64, f64)], qx: f64, qy: f64) -> f64 {
+    project_point(poly, qx, qy).0
 }
 
 #[cfg(test)]
@@ -473,6 +522,7 @@ mod tests {
             },
             goal: Goal { target: Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 } },
             map,
+            objects: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -537,6 +587,7 @@ mod tests {
             },
             goal: Goal { target: Pose { x_m: 25.0, y_m: 0.0, heading_rad: 0.0 } },
             map,
+            objects: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -775,4 +826,141 @@ mod tests {
             "checker must reject even a marginal re-acceleration in Degraded, got {verdict:?}"
         );
     }
+
+    // --- Obstacle-aware planning (#90 Occy 1.B) ----------------------------
+
+    fn obj_at(x: f64, y: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }
+    }
+
+    /// PlanInput in a wide corridor with an explicit object list. Starts at a low
+    /// speed (2 m/s) so a slow obstacle approach reaches its stop within the
+    /// bounded horizon.
+    fn input_with_objects<'a>(
+        map: &'a dyn CorridorSource,
+        ego_x: f64,
+        goal_x: f64,
+        objects: &'a [PerceivedObject],
+    ) -> PlanInput<'a> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 2.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            map,
+            objects,
+            posture: FleetPosture::Nominal,
+        }
+    }
+
+    #[test]
+    fn geometric_planner_stops_short_of_in_path_object() {
+        // Object dead ahead at x=30; goal beyond it. Occy must propose a controlled
+        // stop SHORT of the object (by ~object_stop_gap_m), not drive up to it.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(30.0, 0.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
+
+        assert_eq!(out.kind, ProposalKind::Motion);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(
+            max_x < 30.0 - 3.0,
+            "must stop short of the object at x=30 (with a gap), got max_x {max_x}"
+        );
+        assert!(
+            out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
+            "stop short is a controlled stop"
+        );
+    }
+
+    #[test]
+    fn geometric_planner_caps_approach_speed() {
+        // Approaching an in-path object, Occy does NOT ramp to cruise (8 m/s) — it
+        // holds the slow approach speed so the proposal stays sane near the hazard.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(30.0, 0.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
+
+        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
+        assert!(vmax <= 2.5, "approach speed capped well below cruise, got vmax {vmax}");
+    }
+
+    #[test]
+    fn checker_mrcs_blocked_lane_despite_stop_short() {
+        // INDEPENDENCE: a dead-center object blocks the lane — even though Occy now
+        // proposes a controlled stop short of it (good behavior), KIRRA is the
+        // authority and MRCs the blocked lane (lateral RSS: a same-lane forward
+        // object can't be cleared). Obstacle-awareness = the planner PROPOSING
+        // safety, never overriding the checker.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(30.0, 0.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
+            "checker MRCs a lane-blocking object regardless of the proposal, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn geometric_planner_ignores_off_path_object_and_checker_admits() {
+        // Object well off the path (y=10, beyond the RSS lateral-alignment band):
+        // Occy ignores it and drives to the goal, AND the checker admits the
+        // proposal (the object is filtered as a different-lane object). This is the
+        // obstacle-aware payoff: a genuinely passable object → normal progress.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(15.0, 10.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 10.0, 25.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 24.0, "off-path object ignored → reaches the goal, got max_x {max_x}");
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits driving past an off-path object, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn geometric_planner_holds_for_close_object() {
+        // Object so close ahead that the stop-gap leaves no room to advance → HOLD
+        // (never creep into the gap).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(12.0, 0.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 10.0, 60.0, &objs));
+
+        assert_eq!(out.kind, ProposalKind::SafeStop, "blocked too close → HOLD");
+    }
 }
+
