@@ -122,6 +122,17 @@ kirra_judge_assess,<TARGET_TRIPLE_TBD>,SCHED_FIFO,1000000,10000,<max>,<p999>,QNX
 - The **structural boundedness argument** (`src/wcet_gate.rs` — a finite WCET exists by construction; **target 100 µs**, host CI threshold 1000 µs) supplies *that a bound exists*; this measurement supplies *its magnitude on a real QNX / FIFO target*. Together they feed the FTTI: `verdict_WCET + actuation_latency < control_cycle < 0.5 s reaction`.
 - **Phase I** number = feasibility (eval / VM). **Phase II** = cert-grade on DRIVE + QNX OS for Safety + Ferrocene-qualified Rust.
 
+## 4. Phase-I acceptance criteria + feasibility signal
+
+What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verdict" claim (and what a reviewer needs to see):
+
+1. **The judge cross-compiles** to a `*-nto-qnx800` target with the §1 recipe — `libkirra_judge.a` links `core` + platform symbols only, no QNX `std` (this is the #189/#66–#67 sidestep made concrete).
+2. **The FDIT/RTM matrix passes byte-identically on the target** — every `QNX_MAPPING.md` row's `verdict_observed == verdict_expected`. Cross-compilation must not change a single verdict; the gate is VERDICT CORRECTNESS, timing is reported alongside.
+3. **A real `SCHED_FIFO` `max` + `p99.9` for `kirra_judge_assess`** on the OK/admissible (WCET-path) view, captured per §2, replacing `wcet_status = TBD-QNX-TARGET` with `QNX-TARGET-MEASURED`.
+4. **`max < 100 µs`** (the `src/wcet_gate.rs` target). The structural argument already guarantees a finite bound *exists*; Phase I supplies its *magnitude* on a real QNX/FIFO target.
+
+**Feasibility signal (INDICATIVE — never WCET; see Hard boundaries).** The host harness already runs the verdict per-call in the **sub-microsecond** range (`QNX_MAPPING.md` regression rows: p50 ≈ 0.5 µs, p99 ≈ 0.5 µs on the OK row), with even the scheduling-noise-inflated host *max* ≈ 27 µs — all comfortably under the 100 µs target. So the Phase-I target-FIFO measurement is expected to **confirm** feasibility, not discover a problem: the risk is "produce the certifiable number on the right OS," not "find out whether the bound is met." This is why Objective 1 is a **defined build, not research** — only a QNX target (the #274 blocker) stands between the recipe and the row.
+
 ## Done vs. remaining
 
 | | State |
