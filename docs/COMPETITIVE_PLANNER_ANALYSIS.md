@@ -48,12 +48,16 @@ an NVIDIA-style planner as the doer.**
 1. **No prediction beyond constant-velocity.** The Taj tracker supplies object
    velocity; RSS extrapolates linearly. No intent / multi-modal agent prediction
    (cut-ins, turns) — the #1 functional gap vs. everyone.
-2. **No lane graph / routing.** Occy follows one corridor centerline. No lane
-   selection, intersections, or full lane-change behavior. Autoware's Lanelet2 /
-   Mobileye's REM are the missing substrate — and the adapter's
-   `Lanelet2CorridorSource` seam is the intended home (also the right substrate
-   for *typed* lane-line positions, which the lane-line rules currently take as
-   centerline-relative inputs).
+2. **Lane graph / routing — substrate now exists, routing still thin.** Occy now
+   carries a parse-free **Lanelet2-lite** lane model (`kirra_planner::lanemap`:
+   `LaneGraph` / `Lane` / `LaneEdge`) that derives the drivable corridor over a
+   span of lanes *and* the **typed lane-line positions** the lane-line rules used
+   to take as hand-fed literals — so a commanded lane change is now gated by the
+   *map's* line types (broken-permits / solid-blocks), end-to-end to KIRRA. Still
+   missing: lane *selection* / a real router, intersections, and the actual map-file
+   parse (Autoware's Lanelet2 / Mobileye's REM). The adapter's feature-gated
+   `Lanelet2CorridorSource` (C++ `lanelet2_core`) remains the home for the parse
+   that would *populate* this model.
 3. **No trajectory optimization / comfort.** Geometric centerline + trapezoid vs.
    Autoware's jerk-limited, dynamically-feasible optimization. No MPC.
 4. **Thin lateral behavior.** Route-around + lead-follow only; no lane-change,
@@ -90,7 +94,10 @@ Occy *and* tuning KIRRA's RSS conservatism — not just one.
 
 1. **Lane graph + routing** (Lanelet2 seam) — unlocks lane-lines with real
    positions, lane changes, intersections, routing. Highest leverage; the hook
-   already exists in the adapter.
+   already exists in the adapter. **Done (substrate):** `kirra_planner::lanemap`
+   delivers the parse-free model + the corridor / typed-boundary derivations, with
+   the map-file parse left feature-gated. **Remaining:** lane selection / router and
+   intersections.
 2. **Prediction** — even constant-turn-rate / intention priors beat
    constant-velocity.
 3. **Trajectory optimization** — jerk-limited / comfort, replacing the trapezoid.

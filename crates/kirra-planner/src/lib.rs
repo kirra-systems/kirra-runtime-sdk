@@ -47,6 +47,9 @@ pub use behavior::{
     Behavioral, BehaviorConfig, LaneBoundary, LineType, SignalState, TrafficControl,
 };
 
+pub mod lanemap;
+pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph};
+
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
 /// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop`,
 /// `Behavioral` and `Yield` decelerate to a hard stop; `Goal` cruises to the goal.
