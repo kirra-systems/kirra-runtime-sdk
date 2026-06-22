@@ -13,9 +13,10 @@
 
 **1. A Jetson cannot run QNX.** Jetson modules (Orin NX / AGX Orin / Jetson Thor) run **L4T / Linux** — they are the *doer-side* robotics lane (Parko inference, the Rosmaster R2 bring-up, Mick/Taj). They have **no QNX support** and **cannot** produce a QNX-target WCET row (AOU-HW-QNX-TARGET-001). The measurement runs on a **separate** QNX target. Never describe it as "on Jetson under QNX."
 
-**2. Two QNX targets, two phases.**
-- **Phase I (feasibility):** QNX SDP 8.0 on an **aarch64 eval board** (preferred) or **x86_64 VM** (fallback). Produces a *real* QNX-target-under-FIFO number — far stronger than the host-Linux-indicative CI number, sufficient to substantiate the Phase I sub-100 µs verdict claim. **Not cert-grade.**
-- **Phase II (cert-grade):** **NVIDIA DRIVE AGX Orin / Thor + QNX OS for Safety**, Ferrocene-qualified Rust — the certified FTTI number. (Ferrocene's *qualified* QNX target is `qnx710`, **not** `qnx800`; the cert Rust toolchain is its own decision — see `KIRRA_QNX_CROSSCOMPILE.md`.)
+**2. Two QNX targets, two phases.** The Phase I target is **self-established** (a QNX SDP 8.0 eval/dev license + a target you stand up) — it is **not** gated on the DRIVE partner path, which is Phase II by design. The Phase I number is therefore a *setup task we control*, not a hardware-access wait.
+- **Phase I (feasibility):** QNX SDP 8.0 on an **aarch64 eval board** (better ISA match → cleaner Phase I→II extrapolation; longer setup) or an **x86_64 VM** (lowest-friction, stands up in days — the pragmatic now-path on the proposal timeline). Either produces a *real* QNX-target-under-`SCHED_FIFO` number — far stronger than the host-Linux-indicative CI number, sufficient to substantiate the Phase I sub-100 µs verdict claim. **Not cert-grade.**
+  - **Write-up discipline (ISA honesty).** An x86_64 VM number demonstrates *the bound holds on a real RTOS target under SCHED_FIFO* — frame it **exactly** that way. Do **not** call an x86_64 VM "representative edge hardware": the deployment ISA is aarch64 (Orin/Thor-class), so the aarch64-board and cert-grade DRIVE measurements are **Phase II**. The corrected proposal Task 1 already avoids this overclaim; keep the write-up aligned.
+- **Phase II (cert-grade):** **NVIDIA DRIVE AGX Orin / Thor + QNX OS for Safety**, Ferrocene-qualified Rust — the certified FTTI number on the deployment ISA. (Ferrocene's *qualified* QNX target is `qnx710`, **not** `qnx800`; the cert Rust toolchain is its own decision — see `KIRRA_QNX_CROSSCOMPILE.md`.)
 
 **3. Lane.** This is **checker-side Objective 1** — distinct from the Parko / §2-readiness work and the Mick / Taj / Linux robotics lane.
 
