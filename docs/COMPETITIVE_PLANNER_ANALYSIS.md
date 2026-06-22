@@ -145,9 +145,14 @@ parameters — both levers, not one.
    corner-cutting of the guide centerline (`path_smoothing_iterations`) rounds a
    coarse / curved corridor's vertices, cutting peak path curvature (and the
    steering it implies) — verified ~halved at a kink — while staying in-corridor
-   (the new vertices lie on the original edges) and a no-op on straight roads.
-   **Remaining:** curvature-aware *speed* (slow for tight turns so a corner is
-   admissible at the bicycle-model steering-rate limit, not just lower-curvature).
+   (the new vertices lie on the original edges) and a no-op on straight roads. Plus
+   **curvature-aware speed** (`comfort_lateral_accel_mps2`): the target speed is
+   capped to `sqrt(comfort_lat / κ)` for the path's upcoming curvature (Menger
+   curvature, look-ahead with jerk headroom so the ego decelerates *before* the
+   bend), so a curve is taken at a comfortable lateral accel instead of being taken
+   at cruise and clamped by the checker. No-op on straight roads. **Remaining:**
+   full velocity-profile optimization (jointly optimal speed+path), and an
+   explicit steering-rate cap for very sharp transitions.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
