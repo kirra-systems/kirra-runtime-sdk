@@ -384,6 +384,14 @@ pub struct GeometricPlannerConfig {
     /// (containment still backstops). A straight guide is unaffected. Bounded for
     /// WCET: the vertex count grows by ≤ 2× per iteration, so keep this small.
     pub path_smoothing_iterations: usize,
+    /// Comfort lateral-acceleration limit (m/s²) for curvature-aware speed. The
+    /// target speed is capped to `sqrt(comfort_lateral_accel / κ)` for the path's
+    /// upcoming curvature κ, so the ego SLOWS for curves (looking ahead far enough
+    /// to decelerate in time) instead of taking them at cruise — which the checker
+    /// would otherwise clamp (steering rate / lateral accel) and which is
+    /// uncomfortable. Below the checker's own lateral-accel ceiling, so this is a
+    /// comfort refinement; `0` (or a huge value) effectively disables it.
+    pub comfort_lateral_accel_mps2: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -416,6 +424,7 @@ impl Default for GeometricPlannerConfig {
             yield_temporal_margin_s: 1.0,
             max_jerk_mps3: 2.5,
             path_smoothing_iterations: 2,
+            comfort_lateral_accel_mps2: 2.0,
         }
     }
 }
@@ -757,6 +766,38 @@ impl GeometricPlanner {
             t_accel + (dist - d_accel) / v
         }
     }
+
+    /// Curvature-aware speed cap (m/s) at guide arc-length `s_now`: the highest
+    /// speed the ego may hold NOW so it can still decelerate (at `decel`) to each
+    /// upcoming curve's comfort limit `sqrt(comfort_lat / κ)` by the time it gets
+    /// there. Looks ahead over the braking distance + a fixed horizon. A straight
+    /// path (κ ≈ 0) → no cap (`f64::INFINITY`).
+    fn curve_speed_limit_ahead(&self, guide: &[(f64, f64)], s_now: f64, v: f64, decel: f64) -> f64 {
+        let lat = self.cfg.comfort_lateral_accel_mps2;
+        if lat <= 0.0 {
+            return f64::INFINITY;
+        }
+        // Effective decel is reduced to leave headroom for the jerk-limited ramp
+        // (the speed can't drop at full `decel` instantly), so the ego reaches the
+        // curve speed BEFORE the curvature peaks rather than lagging into it.
+        let decel_eff = (0.6 * decel).max(1e-3);
+        // Look ahead far enough to brake from the current speed, plus a margin.
+        let lookahead = (v * v / (2.0 * decel_eff) + 5.0).min(60.0);
+        let steps = 30usize;
+        let d = 3.0; // curvature span (m), to average over the smoothed polyline
+        let mut limit = f64::INFINITY;
+        for i in 0..=steps {
+            let ds = lookahead * (i as f64) / (steps as f64);
+            let kappa = curvature_at(guide, s_now + ds, d);
+            if kappa > 1e-4 {
+                let v_curve = (lat / kappa).sqrt();
+                // Max speed now that still allows decel to v_curve in `ds`.
+                let v_allow = (v_curve * v_curve + 2.0 * decel_eff * ds).sqrt();
+                limit = limit.min(v_allow);
+            }
+        }
+        limit
+    }
 }
 
 // SAFETY: occy planner proposes within corridor + urban kinematic limits; checker decides | REQ: Occy-1.A (#90) | TEST: kirra_planner::tests::{geometric_planner_proposes_motion_toward_goal, geometric_planner_output_is_checker_admissible, geometric_planner_locked_out_only_stops, geometric_planner_degraded_is_non_increasing, geometric_planner_at_goal_holds, geometric_planner_respects_horizon_cap}
@@ -990,14 +1031,22 @@ impl Planner for GeometricPlanner {
             if !lead_gap_limit && remaining <= brake_dist {
                 braking = true;
             }
+            // Curvature-aware speed: cap the effective target so the ego slows for
+            // an upcoming curve (decelerating in time), keeping lateral accel /
+            // steering rate comfortable instead of being clamped by the checker. A
+            // straight path leaves the cap at infinity → target unchanged.
+            let curve_cap = self.curve_speed_limit_ahead(&guide, s_ego + s, v, decel);
+            let target_eff = target.min(curve_cap);
             // Speed change still to come while `a` ramps back to 0 at max jerk —
             // used to EASE OFF before hitting the target cap (else v slams into the
             // clamp, an un-jerk-limited kink).
             let coast = a * a / (2.0 * jerk);
             let a_des = if braking {
                 -decel
-            } else if v + coast < target {
+            } else if v + coast < target_eff {
                 self.cfg.max_accel_mps2
+            } else if v > target_eff + 0.05 {
+                -decel // overspeed for the upcoming curve → ease the speed down
             } else {
                 0.0 // at / approaching target → ramp accel down to cruise
             };
@@ -1058,6 +1107,26 @@ impl Planner for GeometricPlanner {
 
 fn dist2d(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt()
+}
+
+/// Path curvature (1/m) at arc-length `s` on the guide, via the Menger curvature of
+/// three samples a span `d` apart: `κ = 4·area / (|AB|·|BC|·|CA|)`. Robust to the
+/// piecewise-linear guide (a wider `d` averages over vertices). Returns 0 on a
+/// straight / degenerate triple.
+fn curvature_at(guide: &[(f64, f64)], s: f64, d: f64) -> f64 {
+    let a = point_at(guide, s - d);
+    let b = point_at(guide, s);
+    let c = point_at(guide, s + d);
+    let ab = dist2d(a.0, a.1, b.0, b.1);
+    let bc = dist2d(b.0, b.1, c.0, c.1);
+    let ca = dist2d(c.0, c.1, a.0, a.1);
+    let denom = ab * bc * ca;
+    if denom < 1e-9 {
+        return 0.0;
+    }
+    // Twice the signed triangle area (cross product), magnitude.
+    let area2 = ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)).abs();
+    (2.0 * area2) / denom
 }
 
 /// Position at arc-length `s` along a `Point` polyline (the predicted-path / lane
@@ -1535,6 +1604,88 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
         }
+    }
+
+    /// Corridor that turns ~22° at x=20 and continues well past it; ego starts
+    /// INSIDE (rear overhang has room), goal beyond the curve.
+    fn curve_corridor() -> KinkedCorridor {
+        // Centerline (0,0)→(20,0)→(34,20)→(48,40)→(62,60): a sharp ~55° turn at
+        // x=20, then straight. Boundaries are ±5 in y about the centerline.
+        KinkedCorridor {
+            left: vec![
+                Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 20.0, y_m: 5.0 },
+                Point { x_m: 34.0, y_m: 25.0 }, Point { x_m: 48.0, y_m: 45.0 },
+                Point { x_m: 62.0, y_m: 65.0 },
+            ],
+            right: vec![
+                Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 20.0, y_m: -5.0 },
+                Point { x_m: 34.0, y_m: 15.0 }, Point { x_m: 48.0, y_m: 35.0 },
+                Point { x_m: 62.0, y_m: 55.0 },
+            ],
+        }
+    }
+    fn curve_input(map: &dyn CorridorSource) -> PlanInput<'_> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: 6.0, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 6.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: 70.0, y_m: 20.0, heading_rad: 0.0 } },
+            ..kinked_input(map)
+        }
+    }
+
+    #[test]
+    fn curvature_aware_speed_slows_for_a_curve() {
+        let corr = curve_corridor();
+        // In-curve region (world x in [18, 44]) min speed: the ego SLOWS for the bend.
+        let curve_min_speed = |comfort: f64| -> f64 {
+            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, ..Default::default() };
+            let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
+            out.trajectory.iter()
+                .filter(|p| p.pose.x_m >= 18.0 && p.pose.x_m <= 44.0)
+                .map(|p| p.velocity_mps)
+                .fold(f64::INFINITY, f64::min)
+        };
+        let slowed = curve_min_speed(2.0);          // curvature-aware
+        let unslowed = curve_min_speed(1.0e9);       // cap effectively disabled
+        assert!(slowed.is_finite() && unslowed.is_finite(), "ego reaches the curve");
+        assert!(slowed < unslowed - 1.0,
+            "curvature-aware speed slows through the bend: slowed={slowed:.2}, unslowed={unslowed:.2}");
+        assert!(slowed < 6.0, "and it actually slows below cruise in the bend, got {slowed:.2}");
+
+        // The cap REDUCES the path's actual (Menger) lateral accel v²·κ vs taking
+        // the bend at cruise, and keeps it under the checker's ceiling — measured
+        // off the guide curvature, not per-pose heading deltas (which spike at the
+        // piecewise-linear guide's vertices).
+        let guide = chaikin_smooth(
+            &centerline_from(corr.left_boundary(), corr.right_boundary()),
+            GeometricPlannerConfig::default().path_smoothing_iterations,
+        );
+        let peak_lat = |comfort: f64| -> f64 {
+            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, ..Default::default() };
+            let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
+            out.trajectory.iter()
+                .map(|p| {
+                    let s = project_arc_length(&guide, p.pose.x_m, p.pose.y_m);
+                    p.velocity_mps.powi(2) * curvature_at(&guide, s, 3.0)
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let lat_capped = peak_lat(2.0);
+        let lat_uncapped = peak_lat(1.0e9);
+        assert!(lat_capped < lat_uncapped - 1.0,
+            "the cap reduces peak lateral accel: capped={lat_capped:.2}, uncapped={lat_uncapped:.2}");
+        assert!(lat_capped < 3.5, "and keeps it under the checker's ceiling, got {lat_capped:.2}");
+
+        let out = GeometricPlanner::default().plan(&curve_input(&corr));
+        let verdict = validate_trajectory_slow(
+            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        );
+        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "curvature-aware turn is admissible, got {verdict:?}");
     }
 
     #[test]
