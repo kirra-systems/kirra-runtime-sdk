@@ -114,6 +114,60 @@ fn test_rss_violation_rejects() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Head-on (oncoming) RSS — direction flips the verdict at the same gap
+// ---------------------------------------------------------------------------
+
+/// A vehicle ~15 m ahead at 12 m/s, evaluated two ways at IDENTICAL geometry:
+/// as a same-direction lead (pulling away → safe) and as oncoming (head-on
+/// closure → the opposite-direction bound needs ~40 m → MRC). Proves the
+/// adapter checker now keys the *longitudinal* bound off the object's heading.
+///
+/// The object sits at y = 3 m — laterally offset enough to clear the lateral RSS
+/// side-gap (so a dead-ahead lateral violation can't be the cause) yet inside the
+/// 4 m alignment tolerance (so it is still evaluated longitudinally). Heading is
+/// then the ONLY thing that differs between the two cases.
+fn obj_at(x_m: f64, velocity_mps: f64, heading_rad: f64) -> PerceivedObject {
+    PerceivedObject {
+        id: 1,
+        pos: Point { x_m, y_m: 3.0 },
+        velocity_mps,
+        heading_rad,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }
+}
+
+#[test]
+fn oncoming_vehicle_triggers_head_on_rss_mrc() {
+    let trajectory = straight_trajectory(5, 8.0, 0.1); // poses x≈5..8.2
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    // Heading π → opposing travel → head-on closure at |8 + 12| effective.
+    let objects = vec![obj_at(20.0, 12.0, std::f64::consts::PI)];
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "an oncoming vehicle ~15 m ahead must trigger the head-on bound; got {verdict:?}");
+}
+
+#[test]
+fn same_direction_lead_at_identical_gap_is_admitted() {
+    let trajectory = straight_trajectory(5, 8.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    // Same position/speed but heading 0 → a same-direction lead pulling away
+    // (12 > ego 8) → near-zero required gap → admitted. Only the heading differs.
+    let objects = vec![obj_at(20.0, 12.0, 0.0)];
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a same-direction lead at the same gap is admitted (direction is the only change); got {verdict:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 4. Kinematics DenyBreach → MRCFallback
 // ---------------------------------------------------------------------------
 
