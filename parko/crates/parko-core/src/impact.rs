@@ -969,6 +969,7 @@ mod tests {
             ego_lat_vel: 0.0,
             obj_lat_vel: 0.0,
             actual_lateral_separation_m: 100.0,
+            oncoming: false,
         }
     }
     fn agents(gaps: &[f64]) -> AgentScene {
