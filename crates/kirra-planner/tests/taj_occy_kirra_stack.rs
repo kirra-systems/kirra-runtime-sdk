@@ -148,3 +148,53 @@ fn lockedout_posture_flows_through_stack() {
     assert_eq!(kind, ProposalKind::SafeStop, "LockedOut → Occy proposes only safe-stop");
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback, "LockedOut → KIRRA refuses motion");
 }
+
+#[test]
+fn route_around_in_corridor_object_admits() {
+    // The #451 end-to-end win: a wide drivable corridor with an off-center object
+    // detected in it (Phase-B-style: object separate from the free-space corridor)
+    // → Occy routes AROUND it → KIRRA ADMITS the offset proposal. Contrast the
+    // dead-center case (fails closed); a passable object yields progress.
+    let taj = TajPhaseA::new(TajConfig { forward_extent_m: 40.0, ..Default::default() });
+    let scan = corridor_scan(5.0, None); // clear 5 m corridor (walls only)
+    let mut perception = taj.process(&scan, 2);
+    // A detected obstacle off-center in the lane (not part of the corridor walls).
+    perception.objects.push(kirra_ros2_adapter::state::PerceivedObject {
+        id: 99,
+        pos: kirra_ros2_adapter::corridor::Point { x_m: 20.0, y_m: 3.0 },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: kirra_ros2_adapter::corridor::Point { x_m: 0.0, y_m: 0.0 },
+    });
+
+    let input = PlanInput {
+        ego: EgoState {
+            pose: Pose { x_m: 8.0, y_m: 0.0, heading_rad: 0.0 },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal { target: Pose { x_m: 30.0, y_m: 0.0, heading_rad: 0.0 } },
+        map: &perception.corridor,
+        objects: &perception.objects,
+        posture: FleetPosture::Nominal,
+    };
+    let mut planner = GeometricPlanner::default();
+    let plan = planner.plan(&input);
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory,
+        &perception.corridor,
+        &perception.objects,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    );
+
+    let min_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+    assert_eq!(plan.kind, ProposalKind::Motion, "routes around, not stops");
+    assert!(min_y <= -1.0, "path offsets around the object, got min_y {min_y}");
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "stack admits the route-around, got {verdict:?}"
+    );
+}

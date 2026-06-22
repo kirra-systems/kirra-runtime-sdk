@@ -224,6 +224,24 @@ pub struct GeometricPlannerConfig {
     /// in (a planner that brakes only geometrically still over-speeds mid-approach
     /// and the checker rejects it).
     pub object_approach_speed_mps: f64,
+    /// Lateral clearance the planner steers for when routing around an off-path
+    /// object: it offsets the path so the object ends up at least this far from
+    /// it. Must exceed the checker's lateral-alignment band (4 m) so the cleared
+    /// object is RSS-filtered (#451).
+    pub lateral_clearance_target_m: f64,
+    /// Cap on the lateral offset the planner will take to route around an object.
+    pub lateral_offset_max_m: f64,
+    /// Max lateral metres per longitudinal metre while ramping the offset in/out
+    /// (a gentle slope keeps the maneuver kinematically admissible).
+    pub lateral_ramp_slope: f64,
+    /// The planner's model of the vehicle half-width + containment margin, used to
+    /// keep an offset path inside the corridor boundaries (the checker uses the
+    /// real footprint; this is the planner's conservative assumption).
+    pub vehicle_half_width_m: f64,
+    pub containment_margin_m: f64,
+    /// Speed cap while routing around an object (the lateral pass), low enough to
+    /// keep the maneuver inside the steering-rate / lateral-accel envelope.
+    pub lateral_pass_speed_mps: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -239,6 +257,12 @@ impl Default for GeometricPlannerConfig {
             object_lane_tolerance_m: 2.0,
             object_stop_gap_m: 5.0,
             object_approach_speed_mps: 2.0,
+            lateral_clearance_target_m: 4.5,
+            lateral_offset_max_m: 3.0,
+            lateral_ramp_slope: 0.35,
+            vehicle_half_width_m: 1.0,
+            containment_margin_m: 0.45,
+            lateral_pass_speed_mps: 4.0,
         }
     }
 }
@@ -269,6 +293,61 @@ impl GeometricPlanner {
     #[must_use]
     pub fn new(cfg: GeometricPlannerConfig) -> Self {
         Self { cfg }
+    }
+
+    /// Lateral-avoidance solver: for the nearest off-path object a centered path
+    /// could not clear, compute a trapezoidal offset bump that routes around it —
+    /// IF the offset both fits the corridor (with footprint + margin) and has room
+    /// to ramp in before the object. Otherwise [`LateralBump::NONE`] (the caller
+    /// then stops short instead — never an unsafe squeeze).
+    fn compute_bump(
+        &self,
+        guide: &[(f64, f64)],
+        left: &[Point],
+        right: &[Point],
+        objects: &[PerceivedObject],
+        s_ego: f64,
+    ) -> LateralBump {
+        let ct = self.cfg.lateral_clearance_target_m;
+
+        // Nearest object that is ahead and NOT already clear of the centerline.
+        let mut best: Option<(f64, f64, f64)> = None; // (s_obj, signed_lateral, obj_x)
+        for obj in objects {
+            let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
+            if s_obj <= s_ego || signed.abs() >= ct {
+                continue;
+            }
+            if best.is_none_or(|(bs, _, _)| s_obj < bs) {
+                best = Some((s_obj, signed, obj.pos.x_m));
+            }
+        }
+        let (s_obj, signed, obj_x) = match best {
+            Some(v) => v,
+            None => return LateralBump::NONE,
+        };
+
+        // Offset to the FAR side, minimal magnitude to reach `ct` clearance.
+        let y_off = signed - ct * if signed >= 0.0 { 1.0 } else { -1.0 };
+        if y_off.abs() > self.cfg.lateral_offset_max_m {
+            return LateralBump::NONE;
+        }
+
+        // Corridor fit at the object's x: offset path + footprint inside boundaries.
+        let cl = 0.5 * (boundary_y_at(left, obj_x) + boundary_y_at(right, obj_x));
+        let path_y = cl + y_off;
+        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m;
+        if path_y + fh > boundary_y_at(left, obj_x) || path_y - fh < boundary_y_at(right, obj_x) {
+            return LateralBump::NONE;
+        }
+
+        // Room to ramp the offset in before reaching the object.
+        let ramp_len = (1.5 * y_off.abs() / self.cfg.lateral_ramp_slope.max(1e-3)).max(1.0);
+        let hold_half = 1.0;
+        let hold_start = (s_obj - s_ego) - hold_half;
+        if hold_start - ramp_len < 0.0 {
+            return LateralBump::NONE;
+        }
+        LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
     }
 }
 
@@ -306,6 +385,18 @@ impl Planner for GeometricPlanner {
         let s_ego = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
         let s_goal = project_arc_length(&guide, input.goal.target.x_m, input.goal.target.y_m);
 
+        // Lateral avoidance: if an off-path object can be routed around within the
+        // corridor, compute a smooth lateral bump (applied per-sample below) so
+        // the object clears the checker's RSS band; else the bump is NONE and the
+        // object is handled by stop-short.
+        let bump = self.compute_bump(
+            &guide,
+            input.map.left_boundary(),
+            input.map.right_boundary(),
+            input.objects,
+            s_ego,
+        );
+
         // Obstacle-aware: cap travel to a controlled stop short of the nearest
         // in-path object ahead. An object counts as "in path" when its lateral
         // offset from the guide is within `object_lane_tolerance_m`; the planner
@@ -314,15 +405,21 @@ impl Planner for GeometricPlanner {
         // safe trajectory rather than driving in and relying on the veto.)
         let mut s_limit = s_goal;
         for obj in input.objects {
-            let (s_obj, lateral) = project_point(&guide, obj.pos.x_m, obj.pos.y_m);
+            let (s_obj, signed) = project_signed(&guide, obj.pos.x_m, obj.pos.y_m);
+            // Lateral distance from the ACTUAL (possibly bumped) path, so an object
+            // the bump routes around no longer counts as "in path".
+            let lateral = (signed - bump.at(s_obj - s_ego)).abs();
             if s_obj > s_ego && lateral <= self.cfg.object_lane_tolerance_m {
                 s_limit = s_limit.min(s_obj - self.cfg.object_stop_gap_m);
             }
         }
-        // When an in-path object limits travel, approach the hazard slowly so the
-        // RSS following distance stays satisfied the whole way in.
+        // Slow down when an in-path object limits travel (RSS following distance)
+        // OR when routing around one (so the lateral maneuver stays within the
+        // steering-rate / lateral-accel envelope the checker enforces).
         let object_limited = s_limit < s_goal - 1e-9;
-        let target = if object_limited {
+        let target = if bump.y_off != 0.0 {
+            target.min(self.cfg.lateral_pass_speed_mps)
+        } else if object_limited {
             target.min(self.cfg.object_approach_speed_mps)
         } else {
             target
@@ -355,10 +452,16 @@ impl Planner for GeometricPlanner {
 
         while traj.len() < budget {
             let along = s_ego + s;
-            let (x, y) = point_at(&guide, along);
-            let heading = heading_at(&guide, along);
+            let (bx, by) = point_at(&guide, along);
+            let h = heading_at(&guide, along);
+            // Apply the lateral-avoidance bump perpendicular to the guide.
+            let lat = bump.at(s);
             traj.push(TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: y, heading_rad: heading },
+                pose: Pose {
+                    x_m: bx - lat * h.sin(),
+                    y_m: by + lat * h.cos(),
+                    heading_rad: h,
+                },
                 velocity_mps: v,
                 time_from_start_s: t,
             });
@@ -384,10 +487,15 @@ impl Planner for GeometricPlanner {
         // horizon truncation we leave the rolling-horizon tail as-is — the next
         // plan cycle continues it.
         if reached && traj.last().is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS) {
-            let (gx, gy) = point_at(&guide, s_limit);
+            let (gbx, gby) = point_at(&guide, s_limit);
             let gh = heading_at(&guide, s_limit);
+            let glat = bump.at(dist);
             traj.push(TrajectoryPoint {
-                pose: Pose { x_m: gx, y_m: gy, heading_rad: gh },
+                pose: Pose {
+                    x_m: gbx - glat * gh.sin(),
+                    y_m: gby + glat * gh.cos(),
+                    heading_rad: gh,
+                },
                 velocity_mps: 0.0,
                 time_from_start_s: t + dt,
             });
@@ -396,6 +504,21 @@ impl Planner for GeometricPlanner {
         // The checker requires ≥ 2 points; if geometry degenerated, HOLD.
         if traj.len() < 2 {
             return PlanOutput::safe_stop(input.ego.pose);
+        }
+
+        // When the path was bumped, recompute headings from consecutive poses so
+        // the checker's per-pose steering derivation matches the actual curved
+        // path (not the straight-guide tangent).
+        if bump.y_off != 0.0 {
+            for i in 0..traj.len() - 1 {
+                let (ax, ay) = (traj[i].pose.x_m, traj[i].pose.y_m);
+                let (bx, by) = (traj[i + 1].pose.x_m, traj[i + 1].pose.y_m);
+                if (bx - ax).hypot(by - ay) > 1e-6 {
+                    traj[i].pose.heading_rad = (by - ay).atan2(bx - ax);
+                }
+            }
+            let n = traj.len();
+            traj[n - 1].pose.heading_rad = traj[n - 2].pose.heading_rad;
         }
         PlanOutput { trajectory: traj, kind: ProposalKind::Motion }
     }
@@ -503,6 +626,92 @@ fn project_point(poly: &[(f64, f64)], qx: f64, qy: f64) -> (f64, f64) {
 /// Arc length of the point on the polyline nearest to `(qx, qy)`.
 fn project_arc_length(poly: &[(f64, f64)], qx: f64, qy: f64) -> f64 {
     project_point(poly, qx, qy).0
+}
+
+/// Nearest point on the polyline to `(qx, qy)` as `(arc_length, signed_lateral)`,
+/// where `signed_lateral > 0` means the query lies to the LEFT of the guide
+/// direction. `|signed_lateral|` equals the perpendicular distance.
+fn project_signed(poly: &[(f64, f64)], qx: f64, qy: f64) -> (f64, f64) {
+    if poly.len() < 2 {
+        return (0.0, 0.0);
+    }
+    let cum = cumulative(poly);
+    let mut best = (f64::INFINITY, 0.0_f64, 0.0_f64); // (dist, arc_s, signed)
+    for i in 1..poly.len() {
+        let (ax, ay) = poly[i - 1];
+        let (bx, by) = poly[i];
+        let (ex, ey) = (bx - ax, by - ay);
+        let seg2 = ex * ex + ey * ey;
+        let t = if seg2 > 1e-9 {
+            (((qx - ax) * ex + (qy - ay) * ey) / seg2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (px, py) = (ax + t * ex, ay + t * ey);
+        let d = dist2d(qx, qy, px, py);
+        if d < best.0 {
+            let seg_len = seg2.sqrt().max(1e-9);
+            // 2D cross product of segment direction × (q - a): left-positive.
+            let signed = (ex * (qy - ay) - ey * (qx - ax)) / seg_len;
+            best = (d, cum[i - 1] + t * (cum[i] - cum[i - 1]), signed);
+        }
+    }
+    (best.1, best.2)
+}
+
+/// Interpolated boundary `y` at longitudinal `x` (boundary vertices are x-ordered).
+fn boundary_y_at(boundary: &[Point], x: f64) -> f64 {
+    match boundary.first() {
+        None => return 0.0,
+        Some(p) if x <= p.x_m => return p.y_m,
+        _ => {}
+    }
+    for w in boundary.windows(2) {
+        if x <= w[1].x_m {
+            let dx = w[1].x_m - w[0].x_m;
+            let f = if dx.abs() > 1e-9 { (x - w[0].x_m) / dx } else { 0.0 };
+            return w[0].y_m + f * (w[1].y_m - w[0].y_m);
+        }
+    }
+    boundary.last().unwrap().y_m
+}
+
+/// A trapezoidal lateral-offset profile along the guide: ramp 0 → `y_off`, hold
+/// across the object, ramp back to 0. `at(s)` is the lateral offset at distance
+/// `s` from the ego, applied perpendicular to the guide.
+#[derive(Debug, Clone, Copy)]
+struct LateralBump {
+    y_off: f64,
+    ramp_len: f64,
+    hold_start: f64,
+    hold_end: f64,
+}
+
+impl LateralBump {
+    const NONE: Self = Self { y_off: 0.0, ramp_len: 1.0, hold_start: 0.0, hold_end: 0.0 };
+
+    fn at(&self, s: f64) -> f64 {
+        if self.y_off == 0.0 {
+            return 0.0;
+        }
+        // Smoothstep ramps (C1: zero slope at both ends) so the path has no
+        // heading corners — a linear ramp's corners spike the steering rate.
+        let smooth = |u: f64| {
+            let u = u.clamp(0.0, 1.0);
+            u * u * (3.0 - 2.0 * u)
+        };
+        let up0 = self.hold_start - self.ramp_len;
+        if s <= up0 {
+            0.0
+        } else if s < self.hold_start {
+            self.y_off * smooth((s - up0) / self.ramp_len)
+        } else if s <= self.hold_end {
+            self.y_off
+        } else {
+            let down1 = self.hold_end + self.ramp_len;
+            self.y_off * smooth((down1 - s) / self.ramp_len)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -962,5 +1171,64 @@ mod tests {
 
         assert_eq!(out.kind, ProposalKind::SafeStop, "blocked too close → HOLD");
     }
+
+    // --- Lateral avoidance / route-around (#451) ---------------------------
+
+    #[test]
+    fn geometric_planner_routes_around_offcenter_object() {
+        // Off-center object at (20, 3) in a wide corridor: Occy bends the path
+        // laterally away from it instead of stopping — a Motion proposal whose
+        // path offsets to the far side.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(20.0, 3.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        assert_eq!(out.kind, ProposalKind::Motion, "routes around, does not stop");
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(min_y <= -1.0, "path offsets away from the object, got min_y {min_y}");
+    }
+
+    #[test]
+    fn geometric_planner_route_around_is_checker_admissible() {
+        // The #451 payoff: a route-around proposal is ADMITTED by the real checker
+        // — the object ends up beyond the RSS lateral band, so it is filtered and
+        // the offset path passes (the verdict the corridor refinement alone could
+        // not deliver).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(20.0, 3.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits the route-around proposal, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn geometric_planner_stops_when_offset_infeasible() {
+        // Object too close to the centerline (y=0.5) to clear within
+        // `lateral_offset_max_m` → Occy must NOT squeeze past; it falls back to the
+        // obstacle-aware stop-short (no big lateral offset).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(20.0, 0.5)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
+        assert!(max_x < 17.0, "stops short of the object at x=20, got max_x {max_x}");
+        assert!(min_y > -0.5, "no route-around squeeze, got min_y {min_y}");
+    }
 }
+
 
