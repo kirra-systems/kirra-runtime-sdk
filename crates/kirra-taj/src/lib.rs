@@ -61,6 +61,10 @@ pub struct TajConfig {
     pub cluster_gap_m: f64,
     /// Minimum returns for a cluster to be reported as an object (noise floor).
     pub min_cluster_points: usize,
+    /// Longitudinal spacing of corridor boundary stations. Each station bounds the
+    /// corridor from obstacles within `±corridor_station_m` of it, so a localized
+    /// obstacle narrows the corridor only near its own x (not globally).
+    pub corridor_station_m: f64,
 }
 
 impl Default for TajConfig {
@@ -70,6 +74,7 @@ impl Default for TajConfig {
             open_half_width_m: 5.0,
             cluster_gap_m: 0.5,
             min_cluster_points: 3,
+            corridor_station_m: 1.0,
         }
     }
 }
@@ -154,9 +159,13 @@ impl TajPhaseA {
         TajPerception { corridor, objects, stamp_ms: scan.stamp_ms }
     }
 
-    /// Conservative straight corridor: bounded by the nearest lateral obstacle on
-    /// each side within the forward cone (the tightest lateral bound seen ahead).
-    /// A side with no obstacle opens to `open_half_width_m`.
+    /// Per-station drivable corridor: boundary vertices are placed every
+    /// `corridor_station_m` along the forward extent, each bounded by the nearest
+    /// lateral obstacle within `±corridor_station_m` of that station. A localized
+    /// obstacle therefore narrows the corridor **only near its own x**, leaving it
+    /// wide elsewhere — vs. a single global narrowing that collapses the whole
+    /// corridor for any forward return. A side with no obstacle opens to
+    /// `open_half_width_m`.
     fn extract_corridor(
         &self,
         points: &[(f64, f64)],
@@ -166,32 +175,32 @@ impl TajPhaseA {
     ) -> TajCorridor {
         let ext = self.cfg.forward_extent_m;
         let cap = self.cfg.open_half_width_m;
+        let step = self.cfg.corridor_station_m.max(0.1);
 
-        let mut left_y = cap; // nearest left obstacle = smallest positive y
-        let mut right_y = -cap; // nearest right obstacle = largest negative y
-        for &(x, y) in points {
-            if x <= 0.0 || x > ext {
-                continue; // forward cone only
+        let nstations = (ext / step).ceil() as usize;
+        let mut left = Vec::with_capacity(nstations + 1);
+        let mut right = Vec::with_capacity(nstations + 1);
+        for i in 0..=nstations {
+            let xs = (i as f64 * step).min(ext);
+            let mut left_y = cap; // nearest left obstacle in this station's window
+            let mut right_y = -cap; // nearest right obstacle
+            for &(x, y) in points {
+                if x <= 0.0 || x > ext || (x - xs).abs() > step {
+                    continue; // forward cone, local window only
+                }
+                if y > 0.0 && y < left_y {
+                    left_y = y;
+                } else if y < 0.0 && y > right_y {
+                    right_y = y;
+                }
             }
-            if y > 0.0 && y < left_y {
-                left_y = y;
-            } else if y < 0.0 && y > right_y {
-                right_y = y;
-            }
+            left.push(Point { x_m: xs, y_m: left_y.clamp(1e-3, cap) });
+            right.push(Point { x_m: xs, y_m: right_y.clamp(-cap, -1e-3) });
         }
-        // Keep a non-degenerate width and stay within the cap (defensive).
-        left_y = left_y.clamp(1e-3, cap);
-        right_y = right_y.clamp(-cap, -1e-3);
 
         TajCorridor {
-            left: vec![
-                Point { x_m: 0.0, y_m: left_y },
-                Point { x_m: ext, y_m: left_y },
-            ],
-            right: vec![
-                Point { x_m: 0.0, y_m: right_y },
-                Point { x_m: ext, y_m: right_y },
-            ],
+            left,
+            right,
             confidence,
             age_ms: now_ms.saturating_sub(stamp_ms),
         }
@@ -299,7 +308,7 @@ mod tests {
             out.corridor.right_boundary()[0].y_m
         );
         assert!(out.corridor.confidence() > 0.5, "walls give good coverage");
-        assert_eq!(out.corridor.left_boundary().len(), 2);
+        assert!(out.corridor.left_boundary().len() >= 2, "per-station boundary");
         assert_eq!(out.corridor.age_ms(), 5);
     }
 
@@ -375,7 +384,38 @@ mod tests {
         let taj = TajPhaseA::default();
         let out = taj.process(&walls_scan(2.0, 10.0), 0);
         let dynref: &dyn CorridorSource = &out.corridor;
-        assert_eq!(dynref.left_boundary().len(), 2);
+        assert!(dynref.left_boundary().len() >= 2);
         assert!(dynref.confidence() > 0.0);
+    }
+
+    #[test]
+    fn localized_obstacle_narrows_corridor_only_near_itself() {
+        // A blob dead ahead at x≈4 between walls at ±5. The refined per-station
+        // corridor must narrow NEAR the blob's x but stay wide away from it —
+        // unlike the old global model that collapsed the whole corridor.
+        let taj = TajPhaseA::default(); // forward_extent 8, stations every 1 m
+        let scan = scan_from(12.0, 0, |theta| {
+            let s = theta.sin();
+            let wall = if s.abs() < 1e-3 { f64::INFINITY } else { 5.0 / s.abs() };
+            let blob = if theta.abs() < 0.12 { 4.0 / theta.cos() } else { f64::INFINITY };
+            let r = wall.min(blob);
+            if r.is_finite() {
+                Some(r)
+            } else {
+                None
+            }
+        });
+        let out = taj.process(&scan, 0);
+
+        let y_near = |x: f64| {
+            out.corridor
+                .left_boundary()
+                .iter()
+                .min_by(|a, b| (a.x_m - x).abs().total_cmp(&(b.x_m - x).abs()))
+                .unwrap()
+                .y_m
+        };
+        assert!(y_near(4.0) < 1.0, "corridor narrows near the obstacle, got {}", y_near(4.0));
+        assert!(y_near(7.0) > 3.0, "corridor stays wide away from it, got {}", y_near(7.0));
     }
 }
