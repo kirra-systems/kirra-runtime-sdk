@@ -283,6 +283,82 @@ pub fn occlusion_limited_speed(
     (lo - v_emerge_max).max(0.0)
 }
 
+/// Computes the longitudinal RSS safe-distance for two vehicles travelling in
+/// **OPPOSITE** directions (a head-on / oncoming encounter) — the dedicated
+/// formula `longitudinal_safe_distance` defers to (#408 Obs 3). Per the RSS model
+/// (Shalev-Shwartz et al., *On a Formal Model of Safe and Scalable Self-Driving
+/// Cars*; IEEE 2846-2022 §5.1 opposite-direction): both vehicles may accelerate
+/// through their response window and must then be able to brake to a stop without
+/// their paths overlapping, so the required gap is the **sum of both stopping
+/// distances**.
+///
+/// Returns the minimum required gap (metres) along the closing axis. Both speeds
+/// are CLOSING magnitudes (≥ 0): `v_ego` is the ego's speed toward the conflict,
+/// `v_oncoming` is the oncoming vehicle's speed toward it. (Squaring discards
+/// sign, but the contract is closing magnitudes — pass `abs`.)
+///
+/// Parameters:
+///   v_ego         — ego closing speed (m/s); must be finite
+///   v_oncoming    — oncoming closing speed (m/s); must be finite
+///   reaction_time — response time applied to BOTH vehicles (s); must be finite
+///   accel_max     — maximum acceleration during the response phase (m/s²);
+///                   applied to both; must be finite (may be 0.0)
+///   brake_min_ego      — minimum ego braking after response (m/s²); > 0 or fails safe
+///   brake_min_oncoming — minimum oncoming braking after response (m/s²); > 0 or
+///                        fails safe
+///
+/// # The brake asymmetry — a safety-modelling CHOICE; reviewer, read this
+///
+/// RSS expects the vehicle in its **correct** lane to brake at the normal minimum,
+/// but the vehicle in the **wrong** lane (the overtaker crossing into oncoming —
+/// i.e. the EGO during an overtake) to apply a *stronger* effort. Exposing both
+/// `brake_min_*` lets the caller encode that: during an ego overtake, pass the
+/// ego's larger brake. Equal values give the symmetric, more conservative bound.
+/// A LARGER brake SHRINKS that vehicle's stopping term, so mis-assigning the
+/// stronger brake to the wrong vehicle is non-conservative — the caller owns this.
+///
+/// On any invalid input (non-finite, or either `brake_min_* <= 0`) returns
+/// `RSS_FAILSAFE_DISTANCE_M` — fail-closed, defence in depth (SG9).
+// SAFETY: SG1 SG9 | REQ: rss-opposite-direction-distance-failsafe | TEST: test_opposite_equal_closing,test_opposite_sums_both_stopping_distances,test_opposite_monotonic_in_closing,test_opposite_stronger_brake_shrinks_gap,test_opposite_nan_input_is_failsafe,test_opposite_zero_brake_ego_is_failsafe,test_opposite_zero_brake_oncoming_is_failsafe
+// (≅ Occy SG1 head-on collision RSS; closes #408 Obs 3 — the oncoming-actor
+//  geometry the same-direction primitive declares out of scope. Non-finite or
+//  non-positive brake/accel returns RSS_FAILSAFE_DISTANCE_M — fail-closed via SG9.)
+pub fn opposite_direction_safe_distance(
+    v_ego: f64,
+    v_oncoming: f64,
+    reaction_time: f64,
+    accel_max: f64,
+    brake_min_ego: f64,
+    brake_min_oncoming: f64,
+) -> f64 {
+    // See longitudinal/lateral note: no debug_assert! — the runtime guard is the
+    // safety contract, exercised by the fail-closed tests.
+    if !(finite_positive(brake_min_ego)
+        && finite_positive(brake_min_oncoming)
+        && v_ego.is_finite()
+        && v_oncoming.is_finite()
+        && reaction_time.is_finite()
+        && accel_max.is_finite())
+    {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+
+    // Each vehicle: response-phase travel (creep + acceleration), then brake to a
+    // stop from its post-response speed. The full stopping distances sum because
+    // the vehicles approach along the same axis from opposite ends.
+    let stopping = |v: f64, brake_min: f64| -> f64 {
+        let d_response = v * reaction_time + 0.5 * accel_max * reaction_time.powi(2);
+        let v_after = v + accel_max * reaction_time;
+        d_response + v_after.powi(2) / (2.0 * brake_min)
+    };
+
+    let raw = stopping(v_ego, brake_min_ego) + stopping(v_oncoming, brake_min_oncoming);
+    if !raw.is_finite() {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    raw.max(0.0)
+}
+
 // ---------------------------------------------------------------------------
 // Agent-set input model for pairwise RSS (issue #92)
 // ---------------------------------------------------------------------------
@@ -749,5 +825,83 @@ mod tests {
         let fast = occlusion_limited_speed(60.0, 5.0, 0.5, 2.0, 6.0, 6.0);
         assert!(fast < slow, "a faster possible emerger must lower the cap: slow={slow}, fast={fast}");
         assert!(fast >= 0.0, "the cap is never negative, got {fast}");
+    }
+
+    // ── opposite-direction (head-on) primitive (#408 Obs 3) ─────────────────
+
+    /// Both at rest needs zero gap; both at equal closing speed gives the sum of
+    /// two identical stopping distances. (`accel_max = 0` so a stationary vehicle
+    /// contributes exactly 0 — with worst-case response acceleration even a
+    /// stationary vehicle carries a nonzero creep+brake term, exercised separately.)
+    #[test]
+    fn test_opposite_equal_closing() {
+        // Both stationary, no reaction creep (ρ=0) → zero required gap.
+        assert!(opposite_direction_safe_distance(0.0, 0.0, 0.0, 0.0, 6.0, 6.0).abs() < EPS);
+        // Symmetric closing: result is exactly twice one vehicle's stopping distance.
+        let d = opposite_direction_safe_distance(10.0, 10.0, 0.5, 0.0, 6.0, 6.0);
+        let one = opposite_direction_safe_distance(10.0, 0.0, 0.5, 0.0, 6.0, 6.0);
+        assert!((d - 2.0 * one).abs() < EPS, "equal closing = 2× one side: d={d}, one={one}");
+    }
+
+    /// The required gap is the SUM of both vehicles' stopping distances — it must
+    /// exceed the ego-against-a-stationary-actor distance alone, because the
+    /// oncoming vehicle adds its own stopping distance. (`accel_max = 0` so the
+    /// additive identity is exact; the worst-case response term cancels.)
+    #[test]
+    fn test_opposite_sums_both_stopping_distances() {
+        let head_on = opposite_direction_safe_distance(12.0, 8.0, 0.5, 0.0, 6.0, 6.0);
+        let ego_only = opposite_direction_safe_distance(12.0, 0.0, 0.5, 0.0, 6.0, 6.0);
+        let onc_only = opposite_direction_safe_distance(0.0, 8.0, 0.5, 0.0, 6.0, 6.0);
+        assert!(head_on > ego_only, "oncoming motion adds to the required gap");
+        assert!((head_on - (ego_only + onc_only)).abs() < EPS, "gap is additive across both");
+    }
+
+    /// With worst-case response acceleration (`accel_max > 0`) even a *stationary*
+    /// oncoming vehicle contributes a nonzero creep+brake term — the conservative
+    /// RSS response model (matches `longitudinal_safe_distance`).
+    #[test]
+    fn test_opposite_stationary_oncoming_still_contributes_under_accel() {
+        let onc_only = opposite_direction_safe_distance(0.0, 0.0, 0.5, 2.0, 6.0, 6.0);
+        // 0.5·a·ρ² + (a·ρ)²/(2·b) per side, ×2 = 2·(0.25 + 1/12) ≈ 0.667.
+        assert!(onc_only > 0.6 && onc_only < 0.7, "worst-case response term, got {onc_only}");
+    }
+
+    /// Monotonic: a faster oncoming closing speed strictly increases the gap.
+    #[test]
+    fn test_opposite_monotonic_in_closing() {
+        let slow = opposite_direction_safe_distance(10.0, 5.0, 0.5, 2.0, 6.0, 6.0);
+        let fast = opposite_direction_safe_distance(10.0, 15.0, 0.5, 2.0, 6.0, 6.0);
+        assert!(fast > slow, "faster oncoming → larger required gap: slow={slow}, fast={fast}");
+        assert!(slow.is_finite() && slow >= 0.0);
+    }
+
+    /// A stronger brake on a vehicle SHRINKS its stopping term (the asymmetry knob).
+    #[test]
+    fn test_opposite_stronger_brake_shrinks_gap() {
+        let weak = opposite_direction_safe_distance(10.0, 10.0, 0.5, 2.0, 4.0, 6.0);
+        let strong = opposite_direction_safe_distance(10.0, 10.0, 0.5, 2.0, 9.0, 6.0);
+        assert!(strong < weak, "a stronger ego brake reduces the gap: weak={weak}, strong={strong}");
+    }
+
+    /// NaN input must fail safe (an unreachable gap), not collapse to a small value.
+    #[test]
+    fn test_opposite_nan_input_is_failsafe() {
+        let r = opposite_direction_safe_distance(f64::NAN, 8.0, 0.5, 2.0, 6.0, 6.0);
+        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "NaN closing speed must fail safe, got {r}");
+    }
+
+    /// Zero ego brake with a stationary ego (raw numerator 0) must NOT collapse to
+    /// 0.0 via a NaN→0 sink — must fail safe.
+    #[test]
+    fn test_opposite_zero_brake_ego_is_failsafe() {
+        let r = opposite_direction_safe_distance(0.0, 0.0, 0.5, 2.0, 0.0, 6.0);
+        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "zero ego brake must fail safe, got {r}");
+    }
+
+    /// Zero oncoming brake (divisor → NaN otherwise) must fail safe.
+    #[test]
+    fn test_opposite_zero_brake_oncoming_is_failsafe() {
+        let r = opposite_direction_safe_distance(10.0, 5.0, 0.5, 2.0, 6.0, 0.0);
+        assert!(r >= RSS_FAILSAFE_DISTANCE_M, "zero oncoming brake must fail safe, got {r}");
     }
 }
