@@ -150,9 +150,14 @@ parameters — both levers, not one.
    capped to `sqrt(comfort_lat / κ)` for the path's upcoming curvature (Menger
    curvature, look-ahead with jerk headroom so the ego decelerates *before* the
    bend), so a curve is taken at a comfortable lateral accel instead of being taken
-   at cruise and clamped by the checker. No-op on straight roads. **Remaining:**
-   full velocity-profile optimization (jointly optimal speed+path), and an
-   explicit steering-rate cap for very sharp transitions.
+   at cruise and clamped by the checker. No-op on straight roads. Now generalized
+   to a **full forward–backward velocity profile** (`velocity_profile`): a static
+   limit `min(cruise, √(comfort_lat/κ))` per station + a backward decel-feasibility
+   pass that propagates every downstream constraint (each curve, the stop) upstream
+   — one principled pass that SUBSUMES the curvature cap and the brake-to-stop
+   trigger and resolves SEQUENCES (a curve then a stop) jointly; the jerk-limited
+   forward integration executes it. **Remaining:** an explicit steering-rate cap
+   for very sharp transitions, and joint path+speed optimization.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the

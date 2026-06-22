@@ -284,6 +284,10 @@ impl Planner for StopPlanner {
 /// this is the controlled stop-and-hold.
 const STOP_EPSILON_MPS: f64 = 0.05;
 
+/// Arc-length resolution (m) of the forward–backward velocity profile. Fine enough
+/// to resolve a curve's deceleration, coarse enough to keep the two passes cheap.
+const VELOCITY_PROFILE_DS: f64 = 0.5;
+
 /// Tunables for [`GeometricPlanner`].
 ///
 /// Defaults stay **inside** `VehicleConfig::default_urban` kinematic limits
@@ -772,32 +776,73 @@ impl GeometricPlanner {
     /// upcoming curve's comfort limit `sqrt(comfort_lat / κ)` by the time it gets
     /// there. Looks ahead over the braking distance + a fixed horizon. A straight
     /// path (κ ≈ 0) → no cap (`f64::INFINITY`).
-    fn curve_speed_limit_ahead(&self, guide: &[(f64, f64)], s_now: f64, v: f64, decel: f64) -> f64 {
+    /// Full forward–backward VELOCITY PROFILE over the travel window `[0, dist]`
+    /// (arc-length from the ego), sampled every `VELOCITY_PROFILE_DS`.
+    ///
+    /// One principled pass that subsumes the curvature speed cap AND the brake
+    /// trigger: the static limit at each station is `min(target, √(comfort_lat/κ))`
+    /// (cruise + each curve); a `stop_at_end` window pins the terminal to 0. A
+    /// single BACKWARD pass then enforces deceleration feasibility —
+    /// `v[i] = min(limit[i], √(v[i+1]² + 2·decel·ds))` — which propagates every
+    /// downstream constraint (a stop, each curve) upstream so the ego slows in
+    /// time, handling SEQUENCES (a curve then a stop) that an incremental
+    /// look-ahead can get wrong. The forward jerk-limited integration in `plan`
+    /// then executes this cap (its own accel limit is the forward feasibility pass).
+    ///
+    /// `decel` is reduced to leave headroom for the jerk-limited ramp, so the ego
+    /// reaches each limit BEFORE it bites rather than lagging into it.
+    fn velocity_profile(
+        &self,
+        guide: &[(f64, f64)],
+        s_ego: f64,
+        dist: f64,
+        target: f64,
+        decel: f64,
+        stop_at_end: bool,
+    ) -> Vec<f64> {
+        let ds = VELOCITY_PROFILE_DS;
+        let n = ((dist / ds).ceil() as usize).max(1) + 1;
         let lat = self.cfg.comfort_lateral_accel_mps2;
-        if lat <= 0.0 {
-            return f64::INFINITY;
+        // Static speed limit: cruise/target, tightened by each curve's comfort speed.
+        let mut v: Vec<f64> = (0..n)
+            .map(|i| {
+                let s = (i as f64 * ds).min(dist);
+                let mut lim = target;
+                if lat > 0.0 {
+                    let k = curvature_at(guide, s_ego + s, 3.0);
+                    if k > 1e-4 {
+                        lim = lim.min((lat / k).sqrt());
+                    }
+                }
+                lim
+            })
+            .collect();
+        if stop_at_end {
+            v[n - 1] = 0.0;
         }
-        // Effective decel is reduced to leave headroom for the jerk-limited ramp
-        // (the speed can't drop at full `decel` instantly), so the ego reaches the
-        // curve speed BEFORE the curvature peaks rather than lagging into it.
+        // Backward pass: enforce decel feasibility to every downstream limit.
         let decel_eff = (0.6 * decel).max(1e-3);
-        // Look ahead far enough to brake from the current speed, plus a margin.
-        let lookahead = (v * v / (2.0 * decel_eff) + 5.0).min(60.0);
-        let steps = 30usize;
-        let d = 3.0; // curvature span (m), to average over the smoothed polyline
-        let mut limit = f64::INFINITY;
-        for i in 0..=steps {
-            let ds = lookahead * (i as f64) / (steps as f64);
-            let kappa = curvature_at(guide, s_now + ds, d);
-            if kappa > 1e-4 {
-                let v_curve = (lat / kappa).sqrt();
-                // Max speed now that still allows decel to v_curve in `ds`.
-                let v_allow = (v_curve * v_curve + 2.0 * decel_eff * ds).sqrt();
-                limit = limit.min(v_allow);
-            }
+        for i in (0..n - 1).rev() {
+            let feasible = (v[i + 1] * v[i + 1] + 2.0 * decel_eff * ds).sqrt();
+            v[i] = v[i].min(feasible);
         }
-        limit
+        v
     }
+}
+
+/// Linear interpolation of a `velocity_profile` (sampled every `VELOCITY_PROFILE_DS`
+/// from arc-length 0) at distance `s`; clamped to the endpoints.
+fn sample_profile(profile: &[f64], s: f64) -> f64 {
+    if profile.is_empty() {
+        return 0.0;
+    }
+    let x = (s / VELOCITY_PROFILE_DS).max(0.0);
+    let i = x.floor() as usize;
+    if i + 1 >= profile.len() {
+        return *profile.last().unwrap();
+    }
+    let f = x - i as f64;
+    profile[i] * (1.0 - f) + profile[i + 1] * f
 }
 
 // SAFETY: occy planner proposes within corridor + urban kinematic limits; checker decides | REQ: Occy-1.A (#90) | TEST: kirra_planner::tests::{geometric_planner_proposes_motion_toward_goal, geometric_planner_output_is_checker_admissible, geometric_planner_locked_out_only_stops, geometric_planner_degraded_is_non_increasing, geometric_planner_at_goal_holds, geometric_planner_respects_horizon_cap}
@@ -985,13 +1030,15 @@ impl Planner for GeometricPlanner {
             .max(2);
         let dt = self.cfg.sample_dt_s.max(1e-3);
         let decel = self.cfg.max_decel_mps2.max(1e-3);
+        // Full velocity profile (forward–backward): the decel-feasible speed cap at
+        // every station, subsuming the curvature cap and the brake-to-stop trigger.
+        let v_profile = self.velocity_profile(&guide, s_ego, dist, target, decel, !lead_gap_limit);
         let mut traj: Vec<TrajectoryPoint> = Vec::with_capacity(budget + 1);
         let mut s = 0.0_f64; // distance travelled from ego along the guide
         let mut v = cur.min(target.max(cur)); // start at current speed
         let mut a = 0.0_f64; // current acceleration (jerk-limited; smooth launch)
         let mut t = 0.0_f64;
         let mut reached = false;
-        let mut braking = false; // latched once committed to a stop (no re-accel)
         let jerk = self.cfg.max_jerk_mps3.max(1e-3);
 
         while traj.len() < budget {
@@ -1015,40 +1062,23 @@ impl Planner for GeometricPlanner {
                 reached = true;
                 break;
             }
-            // Jerk-limited (S-curve) speed profile. The DESIRED acceleration is the
-            // bang-bang target (full brake when within stopping distance; else
-            // accelerate to target; else cruise) — but `a` slews toward it bounded
-            // by `max_jerk`, so the commanded acceleration never steps. The brake
-            // trigger is JERK-AWARE: it adds the distance lost while the decel ramps
-            // in (`v·decel/jerk`) so the vehicle still stops by the limit. A lead is
-            // a rolling following-gap, not a stop — cruise, never brake to zero.
-            let brake_dist = (v * v) / (2.0 * decel) + v * decel / jerk;
-            // Commit to the stop once inside the (jerk-aware) braking distance and
-            // LATCH it: a jerk-aware brake reaches 0 slightly short of the limit, and
-            // without the latch the accel branch would see the leftover gap and
-            // re-accelerate (creep into the hazard). A lead is a rolling gap, not a
-            // stop, so it never latches.
-            if !lead_gap_limit && remaining <= brake_dist {
-                braking = true;
-            }
-            // Curvature-aware speed: cap the effective target so the ego slows for
-            // an upcoming curve (decelerating in time), keeping lateral accel /
-            // steering rate comfortable instead of being clamped by the checker. A
-            // straight path leaves the cap at infinity → target unchanged.
-            let curve_cap = self.curve_speed_limit_ahead(&guide, s_ego + s, v, decel);
-            let target_eff = target.min(curve_cap);
-            // Speed change still to come while `a` ramps back to 0 at max jerk —
-            // used to EASE OFF before hitting the target cap (else v slams into the
-            // clamp, an un-jerk-limited kink).
+            // Track the velocity profile (the decel-feasible cap, already accounting
+            // for curves and the stop) with a JERK-LIMITED (S-curve) acceleration:
+            // accelerate toward the profile speed, ease the speed down where the
+            // profile drops (a curve or the approach to the stop), cruise when on it.
+            // `a` slews toward the desired accel bounded by `max_jerk` so the
+            // commanded acceleration never steps. The forward accel limit here is the
+            // forward feasibility pass; the backward pass made the profile reachable.
+            let target_eff = sample_profile(&v_profile, s);
+            // Speed change still to come while `a` ramps to 0 at max jerk — the
+            // ease-off band so v neither overshoots up nor undershoots the target.
             let coast = a * a / (2.0 * jerk);
-            let a_des = if braking {
-                -decel
-            } else if v + coast < target_eff {
+            let a_des = if v + coast < target_eff {
                 self.cfg.max_accel_mps2
-            } else if v > target_eff + 0.05 {
-                -decel // overspeed for the upcoming curve → ease the speed down
+            } else if v - coast > target_eff {
+                -decel // above the profile (curve / stop approach) → ease the speed down
             } else {
-                0.0 // at / approaching target → ramp accel down to cruise
+                0.0 // on the profile → cruise
             };
             // Slew `a` toward `a_des`, clamped by the per-step jerk budget.
             a = if (a_des - a).abs() <= jerk * dt {
@@ -1686,6 +1716,41 @@ mod tests {
         );
         assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
             "curvature-aware turn is admissible, got {verdict:?}");
+    }
+
+    #[test]
+    fn velocity_profile_handles_a_curve_then_a_stop() {
+        // The full forward–backward profile on a guide that is straight, then turns
+        // at arc≈30, then straight to a stop at the end. One pass must: reach cruise
+        // on the open straight (not needlessly slow), dip for the curve, recover
+        // after it, and decelerate to 0 at the stop — a SEQUENCE the incremental
+        // look-ahead cannot resolve jointly.
+        let p = GeometricPlanner::default();
+        let guide: Vec<(f64, f64)> = vec![
+            (0.0, 0.0), (30.0, 0.0), (42.0, 14.0), (90.0, 62.0),
+        ];
+        let dist = 80.0;
+        let (target, decel) = (8.0, 2.5);
+        let prof = p.velocity_profile(&guide, 0.0, dist, target, decel, true);
+        assert!(prof.len() > 10);
+
+        let at = |s: f64| sample_profile(&prof, s);
+        // Reaches cruise on the early open straight (arc 10–20, before the bend).
+        let early_max = (10..=20).map(|x| at(x as f64)).fold(0.0_f64, f64::max);
+        assert!(early_max > target - 0.2, "cruises where unconstrained, got {early_max:.2}");
+        // Dips for the curve (around arc 30).
+        let curve_min = (26..=38).map(|x| at(x as f64)).fold(f64::INFINITY, f64::min);
+        assert!(curve_min < target - 1.0, "slows for the curve, got {curve_min:.2}");
+        // Recovers after the curve (arc 50+) — not stuck slow.
+        let recover = at(52.0);
+        assert!(recover > curve_min + 0.5, "speeds back up after the curve, got {recover:.2}");
+        // Decelerates to a stop at the end.
+        assert!(*prof.last().unwrap() < 0.1, "ends stopped, got {}", prof.last().unwrap());
+        // Every downstep is deceleration-feasible (backward-pass invariant).
+        for w in prof.windows(2) {
+            let max_drop = w[0] - (w[1] * w[1] + 2.0 * decel * VELOCITY_PROFILE_DS).sqrt();
+            assert!(max_drop <= 1e-6, "profile decel-infeasible: {} -> {}", w[0], w[1]);
+        }
     }
 
     #[test]
