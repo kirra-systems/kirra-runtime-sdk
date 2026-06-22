@@ -137,6 +137,12 @@ parameters — both levers, not one.
    drift is no longer mis-predicted as cutting in. CV/CTRV remains the fallback.
    **Remaining:** richer intent (turn/yield negotiation at junctions).
 3. **Trajectory optimization** — jerk-limited / comfort, replacing the trapezoid.
+   **Done (speed profile):** the bang-bang accelerate/cruise/brake profile is now a
+   jerk-limited **S-curve** (`max_jerk_mps3`) — acceleration slews instead of
+   stepping, the brake trigger is jerk-aware (still stops by the limit), and the
+   stop is latched (no re-accel creep). Within the accel/decel envelope the checker
+   already enforces, so it stays admissible. **Remaining:** path-shape smoothing
+   (curvature/steering-rate optimization beyond the speed profile).
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the

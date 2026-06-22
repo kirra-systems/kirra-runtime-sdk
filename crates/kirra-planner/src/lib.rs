@@ -369,6 +369,13 @@ pub struct GeometricPlannerConfig {
     /// than this margin before the ego's SOONEST possible arrival there. Covers
     /// reaction + a safety buffer; bigger = more conservative (yields more often).
     pub yield_temporal_margin_s: f64,
+    /// Maximum jerk (m/s³) for the speed profile. Bounds the rate of change of
+    /// acceleration so the profile is an S-curve (comfort), not the bang-bang
+    /// trapezoid that steps instantly between full accel / cruise / full brake. The
+    /// brake trigger is made jerk-aware so the vehicle still stops by the limit
+    /// despite ramping the deceleration in. Within the accel/decel envelope the
+    /// checker already enforces, so this is a comfort refinement, not a safety one.
+    pub max_jerk_mps3: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -399,6 +406,7 @@ impl Default for GeometricPlannerConfig {
             crossing_speed_threshold_mps: 0.5,
             overtake_offset_max_m: 7.0,
             yield_temporal_margin_s: 1.0,
+            max_jerk_mps3: 2.5,
         }
     }
 }
@@ -926,8 +934,11 @@ impl Planner for GeometricPlanner {
         let mut traj: Vec<TrajectoryPoint> = Vec::with_capacity(budget + 1);
         let mut s = 0.0_f64; // distance travelled from ego along the guide
         let mut v = cur.min(target.max(cur)); // start at current speed
+        let mut a = 0.0_f64; // current acceleration (jerk-limited; smooth launch)
         let mut t = 0.0_f64;
         let mut reached = false;
+        let mut braking = false; // latched once committed to a stop (no re-accel)
+        let jerk = self.cfg.max_jerk_mps3.max(1e-3);
 
         while traj.len() < budget {
             let along = s_ego + s;
@@ -950,15 +961,40 @@ impl Planner for GeometricPlanner {
                 reached = true;
                 break;
             }
-            // Brake when within stopping distance, else accelerate toward target.
-            // When following a lead, the limit is a rolling following-gap, not a
-            // stop — cruise at the matched speed instead of braking to zero.
-            let brake_dist = (v * v) / (2.0 * decel);
-            if remaining <= brake_dist && !lead_gap_limit {
-                v = (v - decel * dt).max(0.0);
-            } else {
-                v = (v + self.cfg.max_accel_mps2 * dt).min(target);
+            // Jerk-limited (S-curve) speed profile. The DESIRED acceleration is the
+            // bang-bang target (full brake when within stopping distance; else
+            // accelerate to target; else cruise) — but `a` slews toward it bounded
+            // by `max_jerk`, so the commanded acceleration never steps. The brake
+            // trigger is JERK-AWARE: it adds the distance lost while the decel ramps
+            // in (`v·decel/jerk`) so the vehicle still stops by the limit. A lead is
+            // a rolling following-gap, not a stop — cruise, never brake to zero.
+            let brake_dist = (v * v) / (2.0 * decel) + v * decel / jerk;
+            // Commit to the stop once inside the (jerk-aware) braking distance and
+            // LATCH it: a jerk-aware brake reaches 0 slightly short of the limit, and
+            // without the latch the accel branch would see the leftover gap and
+            // re-accelerate (creep into the hazard). A lead is a rolling gap, not a
+            // stop, so it never latches.
+            if !lead_gap_limit && remaining <= brake_dist {
+                braking = true;
             }
+            // Speed change still to come while `a` ramps back to 0 at max jerk —
+            // used to EASE OFF before hitting the target cap (else v slams into the
+            // clamp, an un-jerk-limited kink).
+            let coast = a * a / (2.0 * jerk);
+            let a_des = if braking {
+                -decel
+            } else if v + coast < target {
+                self.cfg.max_accel_mps2
+            } else {
+                0.0 // at / approaching target → ramp accel down to cruise
+            };
+            // Slew `a` toward `a_des`, clamped by the per-step jerk budget.
+            a = if (a_des - a).abs() <= jerk * dt {
+                a_des
+            } else {
+                a + (jerk * dt).copysign(a_des - a)
+            };
+            v = (v + a * dt).clamp(0.0, target.max(0.0));
             s += v * dt;
             t += dt;
         }
@@ -1379,6 +1415,36 @@ mod tests {
             matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
             "checker should admit the nominal proposal, got {verdict:?}"
         );
+    }
+
+    #[test]
+    fn speed_profile_is_jerk_limited() {
+        // Launch toward a FAR goal (no obstacle): the profile ramps acceleration as
+        // an S-curve rather than the old bang-bang step to full accel. The jerk (the
+        // second difference of the speed samples) stays within max_jerk, and the
+        // launch acceleration ramps up instead of jumping to the limit on step one.
+        let corridor = MockCorridorSource::straight_5m_half_width(300.0);
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 5.0, 250.0, &[]));
+        let cfg = GeometricPlannerConfig::default();
+        let dt = cfg.sample_dt_s;
+
+        let v: Vec<f64> = out.trajectory.iter().map(|tp| tp.velocity_mps).collect();
+        assert!(v.len() >= 4, "need a profile to measure, got {}", v.len());
+        // Far goal → horizon-truncated cruise tail (no terminal stop-jump to skew jerk).
+        let mut max_jerk_seen = 0.0_f64;
+        for w in v.windows(3) {
+            let jerk = (w[2] - 2.0 * w[1] + w[0]) / (dt * dt);
+            max_jerk_seen = max_jerk_seen.max(jerk.abs());
+        }
+        assert!(max_jerk_seen <= cfg.max_jerk_mps3 * 1.05 + 1e-9,
+            "speed-profile jerk {max_jerk_seen} exceeds max_jerk {}", cfg.max_jerk_mps3);
+        // Smooth launch: the first acceleration is well below max (ramped in), where
+        // the old bang-bang profile jumped straight to max_accel on step one.
+        let a0 = (v[1] - v[0]) / dt;
+        assert!(a0 < cfg.max_accel_mps2,
+            "launch acceleration {a0} should ramp, not jump to max {}", cfg.max_accel_mps2);
+        assert!(a0 > 0.0, "and the ego does accelerate from the low start speed");
     }
 
     #[test]
