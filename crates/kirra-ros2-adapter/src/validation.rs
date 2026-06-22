@@ -26,6 +26,7 @@ use kirra_runtime_sdk::gateway::kinematics_contract::{
 use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, opposite_direction_safe_distance,
+    RSS_LONGITUDINAL_CONFLICT_M,
 };
 
 use crate::config::VehicleConfig;
@@ -300,24 +301,30 @@ pub fn validate_trajectory_slow_capped(
                 return TrajectoryVerdict::MRCFallback;
             }
 
-            // Lateral RSS — required side gap. Use the object's
-            // lateral velocity component as the lateral-vel input.
-            // (Phase 2A: assume objects' lateral velocity = 0 if
-            // PerceivedObject does not carry per-axis velocity. The
-            // longitudinal check is the dominant risk; lateral RSS is
-            // defence in depth against an object cutting in.)
-            let obj_lat_vel = obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).sin();
-            let ego_lat_vel = 0.0; // straight-following assumption per
-                                   // §3 (the per-pose Pose.heading
-                                   // captures any planned curvature).
-            let lat_required = lateral_safe_distance(
-                ego_lat_vel,
-                obj_lat_vel,
-                kinematics.max_lateral_accel_mps2,
-                RSS_REACTION_TIME_S,
-            );
-            if dy_ego.abs() < lat_required {
-                return TrajectoryVerdict::MRCFallback;
+            // Lateral RSS — required side gap. Defence-in-depth against an object
+            // cutting in beside the ego (the longitudinal check above is the
+            // dominant risk). RSS-GATED ON LONGITUDINAL PROXIMITY: a lateral
+            // shortfall is only dangerous when the object is also longitudinally
+            // close (within `RSS_LONGITUDINAL_CONFLICT_M`) — two vehicles cannot
+            // collide laterally unless they are alongside or imminently so. Without
+            // this gate the check over-rejected a lead well ahead, or oncoming
+            // traffic safely passing in the next lane (COMPETITIVE_PLANNER_ANALYSIS
+            // §4): both are longitudinally distant, so a lateral shortfall there is
+            // not a collision risk. (Object lateral velocity is the component along
+            // the pose normal — Phase 2A assumes 0 if perception lacks per-axis vel.)
+            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M {
+                let obj_lat_vel =
+                    obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).sin();
+                let ego_lat_vel = 0.0; // straight-following assumption per §3
+                let lat_required = lateral_safe_distance(
+                    ego_lat_vel,
+                    obj_lat_vel,
+                    kinematics.max_lateral_accel_mps2,
+                    RSS_REACTION_TIME_S,
+                );
+                if dy_ego.abs() < lat_required {
+                    return TrajectoryVerdict::MRCFallback;
+                }
             }
         }
     }

@@ -85,19 +85,29 @@ an NVIDIA-style planner as the doer.**
 
 A *too-strict checker + too-simple planner* is **over-conservative**. We hit it
 repeatedly: a dead-ahead lead → MRC (the lateral-RSS floor); an abreast pass →
-reject. The **overtake** build sharpened it twice more: (a) a car *centered* in the
-ego lane can't be passed at all — the adapter's lateral RSS (≈1.75 m, independent of
-longitudinal distance) MRCs any in-lane-ahead vehicle, so a pass is admissible only
-for a car already near the lane edge; (b) during the *angled* ramp of a pass, the
-lateral RSS treats any **fast adjacent-lane** vehicle as a lateral threat (the path
-heading projects the other car's speed into a closing lateral component), so it MRCs
-oncoming *and* same-direction traffic alike — which is why the overtake demo's
-direction-isolation lives at the checker unit level (#469), not in the trajectory.
-In dense traffic, Occy + KIRRA-as-tuned-today would stop too often. Mobileye avoids
-this by pairing RSS with a *sophisticated* policy **and** carefully-tuned RSS
-parameters. So a real improvement axis is **both** smartening Occy *and* tuning
-KIRRA's RSS conservatism (especially the lateral band's lack of longitudinal
-context) — not just one.
+reject. The **overtake** build sharpened the lateral-RSS half of it: during the
+*angled* ramp of a pass the lateral RSS treated any **fast adjacent-lane** vehicle
+as a lateral threat (the path heading projects the other car's speed into a closing
+lateral component), MRC-ing oncoming *and* same-direction traffic alike.
+
+**Addressed (lateral RSS, longitudinal gate):** the root cause was that the lateral
+safe-distance bound danger *independently* of longitudinal distance, but RSS
+(IEEE 2846 §5; Shalev-Shwartz et al.) defines a dangerous state as the
+**conjunction** — two vehicles cannot collide laterally unless also longitudinally
+close. Both checkers (`validate_trajectory_slow`, `compute_scene_rss`) now **gate**
+the lateral defence-in-depth on `RSS_LONGITUDINAL_CONFLICT_M` (8 m): a lateral
+shortfall is dangerous only when the object is alongside/imminent, so a lead well
+ahead and oncoming traffic safely passing in the next lane no longer trip it (the
+overtake demo's direction-isolation control now passes at the trajectory level, not
+just the #469 unit level). The dominant longitudinal RSS — car-following / head-on —
+is unchanged, and the lateral layer still fails closed for a genuine cut-in.
+
+**Remaining:** the longitudinal/alignment half — a car *centered* in the ego lane
+still can't be passed, because clearing the checker's 4 m lateral-alignment band
+needs >4 m of side room (a pass is admissible only for a car near the lane edge or
+on a wide road). And in dense traffic, smartening Occy's policy is the orthogonal
+axis. Mobileye pairs RSS with a *sophisticated* policy **and** carefully-tuned RSS
+parameters — both levers, not one.
 
 ## 5. Recommended roadmap (in Kirra's grain)
 

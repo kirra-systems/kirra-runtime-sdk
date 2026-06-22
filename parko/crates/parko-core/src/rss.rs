@@ -23,6 +23,28 @@ pub struct RssState {
 /// return this large finite distance — the governor will clamp or stop.
 pub const RSS_FAILSAFE_DISTANCE_M: f64 = 1.0e6;
 
+/// Longitudinal half-window (metres) within which a **lateral** RSS shortfall is
+/// treated as a genuine conflict by the trajectory/scene checkers.
+///
+/// RSS (Shalev-Shwartz et al.; IEEE 2846-2022 §5) defines a *dangerous* state as
+/// the **conjunction** of an unsafe longitudinal AND an unsafe lateral distance —
+/// two vehicles cannot collide laterally unless they are also longitudinally
+/// close (alongside or imminently so). A checker that flags a lateral shortfall
+/// for an object that is longitudinally FAR (a lead well ahead, or oncoming
+/// traffic safely passing in the next lane) is therefore over-conservative: it
+/// rejects motions RSS deems safe.
+///
+/// The checkers keep the lateral safe-distance as a fail-closed *defence-in-depth*
+/// layer (catching a cut-in beside the ego), but **gate** it on this longitudinal
+/// proximity: a lateral shortfall is dangerous only when the object is within
+/// `RSS_LONGITUDINAL_CONFLICT_M` longitudinally. The value is deliberately
+/// conservative — a passenger-vehicle length plus a reaction-time closing buffer —
+/// so an imminent cut-in is still caught while distant traffic no longer trips it.
+///
+/// (The dominant longitudinal RSS — car-following / head-on — is UNCHANGED and
+/// fully governs any object that is longitudinally unsafe at any range.)
+pub const RSS_LONGITUDINAL_CONFLICT_M: f64 = 8.0;
+
 #[inline]
 fn finite_positive(x: f64) -> bool {
     x.is_finite() && x > 0.0

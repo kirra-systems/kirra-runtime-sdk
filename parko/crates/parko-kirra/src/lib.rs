@@ -47,7 +47,7 @@ use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
-    opposite_direction_safe_distance,
+    opposite_direction_safe_distance, RSS_LONGITUDINAL_CONFLICT_M,
 };
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
@@ -236,8 +236,21 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
         // are false); a non-finite agent VELOCITY drove `required_*` to the
         // 1e6 failsafe, so a realistic finite actual gap is `< required` → the
         // pair is unsafe. Either way the agent is evaluated, never skipped.
-        let pair_safe = a.actual_longitudinal_gap_m >= required_long
-            && a.actual_lateral_separation_m >= required_lat;
+        let lon_safe = a.actual_longitudinal_gap_m >= required_long;
+        // Lateral defence-in-depth is GATED on longitudinal proximity (the RSS
+        // conjunction): a lateral shortfall is dangerous only when the object is
+        // also longitudinally close. A lead well ahead / oncoming traffic safely
+        // passing in the next lane is longitudinally distant, so its lateral gap
+        // does not bound safety (it over-rejected before — §4). Fail-closed first:
+        // a non-finite separation is never "safe", regardless of range.
+        let lat_safe = if !a.actual_lateral_separation_m.is_finite() {
+            false
+        } else if a.actual_longitudinal_gap_m > RSS_LONGITUDINAL_CONFLICT_M {
+            true
+        } else {
+            a.actual_lateral_separation_m >= required_lat
+        };
+        let pair_safe = lon_safe && lat_safe;
         if !pair_safe {
             all_safe = false;
         }
@@ -1657,6 +1670,12 @@ mod scene_rss_tests {
 
     fn lat_unsafe_agent() -> RssAgent {
         RssAgent {
+            // Stationary longitudinally (tiny required gap) and CLOSE — within
+            // RSS_LONGITUDINAL_CONFLICT_M — so the lateral shortfall is a genuine
+            // alongside conflict, not a distant object the gate now ignores.
+            ego_vel: 0.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 4.0,
             ego_lat_vel: 2.0,
             obj_lat_vel: 2.0,
             actual_lateral_separation_m: 0.0,
@@ -1744,6 +1763,24 @@ mod scene_rss_tests {
     fn lateral_axis_is_evaluated() {
         let scene = AgentScene::Agents(vec![lat_unsafe_agent()]);
         assert!(!compute_scene_rss(&scene, &params()).safe, "lateral violation must be caught");
+    }
+
+    /// The lateral defence-in-depth is GATED on longitudinal proximity (the RSS
+    /// conjunction, §4): the SAME lateral shortfall that is unsafe when the object
+    /// is alongside is SAFE when it is longitudinally far — two vehicles cannot
+    /// collide laterally unless also longitudinally close. Before the gate this
+    /// over-rejected a lead well ahead / oncoming traffic in the next lane.
+    #[test]
+    fn a_distant_lateral_shortfall_is_not_a_conflict() {
+        // Same lateral shortfall as `lat_unsafe_agent`, but longitudinally FAR
+        // (well beyond RSS_LONGITUDINAL_CONFLICT_M) → longitudinally safe → not
+        // dangerous.
+        let far = RssAgent { actual_longitudinal_gap_m: 50.0, ..lat_unsafe_agent() };
+        assert!(compute_scene_rss(&AgentScene::Agents(vec![far]), &params()).safe,
+            "a lateral shortfall 50 m ahead is not a collision risk (RSS conjunction)");
+        // Control: the SAME shortfall when alongside is still caught.
+        assert!(!compute_scene_rss(&AgentScene::Agents(vec![lat_unsafe_agent()]), &params()).safe,
+            "the shortfall WHEN ALONGSIDE is still caught (defence-in-depth intact)");
     }
 
     // --- NaN / non-finite → failsafe → unsafe (agent evaluated, not skipped) ---

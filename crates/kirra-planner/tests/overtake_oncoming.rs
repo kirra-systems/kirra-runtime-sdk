@@ -156,17 +156,9 @@ fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
     // Identical to the admitted clear-pass scene, plus a closing oncoming vehicle in
     // the oncoming lane. Occy still proposes the pass (it never reasons about
     // oncoming); KIRRA refuses. Because the clear case ABOVE admits, the added
-    // oncoming vehicle is the cause — and the checker evaluates the longitudinal
-    // (head-on, opposite-direction) bound FIRST, which fires on the closing
-    // vehicle (~31 m required vs the dozen-metre gap). The checker, not the
-    // planner, owns the decision.
-    //
-    // (Direction-isolation — that the *oncoming* heading specifically is what
-    // triggers the head-on bound vs. a same-direction lead — is proven cleanly at
-    // the checker unit level in the adapter's `validation_tests` (#469); here it is
-    // confounded by the adapter's conservative *lateral* RSS, which MRCs any fast
-    // adjacent-lane vehicle during the angled ramp regardless of direction — a
-    // tracked over-conservatism, COMPETITIVE_PLANNER_ANALYSIS §4.)
+    // oncoming vehicle is the cause — the checker's head-on (opposite-direction)
+    // longitudinal bound fires on the closing vehicle (~31 m required vs the
+    // dozen-metre gap). The checker, not the planner, owns the decision.
     let g = road(LineType::Unmarked);
     let (map, drivable) = (ego_corridor(&g), full_road(&g));
     let cars = [stopped_car(24.0), oncoming_car(38.0, 12.0)];
@@ -175,6 +167,36 @@ fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
     assert_eq!(
         verdict, TrajectoryVerdict::MRCFallback,
         "oncoming traffic too close → KIRRA refuses the pass, got {verdict:?}"
+    );
+}
+
+#[test]
+fn a_same_direction_vehicle_at_the_same_spot_does_not_block_the_pass() {
+    // The clean direction-isolation control, now possible thanks to the §4
+    // lateral-RSS longitudinal gate: a vehicle at the EXACT spot the oncoming one
+    // occupied, but travelling the SAME direction (heading 0, pulling away). It is
+    // longitudinally safe (a receding lead) and — being >8 m ahead — no longer
+    // trips the (now longitudinally-gated) lateral RSS. KIRRA ADMITS. So the
+    // refusal above is the oncoming DIRECTION (the head-on bound), not merely "a
+    // vehicle is present in the pass corridor". (Before the gate, the adapter's
+    // lateral RSS MRC'd this fast adjacent vehicle during the angled ramp too,
+    // masking the result — COMPETITIVE_PLANNER_ANALYSIS §4.)
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let same_dir = PerceivedObject {
+        id: 2,
+        pos: Point { x_m: 38.0, y_m: 2.0 },
+        velocity_mps: 12.0,
+        heading_rad: 0.0, // same direction, faster → a lead pulling away
+        vel: Point { x_m: 12.0, y_m: 0.0 },
+    };
+    let cars = [stopped_car(24.0), same_dir];
+    let (_, verdict) = plan_and_check(&g, &map, &drivable, &cars, true);
+
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a same-direction vehicle at the same spot is admitted; only the oncoming \
+         direction refuses, got {verdict:?}"
     );
 }
 
