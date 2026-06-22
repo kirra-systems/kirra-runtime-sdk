@@ -242,6 +242,16 @@ pub struct GeometricPlannerConfig {
     /// Speed cap while routing around an object (the lateral pass), low enough to
     /// keep the maneuver inside the steering-rate / lateral-accel envelope.
     pub lateral_pass_speed_mps: f64,
+    /// Longitudinal speed above which an in-path object is treated as a moving
+    /// LEAD (matched/followed) rather than a static hazard (stopped short of).
+    pub lead_speed_threshold_mps: f64,
+    /// Lateral band within which a moving object is a lead to match speed with
+    /// (wider than `object_lane_tolerance_m`: a slightly off-center slower vehicle
+    /// is overtaken at its speed, not blown past at cruise → RSS reject).
+    pub lead_lateral_band_m: f64,
+    /// Following gap kept behind a dead-ahead lead (cruise at the lead's speed up
+    /// to this gap; rolling-horizon, not a hard stop).
+    pub lead_following_gap_m: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -263,6 +273,9 @@ impl Default for GeometricPlannerConfig {
             vehicle_half_width_m: 1.0,
             containment_margin_m: 0.45,
             lateral_pass_speed_mps: 4.0,
+            lead_speed_threshold_mps: 0.5,
+            lead_lateral_band_m: 3.5,
+            lead_following_gap_m: 8.0,
         }
     }
 }
@@ -311,11 +324,17 @@ impl GeometricPlanner {
         let ct = self.cfg.lateral_clearance_target_m;
 
         // Nearest object that is ahead and NOT already clear of the centerline.
+        // A moving LEAD is followed (speed-matched), not routed around — skip it.
         let mut best: Option<(f64, f64, f64)> = None; // (s_obj, signed_lateral, obj_x)
         for obj in objects {
             let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
             if s_obj <= s_ego || signed.abs() >= ct {
                 continue;
+            }
+            let h = heading_at(guide, s_obj);
+            let lon_v = obj.vel.x_m * h.cos() + obj.vel.y_m * h.sin();
+            if lon_v > self.cfg.lead_speed_threshold_mps {
+                continue; // a lead — handled by speed-matching, not avoidance
             }
             if best.is_none_or(|(bs, _, _)| s_obj < bs) {
                 best = Some((s_obj, signed, obj.pos.x_m));
@@ -397,28 +416,49 @@ impl Planner for GeometricPlanner {
             s_ego,
         );
 
-        // Obstacle-aware: cap travel to a controlled stop short of the nearest
-        // in-path object ahead. An object counts as "in path" when its lateral
-        // offset from the guide is within `object_lane_tolerance_m`; the planner
-        // stops `object_stop_gap_m` short of it. (The checker's RSS still
-        // backstops every object independently — this just makes Occy propose a
-        // safe trajectory rather than driving in and relying on the veto.)
+        // Per-object handling, nearest-binding:
+        //  - moving LEAD (forward velocity, within the lead lateral band) → MATCH
+        //    its speed; if dead-ahead, also hold a following gap (cruise at the
+        //    lead's speed, rolling horizon — not a hard stop).
+        //  - static / slow in-lane object → STOP SHORT of it.
+        // (The checker's RSS still backstops every object independently.)
         let mut s_limit = s_goal;
+        let mut lead_match: Option<f64> = None; // slowest lead speed to match
+        let mut lead_gap_limit = false; // is `s_limit` a lead following-gap?
         for obj in input.objects {
             let (s_obj, signed) = project_signed(&guide, obj.pos.x_m, obj.pos.y_m);
-            // Lateral distance from the ACTUAL (possibly bumped) path, so an object
-            // the bump routes around no longer counts as "in path".
+            if s_obj <= s_ego {
+                continue;
+            }
+            // Lateral from the ACTUAL (possibly bumped) path.
             let lateral = (signed - bump.at(s_obj - s_ego)).abs();
-            if s_obj > s_ego && lateral <= self.cfg.object_lane_tolerance_m {
-                s_limit = s_limit.min(s_obj - self.cfg.object_stop_gap_m);
+            // Longitudinal velocity of the object along the guide (forward = lead).
+            let h = heading_at(&guide, s_obj);
+            let lon_v = obj.vel.x_m * h.cos() + obj.vel.y_m * h.sin();
+
+            if lon_v > self.cfg.lead_speed_threshold_mps && lateral <= self.cfg.lead_lateral_band_m {
+                // Follow BEHIND the lead at a gap (match speed; never draw
+                // alongside — abreast at small longitudinal gap fails RSS).
+                lead_match = Some(lead_match.map_or(lon_v, |s| s.min(lon_v)));
+                let gap = s_obj - self.cfg.lead_following_gap_m;
+                if gap < s_limit {
+                    s_limit = gap;
+                    lead_gap_limit = true;
+                }
+            } else if lateral <= self.cfg.object_lane_tolerance_m {
+                let stop = s_obj - self.cfg.object_stop_gap_m;
+                if stop < s_limit {
+                    s_limit = stop;
+                    lead_gap_limit = false;
+                }
             }
         }
-        // Slow down when an in-path object limits travel (RSS following distance)
-        // OR when routing around one (so the lateral maneuver stays within the
-        // steering-rate / lateral-accel envelope the checker enforces).
+        // Target speed: route-around pass cap → match a lead → stop-short approach.
         let object_limited = s_limit < s_goal - 1e-9;
         let target = if bump.y_off != 0.0 {
             target.min(self.cfg.lateral_pass_speed_mps)
+        } else if let Some(ls) = lead_match {
+            target.min(ls)
         } else if object_limited {
             target.min(self.cfg.object_approach_speed_mps)
         } else {
@@ -472,8 +512,10 @@ impl Planner for GeometricPlanner {
                 break;
             }
             // Brake when within stopping distance, else accelerate toward target.
+            // When following a lead, the limit is a rolling following-gap, not a
+            // stop — cruise at the matched speed instead of braking to zero.
             let brake_dist = (v * v) / (2.0 * decel);
-            if remaining <= brake_dist {
+            if remaining <= brake_dist && !lead_gap_limit {
                 v = (v - decel * dt).max(0.0);
             } else {
                 v = (v + self.cfg.max_accel_mps2 * dt).min(target);
@@ -482,11 +524,11 @@ impl Planner for GeometricPlanner {
             t += dt;
         }
 
-        // On reaching the stop limit (the goal, or short of an in-path object),
-        // pin a clean zero-velocity hold there (controlled stop-and-hold). On
-        // horizon truncation we leave the rolling-horizon tail as-is — the next
-        // plan cycle continues it.
-        if reached && traj.last().is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS) {
+        // On reaching the stop limit, pin a clean zero-velocity hold there
+        // (controlled stop-and-hold) — UNLESS following a lead, where the tail is
+        // left at the matched cruising speed (rolling horizon). On horizon
+        // truncation we likewise leave the tail as-is.
+        if reached && !lead_gap_limit && traj.last().is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS) {
             let (gbx, gby) = point_at(&guide, s_limit);
             let gh = heading_at(&guide, s_limit);
             let glat = bump.at(dist);
@@ -1229,6 +1271,65 @@ mod tests {
         assert!(max_x < 17.0, "stops short of the object at x=20, got max_x {max_x}");
         assert!(min_y > -0.5, "no route-around squeeze, got min_y {min_y}");
     }
+
+    // --- Lead-following (moving objects) -----------------------------------
+
+    fn moving_obj_at(x: f64, y: f64, vx: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: vx.abs(),
+            heading_rad: 0.0,
+            vel: Point { x_m: vx, y_m: 0.0 },
+        }
+    }
+
+    #[test]
+    fn lead_following_matches_speed_not_stop() {
+        // A dead-ahead LEAD moving forward at 4 m/s: Occy matches its speed and
+        // follows (cruising at ~4, never stops), instead of stop-shorting it as if
+        // it were a wall.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [moving_obj_at(20.0, 0.0, 4.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        assert_eq!(out.kind, ProposalKind::Motion, "follows the lead, not stop");
+        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
+        assert!((3.5..=4.5).contains(&vmax), "matches the lead's ~4 m/s, got {vmax}");
+        assert!(
+            out.trajectory.last().unwrap().velocity_mps > 3.0,
+            "keeps following at speed (no stop-to-zero)"
+        );
+    }
+
+    #[test]
+    fn lead_following_offcenter_is_checker_admissible() {
+        // An off-center slower lead (y=3, 4 m/s): barreling past at cruise (8) gets
+        // RSS-rejected, but matching its speed is ADMITTED. Occy matches → the
+        // checker accepts the encounter.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [moving_obj_at(20.0, 3.0, 4.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
+        assert!(vmax <= 4.5, "matches the lead, not cruise, got {vmax}");
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits the speed-matched encounter, got {verdict:?}"
+        );
+    }
 }
+
 
 
