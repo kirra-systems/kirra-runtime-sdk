@@ -65,6 +65,9 @@ pub struct TajConfig {
     /// corridor from obstacles within `±corridor_station_m` of it, so a localized
     /// obstacle narrows the corridor only near its own x (not globally).
     pub corridor_station_m: f64,
+    /// Max distance a detection may move between frames to associate with the same
+    /// track (the [`TajTracker`] velocity-estimation gate).
+    pub track_assoc_gate_m: f64,
 }
 
 impl Default for TajConfig {
@@ -75,6 +78,7 @@ impl Default for TajConfig {
             cluster_gap_m: 0.5,
             min_cluster_points: 3,
             corridor_station_m: 1.0,
+            track_assoc_gate_m: 3.0,
         }
     }
 }
@@ -248,6 +252,94 @@ impl TajPhaseA {
     }
 }
 
+/// One persistent object track: a stable id + last position/stamp, kept across
+/// frames so the next frame can estimate velocity from displacement.
+#[derive(Debug, Clone, Copy)]
+struct Track {
+    id: u64,
+    pos: Point,
+    stamp_ms: u64,
+}
+
+/// Taj **temporal tracker** — wraps the Phase-A geometric pipeline and adds
+/// frame-to-frame object association + velocity estimation. Phase-A is
+/// single-frame (every object static); the tracker associates each new detection
+/// with the nearest prior track (within `track_assoc_gate_m`), estimates its
+/// ground velocity from the displacement over the inter-frame `dt`, and carries a
+/// **persistent id**. So KIRRA's RSS sees real object motion (`velocity_mps` +
+/// the `vel` vector) instead of treating a fast-approaching object as parked.
+///
+/// First sighting of an object → velocity `0` (no prior to difference against);
+/// a track with no matching detection this frame is dropped.
+#[derive(Debug, Clone, Default)]
+pub struct TajTracker {
+    phase_a: TajPhaseA,
+    tracks: Vec<Track>,
+    next_id: u64,
+}
+
+impl TajTracker {
+    #[must_use]
+    pub fn new(cfg: TajConfig) -> Self {
+        Self { phase_a: TajPhaseA::new(cfg), tracks: Vec::new(), next_id: 0 }
+    }
+
+    /// Process a scan with temporal association: returns Phase-A perception whose
+    /// objects carry persistent ids and estimated velocity.
+    pub fn track(&mut self, scan: &LaserScan, now_ms: u64) -> TajPerception {
+        let mut perception = self.phase_a.process(scan, now_ms);
+        let gate = self.phase_a.cfg.track_assoc_gate_m;
+
+        let mut next_tracks: Vec<Track> = Vec::with_capacity(perception.objects.len());
+        let mut used = vec![false; self.tracks.len()];
+
+        for obj in &mut perception.objects {
+            // Nearest unused prior track within the association gate.
+            let mut best: Option<(usize, f64)> = None;
+            for (j, tr) in self.tracks.iter().enumerate() {
+                if used[j] {
+                    continue;
+                }
+                let d = (obj.pos.x_m - tr.pos.x_m).hypot(obj.pos.y_m - tr.pos.y_m);
+                if d <= gate && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((j, d));
+                }
+            }
+
+            match best {
+                Some((j, _)) => {
+                    used[j] = true;
+                    let tr = self.tracks[j];
+                    let dt = f64::from(u32::try_from(now_ms.saturating_sub(tr.stamp_ms)).unwrap_or(u32::MAX))
+                        / 1000.0;
+                    let (vx, vy) = if dt > 1e-3 {
+                        ((obj.pos.x_m - tr.pos.x_m) / dt, (obj.pos.y_m - tr.pos.y_m) / dt)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    obj.id = tr.id;
+                    obj.vel = Point { x_m: vx, y_m: vy };
+                    obj.velocity_mps = vx.hypot(vy);
+                    obj.heading_rad = if obj.velocity_mps > 1e-6 { vy.atan2(vx) } else { 0.0 };
+                    next_tracks.push(Track { id: tr.id, pos: obj.pos, stamp_ms: now_ms });
+                }
+                None => {
+                    // New track — first sighting, no velocity yet.
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    obj.id = id;
+                    obj.velocity_mps = 0.0;
+                    obj.vel = Point { x_m: 0.0, y_m: 0.0 };
+                    obj.heading_rad = 0.0;
+                    next_tracks.push(Track { id, pos: obj.pos, stamp_ms: now_ms });
+                }
+            }
+        }
+        self.tracks = next_tracks;
+        perception
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,4 +510,97 @@ mod tests {
         assert!(y_near(4.0) < 1.0, "corridor narrows near the obstacle, got {}", y_near(4.0));
         assert!(y_near(7.0) > 3.0, "corridor stays wide away from it, got {}", y_near(7.0));
     }
+
+    // --- Temporal tracker (velocity estimation) ----------------------------
+
+    /// A blob (≈ vertical wall segment) centred at `x ≈ bx`, `y ≈ 0`.
+    fn blob_scan(bx: f64, stamp_ms: u64) -> LaserScan {
+        scan_from(20.0, stamp_ms, |theta| {
+            if theta.abs() < 0.15 {
+                Some(bx / theta.cos())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn tracker_estimates_velocity_of_moving_object() {
+        // Object moves +2 m over a 200 ms inter-frame gap → ~10 m/s in +x.
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&blob_scan(10.0, 0), 0);
+        let out = taj.track(&blob_scan(12.0, 200), 200);
+
+        assert_eq!(out.objects.len(), 1);
+        let o = &out.objects[0];
+        assert!((o.velocity_mps - 10.0).abs() < 1.0, "speed ≈ 10 m/s, got {}", o.velocity_mps);
+        assert!(o.vel.x_m > 8.0 && o.vel.y_m.abs() < 1.0, "velocity is +x, got {:?}", o.vel);
+        assert!(o.heading_rad.abs() < 0.2, "heading ≈ 0 (forward), got {}", o.heading_rad);
+    }
+
+    #[test]
+    fn tracker_reports_zero_velocity_for_static_object() {
+        let mut taj = TajTracker::default();
+        let _ = taj.track(&blob_scan(10.0, 0), 0);
+        let out = taj.track(&blob_scan(10.0, 200), 200);
+
+        assert_eq!(out.objects.len(), 1);
+        assert!(out.objects[0].velocity_mps < 0.5, "static → ~0 m/s, got {}", out.objects[0].velocity_mps);
+    }
+
+    #[test]
+    fn tracker_persists_track_id() {
+        let mut taj = TajTracker::default();
+        let a = taj.track(&blob_scan(10.0, 0), 0);
+        let b = taj.track(&blob_scan(11.0, 200), 200);
+        assert_eq!(a.objects[0].id, b.objects[0].id, "same object keeps its track id");
+    }
+
+    #[test]
+    fn tracker_first_sighting_is_zero_velocity() {
+        let mut taj = TajTracker::default();
+        let out = taj.track(&blob_scan(10.0, 0), 0);
+        assert_eq!(out.objects.len(), 1);
+        assert_eq!(out.objects[0].velocity_mps, 0.0, "first sighting has no prior → 0 velocity");
+    }
+
+    #[test]
+    fn object_velocity_changes_rss_verdict() {
+        // WHY tracking matters: a fast-receding lead that Phase-A would treat as
+        // PARKED (velocity 0) is wrongly RSS-rejected, but with the tracked
+        // velocity the checker correctly admits it. Same geometry, only the
+        // object's velocity differs.
+        use kirra_ros2_adapter::corridor::MockCorridorSource;
+        use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
+        use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+        use kirra_runtime_sdk::verifier::FleetPosture;
+
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let tp = |x: f64, t: f64| TrajectoryPoint {
+            pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+            velocity_mps: 8.0,
+            time_from_start_s: t,
+        };
+        let traj = vec![tp(10.0, 0.0), tp(12.0, 0.25), tp(14.0, 0.5)];
+        let obj = |vmag: f64, vx: f64| PerceivedObject {
+            id: 1,
+            pos: Point { x_m: 22.0, y_m: 3.0 },
+            velocity_mps: vmag,
+            heading_rad: 0.0,
+            vel: Point { x_m: vx, y_m: 0.0 },
+        };
+        let cfg = VehicleConfig::default_urban();
+        let verdict = |o: &[PerceivedObject]| {
+            validate_trajectory_slow(&traj, &corridor, o, &cfg, None, FleetPosture::Nominal)
+        };
+
+        // Phase-A assumption (static) → the lead's gap looks unsafe → reject.
+        assert_eq!(verdict(&[obj(0.0, 0.0)]), TrajectoryVerdict::MRCFallback);
+        // Tracked velocity (receding at 15 m/s) → adequate gap → admitted.
+        assert!(matches!(
+            verdict(&[obj(15.0, 15.0)]),
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ));
+    }
 }
+
