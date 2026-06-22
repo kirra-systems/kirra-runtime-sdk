@@ -740,10 +740,14 @@ mod tests {
 
     #[test]
     fn checker_catches_reacceleration_in_degraded() {
-        // INDEPENDENCE: if Occy (wrongly) re-accelerated in Degraded, the
-        // checker's Degraded non-increasing gate (#70) catches it — proving the
-        // safety property holds even when the planner violates its own
-        // Conservative contract. In-corridor but speed-INCREASING (2 → 5 m/s).
+        // INDEPENDENCE, tested at the MARGIN: if Occy (wrongly) re-accelerated in
+        // Degraded, the checker's #70 non-increasing gate catches it. We inject
+        // the SUBTLEST realistic drift — a 5% re-acceleration (2.0 → 2.1 m/s),
+        // not an obvious jump — because that is where independence is actually
+        // tested: a checker that only catches gross violations is not a real
+        // backstop. The gate denies on `proposed > current + 1e-9`, so this
+        // marginal increase must still hard-reject (→ MRCFallback). In-corridor
+        // and otherwise well-formed, so the ONLY denial reason is the increase.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let traj = vec![
             TrajectoryPoint {
@@ -752,8 +756,8 @@ mod tests {
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: Pose { x_m: 10.5, y_m: 0.0, heading_rad: 0.0 },
-                velocity_mps: 5.0,
+                pose: Pose { x_m: 10.205, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 2.1, // a mere +0.1 m/s — subtle, but a re-acceleration
                 time_from_start_s: 0.1,
             },
         ];
@@ -765,10 +769,10 @@ mod tests {
             None,
             FleetPosture::Degraded,
         );
-        assert_ne!(
+        assert_eq!(
             verdict,
-            TrajectoryVerdict::Accept,
-            "checker must not Accept re-acceleration in Degraded, got {verdict:?}"
+            TrajectoryVerdict::MRCFallback,
+            "checker must reject even a marginal re-acceleration in Degraded, got {verdict:?}"
         );
     }
 }
