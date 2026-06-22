@@ -1993,6 +1993,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-ros2-adapter",
  "kirra-runtime-sdk",
+ "kirra-taj",
 ]
 
 [[package]]
