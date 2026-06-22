@@ -121,6 +121,148 @@ pub struct TajPerception {
     pub stamp_ms: u64,
 }
 
+// ===========================================================================
+// Phase B — semantic perception seam (ADR-0015)
+//
+// Phase A is geometric: lidar returns → corridor + objects. It is BLIND to
+// surface semantics — most importantly water, which is specular (it returns no
+// lidar) so a lake/ocean reads as FREE drivable space. Phase B closes that gap
+// with a semantic detector whose non-drivable detections (water, etc.) TIGHTEN
+// the corridor — "Taj tightens the envelope, never loosens it" — so KIRRA then
+// has a boundary to enforce.
+//
+// The ML model itself (Parko RGB→TensorRT inference) lives BEHIND the
+// `SemanticDetector` trait and is a hardware-gated follow-up; this module is the
+// model-free seam + the safety fusion, fully offline-testable via a mock.
+// ===========================================================================
+
+/// Semantic class of a detected region. Drivability is conservative: only an
+/// explicit drivable surface is drivable; `Unknown` is non-drivable (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticClass {
+    /// Explicitly drivable surface (road, packed terrain).
+    Road,
+    /// Standing water — non-drivable by policy. Lidar-specular, so Phase A misses
+    /// it entirely; the whole reason Phase B exists. (Drivable-puddle vs. lake is
+    /// an unsolved single-sensor depth problem — treat ALL water as non-drivable.)
+    Water,
+    /// A static non-drivable obstacle classified semantically (wall, kerb, person).
+    StaticObstacle,
+    /// Unclassified region — non-drivable (fail-closed: never assume drivable).
+    Unknown,
+}
+
+impl SemanticClass {
+    /// Conservative drivability: only [`Road`](SemanticClass::Road) is drivable.
+    #[must_use]
+    pub fn is_drivable(self) -> bool {
+        matches!(self, SemanticClass::Road)
+    }
+}
+
+/// A semantic detection: a classified region localized in the ego frame. The ML
+/// detector produces these; the fusion uses `near_x_m` + the lateral span to clip
+/// the corridor at the nearest non-drivable hazard.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SemanticDetection {
+    pub class: SemanticClass,
+    /// Nearest forward distance to the region (m, ego frame).
+    pub near_x_m: f64,
+    /// Lateral extent of the region `[min, max]` (m; +Y left).
+    pub lateral_min_m: f64,
+    pub lateral_max_m: f64,
+}
+
+/// A semantic detector. The real implementation is Parko's RGB→TensorRT model
+/// (hardware-gated); [`MockSemanticDetector`] stands in for offline tests. Kept
+/// trivially object-safe so the pipeline can hold `Box<dyn SemanticDetector>`.
+pub trait SemanticDetector {
+    /// Produce semantic detections for the current sensor frame.
+    fn detect(&self) -> Vec<SemanticDetection>;
+}
+
+/// Deterministic stand-in for the ML detector: returns a scripted detection set.
+#[derive(Debug, Clone, Default)]
+pub struct MockSemanticDetector {
+    pub detections: Vec<SemanticDetection>,
+}
+
+impl SemanticDetector for MockSemanticDetector {
+    fn detect(&self) -> Vec<SemanticDetection> {
+        self.detections.clone()
+    }
+}
+
+/// Interpolated boundary `y` at longitudinal `x` (boundary vertices x-ordered).
+fn boundary_y_at(boundary: &[Point], x: f64) -> f64 {
+    match boundary.first() {
+        None => return 0.0,
+        Some(p) if x <= p.x_m => return p.y_m,
+        _ => {}
+    }
+    for w in boundary.windows(2) {
+        if x <= w[1].x_m {
+            let dx = w[1].x_m - w[0].x_m;
+            let f = if dx.abs() > 1e-9 { (x - w[0].x_m) / dx } else { 0.0 };
+            return w[0].y_m + f * (w[1].y_m - w[0].y_m);
+        }
+    }
+    boundary.last().unwrap().y_m
+}
+
+/// Truncate an x-ordered boundary polyline at `x_clip`, inserting the interpolated
+/// crossing vertex so the polyline ends exactly at `x_clip`.
+fn truncate_boundary(boundary: &[Point], x_clip: f64) -> Vec<Point> {
+    let mut out = Vec::with_capacity(boundary.len());
+    for (i, p) in boundary.iter().enumerate() {
+        if p.x_m <= x_clip {
+            out.push(*p);
+        } else {
+            if i > 0 {
+                let a = boundary[i - 1];
+                let dx = p.x_m - a.x_m;
+                let f = if dx.abs() > 1e-9 { (x_clip - a.x_m) / dx } else { 0.0 };
+                out.push(Point { x_m: x_clip, y_m: a.y_m + f * (p.y_m - a.y_m) });
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// **Phase-B fusion** — clip the drivable corridor at the nearest non-drivable
+/// semantic hazard that laterally overlaps it. The corridor's drivable space ends
+/// at the hazard's edge, so KIRRA's containment rejects any trajectory that would
+/// drive into it (e.g. a lake Phase A reported as free space). Drivable detections
+/// and hazards that don't overlap the corridor leave it unchanged.
+#[must_use]
+pub fn clip_corridor_to_hazards(
+    corridor: &TajCorridor,
+    detections: &[SemanticDetection],
+) -> TajCorridor {
+    let mut x_clip = f64::INFINITY;
+    for d in detections {
+        if d.class.is_drivable() {
+            continue;
+        }
+        // Does the hazard's lateral span overlap the corridor at its near edge?
+        let left = boundary_y_at(&corridor.left, d.near_x_m);
+        let right = boundary_y_at(&corridor.right, d.near_x_m);
+        if d.lateral_max_m > right && d.lateral_min_m < left {
+            x_clip = x_clip.min(d.near_x_m);
+        }
+    }
+    if !x_clip.is_finite() {
+        return corridor.clone();
+    }
+    TajCorridor {
+        left: truncate_boundary(&corridor.left, x_clip),
+        right: truncate_boundary(&corridor.right, x_clip),
+        confidence: corridor.confidence,
+        age_ms: corridor.age_ms,
+    }
+}
+
 /// Taj Phase-A geometric perception pipeline.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TajPhaseA {
@@ -601,6 +743,109 @@ mod tests {
             verdict(&[obj(15.0, 15.0)]),
             TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
         ));
+    }
+
+    // --- Phase B: semantic hazard fusion -----------------------------------
+
+    fn hazard(class: SemanticClass, near_x: f64) -> SemanticDetection {
+        // A region spanning the full lane width at `near_x`.
+        SemanticDetection { class, near_x_m: near_x, lateral_min_m: -5.0, lateral_max_m: 5.0 }
+    }
+
+    #[test]
+    fn drivability_policy_is_conservative() {
+        assert!(SemanticClass::Road.is_drivable());
+        assert!(!SemanticClass::Water.is_drivable());
+        assert!(!SemanticClass::StaticObstacle.is_drivable());
+        assert!(!SemanticClass::Unknown.is_drivable(), "Unknown fails closed");
+    }
+
+    #[test]
+    fn mock_detector_returns_scripted_detections() {
+        let det = MockSemanticDetector { detections: vec![hazard(SemanticClass::Water, 8.0)] };
+        let out = det.detect();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, SemanticClass::Water);
+    }
+
+    #[test]
+    fn water_hazard_clips_corridor_forward_extent() {
+        // A clear (Phase-A) corridor extends to forward_extent; a water hazard at
+        // 4 m clips the drivable space to ~4 m.
+        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let out = taj.process(&walls_scan(5.0, 30.0), 0);
+        let far = out.corridor.left_boundary().last().unwrap().x_m;
+        assert!(far > 15.0, "clear corridor reaches far, got {far}");
+
+        let clipped = clip_corridor_to_hazards(&out.corridor, &[hazard(SemanticClass::Water, 4.0)]);
+        let clipped_far = clipped.left_boundary().last().unwrap().x_m;
+        assert!((clipped_far - 4.0).abs() < 1.0, "corridor clipped at the water edge, got {clipped_far}");
+    }
+
+    #[test]
+    fn kirra_rejects_driving_into_water() {
+        // THE Phase-B win: Phase A reports a lake as free corridor; a trajectory
+        // drives into it and KIRRA ADMITS (it cannot see water). After semantic
+        // fusion clips the corridor at the water edge, the SAME trajectory is
+        // REJECTED — the hazard Phase A was blind to is now enforced.
+        use kirra_ros2_adapter::corridor::CorridorSource as _;
+        use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
+        use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+        use kirra_runtime_sdk::verifier::FleetPosture;
+
+        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let perception = taj.process(&walls_scan(5.0, 30.0), 0);
+
+        // A trajectory driving forward to x = 15 (into where the water is).
+        let traj = vec![
+            TrajectoryPoint { pose: Pose { x_m: 2.0, y_m: 0.0, heading_rad: 0.0 }, velocity_mps: 2.0, time_from_start_s: 0.0 },
+            TrajectoryPoint { pose: Pose { x_m: 15.0, y_m: 0.0, heading_rad: 0.0 }, velocity_mps: 2.0, time_from_start_s: 6.5 },
+        ];
+        let cfg = VehicleConfig::default_urban();
+        let check = |corr: &TajCorridor| {
+            validate_trajectory_slow(&traj, corr, &[], &cfg, None, FleetPosture::Nominal)
+        };
+
+        // Phase A only (lidar blind to water): corridor reaches 20 m → admitted.
+        assert!(
+            matches!(check(&perception.corridor), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "Phase A admits driving into invisible water"
+        );
+        // Phase B: water detected at 10 m → corridor clipped → driving in is rejected.
+        let clipped = clip_corridor_to_hazards(&perception.corridor, &[hazard(SemanticClass::Water, 10.0)]);
+        assert!(clipped.left_boundary().last().unwrap().x_m < 11.0, "corridor clipped at water");
+        assert_eq!(
+            check(&clipped),
+            TrajectoryVerdict::MRCFallback,
+            "Phase B: KIRRA rejects driving into the water hazard"
+        );
+    }
+
+    #[test]
+    fn drivable_class_does_not_clip() {
+        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let out = taj.process(&walls_scan(5.0, 30.0), 0);
+        let clipped = clip_corridor_to_hazards(&out.corridor, &[hazard(SemanticClass::Road, 4.0)]);
+        assert_eq!(
+            clipped.left_boundary().last().unwrap().x_m,
+            out.corridor.left_boundary().last().unwrap().x_m,
+            "a drivable (road) detection does not clip the corridor"
+        );
+    }
+
+    #[test]
+    fn offlane_hazard_does_not_clip() {
+        // Water entirely beyond the corridor wall (lateral 8..10, corridor ±5) →
+        // not in the way → no clip.
+        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let out = taj.process(&walls_scan(5.0, 30.0), 0);
+        let off = SemanticDetection { class: SemanticClass::Water, near_x_m: 4.0, lateral_min_m: 8.0, lateral_max_m: 10.0 };
+        let clipped = clip_corridor_to_hazards(&out.corridor, &[off]);
+        assert_eq!(
+            clipped.left_boundary().last().unwrap().x_m,
+            out.corridor.left_boundary().last().unwrap().x_m,
+            "an off-lane hazard does not clip the drivable corridor"
+        );
     }
 }
 
