@@ -90,6 +90,7 @@ fn plan_and_check(
         lane_boundaries: &boundaries,
         motion: &[],
         lane_change_to_m: None,
+        no_overtake_ids: &[],
         drivable: with_drivable.then_some(drivable),
         posture: FleetPosture::Nominal,
     };
@@ -174,5 +175,52 @@ fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
     assert_eq!(
         verdict, TrajectoryVerdict::MRCFallback,
         "oncoming traffic too close → KIRRA refuses the pass, got {verdict:?}"
+    );
+}
+
+#[test]
+fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
+    // Identical to `occy_proposes_an_overtake...` (which DOES pass the same object),
+    // but the stopped object is flagged a school bus loading children (`no_overtake_
+    // ids`). It is ILLEGAL to pass — so Occy must NOT cross into the oncoming lane
+    // and must hold behind it, even though the centerline is crossable and the pass
+    // is otherwise admissible. The legal rule lives in Occy; KIRRA never enforces it.
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+    let bus = stopped_car(24.0); // id == 1
+    let cars = [bus];
+
+    let input = PlanInput {
+        ego: EgoState {
+            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        map: &map,
+        objects: &cars,
+        controls: &[],
+        lane_boundaries: &boundaries,
+        motion: &[],
+        lane_change_to_m: None,
+        no_overtake_ids: &[1], // the bus
+        drivable: Some(&drivable),
+        posture: FleetPosture::Nominal,
+    };
+    let mut planner = GeometricPlanner::default();
+    let plan = planner.plan(&input);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y <= 0.0, "school bus → no pass into oncoming, got max_y {max_y}");
+    // And it HOLDS behind: a controlled decel-to-stop short of the bus (id 1 at
+    // x=24, stop gap 5 → stop ~x=19), never reaching/passing it. (The full stop
+    // completes over the receding horizon; here it is still decelerating in.)
+    let max_x = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+    assert!(max_x < 20.0, "ego stays behind the bus's stop line, got max_x {max_x}");
+    assert!(
+        plan.trajectory.last().unwrap().velocity_mps <= 2.0,
+        "approaching at the slow object-approach speed (decel-to-stop), not cruising"
     );
 }

@@ -130,6 +130,20 @@ pub struct PlanInput<'a> {
     /// lane-line rules permit crossing to that side and the corridor fits;
     /// otherwise the planner stays in lane. `None` = no lane change.
     pub lane_change_to_m: Option<f64>,
+    /// Object ids that must **NOT be passed** — chiefly a **stopped school bus**
+    /// actively loading/unloading (red lights flashing, stop arm extended). US law
+    /// (MUTCD §7D; every state's stop-for-school-bus statute) requires traffic to
+    /// **stop and not overtake** such a bus — on an undivided road in *both*
+    /// directions. This is a **LEGAL** constraint, so it lives in Occy's behavioral
+    /// layer, not KIRRA: passing a bus is not a *collision*, so the physical
+    /// governor never enforces it (cf. running a red light). The integrator /
+    /// perception flags the id; Occy then refuses any route-around or overtake of
+    /// it and holds behind it (stop-short). An empty slice = no such restriction.
+    ///
+    /// Scope (honest): this gates the *pass*; resuming when the bus's lights clear
+    /// is the integrator dropping the id. The divided-highway exception (oncoming
+    /// traffic may proceed past a median) is not modeled — fail-safe is to stop.
+    pub no_overtake_ids: &'a [u64],
     /// Optional **drivable area** distinct from the reference corridor `map` — the
     /// wider space an **overtake** may briefly borrow (e.g. the full undivided road
     /// when `map` is just the ego lane). `map` stays the reference the path follows
@@ -393,6 +407,7 @@ impl GeometricPlanner {
     /// IF the offset both fits the corridor (with footprint + margin) and has room
     /// to ramp in before the object. Otherwise [`LateralBump::NONE`] (the caller
     /// then stops short instead — never an unsafe squeeze).
+    #[allow(clippy::too_many_arguments)]
     fn compute_bump(
         &self,
         guide: &[(f64, f64)],
@@ -400,6 +415,7 @@ impl GeometricPlanner {
         right: &[Point],
         objects: &[PerceivedObject],
         lane_boundaries: &[LaneBoundary],
+        no_overtake: &[u64],
         s_ego: f64,
     ) -> LateralBump {
         let ct = self.cfg.lateral_clearance_target_m;
@@ -408,6 +424,11 @@ impl GeometricPlanner {
         // A moving LEAD is followed (speed-matched), not routed around — skip it.
         let mut best: Option<(f64, f64, f64)> = None; // (s_obj, signed_lateral, obj_x)
         for obj in objects {
+            // A no-pass object (stopped school bus) is never routed around — the
+            // ego must hold behind it (the per-object stop-short does that).
+            if no_overtake.contains(&obj.id) {
+                continue;
+            }
             let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
             if s_obj <= s_ego || signed.abs() >= ct {
                 continue;
@@ -469,6 +490,7 @@ impl GeometricPlanner {
     /// the pass exposes — KIRRA's head-on RSS is the sole authority on whether the
     /// oncoming lane is clear enough (the doer-checker split). A moving lead is
     /// followed (speed-matched), never overtaken here.
+    #[allow(clippy::too_many_arguments)]
     fn compute_overtake_bump(
         &self,
         guide: &[(f64, f64)],
@@ -476,12 +498,18 @@ impl GeometricPlanner {
         right: &[Point],
         objects: &[PerceivedObject],
         lane_boundaries: &[LaneBoundary],
+        no_overtake: &[u64],
         s_ego: f64,
     ) -> LateralBump {
         let band = self.cfg.object_lane_tolerance_m;
         // Nearest stopped/slow object ahead and IN our lane (a pass candidate).
         let mut best: Option<(f64, f64)> = None; // (s_obj, signed)
         for obj in objects {
+            // A stopped school bus (or any flagged no-pass object) is NEVER
+            // overtaken — it is illegal. Hold behind it (stop-short) instead.
+            if no_overtake.contains(&obj.id) {
+                continue;
+            }
             let (s_obj, signed) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
             if s_obj <= s_ego || signed.abs() > band {
                 continue;
@@ -677,6 +705,7 @@ impl Planner for GeometricPlanner {
                     input.map.right_boundary(),
                     input.objects,
                     input.lane_boundaries,
+                    input.no_overtake_ids,
                     s_ego,
                 );
                 match input.drivable {
@@ -686,6 +715,7 @@ impl Planner for GeometricPlanner {
                         drivable.right_boundary(),
                         input.objects,
                         input.lane_boundaries,
+                        input.no_overtake_ids,
                         s_ego,
                     ),
                     _ => within,
@@ -1088,6 +1118,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }
@@ -1158,6 +1189,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }
@@ -1433,6 +1465,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }
@@ -1677,6 +1710,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }
@@ -1784,6 +1818,7 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             lane_change_to_m: None,
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }
@@ -1956,6 +1991,7 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             lane_change_to_m: Some(target),
+            no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
         }

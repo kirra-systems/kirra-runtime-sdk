@@ -94,6 +94,7 @@ fn run_stack(
         lane_boundaries: &[],
         motion: &[],
         lane_change_to_m: None,
+        no_overtake_ids: &[],
         drivable: None,
         posture: posture.clone(),
     };
@@ -186,6 +187,7 @@ fn route_around_in_corridor_object_admits() {
         lane_boundaries: &[],
         motion: &[],
         lane_change_to_m: None,
+        no_overtake_ids: &[],
         drivable: None,
         posture: FleetPosture::Nominal,
     };
