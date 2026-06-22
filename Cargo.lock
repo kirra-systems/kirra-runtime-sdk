@@ -2054,6 +2054,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-taj"
+version = "0.1.0"
+dependencies = [
+ "kirra-ros2-adapter",
+ "kirra-runtime-sdk",
+]
+
+[[package]]
 name = "kirra-wire-client"
 version = "0.1.0"
 dependencies = [
