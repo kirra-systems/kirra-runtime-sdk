@@ -45,6 +45,26 @@ pub const RSS_FAILSAFE_DISTANCE_M: f64 = 1.0e6;
 /// fully governs any object that is longitudinally unsafe at any range.)
 pub const RSS_LONGITUDINAL_CONFLICT_M: f64 = 8.0;
 
+/// Lateral half-window (metres) within which the **longitudinal** RSS (rear-end /
+/// head-on) is treated as a real conflict by the trajectory/scene checkers.
+///
+/// The dual of `RSS_LONGITUDINAL_CONFLICT_M`: a longitudinal collision is only
+/// geometrically possible when the two vehicles' footprints **laterally overlap**
+/// (one is in the other's path). Applying the longitudinal car-following / head-on
+/// bound to an object the ego is laterally CLEAR of — a vehicle being passed in the
+/// next lane, or oncoming traffic safely in the adjacent lane — is over-conservative
+/// (COMPETITIVE_PLANNER_ANALYSIS §4): it was the reason a car *centered* in the ego
+/// lane could not be overtaken (clearing the wider lane-alignment band needed more
+/// side room than a normal lane affords).
+///
+/// The value is a passenger-vehicle footprint overlap (≈ two half-widths) plus a
+/// small lateral-fluctuation margin — wide enough to catch any in-path object,
+/// narrow enough that a normal-clearance pass is no longer a longitudinal conflict.
+/// (A laterally-CLOSING object is separately covered by the lateral RSS, which is
+/// itself gated on longitudinal proximity — together they approximate the RSS
+/// danger conjunction while each remains a fail-closed layer.)
+pub const RSS_LONGITUDINAL_OVERLAP_M: f64 = 2.5;
+
 #[inline]
 fn finite_positive(x: f64) -> bool {
     x.is_finite() && x > 0.0

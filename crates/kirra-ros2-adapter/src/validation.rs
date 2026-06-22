@@ -26,7 +26,7 @@ use kirra_runtime_sdk::gateway::kinematics_contract::{
 use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, opposite_direction_safe_distance,
-    RSS_LONGITUDINAL_CONFLICT_M,
+    RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
 };
 
 use crate::config::VehicleConfig;
@@ -268,37 +268,43 @@ pub fn validate_trajectory_slow_capped(
                 continue;
             }
 
-            // Longitudinal RSS — required forward gap. Direction matters: an
-            // ONCOMING vehicle (heading opposes the ego, so its velocity projects
-            // backward onto the ego's forward axis) is a HEAD-ON closure, not a
-            // same-direction lead. Routing it through the same-direction primitive
-            // would discard the closing sign and UNDER-estimate the gap (#408 Obs
-            // 3); the opposite-direction bound (sum of both stopping distances)
-            // applies instead.
-            let obj_lon_v =
-                obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).cos();
-            let lon_required = if obj_lon_v < 0.0 {
-                // Closing magnitudes; symmetric brake_min (both in their own lanes).
-                opposite_direction_safe_distance(
-                    traj_point.velocity_mps,
-                    obj_lon_v.abs(),
-                    RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
-                    config.max_decel_mps2,
-                )
-            } else {
-                longitudinal_safe_distance(
-                    traj_point.velocity_mps,
-                    obj.velocity_mps,
-                    RSS_REACTION_TIME_S,
-                    config.max_accel_mps2,
-                    config.max_decel_mps2,
-                    config.max_decel_mps2,
-                )
-            };
-            if dx_ego < lon_required {
-                return TrajectoryVerdict::MRCFallback;
+            // Longitudinal RSS (rear-end / head-on) — GATED ON LATERAL OVERLAP: a
+            // longitudinal collision is only possible when the footprints laterally
+            // overlap (the object is in the ego's path). Applying it to an object
+            // the ego is laterally CLEAR of — a vehicle being passed, or oncoming
+            // traffic safely in the next lane — over-rejected (§4): it was why a car
+            // centered in the ego lane could not be overtaken. Direction matters: an
+            // ONCOMING vehicle (heading opposes the ego, velocity projects backward
+            // onto the ego's forward axis) is a HEAD-ON closure, not a same-direction
+            // lead — routing it through the same-direction primitive would discard
+            // the closing sign and UNDER-estimate the gap (#408 Obs 3); the
+            // opposite-direction bound (sum of both stopping distances) applies.
+            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M {
+                let obj_lon_v =
+                    obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).cos();
+                let lon_required = if obj_lon_v < 0.0 {
+                    // Closing magnitudes; symmetric brake_min (both in their lanes).
+                    opposite_direction_safe_distance(
+                        traj_point.velocity_mps,
+                        obj_lon_v.abs(),
+                        RSS_REACTION_TIME_S,
+                        config.max_accel_mps2,
+                        config.max_decel_mps2,
+                        config.max_decel_mps2,
+                    )
+                } else {
+                    longitudinal_safe_distance(
+                        traj_point.velocity_mps,
+                        obj.velocity_mps,
+                        RSS_REACTION_TIME_S,
+                        config.max_accel_mps2,
+                        config.max_decel_mps2,
+                        config.max_decel_mps2,
+                    )
+                };
+                if dx_ego < lon_required {
+                    return TrajectoryVerdict::MRCFallback;
+                }
             }
 
             // Lateral RSS — required side gap. Defence-in-depth against an object

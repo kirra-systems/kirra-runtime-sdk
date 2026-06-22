@@ -90,23 +90,31 @@ reject. The **overtake** build sharpened the lateral-RSS half of it: during the
 as a lateral threat (the path heading projects the other car's speed into a closing
 lateral component), MRC-ing oncoming *and* same-direction traffic alike.
 
-**Addressed (lateral RSS, longitudinal gate):** the root cause was that the lateral
-safe-distance bound danger *independently* of longitudinal distance, but RSS
-(IEEE 2846 §5; Shalev-Shwartz et al.) defines a dangerous state as the
-**conjunction** — two vehicles cannot collide laterally unless also longitudinally
-close. Both checkers (`validate_trajectory_slow`, `compute_scene_rss`) now **gate**
-the lateral defence-in-depth on `RSS_LONGITUDINAL_CONFLICT_M` (8 m): a lateral
-shortfall is dangerous only when the object is alongside/imminent, so a lead well
-ahead and oncoming traffic safely passing in the next lane no longer trip it (the
-overtake demo's direction-isolation control now passes at the trajectory level, not
-just the #469 unit level). The dominant longitudinal RSS — car-following / head-on —
-is unchanged, and the lateral layer still fails closed for a genuine cut-in.
+**Addressed (the RSS conjunction, both axes).** The root cause was that each
+checker bound danger on EITHER axis *independently*, but RSS (IEEE 2846 §5;
+Shalev-Shwartz et al.) defines a dangerous state as the **conjunction** — a
+collision needs the vehicles unsafe longitudinally AND laterally at once. Both
+checkers (`validate_trajectory_slow`, `compute_scene_rss`) now gate each axis on
+the OTHER's proximity, approximating the conjunction while each axis stays a
+fail-closed layer:
 
-**Remaining:** the longitudinal/alignment half — a car *centered* in the ego lane
-still can't be passed, because clearing the checker's 4 m lateral-alignment band
-needs >4 m of side room (a pass is admissible only for a car near the lane edge or
-on a wide road). And in dense traffic, smartening Occy's policy is the orthogonal
-axis. Mobileye pairs RSS with a *sophisticated* policy **and** carefully-tuned RSS
+- *Lateral* defence-in-depth gated on longitudinal proximity
+  (`RSS_LONGITUDINAL_CONFLICT_M`, 8 m): a lead well ahead and oncoming traffic
+  safely passing in the next lane no longer trip it (the overtake demo's
+  direction-isolation control now passes at the trajectory level, not just the
+  #469 unit level).
+- *Longitudinal* (car-following / head-on) gated on lateral footprint overlap
+  (`RSS_LONGITUDINAL_OVERLAP_M`, 2.5 m): it no longer applies to an object the ego
+  is laterally clear of (a vehicle being passed, oncoming traffic in the adjacent
+  lane). This is what unblocked overtaking a car **centered** in the ego lane on a
+  normal road — clearing footprint overlap, not a 4 m band.
+
+Each gate fails closed first on a non-finite input, and a genuine in-path /
+alongside conflict is still caught — these narrow the checker to RSS-correct, they
+do not open it.
+
+**Remaining:** in dense traffic, smartening Occy's policy is the orthogonal axis.
+Mobileye pairs RSS with a *sophisticated* policy **and** carefully-tuned RSS
 parameters — both levers, not one.
 
 ## 5. Recommended roadmap (in Kirra's grain)
@@ -124,9 +132,9 @@ parameters — both levers, not one.
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
    oncoming lane (gated by lane-line type + drivable fit); KIRRA's head-on RSS
-   governs the oncoming risk. **Remaining:** merge / unprotected-turn negotiation,
-   and the §4 RSS-tuning needed for passes to be admitted as routinely as they are
-   proposed.
+   governs the oncoming risk, and the §4 RSS conjunction-gating now admits a
+   centered-lane pass as readily as Occy proposes it. **Remaining:** merge /
+   unprotected-turn negotiation.
 5. **The strategic one** — prove KIRRA bounds a **learned planner**: swap a
    NVIDIA / Hydra-MDP-style net in as the doer and show the safety case is
    *unchanged*. That is the Kirra thesis's killer demo, and it is why Occy's

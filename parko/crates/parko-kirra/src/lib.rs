@@ -47,7 +47,7 @@ use kirra_runtime_sdk::verifier::FleetPosture;
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
-    opposite_direction_safe_distance, RSS_LONGITUDINAL_CONFLICT_M,
+    opposite_direction_safe_distance, RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
 };
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
@@ -236,13 +236,28 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
         // are false); a non-finite agent VELOCITY drove `required_*` to the
         // 1e6 failsafe, so a realistic finite actual gap is `< required` → the
         // pair is unsafe. Either way the agent is evaluated, never skipped.
-        let lon_safe = a.actual_longitudinal_gap_m >= required_long;
-        // Lateral defence-in-depth is GATED on longitudinal proximity (the RSS
-        // conjunction): a lateral shortfall is dangerous only when the object is
-        // also longitudinally close. A lead well ahead / oncoming traffic safely
+        //
+        // RSS danger is the longitudinal∧lateral conjunction; each axis bounds
+        // safety only when the OTHER axis is in conflict, so each is gated on the
+        // other's proximity (§4). Each gate is fail-closed FIRST on its own
+        // non-finite input (a NaN must never read as "safe").
+        //
+        // Longitudinal (rear-end / head-on) bounds safety only when the footprints
+        // laterally OVERLAP — an object the ego is laterally clear of (passed, or
+        // oncoming in the next lane) cannot be a longitudinal collision.
+        let lon_safe = if !a.actual_longitudinal_gap_m.is_finite() {
+            false
+        } else if a.actual_lateral_separation_m.is_finite()
+            && a.actual_lateral_separation_m >= RSS_LONGITUDINAL_OVERLAP_M
+        {
+            true
+        } else {
+            a.actual_longitudinal_gap_m >= required_long
+        };
+        // Lateral defence-in-depth bounds safety only when the object is also
+        // longitudinally CLOSE — a lead well ahead / oncoming traffic safely
         // passing in the next lane is longitudinally distant, so its lateral gap
-        // does not bound safety (it over-rejected before — §4). Fail-closed first:
-        // a non-finite separation is never "safe", regardless of range.
+        // does not bound safety (it over-rejected before — §4).
         let lat_safe = if !a.actual_lateral_separation_m.is_finite() {
             false
         } else if a.actual_longitudinal_gap_m > RSS_LONGITUDINAL_CONFLICT_M {
@@ -1651,15 +1666,19 @@ mod scene_rss_tests {
         }
     }
 
-    /// Huge actual separations on both axes → comfortably safe at these speeds.
+    /// A comfortably-safe IN-LANE lead: a huge longitudinal gap, laterally aligned
+    /// (within the footprint-overlap band so the longitudinal axis is live) but with
+    /// a side gap above the lateral requirement. No lateral motion. Derived
+    /// "longitudinally unsafe" agents inherit this in-lane separation so their
+    /// violation is a real same-lane conflict, not an object the ego is clear of.
     fn safe_agent() -> RssAgent {
         RssAgent {
             ego_vel: 10.0,
             lead_vel: 10.0,
             actual_longitudinal_gap_m: 1000.0,
-            ego_lat_vel: 0.5,
-            obj_lat_vel: 0.5,
-            actual_lateral_separation_m: 1000.0,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 2.0,
             oncoming: false,
         }
     }
@@ -1730,8 +1749,9 @@ mod scene_rss_tests {
         // ~7 m suffices for a 10 m/s same-direction lead; the head-on bound needs
         // ~31 m. 20 m sits between → safe as a lead, unsafe as oncoming.
         let gap = 20.0;
+        // In-lane (laterally overlapping) so the longitudinal axis is live for both.
         let lead = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: gap,
-            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1000.0, oncoming: false };
+            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1.5, oncoming: false };
         let onc = RssAgent { oncoming: true, ..lead };
 
         let lead_state = compute_scene_rss(&AgentScene::Agents(vec![lead]), &params());
@@ -1744,9 +1764,10 @@ mod scene_rss_tests {
 
     #[test]
     fn oncoming_agent_with_ample_gap_is_safe() {
-        // A wide gap clears even the (larger) head-on requirement.
+        // A wide gap clears even the (larger) head-on requirement. In-lane
+        // (laterally overlapping) so the head-on longitudinal bound actually applies.
         let onc = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: 1000.0,
-            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1000.0, oncoming: true };
+            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1.5, oncoming: true };
         assert!(compute_scene_rss(&AgentScene::Agents(vec![onc]), &params()).safe,
             "an oncoming vehicle far enough away is safe under the head-on bound");
     }
