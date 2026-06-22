@@ -298,6 +298,63 @@ impl LaneGraph {
         Some(out)
     }
 
+    /// Synthesize a two-lane **undivided** road from a single wide drivable
+    /// `corridor` — the unmarked-road / dirt-road case. On a road with no painted
+    /// centerline, perception ([`kirra_taj`](../../kirra_taj/index.html)) reports
+    /// one wide corridor, and "follow the centerline" would drive the ego **down
+    /// the middle** — wrong, and unsafe w.r.t. oncoming traffic. The US rule of the
+    /// road (keep **right**, UVC §11-301) still applies even with no paint.
+    ///
+    /// This applies that rule **structurally**: split the road at its midline into
+    /// a right-half **ego** lane and a left-half **oncoming** lane, divided by an
+    /// [`LineType::Unmarked`] centerline (crossable — you may use the other half to
+    /// pass when clear). The ego then "keeps right" simply by following its
+    /// synthesized lane's corridor ([`Lane::corridor`]) — no special biasing logic,
+    /// it reuses the same lane-following the marked-road case uses.
+    ///
+    /// **Honest scope:** the *travel direction* of the oncoming lane (it runs the
+    /// opposite way) is not yet encoded — the oncoming lane is marked only
+    /// structurally (the left neighbor). Directionality is needed for the head-on
+    /// RSS check (the oncoming-traffic collision bound) and lands with it.
+    ///
+    /// Returns `None` if the corridor boundaries are empty/degenerate or not a
+    /// `+y`-left / `-y`-right road.
+    #[must_use]
+    pub fn from_undivided_corridor(
+        corridor: &dyn CorridorSource,
+        ego_lane_id: u64,
+        oncoming_lane_id: u64,
+    ) -> Option<Self> {
+        let left = corridor.left_boundary();
+        let right = corridor.right_boundary();
+        if left.len() < 2 || right.len() < 2 {
+            return None;
+        }
+        let left_y = mean_y_of(left);
+        let right_y = mean_y_of(right);
+        if left_y <= right_y {
+            return None; // not a +y-left / -y-right road
+        }
+        let (x0, x1) = x_extent(left, right)?;
+        let mid = 0.5 * (left_y + right_y);
+        let lane_half = 0.25 * (left_y - right_y); // a quarter of the total width
+        let ego_c = 0.5 * (mid + right_y); // center of the right half
+        let onc_c = 0.5 * (left_y + mid); // center of the left half
+
+        let mut g = LaneGraph::new();
+        // Ego (right half): unmarked centerline on the LEFT, road edge on the right.
+        g.add_lane(
+            Lane::straight(ego_lane_id, ego_c, x0, x1, lane_half, LineType::Unmarked, LineType::Solid)
+                .with_edge(LaneEdge::LeftNeighbor { to: oncoming_lane_id }),
+        );
+        // Oncoming (left half): road edge on the left, unmarked centerline on the right.
+        g.add_lane(
+            Lane::straight(oncoming_lane_id, onc_c, x0, x1, lane_half, LineType::Solid, LineType::Unmarked)
+                .with_edge(LaneEdge::RightNeighbor { to: ego_lane_id }),
+        );
+        Some(g)
+    }
+
     /// Resolve a slice of ids to lane refs, or `None` if any is missing/empty.
     fn resolve(&self, lane_ids: &[u64]) -> Option<Vec<&Lane>> {
         if lane_ids.is_empty() {
@@ -305,6 +362,19 @@ impl LaneGraph {
         }
         lane_ids.iter().map(|id| self.lanes.get(id)).collect()
     }
+}
+
+/// Mean lateral position of a boundary polyline.
+fn mean_y_of(pts: &[Point]) -> f64 {
+    pts.iter().map(|p| p.y_m).sum::<f64>() / pts.len() as f64
+}
+
+/// Longitudinal `[x_min, x_max]` spanned by two boundary polylines, or `None` if
+/// degenerate (non-finite or zero length).
+fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
+    let x0 = a.iter().chain(b).map(|p| p.x_m).fold(f64::INFINITY, f64::min);
+    let x1 = a.iter().chain(b).map(|p| p.x_m).fold(f64::NEG_INFINITY, f64::max);
+    (x0.is_finite() && x1.is_finite() && x1 > x0).then_some((x0, x1))
 }
 
 /// Offset a centerline polyline laterally by `signed_offset` (>0 = +y/left side)
@@ -414,6 +484,70 @@ mod tests {
         assert!(g.corridor_over(&[1, 99], 0.95, 10).is_none());
         assert!(g.boundaries_relative_to(1, &[]).is_none());
         assert!(g.boundaries_relative_to(99, &[1]).is_none());
+    }
+
+    #[test]
+    fn undivided_corridor_synthesizes_keep_right_split() {
+        use kirra_ros2_adapter::corridor::MockCorridorSource;
+        // A 10 m-wide undivided road (±5). Keep-right split → ego on the right half.
+        let road = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = LaneGraph::from_undivided_corridor(&road, 1, 2).expect("synthesize");
+        let ego = g.lane(1).unwrap();
+        let onc = g.lane(2).unwrap();
+        // Each synthesized lane is a quarter-width half-lane (2.5 m), centered in
+        // its half: ego at -2.5 (right), oncoming at +2.5 (left).
+        assert!((ego.centerline[0].y_m + 2.5).abs() < 1e-9, "ego keeps right (-2.5)");
+        assert!((onc.centerline[0].y_m - 2.5).abs() < 1e-9, "oncoming is the left half (+2.5)");
+        assert!((ego.half_width_m - 2.5).abs() < 1e-9);
+        // The shared centerline is UNMARKED (crossable to pass), road edges SOLID.
+        assert_eq!(ego.left_line, LineType::Unmarked, "ego↔oncoming divider unmarked");
+        assert_eq!(ego.right_line, LineType::Solid, "right road edge");
+        assert_eq!(onc.right_line, LineType::Unmarked);
+        assert_eq!(ego.left_neighbor(), Some(2));
+    }
+
+    #[test]
+    fn ego_lane_corridor_keeps_right_of_the_road_center() {
+        use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
+        let road = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
+        let ego = g.lane(1).unwrap().corridor(0.95, 10);
+        // The ego-lane corridor spans the RIGHT half: [-5, 0], never crossing the
+        // road center into the +y (oncoming) half.
+        for p in ego.left_boundary().iter().chain(ego.right_boundary()) {
+            assert!(p.y_m <= 1e-9, "ego lane stays right of center, got y={}", p.y_m);
+        }
+        assert!((ego.left_boundary()[0].y_m).abs() < 1e-9, "left edge at the road center (0)");
+        assert!((ego.right_boundary()[0].y_m + 5.0).abs() < 1e-9, "right edge at the road edge (-5)");
+    }
+
+    #[test]
+    fn degenerate_corridor_fails_closed() {
+        // An inline source whose boundaries are flipped (left below right) — not a
+        // valid +y-left / -y-right road → synthesis fails closed (None).
+        struct FlippedSource {
+            left: Vec<Point>,
+            right: Vec<Point>,
+        }
+        impl CorridorSource for FlippedSource {
+            fn left_boundary(&self) -> &[Point] {
+                &self.left
+            }
+            fn right_boundary(&self) -> &[Point] {
+                &self.right
+            }
+            fn confidence(&self) -> f32 {
+                0.9
+            }
+            fn age_ms(&self) -> u64 {
+                5
+            }
+        }
+        let flipped = FlippedSource {
+            left: vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 50.0, y_m: -5.0 }],
+            right: vec![Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 50.0, y_m: 5.0 }],
+        };
+        assert!(LaneGraph::from_undivided_corridor(&flipped, 1, 2).is_none());
     }
 
     #[test]

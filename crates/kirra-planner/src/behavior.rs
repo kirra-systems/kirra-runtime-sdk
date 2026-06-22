@@ -243,6 +243,16 @@ pub enum LineType {
     /// Combined with the broken marking facing the -y (right) side: the -y side
     /// may cross; the +y (solid) side may not.
     BrokenOnRight,
+    /// **Unmarked** — no painted line at all (an undivided road / dirt road
+    /// centerline). Crossing is *permitted* either direction (like [`Broken`]),
+    /// because the law does not forbid using the other half to pass when clear.
+    /// The absence of paint does NOT remove the rule of the road, though: the
+    /// **keep-right positional default** is a separate concern, modeled
+    /// structurally by placing the ego's lane on the right half of the road (see
+    /// `lanemap::LaneGraph::from_undivided_corridor`), not by this crossing flag.
+    ///
+    /// [`Broken`]: LineType::Broken
+    Unmarked,
 }
 
 /// A lane boundary at lateral offset `y_m` from the path centerline (+y left).
@@ -264,7 +274,8 @@ impl LaneBoundary {
             return true;
         }
         match self.line {
-            LineType::Broken => true,
+            // Permissive: dashed paint, or no paint at all (undivided road).
+            LineType::Broken | LineType::Unmarked => true,
             LineType::Solid | LineType::DoubleSolid => false,
             // Combined: only the side the broken marking faces may cross.
             LineType::BrokenOnLeft => from_side > 0.0,
@@ -374,6 +385,16 @@ mod tests {
         assert!(!solid.may_cross(0.0, -1.5), "solid: no crossing");
         let double = LaneBoundary { y_m: 0.5, line: LineType::DoubleSolid };
         assert!(!double.may_cross(0.0, 2.0), "double solid: no crossing");
+    }
+
+    #[test]
+    fn unmarked_line_allows_crossing_like_broken() {
+        // No paint (undivided / dirt road centerline) → crossing permitted either
+        // way, same as a broken line. (Keep-right is a positional default handled
+        // elsewhere, not a crossing prohibition.)
+        let unmarked = LaneBoundary { y_m: 0.0, line: LineType::Unmarked };
+        assert!(unmarked.may_cross(-1.0, 1.0), "unmarked: cross left OK");
+        assert!(unmarked.may_cross(1.0, -1.0), "unmarked: cross right OK");
     }
 
     #[test]
