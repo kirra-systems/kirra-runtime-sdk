@@ -1,0 +1,434 @@
+//! Occy lane-graph substrate — a parse-free **Lanelet2-lite** lane model (#90 / Occy 1.D).
+//!
+//! # Why this exists
+//!
+//! Occy's competitive-gap analysis named the **lane graph / routing** substrate
+//! the single highest-leverage missing piece (see
+//! `docs/COMPETITIVE_PLANNER_ANALYSIS.md` §5.1): it is what turns the planner's
+//! centerline-relative lane-line rules and commanded lane changes from
+//! hand-fed inputs into something *derived from a map*. Autoware uses **Lanelet2**
+//! for exactly this; the adapter already has the production seam
+//! ([`kirra_ros2_adapter::corridor`]'s feature-gated `Lanelet2CorridorSource`,
+//! which deserializes a real `LaneletMapBin` through C++ `lanelet2_core`).
+//!
+//! # Honest scope — what is and isn't here
+//!
+//! This module is the **lane data model + the derivation to Occy's inputs**, with
+//! **no map-file parse**. The actual Lanelet2 `.osm`/`MapBin` deserialization stays
+//! behind the adapter's `lanelet2` feature gate (it needs the C++ library); this is
+//! the structure that parser *populates* and the two derivations the planner
+//! consumes:
+//!
+//! 1. [`LaneGraph::corridor_over`] → a [`LaneCorridor`] (a [`CorridorSource`]) — the
+//!    drivable envelope across one or more laterally-adjacent lanes, the **same**
+//!    handle the KIRRA checker re-reads. This is what makes a lane change physically
+//!    checkable: the corridor spans both the source and target lanes.
+//! 2. [`LaneGraph::boundaries_relative_to`] / [`Lane::lane_boundaries`] → typed
+//!    [`LaneBoundary`]s at **real positions** (solid / broken at their true lateral
+//!    offsets) instead of the centerline-relative literals the lane-line rules took
+//!    as hand-fed inputs before.
+//!
+//! # Geometry assumption (stated, not hidden)
+//!
+//! Lanes carry a polyline **centerline** and produce real offset-polyline boundaries
+//! (via the local segment normal), so [`LaneCorridor`] is correct for gently-curved
+//! lanes. The *centerline-relative* `LaneBoundary` derivation (a single lateral
+//! `y_m` offset) is the **Frenet projection** and is exact for **straight** lanes —
+//! which matches Occy's lateral model (its `LaneBoundary` is itself a
+//! centerline-relative-`y` abstraction) and the straight corridors the rest of the
+//! stack produces (`TajCorridor`, `MockCorridorSource`). Full curved-lane Frenet
+//! derivation is follow-up, exactly as elsewhere in the stack.
+
+use kirra_ros2_adapter::corridor::{CorridorSource, Point};
+use std::collections::BTreeMap;
+
+use crate::behavior::{LaneBoundary, LineType};
+
+/// A directed connectivity edge out of a [`Lane`]. Mirrors the relations a
+/// Lanelet2 routing graph carries: longitudinal **successors** (drive forward
+/// into) and lateral **neighbors** (the adjacent lane on each side, the lane a
+/// commanded lane change targets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneEdge {
+    /// Longitudinal successor — the lane you drive forward into.
+    Successor { to: u64 },
+    /// Laterally-adjacent lane on the +y (left) side.
+    LeftNeighbor { to: u64 },
+    /// Laterally-adjacent lane on the -y (right) side.
+    RightNeighbor { to: u64 },
+}
+
+/// One lane: a centerline polyline, a typed boundary on each side, and its
+/// connectivity. The boundary `LineType`s carry the crossing rules
+/// ([`LaneBoundary::may_cross`]) that gate Occy's lateral maneuvers; the
+/// centerline + `half_width_m` produce the drivable corridor.
+///
+/// Boundaries are stored **per-lane** (left/right `LineType`). A boundary shared
+/// with a laterally-adjacent lane is modeled on both lanes; the derivations dedup
+/// it by lateral position. This is the planner-facing view a Lanelet2 parser
+/// (whose linestrings are shared between lanelets) populates.
+#[derive(Debug, Clone)]
+pub struct Lane {
+    /// Stable lane id (the Lanelet2 primitive id in production).
+    pub id: u64,
+    /// World-frame centerline polyline (≥ 2 vertices), advancing along travel.
+    pub centerline: Vec<Point>,
+    /// Lateral half-width to each boundary, metres.
+    pub half_width_m: f64,
+    /// Marking on the +y (left) boundary — its crossing rule.
+    pub left_line: LineType,
+    /// Marking on the -y (right) boundary — its crossing rule.
+    pub right_line: LineType,
+    /// Connectivity (successors + lateral neighbors).
+    pub edges: Vec<LaneEdge>,
+}
+
+impl Lane {
+    /// Build a **straight** lane of constant `y_center` running `x_start..x_end`.
+    /// The convenience constructor for the straight lanes the stack uses today;
+    /// curved lanes set `centerline` directly.
+    #[must_use]
+    pub fn straight(
+        id: u64,
+        y_center: f64,
+        x_start: f64,
+        x_end: f64,
+        half_width_m: f64,
+        left_line: LineType,
+        right_line: LineType,
+    ) -> Self {
+        Self {
+            id,
+            centerline: vec![
+                Point { x_m: x_start, y_m: y_center },
+                Point { x_m: x_end, y_m: y_center },
+            ],
+            half_width_m,
+            left_line,
+            right_line,
+            edges: Vec::new(),
+        }
+    }
+
+    /// Builder: append a connectivity edge.
+    #[must_use]
+    pub fn with_edge(mut self, edge: LaneEdge) -> Self {
+        self.edges.push(edge);
+        self
+    }
+
+    /// Longitudinal successors of this lane.
+    pub fn successors(&self) -> impl Iterator<Item = u64> + '_ {
+        self.edges.iter().filter_map(|e| match e {
+            LaneEdge::Successor { to } => Some(*to),
+            _ => None,
+        })
+    }
+
+    /// The lane id of the +y (left) lateral neighbor, if any.
+    #[must_use]
+    pub fn left_neighbor(&self) -> Option<u64> {
+        self.edges.iter().find_map(|e| match e {
+            LaneEdge::LeftNeighbor { to } => Some(*to),
+            _ => None,
+        })
+    }
+
+    /// The lane id of the -y (right) lateral neighbor, if any.
+    #[must_use]
+    pub fn right_neighbor(&self) -> Option<u64> {
+        self.edges.iter().find_map(|e| match e {
+            LaneEdge::RightNeighbor { to } => Some(*to),
+            _ => None,
+        })
+    }
+
+    /// Mean lateral position of the centerline (the lane's `y_center` for a
+    /// straight lane).
+    fn mean_y(&self) -> f64 {
+        if self.centerline.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.centerline.iter().map(|p| p.y_m).sum();
+        sum / self.centerline.len() as f64
+    }
+
+    /// This lane's two boundaries as centerline-relative typed [`LaneBoundary`]s:
+    /// the left line at `+half_width_m`, the right line at `-half_width_m`. These
+    /// feed Occy's lane-line crossing rules directly (its `LaneBoundary` is a
+    /// centerline-relative-`y` abstraction). Exact for straight lanes (the Frenet
+    /// projection).
+    #[must_use]
+    pub fn lane_boundaries(&self) -> Vec<LaneBoundary> {
+        vec![
+            LaneBoundary { y_m: self.half_width_m, line: self.left_line },
+            LaneBoundary { y_m: -self.half_width_m, line: self.right_line },
+        ]
+    }
+
+    /// Derive this single lane's drivable [`LaneCorridor`] — the left/right offset
+    /// polylines at `±half_width_m`. `confidence` / `age_ms` are the map-server
+    /// health the kernel's `Corridor::is_healthy` check reads.
+    #[must_use]
+    pub fn corridor(&self, confidence: f32, age_ms: u64) -> LaneCorridor {
+        LaneCorridor {
+            left: offset_polyline(&self.centerline, self.half_width_m),
+            right: offset_polyline(&self.centerline, -self.half_width_m),
+            confidence,
+            age_ms,
+        }
+    }
+}
+
+/// A `CorridorSource` derived from a lane (or a span of laterally-adjacent lanes).
+/// Owns the boundary polylines; the trait methods return slice borrows — the same
+/// surface [`kirra_ros2_adapter::corridor::MockCorridorSource`] and `TajCorridor`
+/// present, so the planner and KIRRA read one corridor without copying.
+#[derive(Debug, Clone)]
+pub struct LaneCorridor {
+    left: Vec<Point>,
+    right: Vec<Point>,
+    confidence: f32,
+    age_ms: u64,
+}
+
+impl CorridorSource for LaneCorridor {
+    fn left_boundary(&self) -> &[Point] {
+        &self.left
+    }
+    fn right_boundary(&self) -> &[Point] {
+        &self.right
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+    fn age_ms(&self) -> u64 {
+        self.age_ms
+    }
+}
+
+/// A collection of connected [`Lane`]s — the Lanelet2-lite lane graph. Lanes are
+/// keyed by id (deterministic iteration). The planner derives a corridor + typed
+/// boundaries from a chosen span of lanes; a real route (the preferred-primitive
+/// id sequence) would select that span.
+#[derive(Debug, Clone, Default)]
+pub struct LaneGraph {
+    lanes: BTreeMap<u64, Lane>,
+}
+
+impl LaneGraph {
+    /// An empty graph.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { lanes: BTreeMap::new() }
+    }
+
+    /// Insert (or replace) a lane.
+    pub fn add_lane(&mut self, lane: Lane) {
+        self.lanes.insert(lane.id, lane);
+    }
+
+    /// Builder form of [`add_lane`](Self::add_lane).
+    #[must_use]
+    pub fn with_lane(mut self, lane: Lane) -> Self {
+        self.add_lane(lane);
+        self
+    }
+
+    /// Look up a lane by id.
+    #[must_use]
+    pub fn lane(&self, id: u64) -> Option<&Lane> {
+        self.lanes.get(&id)
+    }
+
+    /// Number of lanes in the graph.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lanes.len()
+    }
+
+    /// Whether the graph holds no lanes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
+    }
+
+    /// Derive the drivable [`LaneCorridor`] spanning the given laterally-adjacent
+    /// lanes — the **outer envelope**: the left boundary of the leftmost lane and
+    /// the right boundary of the rightmost lane. This is what makes a commanded
+    /// lane change checkable: the corridor covers the source *and* target lanes, so
+    /// the shifted trajectory stays contained. Returns `None` if any id is unknown
+    /// or the slice is empty.
+    #[must_use]
+    pub fn corridor_over(&self, lane_ids: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+        let lanes = self.resolve(lane_ids)?;
+        // Leftmost = greatest mean-y; rightmost = least mean-y.
+        let leftmost = lanes.iter().copied().max_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
+        let rightmost = lanes.iter().copied().min_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
+        Some(LaneCorridor {
+            left: offset_polyline(&leftmost.centerline, leftmost.half_width_m),
+            right: offset_polyline(&rightmost.centerline, -rightmost.half_width_m),
+            confidence,
+            age_ms,
+        })
+    }
+
+    /// Derive the typed lane boundaries across a span of lanes, expressed as
+    /// lateral offsets **relative to `ego_lane`'s centerline** (the frame Occy's
+    /// `lane_boundaries` input uses). Boundaries shared between adjacent lanes are
+    /// deduplicated by lateral position. Returns `None` if any id is unknown.
+    #[must_use]
+    pub fn boundaries_relative_to(&self, ego_lane: u64, lane_ids: &[u64]) -> Option<Vec<LaneBoundary>> {
+        let ego_y = self.lanes.get(&ego_lane)?.mean_y();
+        let lanes = self.resolve(lane_ids)?;
+        let mut out: Vec<LaneBoundary> = Vec::new();
+        for lane in lanes {
+            let c = lane.mean_y() - ego_y;
+            for b in [
+                LaneBoundary { y_m: c + lane.half_width_m, line: lane.left_line },
+                LaneBoundary { y_m: c - lane.half_width_m, line: lane.right_line },
+            ] {
+                // Dedup a boundary already present at this lateral position (shared
+                // divider between two adjacent lanes appears on both).
+                if !out.iter().any(|e| (e.y_m - b.y_m).abs() <= 1e-6) {
+                    out.push(b);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Resolve a slice of ids to lane refs, or `None` if any is missing/empty.
+    fn resolve(&self, lane_ids: &[u64]) -> Option<Vec<&Lane>> {
+        if lane_ids.is_empty() {
+            return None;
+        }
+        lane_ids.iter().map(|id| self.lanes.get(id)).collect()
+    }
+}
+
+/// Offset a centerline polyline laterally by `signed_offset` (>0 = +y/left side)
+/// along the local segment normal. Exact for straight lanes; correct for
+/// gently-curved polylines (per-vertex normal from the adjacent segments).
+fn offset_polyline(centerline: &[Point], signed_offset: f64) -> Vec<Point> {
+    let n = centerline.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        // Degenerate: no tangent — offset straight along +y.
+        return vec![Point { x_m: centerline[0].x_m, y_m: centerline[0].y_m + signed_offset }];
+    }
+    (0..n)
+        .map(|i| {
+            // Tangent from the adjacent segment(s).
+            let (ax, ay) = if i == 0 {
+                (centerline[1].x_m - centerline[0].x_m, centerline[1].y_m - centerline[0].y_m)
+            } else if i == n - 1 {
+                (centerline[n - 1].x_m - centerline[n - 2].x_m, centerline[n - 1].y_m - centerline[n - 2].y_m)
+            } else {
+                (centerline[i + 1].x_m - centerline[i - 1].x_m, centerline[i + 1].y_m - centerline[i - 1].y_m)
+            };
+            let len = ax.hypot(ay).max(1e-9);
+            // Left-normal of the tangent (rotate +90°): (-ty, tx).
+            let (nx, ny) = (-ay / len, ax / len);
+            Point {
+                x_m: centerline[i].x_m + signed_offset * nx,
+                y_m: centerline[i].y_m + signed_offset * ny,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-lane road: ego (left) lane centered at y=0, right lane at y=-3.5.
+    /// The divider between them is BROKEN (crossable); the outer edges are SOLID.
+    fn two_lane_road() -> LaneGraph {
+        LaneGraph::new()
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 100.0, 1.75, LineType::Solid, LineType::Broken)
+                    .with_edge(LaneEdge::RightNeighbor { to: 2 }),
+            )
+            .with_lane(
+                Lane::straight(2, -3.5, 0.0, 100.0, 1.75, LineType::Broken, LineType::Solid)
+                    .with_edge(LaneEdge::LeftNeighbor { to: 1 }),
+            )
+    }
+
+    #[test]
+    fn single_lane_corridor_is_a_valid_source() {
+        let lane = Lane::straight(1, 0.0, 0.0, 50.0, 1.75, LineType::Solid, LineType::Broken);
+        let c = lane.corridor(0.95, 10);
+        assert_eq!(c.left_boundary().len(), 2);
+        assert_eq!(c.right_boundary().len(), 2);
+        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "left at +half_width");
+        assert!((c.right_boundary()[0].y_m + 1.75).abs() < 1e-9, "right at -half_width");
+        assert_eq!(c.confidence(), 0.95);
+        assert_eq!(c.age_ms(), 10);
+    }
+
+    #[test]
+    fn lane_boundaries_are_typed_at_real_offsets() {
+        let lane = Lane::straight(1, 0.0, 0.0, 50.0, 1.75, LineType::Solid, LineType::Broken);
+        let b = lane.lane_boundaries();
+        assert_eq!(b.len(), 2);
+        assert!(b.iter().any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
+        assert!(b.iter().any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
+    }
+
+    #[test]
+    fn corridor_over_spans_both_lanes() {
+        let g = two_lane_road();
+        let c = g.corridor_over(&[1, 2], 0.95, 10).expect("both lanes resolve");
+        // Outer envelope: left edge of lane 1 (+1.75), right edge of lane 2 (-5.25).
+        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "left envelope +1.75");
+        assert!((c.right_boundary()[0].y_m + 5.25).abs() < 1e-9, "right envelope -5.25");
+    }
+
+    #[test]
+    fn boundaries_relative_to_ego_dedup_the_shared_divider() {
+        let g = two_lane_road();
+        let b = g.boundaries_relative_to(1, &[1, 2]).expect("resolve");
+        // Three distinct boundaries: +1.75 solid, -1.75 broken (shared), -5.25 solid.
+        assert_eq!(b.len(), 3, "shared divider deduped, got {b:?}");
+        assert!(b.iter().any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
+        assert!(b.iter().any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
+        assert!(b.iter().any(|x| (x.y_m + 5.25).abs() < 1e-9 && x.line == LineType::Solid));
+    }
+
+    #[test]
+    fn connectivity_round_trips() {
+        let g = two_lane_road();
+        assert_eq!(g.lane(1).unwrap().right_neighbor(), Some(2));
+        assert_eq!(g.lane(2).unwrap().left_neighbor(), Some(1));
+        assert_eq!(g.lane(1).unwrap().left_neighbor(), None);
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn unknown_lane_id_fails_closed() {
+        let g = two_lane_road();
+        assert!(g.corridor_over(&[1, 99], 0.95, 10).is_none());
+        assert!(g.boundaries_relative_to(1, &[]).is_none());
+        assert!(g.boundaries_relative_to(99, &[1]).is_none());
+    }
+
+    #[test]
+    fn curved_centerline_offsets_along_the_normal() {
+        // A centerline turning toward +y: the left offset is longer-arc/outside.
+        let cl = vec![
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 10.0, y_m: 0.0 },
+            Point { x_m: 20.0, y_m: 5.0 },
+        ];
+        let left = offset_polyline(&cl, 1.0);
+        let right = offset_polyline(&cl, -1.0);
+        assert_eq!(left.len(), 3);
+        // At the straight start the normal is +y → left point sits at y≈+1.
+        assert!((left[0].y_m - 1.0).abs() < 1e-9 && left[0].x_m.abs() < 1e-9);
+        assert!((right[0].y_m + 1.0).abs() < 1e-9);
+    }
+}
