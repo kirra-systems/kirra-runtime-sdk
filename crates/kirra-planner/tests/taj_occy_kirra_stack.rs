@@ -91,6 +91,7 @@ fn run_stack(
         map: &perception.corridor,
         objects: &perception.objects,
         controls: &[],
+        lane_boundaries: &[],
         posture: posture.clone(),
     };
     let mut planner = GeometricPlanner::default();
@@ -179,6 +180,7 @@ fn route_around_in_corridor_object_admits() {
         map: &perception.corridor,
         objects: &perception.objects,
         controls: &[],
+        lane_boundaries: &[],
         posture: FleetPosture::Nominal,
     };
     let mut planner = GeometricPlanner::default();
