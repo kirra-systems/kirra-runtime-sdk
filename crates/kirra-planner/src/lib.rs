@@ -48,14 +48,16 @@ pub use behavior::{
 };
 
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
-/// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop` and
-/// `Behavioral` decelerate to a hard stop; `Goal` cruises to the goal.
+/// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop`,
+/// `Behavioral` and `Yield` decelerate to a hard stop; `Goal` cruises to the goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LimitKind {
     Goal,
     ObjectStop,
     Lead,
     Behavioral,
+    /// Predicted-conflict yield: a crossing object will enter the lane ahead.
+    Yield,
 }
 
 /// Ego world-state the planner consumes.
@@ -276,6 +278,14 @@ pub struct GeometricPlannerConfig {
     /// Following gap kept behind a dead-ahead lead (cruise at the lead's speed up
     /// to this gap; rolling-horizon, not a hard stop).
     pub lead_following_gap_m: f64,
+    /// How far ahead (s) to predict object motion for conflict yielding.
+    pub prediction_horizon_s: f64,
+    /// Time step for the constant-velocity prediction rollout.
+    pub prediction_dt_s: f64,
+    /// Lane half-width used to decide when a predicted object has entered the path.
+    pub prediction_lane_half_m: f64,
+    /// Min object speed to treat it as a moving "crosser" worth predicting.
+    pub crossing_speed_threshold_mps: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -300,6 +310,10 @@ impl Default for GeometricPlannerConfig {
             lead_speed_threshold_mps: 0.5,
             lead_lateral_band_m: 3.5,
             lead_following_gap_m: 8.0,
+            prediction_horizon_s: 3.0,
+            prediction_dt_s: 0.2,
+            prediction_lane_half_m: 2.0,
+            crossing_speed_threshold_mps: 0.5,
         }
     }
 }
@@ -399,6 +413,36 @@ impl GeometricPlanner {
         }
         LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
     }
+
+    /// Predictive yield: roll a moving object forward at constant velocity and, if
+    /// it is currently OUT of the lane but will ENTER the path ahead within the
+    /// horizon (a crossing vehicle/pedestrian), return the arc-length at which it
+    /// crosses in — so the planner yields short of it. Objects already in the lane
+    /// are handled by stop-short/lead (skipped here). Conservative: it yields to
+    /// any predicted in-lane conflict ahead without reasoning about precise
+    /// temporal overlap. Returns `None` if there is no predicted conflict.
+    fn predict_yield_s(&self, obj: &PerceivedObject, guide: &[(f64, f64)], s_ego: f64) -> Option<f64> {
+        let (_, signed_now) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
+        if signed_now.abs() <= self.cfg.object_lane_tolerance_m {
+            return None; // already in-lane → stop-short / lead handles it
+        }
+        let speed = obj.vel.x_m.hypot(obj.vel.y_m);
+        if speed < self.cfg.crossing_speed_threshold_mps {
+            return None; // not a mover worth predicting
+        }
+        let dt = self.cfg.prediction_dt_s.max(0.05);
+        let steps = (self.cfg.prediction_horizon_s / dt).ceil() as usize;
+        for i in 1..=steps {
+            let t = i as f64 * dt;
+            let fx = obj.pos.x_m + obj.vel.x_m * t;
+            let fy = obj.pos.y_m + obj.vel.y_m * t;
+            let (s_f, lateral_f) = project_signed(guide, fx, fy);
+            if s_f > s_ego && lateral_f.abs() <= self.cfg.prediction_lane_half_m {
+                return Some(s_f); // first predicted entry into the lane ahead
+            }
+        }
+        None
+    }
 }
 
 // SAFETY: occy planner proposes within corridor + urban kinematic limits; checker decides | REQ: Occy-1.A (#90) | TEST: kirra_planner::tests::{geometric_planner_proposes_motion_toward_goal, geometric_planner_output_is_checker_admissible, geometric_planner_locked_out_only_stops, geometric_planner_degraded_is_non_increasing, geometric_planner_at_goal_holds, geometric_planner_respects_horizon_cap}
@@ -486,6 +530,19 @@ impl Planner for GeometricPlanner {
             }
         }
 
+        // Predictive yield: a crossing object that will enter the lane ahead within
+        // the horizon → yield short of where it crosses (anticipates a cut-in /
+        // crossing that the snapshot-only checks miss until it is already close).
+        for obj in input.objects {
+            if let Some(s_conflict) = self.predict_yield_s(obj, &guide, s_ego) {
+                let yield_s = s_conflict - self.cfg.object_stop_gap_m;
+                if yield_s < s_limit {
+                    s_limit = yield_s;
+                    limit_kind = LimitKind::Yield;
+                }
+            }
+        }
+
         // Behavioral rules layer: traffic signs & signals impose a hard stop/hold
         // line and/or a speed cap. Occy OBEYS the rule; KIRRA stays the *physical*
         // authority (it never enforces traffic law). A nearer mandatory stop line
@@ -508,7 +565,7 @@ impl Planner for GeometricPlanner {
             match limit_kind {
                 LimitKind::Lead => target.min(lead_match.unwrap_or(target)),
                 LimitKind::ObjectStop => target.min(self.cfg.object_approach_speed_mps),
-                LimitKind::Goal | LimitKind::Behavioral => target,
+                LimitKind::Goal | LimitKind::Behavioral | LimitKind::Yield => target,
             }
         };
         if let Some(cap) = behavioral.speed_cap_mps {
@@ -1558,6 +1615,82 @@ mod tests {
             TrajectoryVerdict::MRCFallback,
             "can't legally pass → KIRRA backstops the straight path, got {verdict:?}"
         );
+    }
+
+    // --- Predictive yielding (object motion prediction) --------------------
+
+    fn crossing_obj_at(x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: vx.hypot(vy),
+            heading_rad: vy.atan2(vx),
+            vel: Point { x_m: vx, y_m: vy },
+        }
+    }
+
+    #[test]
+    fn yields_to_crossing_object() {
+        // An object off to the side at (20, 5) crossing INTO the lane at 3 m/s:
+        // not in-path now (so stop-short ignores it), but prediction sees it will
+        // enter the lane ahead → Occy yields short of the crossing point.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -3.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        assert_eq!(out.kind, ProposalKind::Motion);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x < 17.0, "yields short of the predicted crossing at x=20, got {max_x}");
+        assert!(
+            out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
+            "controlled stop to yield"
+        );
+    }
+
+    #[test]
+    fn crossing_yield_is_checker_admissible() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -3.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits the predictive yield, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn object_crossing_away_does_not_yield() {
+        // Same object but moving AWAY from the lane (+y) → no predicted conflict.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, 3.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 22.0, "object moving away → no yield, drives on, got {max_x}");
+    }
+
+    #[test]
+    fn slow_drifting_object_does_not_yield() {
+        // Drifting toward the lane too slowly to reach it within the horizon → no yield.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -0.2)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 22.0, "won't enter the lane in time → no yield, got {max_x}");
     }
 }
 
