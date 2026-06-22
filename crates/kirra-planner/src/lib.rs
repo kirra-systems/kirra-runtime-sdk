@@ -341,6 +341,11 @@ pub struct GeometricPlannerConfig {
     /// (>4 m clearance won't fit one oncoming lane). The DRIVABLE corridor fit is
     /// the real bound; this is a sanity ceiling.
     pub overtake_offset_max_m: f64,
+    /// Temporal-overlap margin (s) for predictive yielding. The planner yields to a
+    /// predicted crosser UNLESS the object provably clears the conflict band more
+    /// than this margin before the ego's SOONEST possible arrival there. Covers
+    /// reaction + a safety buffer; bigger = more conservative (yields more often).
+    pub yield_temporal_margin_s: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -370,6 +375,7 @@ impl Default for GeometricPlannerConfig {
             prediction_lane_half_m: 2.0,
             crossing_speed_threshold_mps: 0.5,
             overtake_offset_max_m: 7.0,
+            yield_temporal_margin_s: 1.0,
         }
     }
 }
@@ -600,20 +606,30 @@ impl GeometricPlanner {
         Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
     }
 
-    /// Predictive yield: roll a moving object forward (CTRV if a yaw rate is
-    /// supplied via `motion`, else constant-velocity) and, if it is currently OUT
-    /// of the lane but will ENTER the path ahead within the horizon (a crossing or
-    /// turning-in vehicle/pedestrian), return the arc-length at which it crosses in
-    /// — so the planner yields short of it. Objects already in the lane are handled
-    /// by stop-short/lead (skipped here). Conservative: yields to any predicted
-    /// in-lane conflict ahead without precise temporal-overlap reasoning. Returns
-    /// `None` if there is no predicted conflict.
+    /// Predictive yield (SPACE-TIME): roll a moving object forward (CTRV if a yaw
+    /// rate is supplied via `motion`, else constant-velocity) and, if it is
+    /// currently OUT of the lane but will ENTER the path ahead within the horizon
+    /// (a crossing or turning-in vehicle/pedestrian), return the arc-length at
+    /// which it crosses in — so the planner yields short of it. Objects already in
+    /// the lane are handled by stop-short/lead (skipped here).
+    ///
+    /// TEMPORAL OVERLAP: a yield is returned only if the object still occupies the
+    /// conflict band when the ego could reach it. The object's occupancy window
+    /// `[t_enter, t_exit]` is compared against `t_ego`, the SOONEST the ego could
+    /// arrive at the conflict (accelerate to cruise, then cruise — an upper-bound
+    /// speed, so the test is yield-biased / fail-safe). If the object clears more
+    /// than `yield_temporal_margin_s` before `t_ego`, the crosser is long gone and
+    /// the planner does NOT yield. This only DROPS provably-unnecessary yields — it
+    /// is never less cautious than a purely spatial yield, and KIRRA still backstops.
+    /// Returns `None` if there is no predicted space-time conflict.
     fn predict_yield_s(
         &self,
         obj: &PerceivedObject,
         motion: &[MotionState],
         guide: &[(f64, f64)],
         s_ego: f64,
+        ego_speed: f64,
+        ego_target: f64,
     ) -> Option<f64> {
         let (_, signed_now) = project_signed(guide, obj.pos.x_m, obj.pos.y_m);
         if signed_now.abs() <= self.cfg.object_lane_tolerance_m {
@@ -632,16 +648,61 @@ impl GeometricPlanner {
         let steps = (self.cfg.prediction_horizon_s / dt).ceil() as usize;
         let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
         let (mut fx, mut fy) = (obj.pos.x_m, obj.pos.y_m);
-        for _ in 1..=steps {
+        // Track the FIRST in-lane-ahead entry and the time the object then LEAVES
+        // the band — only a real exit (within the horizon) counts.
+        let mut conflict: Option<(f64, f64)> = None; // (s_conflict, t_enter)
+        let mut exit_t: Option<f64> = None;
+        for i in 1..=steps {
+            let t = i as f64 * dt;
             heading += yaw_rate * dt;
             fx += speed * heading.cos() * dt;
             fy += speed * heading.sin() * dt;
             let (s_f, lateral_f) = project_signed(guide, fx, fy);
-            if s_f > s_ego && lateral_f.abs() <= self.cfg.prediction_lane_half_m {
-                return Some(s_f); // first predicted entry into the lane ahead
+            let in_band = s_f > s_ego && lateral_f.abs() <= self.cfg.prediction_lane_half_m;
+            match conflict {
+                None if in_band => conflict = Some((s_f, t)), // first entry
+                Some(_) if !in_band => {
+                    exit_t = Some(t); // first exit after entry
+                    break;
+                }
+                _ => {}
             }
         }
-        None
+        let (s_conflict, _t_enter) = conflict?;
+
+        // Relax the yield ONLY if the object DEFINITELY clears the band within the
+        // horizon, and does so more than `yield_temporal_margin_s` before the ego's
+        // SOONEST arrival (accelerate to cruise, then cruise — upper-bound speed, so
+        // the test is yield-biased). If the object enters and STAYS through the
+        // horizon (a stall / slow crosser still present at the end of prediction),
+        // we cannot confirm it clears → yield (conservative). KIRRA still backstops.
+        if let Some(t_exit) = exit_t {
+            let t_ego = self.time_to_distance(s_conflict - s_ego, ego_speed, ego_target);
+            if t_exit + self.cfg.yield_temporal_margin_s < t_ego {
+                return None;
+            }
+        }
+        Some(s_conflict)
+    }
+
+    /// Time (s) for the ego to cover `dist` starting at `v0`, accelerating at
+    /// `max_accel_mps2` to `v_target`, then cruising. The SOONEST plausible arrival
+    /// (used yield-biased). `dist <= 0` → 0.
+    fn time_to_distance(&self, dist: f64, v0: f64, v_target: f64) -> f64 {
+        if dist <= 0.0 {
+            return 0.0;
+        }
+        let a = self.cfg.max_accel_mps2.max(1e-3);
+        let v0 = v0.clamp(0.0, v_target.max(0.0));
+        let t_accel = ((v_target - v0) / a).max(0.0);
+        let d_accel = v0 * t_accel + 0.5 * a * t_accel * t_accel;
+        if dist <= d_accel {
+            // Still accelerating: solve v0*t + 0.5*a*t^2 = dist.
+            (-v0 + (v0 * v0 + 2.0 * a * dist).sqrt()) / a
+        } else {
+            let v = v_target.max(1e-3);
+            t_accel + (dist - d_accel) / v
+        }
     }
 }
 
@@ -765,7 +826,9 @@ impl Planner for GeometricPlanner {
         // the horizon → yield short of where it crosses (anticipates a cut-in /
         // crossing that the snapshot-only checks miss until it is already close).
         for obj in input.objects {
-            if let Some(s_conflict) = self.predict_yield_s(obj, input.motion, &guide, s_ego) {
+            if let Some(s_conflict) =
+                self.predict_yield_s(obj, input.motion, &guide, s_ego, cur, target)
+            {
                 let yield_s = s_conflict - self.cfg.object_stop_gap_m;
                 if yield_s < s_limit {
                     s_limit = yield_s;
@@ -1972,6 +2035,49 @@ mod tests {
         let ctrv_max = ctrv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(ctrv_max < 21.0, "CTRV: predicts the turn-in → yields short, got {ctrv_max}");
         assert!(ctrv_max < cv_max - 5.0, "CTRV yields meaningfully shorter than CV");
+    }
+
+    // --- Temporal-overlap (space-time) yielding ----------------------------
+
+    #[test]
+    fn fast_crosser_that_clears_in_time_is_not_yielded_to() {
+        // SAME geometry as `yields_to_crossing_object` (crosser at x=20, ego from
+        // x=8) but the crosser is FAST (vy=-8): it enters AND clears the lane band
+        // (~0.4–0.9 s) long before the ego could reach x=20 (~2.6 s). Space-time:
+        // the object is already gone → no conflict → no yield. The pre-temporal
+        // spatial-only predictor stopped the ego short of a crosser that has passed.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -8.0)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 22.0,
+            "fast crosser clears before the ego arrives → drives on (no yield), got {max_x}");
+        // And it remains checker-admissible (the crosser's snapshot is 5 m aside).
+        let verdict = validate_trajectory_slow(
+            &out.trajectory, &corridor, &objs, &VehicleConfig::default_urban(), None,
+            FleetPosture::Nominal,
+        );
+        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "no-yield trajectory is admissible, got {verdict:?}");
+    }
+
+    #[test]
+    fn slow_crosser_still_in_the_lane_when_ego_arrives_is_yielded_to() {
+        // The contrast: a SLOW crosser (vy=-1.5) that enters the lane band and is
+        // STILL there through the prediction horizon (never confirmed to clear) →
+        // the temporal relaxation does NOT apply → yield (conservative). Proves the
+        // gate only drops provably-cleared conflicts, never a persisting one.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(25.0, 4.0, 0.0, -1.5)];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_objects(&corridor, 8.0, 40.0, &objs));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x < 23.0, "persisting in-lane crosser → yields short of it, got {max_x}");
+        assert!(out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
+            "controlled stop to yield");
     }
 
     // --- Commanded lane change ---------------------------------------------

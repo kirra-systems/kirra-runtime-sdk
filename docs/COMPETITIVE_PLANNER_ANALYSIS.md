@@ -126,7 +126,12 @@ parameters — both levers, not one.
    the map-file parse left feature-gated. **Remaining:** lane selection / router and
    intersections.
 2. **Prediction** — even constant-turn-rate / intention priors beat
-   constant-velocity.
+   constant-velocity. **Done:** CTRV turn-aware rollout (`predict_yield_s`, fed by
+   the Taj `motion` channel) + **space-time** yielding — the ego yields only when a
+   crosser's lane-band occupancy overlaps its own soonest arrival, so it no longer
+   stops for a crosser that has already passed (it drops provably-cleared conflicts,
+   never a persisting one). **Remaining:** lane-aware *intention* priors (objects
+   follow their lane / turn at junctions) using the lane graph.
 3. **Trajectory optimization** — jerk-limited / comfort, replacing the trapezoid.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
