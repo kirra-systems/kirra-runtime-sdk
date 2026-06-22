@@ -425,7 +425,8 @@ fn adapter_to_kernel_pose(p: &Pose) -> KernelPose {
 ///     (the FIRST segment passes the odom-derived estimate; subsequent
 ///     segments pass the prior segment's commanded steering)
 ///   - `steering_angle_deg`         = bicycle-model approx:
-///        steering = atan2(δheading * wheelbase, velocity * δt) → degrees
+///     steering = atan2(δheading * wheelbase, velocity * δt) → degrees
+///
 /// The bicycle-model approximation matches the kernel's P6 (lateral-accel)
 /// model and is the canonical pose-pair → steering-angle conversion.
 /// Field names match `ProposedVehicleCommand` exactly (Step 0).
