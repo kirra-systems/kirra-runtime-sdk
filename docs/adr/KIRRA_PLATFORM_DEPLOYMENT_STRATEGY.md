@@ -8,7 +8,7 @@
 
 ## Executive summary
 
-The KIRRA governor will run as the safety-domain payload **directly on QNX Hypervisor 8.0 for Safety**, with the Autoware / ROS 2 Jazzy / Occy stack (the *doer*) running **unmodified as an isolated Ubuntu guest VM** on the same SoC. The certified VMM supplies the ASIL-D freedom-from-interference boundary that makes the runtime-assurance decomposition creditable. The governor is written in **Rust, compiled with Ferrocene** (qualified for QNX Neutrino), and the **certified artifact is the minimal `no_std` verdict core**, not the whole process.
+The KIRRA governor will run as the safety-domain payload **directly on QNX Hypervisor 8.0 for Safety**, with the Autoware / ROS 2 Jazzy / Occy stack (the *doer*) running **unmodified as an isolated Ubuntu guest VM** on the same SoC. The certified VMM supplies the ASIL-D freedom-from-interference boundary that makes the runtime-assurance decomposition creditable. The governor is written in **Rust** — today built with upstream `rustc`, and **Ferrocene-ready** for the ASIL-D build (Ferrocene is qualified for QNX Neutrino; productization is tracked in #132) — and the **certified artifact is the minimal `no_std` verdict core**, not the whole process.
 
 QNX is chosen over PikeOS and INTEGRITY for one decisive reason on top of parity: it is the only one of the three with a qualified ASIL-D Rust toolchain target, so the governor stays in Rust without a bespoke toolchain qualification. PikeOS and INTEGRITY remain roadmap-only, activated by a named customer already certified on them.
 
