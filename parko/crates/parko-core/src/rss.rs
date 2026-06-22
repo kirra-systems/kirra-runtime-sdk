@@ -409,6 +409,13 @@ pub struct RssAgent {
     pub obj_lat_vel: f64,
     /// ACTUAL lateral separation to the object (m).
     pub actual_lateral_separation_m: f64,
+    /// Is this agent **oncoming** (opposing traffic / head-on)? When `true`, the
+    /// longitudinal axis is checked with [`opposite_direction_safe_distance`] (the
+    /// sum of both closing stopping distances) instead of the same-direction lead
+    /// primitive — and `ego_vel` / `lead_vel` are then the two closing speeds. The
+    /// integrator sets this from the lane graph (an object in an opposing lane;
+    /// `kirra_planner::LaneGraph::is_oncoming_at`). Default `false` = same-direction.
+    pub oncoming: bool,
 }
 
 /// The agent scene the governor sees this tick.

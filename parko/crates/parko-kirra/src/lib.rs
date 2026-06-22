@@ -45,7 +45,10 @@ use kirra_runtime_sdk::gateway::kinematics_contract::{
 use kirra_runtime_sdk::verifier::FleetPosture;
 
 use parko_core::commands::ControlCommand;
-use parko_core::rss::{lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed};
+use parko_core::rss::{
+    lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
+    opposite_direction_safe_distance,
+};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
     commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, localization_trusted,
@@ -194,14 +197,34 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
     let mut min_lat_margin = f64::INFINITY;
 
     for a in agents {
-        let required_long = longitudinal_safe_distance(
-            a.ego_vel,
-            a.lead_vel,
-            params.reaction_time,
-            params.accel_max,
-            params.brake_min,
-            params.brake_max,
-        );
+        // ONCOMING agents take the head-on bound (sum of both closing stopping
+        // distances); a same-direction lead takes the classic primitive. Routing
+        // an oncoming actor through the same-direction primitive would discard the
+        // closing sign and UNDER-estimate the gap (the #408 Obs 3 hazard) — the
+        // directionality the lane graph supplies is what prevents that here.
+        let required_long = if a.oncoming {
+            // Both speeds are closing magnitudes. Symmetric brake_min: the ego is
+            // in its correct lane (brakes at brake_min) and the oncoming actor is
+            // assumed to brake no harder than brake_min too (conservative). The
+            // wrong-lane overtake asymmetry is the deferred maneuver, not this path.
+            opposite_direction_safe_distance(
+                a.ego_vel.abs(),
+                a.lead_vel.abs(),
+                params.reaction_time,
+                params.accel_max,
+                params.brake_min,
+                params.brake_min,
+            )
+        } else {
+            longitudinal_safe_distance(
+                a.ego_vel,
+                a.lead_vel,
+                params.reaction_time,
+                params.accel_max,
+                params.brake_min,
+                params.brake_max,
+            )
+        };
         let required_lat = lateral_safe_distance(
             a.ego_lat_vel,
             a.obj_lat_vel,
@@ -1624,6 +1647,7 @@ mod scene_rss_tests {
             ego_lat_vel: 0.5,
             obj_lat_vel: 0.5,
             actual_lateral_separation_m: 1000.0,
+            oncoming: false,
         }
     }
 
@@ -1674,6 +1698,38 @@ mod scene_rss_tests {
         let scene = AgentScene::Agents(vec![safe_agent(), long_unsafe_agent(), safe_agent()]);
         assert!(!compute_scene_rss(&scene, &params()).safe,
             "a single unsafe agent makes the whole-scene verdict unsafe (worst case)");
+    }
+
+    // --- oncoming (head-on) agents take the opposite-direction bound ---
+
+    #[test]
+    fn oncoming_agent_requires_a_larger_gap_than_a_same_direction_lead() {
+        // Same kinematics (both moving 10 m/s), same actual gap — but one is a
+        // same-direction lead and one is oncoming. The oncoming head-on bound (sum
+        // of both stopping distances) requires a far larger gap, so at a gap that
+        // is SAFE for a lead it is UNSAFE for an oncoming vehicle.
+        // ~7 m suffices for a 10 m/s same-direction lead; the head-on bound needs
+        // ~31 m. 20 m sits between → safe as a lead, unsafe as oncoming.
+        let gap = 20.0;
+        let lead = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: gap,
+            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1000.0, oncoming: false };
+        let onc = RssAgent { oncoming: true, ..lead };
+
+        let lead_state = compute_scene_rss(&AgentScene::Agents(vec![lead]), &params());
+        let onc_state = compute_scene_rss(&AgentScene::Agents(vec![onc]), &params());
+        assert!(lead_state.safe, "a same-direction lead at {gap} m is safe");
+        assert!(!onc_state.safe, "the SAME gap is unsafe for an oncoming (head-on) vehicle");
+        assert!(onc_state.longitudinal_margin < lead_state.longitudinal_margin,
+            "the head-on bound leaves a smaller (here negative) margin");
+    }
+
+    #[test]
+    fn oncoming_agent_with_ample_gap_is_safe() {
+        // A wide gap clears even the (larger) head-on requirement.
+        let onc = RssAgent { ego_vel: 10.0, lead_vel: 10.0, actual_longitudinal_gap_m: 1000.0,
+            ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 1000.0, oncoming: true };
+        assert!(compute_scene_rss(&AgentScene::Agents(vec![onc]), &params()).safe,
+            "an oncoming vehicle far enough away is safe under the head-on bound");
     }
 
     // --- both axes evaluated per pair ---
@@ -2036,6 +2092,7 @@ mod scene_rss_tests {
         let close = AgentScene::Agents(vec![RssAgent {
             ego_vel: 0.0, lead_vel: 0.0, actual_longitudinal_gap_m: 1.0,
             ego_lat_vel: 0.0, obj_lat_vel: 0.0, actual_lateral_separation_m: 100.0,
+            oncoming: false,
         }]);
 
         // Tick 1 — close agent: derives vanished=false (obligation opens), no latch.
