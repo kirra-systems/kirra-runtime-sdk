@@ -36,6 +36,7 @@ fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
         controls: &[],
         lane_boundaries: &[],
         motion: &[],
+        predicted_paths: &[],
         lane_change_to_m: None,
         no_overtake_ids: &[],
         drivable: None,

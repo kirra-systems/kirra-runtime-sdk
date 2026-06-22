@@ -130,8 +130,12 @@ parameters — both levers, not one.
    the Taj `motion` channel) + **space-time** yielding — the ego yields only when a
    crosser's lane-band occupancy overlaps its own soonest arrival, so it no longer
    stops for a crosser that has already passed (it drops provably-cleared conflicts,
-   never a persisting one). **Remaining:** lane-aware *intention* priors (objects
-   follow their lane / turn at junctions) using the lane graph.
+   never a persisting one). Plus lane-aware **intention** priors: a per-object
+   predicted-path channel (`PlanInput.predicted_paths`, the object's lane-following
+   intent from the tracker) — Occy rolls a vehicle along its own lane instead of its
+   instantaneous-velocity tangent, so a lane-keeping car with a transient lateral
+   drift is no longer mis-predicted as cutting in. CV/CTRV remains the fallback.
+   **Remaining:** richer intent (turn/yield negotiation at junctions).
 3. **Trajectory optimization** — jerk-limited / comfort, replacing the trapezoid.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +

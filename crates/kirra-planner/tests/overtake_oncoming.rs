@@ -89,6 +89,7 @@ fn plan_and_check(
         controls: &[],
         lane_boundaries: &boundaries,
         motion: &[],
+        predicted_paths: &[],
         lane_change_to_m: None,
         no_overtake_ids: &[],
         drivable: with_drivable.then_some(drivable),
@@ -253,6 +254,7 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         controls: &[],
         lane_boundaries: &boundaries,
         motion: &[],
+        predicted_paths: &[],
         lane_change_to_m: None,
         no_overtake_ids: &[1], // the bus
         drivable: Some(&drivable),
