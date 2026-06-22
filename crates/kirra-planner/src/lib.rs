@@ -376,6 +376,14 @@ pub struct GeometricPlannerConfig {
     /// despite ramping the deceleration in. Within the accel/decel envelope the
     /// checker already enforces, so this is a comfort refinement, not a safety one.
     pub max_jerk_mps3: f64,
+    /// Chaikin corner-cutting iterations applied to the guide centerline before
+    /// sampling — rounds the corners of a coarse / curved corridor so the path's
+    /// curvature (and the steering it implies) is bounded (comfort), instead of the
+    /// heading jumping at each polyline vertex. `0` = off; the new vertices lie on
+    /// the original centerline segments, so it stays within the corridor
+    /// (containment still backstops). A straight guide is unaffected. Bounded for
+    /// WCET: the vertex count grows by ≤ 2× per iteration, so keep this small.
+    pub path_smoothing_iterations: usize,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -407,6 +415,7 @@ impl Default for GeometricPlannerConfig {
             overtake_offset_max_m: 7.0,
             yield_temporal_margin_s: 1.0,
             max_jerk_mps3: 2.5,
+            path_smoothing_iterations: 2,
         }
     }
 }
@@ -771,7 +780,7 @@ impl Planner for GeometricPlanner {
 
         // Guide path: corridor centerline if usable, else a straight ego→goal line.
         let center = centerline_from(input.map.left_boundary(), input.map.right_boundary());
-        let guide: Vec<(f64, f64)> = if center.len() >= 2 {
+        let raw_guide: Vec<(f64, f64)> = if center.len() >= 2 {
             center
         } else {
             vec![
@@ -779,6 +788,10 @@ impl Planner for GeometricPlanner {
                 (input.goal.target.x_m, input.goal.target.y_m),
             ]
         };
+        // Round the guide's corners (Chaikin) so a coarse / curved corridor yields a
+        // bounded-curvature path (comfort) instead of a heading jump at each vertex.
+        // A straight guide is unchanged; containment still backstops the result.
+        let guide = chaikin_smooth(&raw_guide, self.cfg.path_smoothing_iterations);
 
         // Travel window: ego projection → goal projection along the guide.
         let s_ego = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
@@ -1067,6 +1080,32 @@ fn point_on_path(points: &[Point], s: f64) -> (f64, f64) {
     }
     let last = points.last().unwrap();
     (last.x_m, last.y_m)
+}
+
+/// Chaikin corner-cutting smoothing of an open polyline, applied `iterations`
+/// times. Each interior corner `P` is replaced by the two points ¼ and ¾ of the
+/// way along its incident edges, rounding the corner; the FIRST and LAST vertices
+/// are kept (the path must still start at the ego projection and end at the goal).
+/// The new vertices are convex combinations of adjacent originals — they lie on the
+/// original edges — so for a corridor CENTERLINE the result stays within the
+/// corridor (containment still backstops). A straight polyline is unchanged.
+fn chaikin_smooth(poly: &[(f64, f64)], iterations: usize) -> Vec<(f64, f64)> {
+    let mut pts = poly.to_vec();
+    for _ in 0..iterations {
+        if pts.len() < 3 {
+            break; // nothing to round
+        }
+        let mut next = Vec::with_capacity(pts.len() * 2);
+        next.push(pts[0]); // keep the start
+        for w in pts.windows(2) {
+            let (p, q) = (w[0], w[1]);
+            next.push((0.75 * p.0 + 0.25 * q.0, 0.75 * p.1 + 0.25 * q.1)); // ¼
+            next.push((0.25 * p.0 + 0.75 * q.0, 0.25 * p.1 + 0.75 * q.1)); // ¾
+        }
+        next.push(pts[pts.len() - 1]); // keep the end
+        pts = next;
+    }
+    pts
 }
 
 /// Corridor centerline = pairwise midpoints of the boundary polylines over their
@@ -1445,6 +1484,94 @@ mod tests {
         assert!(a0 < cfg.max_accel_mps2,
             "launch acceleration {a0} should ramp, not jump to max {}", cfg.max_accel_mps2);
         assert!(a0 > 0.0, "and the ego does accelerate from the low start speed");
+    }
+
+    /// A corridor that turns at x=20 (centerline kink (0,0)→(20,0)→(40,2.5)),
+    /// half-width 5. The midpoint boundaries reproduce the kink as the guide.
+    struct KinkedCorridor {
+        left: Vec<Point>,
+        right: Vec<Point>,
+    }
+    impl KinkedCorridor {
+        fn new() -> Self {
+            Self {
+                left: vec![
+                    Point { x_m: 0.0, y_m: 5.0 },
+                    Point { x_m: 20.0, y_m: 5.0 },
+                    Point { x_m: 40.0, y_m: 7.5 },
+                ],
+                right: vec![
+                    Point { x_m: 0.0, y_m: -5.0 },
+                    Point { x_m: 20.0, y_m: -5.0 },
+                    Point { x_m: 40.0, y_m: -2.5 },
+                ],
+            }
+        }
+    }
+    impl CorridorSource for KinkedCorridor {
+        fn left_boundary(&self) -> &[Point] { &self.left }
+        fn right_boundary(&self) -> &[Point] { &self.right }
+        fn confidence(&self) -> f32 { 0.95 }
+        fn age_ms(&self) -> u64 { 10 }
+    }
+
+    fn kinked_input(map: &dyn CorridorSource) -> PlanInput<'_> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 2.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: 40.0, y_m: 2.5, heading_rad: 0.0 } },
+            map,
+            objects: &[],
+            controls: &[],
+            lane_boundaries: &[],
+            motion: &[],
+            predicted_paths: &[],
+            lane_change_to_m: None,
+            no_overtake_ids: &[],
+            drivable: None,
+            posture: FleetPosture::Nominal,
+        }
+    }
+
+    #[test]
+    fn chaikin_smoothing_reduces_path_curvature_at_a_corridor_kink() {
+        // The raw guide's heading JUMPS at the kink (a coarse-corridor vertex) →
+        // a curvature spike. Chaikin corner-cutting spreads the turn over several
+        // samples → far lower PEAK path curvature (Δheading/Δs), the comfort win and
+        // the steering-rate the checker derives. (The path STILL follows the same
+        // corridor; admitting a turn at cruise additionally needs curvature-aware
+        // SPEED — a separate lever — since steering rate scales with speed.)
+        let corr = KinkedCorridor::new();
+        let peak_curvature = |iters: usize| -> f64 {
+            let cfg = GeometricPlannerConfig {
+                path_smoothing_iterations: iters,
+                ..Default::default()
+            };
+            let out = GeometricPlanner::new(cfg).plan(&kinked_input(&corr));
+            out.trajectory
+                .windows(2)
+                .map(|w| {
+                    let dh = (w[1].pose.heading_rad - w[0].pose.heading_rad).abs();
+                    let ds = dist2d(w[0].pose.x_m, w[0].pose.y_m, w[1].pose.x_m, w[1].pose.y_m)
+                        .max(1e-6);
+                    dh / ds
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let raw = peak_curvature(0);
+        let smooth = peak_curvature(2);
+        assert!(smooth < raw * 0.5,
+            "smoothing should at least halve peak path curvature: raw={raw}, smooth={smooth}");
+        assert!(smooth.is_finite() && smooth > 0.0, "the smoothed path still turns");
+        // The smoothed proposal is still a forward Motion that advances past the kink.
+        let out = GeometricPlanner::default().plan(&kinked_input(&corr));
+        assert_eq!(out.kind, ProposalKind::Motion);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 20.0, "the smoothed path drives through the kink, got max_x {max_x}");
     }
 
     #[test]

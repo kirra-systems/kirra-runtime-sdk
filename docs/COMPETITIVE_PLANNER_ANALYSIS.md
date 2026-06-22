@@ -141,8 +141,13 @@ parameters — both levers, not one.
    jerk-limited **S-curve** (`max_jerk_mps3`) — acceleration slews instead of
    stepping, the brake trigger is jerk-aware (still stops by the limit), and the
    stop is latched (no re-accel creep). Within the accel/decel envelope the checker
-   already enforces, so it stays admissible. **Remaining:** path-shape smoothing
-   (curvature/steering-rate optimization beyond the speed profile).
+   already enforces, so it stays admissible. **Done (path shape):** Chaikin
+   corner-cutting of the guide centerline (`path_smoothing_iterations`) rounds a
+   coarse / curved corridor's vertices, cutting peak path curvature (and the
+   steering it implies) — verified ~halved at a kink — while staying in-corridor
+   (the new vertices lie on the original edges) and a no-op on straight roads.
+   **Remaining:** curvature-aware *speed* (slow for tight turns so a corner is
+   admissible at the bicycle-model steering-rate limit, not just lower-curvature).
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
