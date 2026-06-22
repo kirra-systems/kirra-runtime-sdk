@@ -96,6 +96,23 @@ pub struct MotionState {
     pub yaw_rate_rad_s: f64,
 }
 
+/// Per-object **intention-aware predicted path** the tracker/integrator supplies
+/// for predictive yielding. Keyed by the object's `id`; `points` is the object's
+/// expected future positions in world frame (e.g. its **lane centerline ahead** —
+/// the lane-following intent — derived from the map the tracker holds). When
+/// present, the planner rolls the object ALONG this path at its current speed
+/// instead of extrapolating its instantaneous velocity (CTRV/CV): a vehicle keeping
+/// its own (adjacent / opposing / curving) lane is no longer mis-predicted as
+/// drifting into the ego lane, so it does not trigger a spurious yield. An object
+/// with no entry falls back to the CTRV kinematic rollout, as before. `< 2` points
+/// is treated as "no path" (fail-safe → CTRV). The planner only *consumes* this;
+/// the intent reasoning lives where the map does, and KIRRA still backstops.
+#[derive(Debug, Clone, Copy)]
+pub struct PredictedPath<'a> {
+    pub id: u64,
+    pub points: &'a [Point],
+}
+
 /// World-state input to [`Planner::plan`].
 ///
 /// `// PHASE-0 LOCKED` — derived from the checker's own consumed inputs: ego
@@ -125,6 +142,12 @@ pub struct PlanInput<'a> {
     /// (from the Taj tracker) instead of constant-velocity. An object with no
     /// entry (or an empty slice) predicts straight-line (CV), as before.
     pub motion: &'a [MotionState],
+    /// Per-object intention-aware predicted paths (see [`PredictedPath`]) — when an
+    /// object has one, predictive yielding rolls it along that path (lane-following
+    /// intent) instead of the CTRV kinematic tangent, suppressing spurious yields to
+    /// vehicles keeping their own lane. An object with no entry (or an empty slice)
+    /// uses the CTRV rollout, as before.
+    pub predicted_paths: &'a [PredictedPath<'a>],
     /// Commanded lane change: a target lateral offset from the current path
     /// centerline to shift to (e.g. the adjacent lane center). Honored only if the
     /// lane-line rules permit crossing to that side and the corridor fits;
@@ -622,10 +645,12 @@ impl GeometricPlanner {
     /// the planner does NOT yield. This only DROPS provably-unnecessary yields — it
     /// is never less cautious than a purely spatial yield, and KIRRA still backstops.
     /// Returns `None` if there is no predicted space-time conflict.
+    #[allow(clippy::too_many_arguments)]
     fn predict_yield_s(
         &self,
         obj: &PerceivedObject,
         motion: &[MotionState],
+        predicted_paths: &[PredictedPath],
         guide: &[(f64, f64)],
         s_ego: f64,
         ego_speed: f64,
@@ -639,7 +664,12 @@ impl GeometricPlanner {
         if speed < self.cfg.crossing_speed_threshold_mps {
             return None; // not a mover worth predicting
         }
-        // Turn-aware: roll on CTRV using the object's yaw rate (0 → CV).
+        // INTENTION prior: if the tracker supplied a predicted path (the object's
+        // lane-following intent), roll the object ALONG it at its speed. Otherwise
+        // fall back to the turn-aware CTRV kinematic rollout (yaw rate 0 → CV).
+        let path = predicted_paths
+            .iter()
+            .find(|p| p.id == obj.id && p.points.len() >= 2);
         let yaw_rate = motion
             .iter()
             .find(|m| m.id == obj.id)
@@ -647,16 +677,22 @@ impl GeometricPlanner {
         let dt = self.cfg.prediction_dt_s.max(0.05);
         let steps = (self.cfg.prediction_horizon_s / dt).ceil() as usize;
         let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
-        let (mut fx, mut fy) = (obj.pos.x_m, obj.pos.y_m);
+        let (mut kx, mut ky) = (obj.pos.x_m, obj.pos.y_m);
         // Track the FIRST in-lane-ahead entry and the time the object then LEAVES
         // the band — only a real exit (within the horizon) counts.
         let mut conflict: Option<(f64, f64)> = None; // (s_conflict, t_enter)
         let mut exit_t: Option<f64> = None;
         for i in 1..=steps {
             let t = i as f64 * dt;
-            heading += yaw_rate * dt;
-            fx += speed * heading.cos() * dt;
-            fy += speed * heading.sin() * dt;
+            let (fx, fy) = if let Some(p) = path {
+                // Lane-following: position after travelling `speed*t` along the path.
+                point_on_path(p.points, speed * t)
+            } else {
+                heading += yaw_rate * dt;
+                kx += speed * heading.cos() * dt;
+                ky += speed * heading.sin() * dt;
+                (kx, ky)
+            };
             let (s_f, lateral_f) = project_signed(guide, fx, fy);
             let in_band = s_f > s_ego && lateral_f.abs() <= self.cfg.prediction_lane_half_m;
             match conflict {
@@ -826,9 +862,9 @@ impl Planner for GeometricPlanner {
         // the horizon → yield short of where it crosses (anticipates a cut-in /
         // crossing that the snapshot-only checks miss until it is already close).
         for obj in input.objects {
-            if let Some(s_conflict) =
-                self.predict_yield_s(obj, input.motion, &guide, s_ego, cur, target)
-            {
+            if let Some(s_conflict) = self.predict_yield_s(
+                obj, input.motion, input.predicted_paths, &guide, s_ego, cur, target,
+            ) {
                 let yield_s = s_conflict - self.cfg.object_stop_gap_m;
                 if yield_s < s_limit {
                     s_limit = yield_s;
@@ -973,6 +1009,28 @@ impl Planner for GeometricPlanner {
 
 fn dist2d(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
     ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt()
+}
+
+/// Position at arc-length `s` along a `Point` polyline (the predicted-path / lane
+/// centerline). `s <= 0` → the first vertex; past the end → clamped to the last
+/// (the object holds at the path end rather than extrapolating off it).
+fn point_on_path(points: &[Point], s: f64) -> (f64, f64) {
+    match points.first() {
+        None => return (0.0, 0.0),
+        Some(p0) if s <= 0.0 => return (p0.x_m, p0.y_m),
+        _ => {}
+    }
+    let mut acc = 0.0;
+    for w in points.windows(2) {
+        let seg = dist2d(w[0].x_m, w[0].y_m, w[1].x_m, w[1].y_m);
+        if acc + seg >= s {
+            let f = if seg > 1e-9 { (s - acc) / seg } else { 0.0 };
+            return (w[0].x_m + f * (w[1].x_m - w[0].x_m), w[0].y_m + f * (w[1].y_m - w[0].y_m));
+        }
+        acc += seg;
+    }
+    let last = points.last().unwrap();
+    (last.x_m, last.y_m)
 }
 
 /// Corridor centerline = pairwise midpoints of the boundary polylines over their
@@ -1180,6 +1238,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1251,6 +1310,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1527,6 +1587,7 @@ mod tests {
             controls: &[],
             lane_boundaries: &[],
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1772,6 +1833,7 @@ mod tests {
             controls,
             lane_boundaries: &[],
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1880,6 +1942,7 @@ mod tests {
             controls: &[],
             lane_boundaries: lanes,
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -2080,6 +2143,58 @@ mod tests {
             "controlled stop to yield");
     }
 
+    // --- Intention priors (lane-following predicted path) ------------------
+
+    #[test]
+    fn intention_prior_suppresses_a_spurious_yield_to_a_lane_keeping_vehicle() {
+        // An object in the adjacent lane (y=4) moving forward at 5 m/s with an
+        // apparent lateral drift toward the ego lane (vy=-2). KINEMATIC prediction
+        // (CV/CTRV) extrapolates the drift INTO the ego lane → yields. But the
+        // tracker's INTENTION-aware path says the vehicle keeps its own lane
+        // (straight along y=4) → it never enters the ego lane → no yield. The drift
+        // was transient; intent beats kinematics, and KIRRA still backstops.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 4.0, 5.0, -2.0)];
+
+        // Kinematic (no predicted path) → extrapolated drift-in → yields short.
+        let mut p = GeometricPlanner::default();
+        let kin = p.plan(&input_with_objects(&corridor, 8.0, 40.0, &objs));
+        let kin_max = kin.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(kin_max < 22.0, "kinematic: extrapolated drift-in → yields, got {kin_max}");
+
+        // Intention prior: the lane-following path keeps it at y=4 → no entry → drives on.
+        let lane_path = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 90.0, y_m: 4.0 }];
+        let paths = [PredictedPath { id: 1, points: &lane_path }];
+        let inp = PlanInput {
+            predicted_paths: &paths,
+            ..input_with_objects(&corridor, 8.0, 40.0, &objs)
+        };
+        let intent = p.plan(&inp);
+        let intent_max = intent.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(intent_max > 30.0,
+            "intent: lane-keeping vehicle → no yield, drives on, got {intent_max}");
+        assert!(intent_max > kin_max + 8.0, "intent drives meaningfully further than kinematic");
+    }
+
+    #[test]
+    fn intention_prior_still_yields_when_the_path_does_enter_the_lane() {
+        // Control: when the predicted path genuinely turns INTO the ego lane, the
+        // intent rollout finds the entry and yields — the prior is not a blanket
+        // "never yield", it follows the supplied path.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 4.0, 5.0, 0.0)]; // moving parallel
+        let turn_in = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 28.0, y_m: 0.0 }];
+        let paths = [PredictedPath { id: 1, points: &turn_in }];
+        let mut p = GeometricPlanner::default();
+        let inp = PlanInput {
+            predicted_paths: &paths,
+            ..input_with_objects(&corridor, 8.0, 40.0, &objs)
+        };
+        let out = p.plan(&inp);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x < 26.0, "path turns into the lane → yields, got {max_x}");
+    }
+
     // --- Commanded lane change ---------------------------------------------
 
     fn input_lane_change<'a>(
@@ -2102,6 +2217,7 @@ mod tests {
             controls: &[],
             lane_boundaries: lanes,
             motion: &[],
+            predicted_paths: &[],
             lane_change_to_m: Some(target),
             no_overtake_ids: &[],
             drivable: None,
