@@ -85,10 +85,19 @@ an NVIDIA-style planner as the doer.**
 
 A *too-strict checker + too-simple planner* is **over-conservative**. We hit it
 repeatedly: a dead-ahead lead → MRC (the lateral-RSS floor); an abreast pass →
-reject. In dense traffic, Occy + KIRRA-as-tuned-today would stop too often.
-Mobileye avoids this by pairing RSS with a *sophisticated* policy **and**
-carefully-tuned RSS parameters. So a real improvement axis is **both** smartening
-Occy *and* tuning KIRRA's RSS conservatism — not just one.
+reject. The **overtake** build sharpened it twice more: (a) a car *centered* in the
+ego lane can't be passed at all — the adapter's lateral RSS (≈1.75 m, independent of
+longitudinal distance) MRCs any in-lane-ahead vehicle, so a pass is admissible only
+for a car already near the lane edge; (b) during the *angled* ramp of a pass, the
+lateral RSS treats any **fast adjacent-lane** vehicle as a lateral threat (the path
+heading projects the other car's speed into a closing lateral component), so it MRCs
+oncoming *and* same-direction traffic alike — which is why the overtake demo's
+direction-isolation lives at the checker unit level (#469), not in the trajectory.
+In dense traffic, Occy + KIRRA-as-tuned-today would stop too often. Mobileye avoids
+this by pairing RSS with a *sophisticated* policy **and** carefully-tuned RSS
+parameters. So a real improvement axis is **both** smartening Occy *and* tuning
+KIRRA's RSS conservatism (especially the lateral band's lack of longitudinal
+context) — not just one.
 
 ## 5. Recommended roadmap (in Kirra's grain)
 
@@ -101,7 +110,13 @@ Occy *and* tuning KIRRA's RSS conservatism — not just one.
 2. **Prediction** — even constant-turn-rate / intention priors beat
    constant-velocity.
 3. **Trajectory optimization** — jerk-limited / comfort, replacing the trapezoid.
-4. **Lateral behaviors** — lane-change / merge / overtake decisions.
+4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
+   (overtake):** the `PlanInput` reference-path vs drivable-area split +
+   `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
+   oncoming lane (gated by lane-line type + drivable fit); KIRRA's head-on RSS
+   governs the oncoming risk. **Remaining:** merge / unprotected-turn negotiation,
+   and the §4 RSS-tuning needed for passes to be admitted as routinely as they are
+   proposed.
 5. **The strategic one** — prove KIRRA bounds a **learned planner**: swap a
    NVIDIA / Hydra-MDP-style net in as the doer and show the safety case is
    *unchanged*. That is the Kirra thesis's killer demo, and it is why Occy's
