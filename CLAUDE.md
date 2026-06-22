@@ -226,7 +226,11 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
 - `Unknown` → `false` immediately (before posture check)
 - Stale cache (TTL exceeded) → `false`
 - `LockedOut` → blocks everything
-- `Degraded` → allows `ReadTelemetry` only
+- `Degraded` → allows `ReadTelemetry` AND `ActuatorMotion` only (Option A / ADR-0011):
+  `ActuatorMotion` is the one write classification (`POST /actuator/motion/command`,
+  exact match) mounted behind the inner `enforce_actuator_safety_envelope` decel gate,
+  so the outer gate defers its Degraded verdict to that gate instead of 503-ing it.
+  Every other `WriteState` / `SystemMutation` is still denied in Degraded.
 - `Nominal` → allows all except `Unknown`
 
 **Degraded = Controlled Decel-to-Stop-and-HOLD** (`enforce_degraded_decel_to_stop`, issue #70):
@@ -241,13 +245,16 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
   fabric `AssetGovernor::evaluate_command`, ros2-adapter `validate_trajectory_slow`,
   parko-kirra `KirraGovernor::apply_mrc_profile` (the last also gates an independent
   angular-velocity channel via `STOP_EPSILON_RAD_S` for differential drive). **REACHABILITY
-  CAVEAT (#405 / ADR-0011):** the three *direct* callers (fabric / parko-kirra / ros2-adapter)
-  invoke the gate directly and ARE reachable. The gateway `enforce_actuator_safety_envelope`
-  branch is currently **UNREACHABLE on the HTTP `/actuator/motion/command` path** — the outer
-  `enforce_posture_routing` gate 503s Degraded `WriteState` before the inner envelope runs, so
-  the decel-to-stop branch is dead code there. Resolution recorded in ADR-0011 (the `503 → 0.0`
-  consumer fix is the safety floor; relaxing the outer gate is a follow-on design choice). Do
-  not cite the gateway HTTP path as a live decel-to-stop enforcement point until that lands.
+  (#405 / ADR-0011, Option A adopted):** all four enforcement points are now live. The three
+  *direct* callers (fabric / parko-kirra / ros2-adapter) invoke the gate directly; the gateway
+  `enforce_actuator_safety_envelope` branch is now **reachable on the HTTP
+  `/actuator/motion/command` path** because the outer `enforce_posture_routing` gate classifies
+  that exact route as `OperationalCommand::ActuatorMotion` and `should_route_command` admits it
+  under Degraded (deferring the verdict to the inner decel gate) — every OTHER `WriteState`
+  stays 503 under Degraded. The `503 → 0.0` consumer safe-stop (#405) remains the defense-in-depth
+  safety floor for the LockedOut/stale 503s and any non-gated write. Auth note: on the assembled
+  router the actuator route is still admin-gated, so the auth-free Degraded-deferral proof lives
+  in `tests/posture_gate_integration.rs` (INV-13 forbids `set_var` in the binary-internal test).
 - The Nominal WCET-critical `validate_vehicle_command` path is UNCHANGED.
 - "MRC" disambiguation: Degraded MRC = decel-to-stop *envelope* (bounds a converging
   command); LockedOut MRC fallback = safe-stop *maneuver* (all commands denied).

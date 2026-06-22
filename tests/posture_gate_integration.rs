@@ -90,10 +90,17 @@ fn build_test_app(svc: Arc<ServiceState>) -> Router {
     let actuator_routes = Router::new()
         .route("/actuator/motion/command", post(ok_handler));
 
+    // A generic state-write route (classifies as WriteState, has NO inner
+    // kinematic gate) — used to prove Option A relaxes ONLY the inner-gated
+    // actuator route under Degraded, while every other write stays 503.
+    let generic_write_routes = Router::new()
+        .route("/fleet/dependencies", post(ok_handler));
+
     Router::new()
         .merge(probe_routes)
         .merge(read_routes)
         .merge(actuator_routes)
+        .merge(generic_write_routes)
         .with_state(svc.clone())
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc),
@@ -179,18 +186,43 @@ async fn test_lockedout_blocks_functional_reads() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Degraded posture: a WriteState command is denied 503. `should_route_command`
-// only permits `ReadTelemetry` under Degraded.
+// 4. Degraded posture (Option A / ADR-0011): the inner-gated actuator-motion
+// command is DEFERRED past the outer gate to its inner kinematic envelope
+// (here a stub returns 200, proving the gate stepped aside), while EVERY OTHER
+// WriteState — one with no inner gate — is still denied 503. This is the
+// authoritative auth-free proof of the Option A relaxation: the representative
+// router carries only `enforce_posture_routing`, so the actuator 200 vs generic
+// 503 contrast is the posture gate's decision, not masked by auth or the
+// envelope. (`should_route_command` Degraded now admits ReadTelemetry +
+// ActuatorMotion only.)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_degraded_blocks_writes() {
-    let svc = build_state_with_posture(FleetPosture::Degraded);
-    let status = req_status(build_test_app(svc), "POST", "/actuator/motion/command").await;
+async fn test_degraded_defers_actuator_motion_but_blocks_other_writes() {
+    // The inner-gated actuator route passes the outer gate under Degraded.
+    let actuator = req_status(
+        build_test_app(build_state_with_posture(FleetPosture::Degraded)),
+        "POST",
+        "/actuator/motion/command",
+    )
+    .await;
     assert_eq!(
-        status,
+        actuator,
+        StatusCode::OK,
+        "Degraded must DEFER /actuator/motion/command to the inner gate (Option A); got {actuator}"
+    );
+
+    // A generic write (no inner kinematic gate) is still denied.
+    let generic = req_status(
+        build_test_app(build_state_with_posture(FleetPosture::Degraded)),
+        "POST",
+        "/fleet/dependencies",
+    )
+    .await;
+    assert_eq!(
+        generic,
         StatusCode::SERVICE_UNAVAILABLE,
-        "Degraded must block actuator writes (only ReadTelemetry allowed); got {status}"
+        "Degraded must still block a generic WriteState with no inner gate; got {generic}"
     );
 }
 

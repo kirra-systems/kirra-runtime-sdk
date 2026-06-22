@@ -6,6 +6,15 @@ pub enum OperationalCommand {
     ReadTelemetry,
     /// Actuator writes and velocity commands. Denied when LockedOut.
     WriteState,
+    /// Actuator motion command on the ONE route gated by an inner kinematic
+    /// safety envelope (`/actuator/motion/command`). Allowed under Nominal AND
+    /// Degraded — under Degraded the inner `enforce_degraded_decel_to_stop` gate
+    /// (decel-to-stop-and-HOLD over the MRC 5.0 m/s envelope) authors the safe
+    /// verdict, so the OUTER posture gate defers to it instead of returning a
+    /// blanket 503 (Option A / ADR-0011). Denied under LockedOut and on a
+    /// stale/cold cache (fail-closed), exactly like any other state write — and
+    /// it is still treated as a state mutation by the HA epoch fence.
+    ActuatorMotion,
     /// Firmware, reboot, config mutations. Denied unless Nominal.
     SystemMutation,
     /// Unrecognised HTTP method. Denied in ALL postures (fail-closed).
@@ -42,7 +51,18 @@ pub fn classify_http_command(method: &str, path: &str) -> OperationalCommand {
         "DELETE" => OperationalCommand::SystemMutation,
 
         "POST" | "PUT" => {
-            if is_write_state_path(path) {
+            if path == "/actuator/motion/command" {
+                // The ONLY actuator route mounted with the inner
+                // `enforce_actuator_safety_envelope` decel-to-stop gate (see
+                // `build_app`). Classed distinctly so the outer posture gate can
+                // DEFER the Degraded verdict to that inner kinematic gate
+                // (Option A / ADR-0011) instead of a blanket 503 — while every
+                // other WriteState path stays fail-closed under Degraded. Exact
+                // match (not a `/actuator` prefix) so a future actuator route
+                // without an inner gate cannot inherit the relaxation: it falls
+                // to the `is_write_state_path` arm and stays fail-closed.
+                OperationalCommand::ActuatorMotion
+            } else if is_write_state_path(path) {
                 OperationalCommand::WriteState
             } else if is_system_mutation_path(path) {
                 OperationalCommand::SystemMutation
@@ -129,6 +149,37 @@ mod tests {
     fn test_classifies_actuator_as_write_state() {
         assert_eq!(classify_http_command("POST", "/actuator/servo"), OperationalCommand::WriteState);
         assert_eq!(classify_http_command("PUT",  "/actuator/valve"), OperationalCommand::WriteState);
+    }
+
+    /// Option A / ADR-0011: the ONE actuator route mounted behind the inner
+    /// `enforce_actuator_safety_envelope` decel gate classifies as the distinct
+    /// `ActuatorMotion`, so the outer posture gate defers its Degraded verdict to
+    /// that inner gate instead of a blanket 503. Match is EXACT — a sibling
+    /// `/actuator/*` path without an inner gate must stay `WriteState`
+    /// (fail-closed under Degraded), so the relaxation cannot leak to a route
+    /// that has no kinematic envelope behind it.
+    #[test]
+    fn test_actuator_motion_command_classifies_as_actuator_motion() {
+        assert_eq!(
+            classify_http_command("POST", "/actuator/motion/command"),
+            OperationalCommand::ActuatorMotion,
+            "the inner-gated actuator route must classify as ActuatorMotion (Option A)"
+        );
+        // Query string must not defeat the exact match.
+        assert_eq!(
+            classify_http_command("POST", "/actuator/motion/command?dry_run=1"),
+            OperationalCommand::ActuatorMotion
+        );
+        // Sibling actuator paths (NO inner gate mounted) stay fail-closed WriteState.
+        assert_eq!(
+            classify_http_command("POST", "/actuator/motion/command/extra"),
+            OperationalCommand::WriteState,
+            "a non-exact actuator sub-path must NOT inherit the ActuatorMotion relaxation"
+        );
+        assert_eq!(
+            classify_http_command("POST", "/actuator/servo"),
+            OperationalCommand::WriteState
+        );
     }
 
     #[test]
@@ -235,8 +286,10 @@ mod tests {
     #[test]
     fn test_known_write_paths_preserved() {
         // Control-plane / actuator WriteState endpoints.
+        // NOTE: `/actuator/motion/command` is intentionally absent here — it
+        // classifies as `ActuatorMotion` (Option A / ADR-0011), asserted
+        // separately in `test_actuator_motion_command_classifies_as_actuator_motion`.
         for p in [
-            "/actuator/motion/command",
             "/cmd_vel",
             "/action_filter/evaluate",
             "/attestation/register",

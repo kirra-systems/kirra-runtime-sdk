@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed resolution (2026-06-21)** — owner direction set; ratified on merge. Supersedes the prior "Open / deferred" status (see Decision). |
-| Date | 2026-06-20 (finding) · 2026-06-21 (resolution) |
+| Status | **Accepted (2026-06-22)** — owner direction ratified; **Option A adopted** and implemented (see Update). Supersedes the prior "Proposed resolution / Open / deferred" status. |
+| Date | 2026-06-20 (finding) · 2026-06-21 (resolution) · 2026-06-22 (Option A adopted) |
 | Deciders | Project / safety-case owner |
 | Issues | #405 (this), #406 (sequenced behind — MRC divergence, ADR-0012), #70 (Degraded decel-to-stop-and-HOLD design) |
 | Code | `src/bin/kirra_verifier_service.rs` (router assembly), `src/gateway/policy_layer.rs`, `src/posture_cache.rs` (`should_route_command`), `src/bin/kirra_carla_client.rs` (the actuator consumer) |
@@ -127,3 +127,39 @@ the CLAUDE.md "wired at all four points" correction.
 
 **Implementation** (the consumer `503 → 0.0` fix + the test) lands from a laptop (large
 governor sources; web `git push` unavailable). This ADR records the decision, which does not.
+
+## Update (2026-06-22) — Option A adopted and implemented
+
+With the `503 → 0.0` safety floor (#405) already merged, the owner adopted **Option A**: the
+HTTP `/actuator/motion/command` path is relaxed under Degraded so it reaches the inner
+`enforce_degraded_decel_to_stop` gate, upgrading the flat-zero stop to a *converging-decel*
+command. Scope is deliberately minimal and fail-closed by construction:
+
+1. **New classification `OperationalCommand::ActuatorMotion`** (`src/gateway/policy.rs`),
+   returned for the **exact** path `/actuator/motion/command` — the *only* route mounted
+   behind the inner envelope in `build_app`. A non-exact `/actuator/*` sibling falls through to
+   `WriteState` and stays fail-closed, so the relaxation cannot leak to a route with no inner
+   kinematic gate.
+2. **`should_route_command` Degraded arm** (`src/posture_cache.rs`) now admits
+   `ReadTelemetry | ActuatorMotion`. Every other `WriteState` / `SystemMutation` is still 503
+   under Degraded; `LockedOut` still denies **all** commands (deny-all preserved at the outer
+   gate, with the inner envelope's 403 as defense-in-depth); `Unknown` and stale/cold-cache
+   fail-closed paths are unchanged. `ActuatorMotion` is still treated as a state mutation by the
+   HA epoch fence in `enforce_posture_routing`.
+3. **Envelope unchanged.** The Degraded path uses `mrc_fallback_profile()` (**5.0 m/s**, the
+   load-bearing SS-002 number). The fabric command path (`/fabric/command/{asset_id}`) is **not**
+   relaxed — it stays `WriteState` → 503 under Degraded — so the **#406 MRC divergence
+   (ADR-0012) remains dormant** and is not made live by this change.
+4. **Tests:** the authoritative auth-free deferral proof is
+   `tests/posture_gate_integration.rs::test_degraded_defers_actuator_motion_but_blocks_other_writes`
+   (actuator → 200 through the outer gate, generic write → 503); unit coverage in
+   `policy.rs` (classification, exact-match scoping) and `posture_cache.rs` (Degraded admits
+   ActuatorMotion; LockedOut/stale/cold still deny it); the binary-internal real-router test
+   `degraded_actuator_write_reaches_inner_envelope_on_real_router` proves it on the assembled
+   `build_app` when a token is configured (the actuator route is admin-gated, and INV-13 forbids
+   `set_var` in that multithreaded test). The CLAUDE.md "Degraded = ReadTelemetry only" line and
+   the four-enforcement-points reachability caveat are corrected.
+
+The `503 → 0.0` consumer safe-stop (#405) remains in place as defense-in-depth for the
+LockedOut/stale 503s and any non-gated write; the integrator DBW command-freshness watchdog
+remains an Assumption of Use (defense-in-depth, not the floor).
