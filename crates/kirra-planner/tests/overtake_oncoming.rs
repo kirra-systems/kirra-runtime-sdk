@@ -152,6 +152,33 @@ fn kirra_admits_the_pass_when_the_oncoming_lane_is_clear() {
 }
 
 #[test]
+fn a_car_centered_in_the_ego_lane_is_now_overtaken_and_admitted() {
+    // The §4 alignment-band payoff. Before the longitudinal-RSS footprint-overlap
+    // gate, a car CENTERED in the ego lane (dead on the reference path) could not
+    // be passed: clearing the wide 4 m lateral-alignment band needed more side room
+    // than the maneuver builds before closing the longitudinal gap. Now the
+    // longitudinal bound only applies within the footprint-overlap band, so the
+    // ego clears it before the gap closes → the pass admits.
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let centered = PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 24.0, y_m: -2.5 }, // ego-lane centerline (on the reference path)
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    };
+    let (plan, verdict) = plan_and_check(&g, &map, &drivable, &[centered], true);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y > 0.0, "the pass crosses into the oncoming half, got max_y {max_y}");
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a centered-lane car is now passable (footprint-overlap gate), got {verdict:?}"
+    );
+}
+
+#[test]
 fn kirra_refuses_the_pass_when_oncoming_traffic_is_too_close() {
     // Identical to the admitted clear-pass scene, plus a closing oncoming vehicle in
     // the oncoming lane. Occy still proposes the pass (it never reasons about

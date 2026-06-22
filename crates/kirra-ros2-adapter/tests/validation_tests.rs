@@ -120,16 +120,16 @@ fn test_rss_violation_rejects() {
 /// A vehicle ~15 m ahead at 12 m/s, evaluated two ways at IDENTICAL geometry:
 /// as a same-direction lead (pulling away → safe) and as oncoming (head-on
 /// closure → the opposite-direction bound needs ~40 m → MRC). Proves the
-/// adapter checker now keys the *longitudinal* bound off the object's heading.
+/// adapter checker keys the *longitudinal* bound off the object's heading.
 ///
-/// The object sits at y = 3 m — laterally offset enough to clear the lateral RSS
-/// side-gap (so a dead-ahead lateral violation can't be the cause) yet inside the
-/// 4 m alignment tolerance (so it is still evaluated longitudinally). Heading is
-/// then the ONLY thing that differs between the two cases.
+/// The object sits at y = 1.5 m — inside the longitudinal footprint-overlap band
+/// (`RSS_LONGITUDINAL_OVERLAP_M`) so the head-on/lead bound is the live check, and
+/// more than 8 m ahead so the longitudinally-gated *lateral* RSS does not fire (it
+/// can't be the cause). Heading is then the ONLY difference between the two cases.
 fn obj_at(x_m: f64, velocity_mps: f64, heading_rad: f64) -> PerceivedObject {
     PerceivedObject {
         id: 1,
-        pos: Point { x_m, y_m: 3.0 },
+        pos: Point { x_m, y_m: 1.5 },
         velocity_mps,
         heading_rad,
         vel: Point { x_m: 0.0, y_m: 0.0 },

@@ -1827,9 +1827,12 @@ mod tests {
     #[test]
     fn broken_line_permits_route_around() {
         // Off-center object + a BROKEN line on the offset side → Occy may cross →
-        // routes around (offsets) and the checker admits it.
+        // routes around (offsets) and the checker admits it. The object sits in the
+        // ego's footprint-overlap band (within RSS_LONGITUDINAL_OVERLAP_M) but
+        // outside the stop-short band, so a STRAIGHT path would be a near-miss the
+        // checker rejects (see the SOLID-line pair) — routing around is what clears it.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let objs = [obj_at(20.0, 3.0)];
+        let objs = [obj_at(20.0, 2.3)];
         let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &broken));
@@ -1841,11 +1844,14 @@ mod tests {
     #[test]
     fn solid_line_forbids_route_around_and_kirra_backstops() {
         // Same object, but a SOLID line on the offset side: Occy must NOT cross it
-        // → no route-around (drives straight). Since it can't legally pass the
-        // obstacle, KIRRA (physical authority) rejects the straight path → the
-        // stack stops. Occy obeys the line; KIRRA enforces the collision safety.
+        // → no route-around (drives straight). The object is in the ego's
+        // footprint-overlap band (y=2.3 < RSS_LONGITUDINAL_OVERLAP_M) yet outside
+        // the stop-short band (> object_lane_tolerance), so Occy drives straight
+        // PAST it at cruise — a near-miss the straight path can't avoid — and KIRRA
+        // (physical authority) rejects it. Occy obeys the line; KIRRA enforces the
+        // collision safety.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let objs = [obj_at(20.0, 3.0)];
+        let objs = [obj_at(20.0, 2.3)];
         let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &solid));
