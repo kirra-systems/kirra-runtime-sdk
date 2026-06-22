@@ -90,6 +90,7 @@ fn run_stack(
         goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
         map: &perception.corridor,
         objects: &perception.objects,
+        controls: &[],
         posture: posture.clone(),
     };
     let mut planner = GeometricPlanner::default();
@@ -177,6 +178,7 @@ fn route_around_in_corridor_object_admits() {
         goal: Goal { target: Pose { x_m: 30.0, y_m: 0.0, heading_rad: 0.0 } },
         map: &perception.corridor,
         objects: &perception.objects,
+        controls: &[],
         posture: FleetPosture::Nominal,
     };
     let mut planner = GeometricPlanner::default();

@@ -42,6 +42,20 @@ use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 // stay within it (including the terminal stop point) to be admissible.
 use kirra_runtime_sdk::gateway::containment::MAX_TRAJECTORY_HORIZON;
 
+pub mod behavior;
+pub use behavior::{Behavioral, BehaviorConfig, SignalState, TrafficControl};
+
+/// What set the binding travel limit `s_limit` — selects the speed/brake policy:
+/// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop` and
+/// `Behavioral` decelerate to a hard stop; `Goal` cruises to the goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitKind {
+    Goal,
+    ObjectStop,
+    Lead,
+    Behavioral,
+}
+
 /// Ego world-state the planner consumes.
 ///
 /// `// PHASE-0 LOCKED` — derived from `kirra_ros2_adapter::state::EgoOdom`
@@ -81,6 +95,10 @@ pub struct PlanInput<'a> {
     /// obstacle-aware planner): [`GeometricPlanner`] decelerates to a controlled
     /// stop short of the nearest in-path object. An empty slice = no obstacles.
     pub objects: &'a [PerceivedObject],
+    /// Active traffic controls (signs / signals) the planner must OBEY — the
+    /// behavioral/legal layer (distinct from KIRRA's physical authority). An
+    /// empty slice = no controls. See [`behavior`].
+    pub controls: &'a [TrafficControl],
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
 }
@@ -423,8 +441,8 @@ impl Planner for GeometricPlanner {
         //  - static / slow in-lane object → STOP SHORT of it.
         // (The checker's RSS still backstops every object independently.)
         let mut s_limit = s_goal;
+        let mut limit_kind = LimitKind::Goal;
         let mut lead_match: Option<f64> = None; // slowest lead speed to match
-        let mut lead_gap_limit = false; // is `s_limit` a lead following-gap?
         for obj in input.objects {
             let (s_obj, signed) = project_signed(&guide, obj.pos.x_m, obj.pos.y_m);
             if s_obj <= s_ego {
@@ -443,27 +461,47 @@ impl Planner for GeometricPlanner {
                 let gap = s_obj - self.cfg.lead_following_gap_m;
                 if gap < s_limit {
                     s_limit = gap;
-                    lead_gap_limit = true;
+                    limit_kind = LimitKind::Lead;
                 }
             } else if lateral <= self.cfg.object_lane_tolerance_m {
                 let stop = s_obj - self.cfg.object_stop_gap_m;
                 if stop < s_limit {
                     s_limit = stop;
-                    lead_gap_limit = false;
+                    limit_kind = LimitKind::ObjectStop;
                 }
             }
         }
-        // Target speed: route-around pass cap → match a lead → stop-short approach.
-        let object_limited = s_limit < s_goal - 1e-9;
-        let target = if bump.y_off != 0.0 {
+
+        // Behavioral rules layer: traffic signs & signals impose a hard stop/hold
+        // line and/or a speed cap. Occy OBEYS the rule; KIRRA stays the *physical*
+        // authority (it never enforces traffic law). A nearer mandatory stop line
+        // overrides object/lead handling with a clean decel-to-stop.
+        let behavioral =
+            behavior::evaluate_controls(input.controls, input.ego.pose.x_m, cur, &BehaviorConfig::default());
+        if let Some(stop_x) = behavioral.stop_x_m {
+            let s_stop = project_arc_length(&guide, stop_x, input.ego.pose.y_m);
+            if s_stop > s_ego && s_stop < s_limit {
+                s_limit = s_stop;
+                limit_kind = LimitKind::Behavioral;
+            }
+        }
+
+        // Target speed by the binding limit, then clamped by any behavioral speed
+        // cap (regulatory / advisory / yield).
+        let mut target = if bump.y_off != 0.0 {
             target.min(self.cfg.lateral_pass_speed_mps)
-        } else if let Some(ls) = lead_match {
-            target.min(ls)
-        } else if object_limited {
-            target.min(self.cfg.object_approach_speed_mps)
         } else {
-            target
+            match limit_kind {
+                LimitKind::Lead => target.min(lead_match.unwrap_or(target)),
+                LimitKind::ObjectStop => target.min(self.cfg.object_approach_speed_mps),
+                LimitKind::Goal | LimitKind::Behavioral => target,
+            }
         };
+        if let Some(cap) = behavioral.speed_cap_mps {
+            target = target.min(cap);
+        }
+        // A lead follows at a rolling gap (no brake-to-zero); everything else stops.
+        let lead_gap_limit = limit_kind == LimitKind::Lead;
         let dist = (s_limit - s_ego).max(0.0);
 
         // Arrived, blocked too close to advance, or the mode admits no forward
@@ -774,6 +812,7 @@ mod tests {
             goal: Goal { target: Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 } },
             map,
             objects: &[],
+            controls: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -839,6 +878,7 @@ mod tests {
             goal: Goal { target: Pose { x_m: 25.0, y_m: 0.0, heading_rad: 0.0 } },
             map,
             objects: &[],
+            controls: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1109,6 +1149,7 @@ mod tests {
             goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
             map,
             objects,
+            controls: &[],
             posture: FleetPosture::Nominal,
         }
     }
@@ -1327,6 +1368,108 @@ mod tests {
         assert!(
             matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
             "checker admits the speed-matched encounter, got {verdict:?}"
+        );
+    }
+
+    // --- Behavioral rules: traffic signs & signals (#90 / Occy 1.C) ---------
+
+    fn input_with_controls<'a>(
+        map: &'a dyn CorridorSource,
+        ego_x: f64,
+        goal_x: f64,
+        controls: &'a [TrafficControl],
+    ) -> PlanInput<'a> {
+        PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                linear_x_mps: 2.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            map,
+            objects: &[],
+            controls,
+            posture: FleetPosture::Nominal,
+        }
+    }
+
+    #[test]
+    fn red_light_makes_occy_stop_at_the_line() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Red }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
+
+        assert_eq!(out.kind, ProposalKind::Motion);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!((18.0..=20.5).contains(&max_x), "stops at the red-light line ~20, got {max_x}");
+        assert!(
+            out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
+            "controlled stop at the line"
+        );
+    }
+
+    #[test]
+    fn green_light_does_not_stop() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Green }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_controls(&corridor, 8.0, 35.0, &controls));
+
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 22.0, "green → drives through the light, got max_x {max_x}");
+    }
+
+    #[test]
+    fn speed_limit_caps_the_planner() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let controls = [TrafficControl::SpeedLimit { from_x_m: 0.0, limit_mps: 5.0 }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
+
+        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
+        assert!(vmax <= 5.2, "obeys the 5 m/s limit, not cruise 8, got {vmax}");
+        assert!(vmax > 4.0, "still progresses near the limit, got {vmax}");
+    }
+
+    #[test]
+    fn stop_sign_then_satisfied_proceeds() {
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let unsat = [TrafficControl::StopSign { stop_line_x_m: 20.0, satisfied: false }];
+        let sat = [TrafficControl::StopSign { stop_line_x_m: 20.0, satisfied: true }];
+        let mut p = GeometricPlanner::default();
+
+        let stops = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &unsat));
+        let stop_max = stops.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(stop_max <= 20.5, "unsatisfied stop sign → stop at the line, got {stop_max}");
+
+        let goes = p.plan(&input_with_controls(&corridor, 8.0, 35.0, &sat));
+        let go_max = goes.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(go_max > 22.0, "satisfied stop sign → proceed, got {go_max}");
+    }
+
+    #[test]
+    fn behavioral_stop_is_checker_admissible() {
+        // Obeying a red light produces a clean in-corridor decel-to-stop the
+        // physical checker admits (KIRRA admits the stop; it would still MRC
+        // cross-traffic regardless of the signal).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Red }];
+        let mut p = GeometricPlanner::default();
+        let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
+
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "checker admits the controlled stop at the line, got {verdict:?}"
         );
     }
 }
