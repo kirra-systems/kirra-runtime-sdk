@@ -3983,32 +3983,81 @@ mod posture_gate_real_router_tests {
         );
     }
 
-    /// ADR-0011 reachability pin: under **Degraded** the OUTER posture gate
-    /// 503s the actuator WRITE before the inner `enforce_actuator_safety_envelope`
-    /// decel-to-stop branch can run — `should_route_command` admits only
-    /// `ReadTelemetry` in Degraded, and a POST to `/actuator/motion/command`
-    /// classifies as `WriteState`. So on the HTTP `/actuator/motion/command`
-    /// path that decel-to-stop branch is dead code; the real Degraded safety
-    /// floor is the consumer-side `503 → 0.0` safe-stop (#405), not the inner
-    /// envelope. This test pins the gate behavior: Degraded WriteState is denied
-    /// 503 on the real assembled router, identically to LockedOut — the exact
-    /// 503 the #405 client now maps to an explicit safe-stop. Do NOT cite the
-    /// gateway HTTP path as a live decel-to-stop enforcement point while this
-    /// holds (ADR-0011).
+    /// Option A / ADR-0011 on the REAL assembled router: under **Degraded** the
+    /// outer posture gate now DEFERS the actuator-motion command to the inner
+    /// `enforce_actuator_safety_envelope` (decel-to-stop) instead of 503-ing it
+    /// (`should_route_command` Degraded admits `ReadTelemetry` + `ActuatorMotion`).
+    ///
+    /// On the real assembly the layer after the posture gate is
+    /// `require_admin_token`, which 503s when `KIRRA_ADMIN_TOKEN` is unset — and
+    /// INV-13 forbids `set_var` in this multithreaded test — so a token-less
+    /// Degraded POST is 503 at the ADMIN layer, masking the deferral by status.
+    /// The authoritative auth-free proof therefore lives in
+    /// `tests/posture_gate_integration.rs::test_degraded_defers_actuator_motion_but_blocks_other_writes`.
+    /// Here we prove it on the REAL assembly WHEN a token is configured: an
+    /// authenticated Degraded POST reaches the inner envelope (its verdict is a
+    /// 200/clamp or 400, never the posture/admin 503 nor 401), while the
+    /// authenticated LockedOut control still 503s at the posture gate, before the
+    /// envelope. With no token the test degrades to the robust LockedOut control.
     #[tokio::test]
-    async fn degraded_blocks_actuator_write_on_real_router() {
-        let status = status_through_real_app(
+    async fn degraded_actuator_write_reaches_inner_envelope_on_real_router() {
+        use axum::http::header;
+
+        async fn post_actuator(
+            svc: Arc<ServiceState>,
+            bearer: Option<&str>,
+            body: &str,
+        ) -> StatusCode {
+            let mut rb = Request::builder()
+                .method("POST")
+                .uri("/actuator/motion/command")
+                .header("content-type", "application/json");
+            if let Some(tok) = bearer {
+                rb = rb.header(header::AUTHORIZATION, format!("Bearer {tok}"));
+            }
+            build_app(svc)
+                .oneshot(rb.body(Body::from(body.to_string())).expect("build request"))
+                .await
+                .expect("router service should not panic")
+                .status()
+        }
+
+        let token = std::env::var("KIRRA_ADMIN_TOKEN").unwrap_or_default();
+        if token.is_empty() {
+            // No token: the actuator route is admin-gated, so a Degraded POST is
+            // 503 at the admin layer (indistinguishable by status from a posture
+            // denial). Assert only the robust LockedOut control here; the Option A
+            // deferral is proven auth-free in the integration test referenced above.
+            let locked = post_actuator(state_with(FleetPosture::LockedOut), None, "{}").await;
+            assert_eq!(
+                locked,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LockedOut must 503 at the posture gate on the real router; got {locked}"
+            );
+            return;
+        }
+
+        // Authenticated. A valid decel command (4.0 -> 3.0 m/s, within MRC 5.0)
+        // reaches the inner envelope under Degraded and is admitted there — the
+        // status is the ENVELOPE verdict, never the posture/admin 503 or 401.
+        let degraded = post_actuator(
             state_with(FleetPosture::Degraded),
-            "POST",
-            "/actuator/motion/command",
+            Some(&token),
+            r#"{"linear_velocity_mps":3.0,"current_velocity_mps":4.0,"delta_time_s":0.1,"steering_angle_deg":0.0,"current_steering_angle_deg":0.0}"#,
         )
         .await;
+        assert!(
+            degraded != StatusCode::SERVICE_UNAVAILABLE && degraded != StatusCode::UNAUTHORIZED,
+            "Degraded actuator command must reach the inner envelope on the real router \
+             (Option A) — not a posture/admin 503 or 401; got {degraded}"
+        );
+
+        // LockedOut control: still denied at the posture gate, before the envelope.
+        let locked = post_actuator(state_with(FleetPosture::LockedOut), Some(&token), "{}").await;
         assert_eq!(
-            status,
+            locked,
             StatusCode::SERVICE_UNAVAILABLE,
-            "the real router must deny POST /actuator/motion/command under Degraded \
-             (outer posture gate 503s WriteState before the inner envelope runs, \
-             ADR-0011); got {status}"
+            "LockedOut must still 503 at the posture gate even authenticated; got {locked}"
         );
     }
 

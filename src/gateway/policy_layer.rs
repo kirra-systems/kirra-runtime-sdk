@@ -488,7 +488,12 @@ pub async fn enforce_posture_routing(
     // re-check is the authoritative one.
     let is_mutation = matches!(
         cmd,
-        OperationalCommand::WriteState | OperationalCommand::SystemMutation
+        OperationalCommand::WriteState
+            | OperationalCommand::SystemMutation
+            // ActuatorMotion is a physical state write — it MUST still be fenced
+            // by the HA epoch guard even though the posture gate defers its
+            // Degraded verdict to the inner kinematic envelope (Option A).
+            | OperationalCommand::ActuatorMotion
     );
     if is_mutation {
         let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
