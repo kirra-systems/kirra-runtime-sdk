@@ -148,6 +148,15 @@ pub struct PlanInput<'a> {
     /// vehicles keeping their own lane. An object with no entry (or an empty slice)
     /// uses the CTRV rollout, as before.
     pub predicted_paths: &'a [PredictedPath<'a>],
+    /// **Junction right-of-way**: object ids that must yield TO the ego at the
+    /// junction the ego is negotiating (the ego has priority over them). The
+    /// predictive yield SKIPS these — the ego asserts its right-of-way and proceeds
+    /// rather than waiting for traffic that must cede. Right-of-way is determined
+    /// upstream by the behavioral/map layer (stop/yield signs + lane priority), like
+    /// the other legal rules; Occy only executes it. The ego still yields (space-time)
+    /// to every other crossing agent, and KIRRA still backstops any agent that is an
+    /// imminent collision. Empty = no priority asserted (yield to all crossings).
+    pub cedes_to_ego_ids: &'a [u64],
     /// Commanded lane change: a target lateral offset from the current path
     /// centerline to shift to (e.g. the adjacent lane center). Honored only if the
     /// lane-line rules permit crossing to that side and the corridor fits;
@@ -968,7 +977,12 @@ impl Planner for GeometricPlanner {
         // Predictive yield: a crossing object that will enter the lane ahead within
         // the horizon → yield short of where it crosses (anticipates a cut-in /
         // crossing that the snapshot-only checks miss until it is already close).
+        // Junction right-of-way: an agent that must CEDE to the ego is skipped — the
+        // ego asserts priority and proceeds instead of waiting for it.
         for obj in input.objects {
+            if input.cedes_to_ego_ids.contains(&obj.id) {
+                continue;
+            }
             if let Some(s_conflict) = self.predict_yield_s(
                 obj, input.motion, input.predicted_paths, &guide, s_ego, cur, target,
             ) {
@@ -1413,6 +1427,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1485,6 +1500,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1629,6 +1645,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -1997,6 +2014,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -2243,6 +2261,7 @@ mod tests {
             lane_boundaries: &[],
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -2352,6 +2371,7 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: None,
             no_overtake_ids: &[],
             drivable: None,
@@ -2576,6 +2596,7 @@ mod tests {
         let paths = [PredictedPath { id: 1, points: &lane_path }];
         let inp = PlanInput {
             predicted_paths: &paths,
+            cedes_to_ego_ids: &[],
             ..input_with_objects(&corridor, 8.0, 40.0, &objs)
         };
         let intent = p.plan(&inp);
@@ -2597,11 +2618,62 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let inp = PlanInput {
             predicted_paths: &paths,
+            cedes_to_ego_ids: &[],
             ..input_with_objects(&corridor, 8.0, 40.0, &objs)
         };
         let out = p.plan(&inp);
         let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(max_x < 26.0, "path turns into the lane → yields, got {max_x}");
+    }
+
+    // --- Junction right-of-way negotiation ---------------------------------
+
+    #[test]
+    fn junction_right_of_way_lets_the_ego_proceed_against_a_ceding_agent() {
+        // A crossing agent at a junction (same geometry as `yields_to_crossing_object`).
+        // By default the ego YIELDS (waits before the conflict). When the agent must
+        // CEDE to the ego (right-of-way), the ego asserts priority and PROCEEDS —
+        // same geometry, the cede list is the only change. KIRRA still backstops.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -3.0)]; // id 1, crossing in
+        let mut p = GeometricPlanner::default();
+
+        let yielded = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
+        let y_max = yielded.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(y_max < 17.0, "default → yields to the crossing agent, got {y_max}");
+
+        let cede = [1u64];
+        let inp = PlanInput {
+            cedes_to_ego_ids: &cede,
+            ..input_with_objects(&corridor, 8.0, 35.0, &objs)
+        };
+        let proceeded = p.plan(&inp);
+        let p_max = proceeded.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(p_max > 22.0, "ceding agent → ego asserts priority and proceeds, got {p_max}");
+    }
+
+    #[test]
+    fn junction_still_yields_to_a_non_ceding_agent_when_another_cedes() {
+        // Two crossing conflicts: a NEAR agent (id 1, x=20) cedes to the ego; a FAR
+        // one (id 2, x=32) does not (higher priority). The ego proceeds past the
+        // ceding agent's conflict but STILL yields to the non-ceding one — priority
+        // is per-agent, not a blanket "ignore all".
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let mut a1 = crossing_obj_at(20.0, 5.0, 0.0, -3.0); // cedes (fast crosser)
+        a1.id = 1;
+        let mut a2 = crossing_obj_at(32.0, 5.0, 0.0, -1.5); // does not — still crossing on arrival
+        a2.id = 2;
+        let objs = [a1, a2];
+        let cede = [1u64];
+        let mut p = GeometricPlanner::default();
+        let inp = PlanInput {
+            cedes_to_ego_ids: &cede,
+            ..input_with_objects(&corridor, 8.0, 45.0, &objs)
+        };
+        let out = p.plan(&inp);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 18.0, "proceeds past the ceding agent's conflict, got {max_x}");
+        assert!(max_x < 30.0, "but still yields to the non-ceding agent, got {max_x}");
     }
 
     // --- Commanded lane change ---------------------------------------------
@@ -2627,6 +2699,7 @@ mod tests {
             lane_boundaries: lanes,
             motion: &[],
             predicted_paths: &[],
+            cedes_to_ego_ids: &[],
             lane_change_to_m: Some(target),
             no_overtake_ids: &[],
             drivable: None,
