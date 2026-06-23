@@ -13,7 +13,7 @@
 # That separation keeps the ML inference pipeline (parko-core / parko-onnx /
 # parko-kirra) independent of the safety-kernel build.
 [workspace]
-members = [".", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-taj", "crates/kirra-fleet-transport"]
+members = [".", "crates/kirra-core", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-taj", "crates/kirra-fleet-transport"]
 resolver = "2"
 
 [package]
@@ -49,6 +49,9 @@ ros2 = []
 tpm = ["dep:tss-esapi"]
 
 [dependencies]
+# Lean safety/contract foundation (de-monolith Stage 1): FleetPosture / NodeTrustState
+# live here; this crate re-exports them so existing paths are unchanged.
+kirra-core = { path = "crates/kirra-core" }
 parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.
