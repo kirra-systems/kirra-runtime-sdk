@@ -17,7 +17,7 @@ echo "Compiling native test..."
 g++ -std=c++17 -o "${TEST_BIN}" "${TEST_SRC}" \
     -I "${INCLUDE_PATH}" \
     -L "${LIB_PATH}" \
-    -lkirra_runtime_sdk \
+    -lkirra_verifier \
     -Wl,-rpath,"${LIB_PATH}"
 
 echo "Running native test..."

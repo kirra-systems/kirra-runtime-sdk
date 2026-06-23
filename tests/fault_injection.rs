@@ -16,12 +16,12 @@
 //
 // Tracking: CERT-004, ADL-010 / ADL-011 in work/decisions.md.
 
-use kirra_runtime_sdk::federation::{
+use kirra_verifier::federation::{
     evaluate_federated_report, FederatedTrustReport, FEDERATION_REPLAY_WINDOW_MS,
 };
-use kirra_runtime_sdk::gateway::policy::OperationalCommand;
-use kirra_runtime_sdk::posture_cache::{should_route_command, CachedFleetPosture};
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_verifier::gateway::policy::OperationalCommand;
+use kirra_verifier::posture_cache::{should_route_command, CachedFleetPosture};
+use kirra_verifier::verifier::FleetPosture;
 
 // ============================================================================
 // SG-006 (ASIL D) — Unknown command denial in all posture states
@@ -238,10 +238,10 @@ fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
 #[test]
 fn test_safety_goal_sg_007_cross_asset_lockout_propagation() {
     use std::collections::HashMap;
-    use kirra_runtime_sdk::fabric::asset::{
+    use kirra_verifier::fabric::asset::{
         AssetPosture, AssetType, FabricAsset, KinematicProfileType,
     };
-    use kirra_runtime_sdk::fabric::router::FabricRouter;
+    use kirra_verifier::fabric::router::FabricRouter;
 
     fn convoy_asset(id: &str, role: &str) -> FabricAsset {
         let mut metadata = HashMap::new();

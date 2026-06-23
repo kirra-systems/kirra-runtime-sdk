@@ -39,10 +39,10 @@ fn test_safety_goal_sg_006_unknown_command_denial() {
 #[test]
 fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
     use std::collections::HashMap;
-    use kirra_runtime_sdk::fabric::router::FabricRouter;
-    use kirra_runtime_sdk::fabric::causal_log::FabricCausalLog;
-    use kirra_runtime_sdk::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
-    use kirra_runtime_sdk::verifier::FleetPosture;
+    use kirra_verifier::fabric::router::FabricRouter;
+    use kirra_verifier::fabric::causal_log::FabricCausalLog;
+    use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+    use kirra_verifier::verifier::FleetPosture;
 
     fn convoy_av(id: &str, role: &str) -> FabricAsset {
         let mut metadata = HashMap::new();
@@ -185,11 +185,11 @@ fn test_safety_goal_sg_012_dnp3_broadcast_mandatory_audit() {
 // backdoor.
 #[test]
 fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
-    use kirra_runtime_sdk::recovery_hysteresis::{
+    use kirra_verifier::recovery_hysteresis::{
         evaluate_recovery_report, HysteresisDecision, AV_RECOVERY_STREAK_THRESHOLD,
         AV_RECOVERY_WINDOW_MS,
     };
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier_store::VerifierStore;
 
     assert_eq!(AV_RECOVERY_STREAK_THRESHOLD, 5, "spec pins the threshold at 5");
 

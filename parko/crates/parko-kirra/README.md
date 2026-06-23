@@ -4,7 +4,7 @@ A `SafetyGovernor` implementation for parko-core, backed by the Kirra runtime SD
 
 ## What this does
 
-Implements parko-core's `SafetyGovernor` trait by calling `kirra_runtime_sdk::gateway::kinematics_contract::validate_vehicle_command` with the active vehicle kinematics contract profile (nominal or MRC fallback).
+Implements parko-core's `SafetyGovernor` trait by calling `kirra_verifier::gateway::kinematics_contract::validate_vehicle_command` with the active vehicle kinematics contract profile (nominal or MRC fallback).
 
 When attached to a `parko_core::InferenceLoop` via `with_governor()`, proposed control commands are evaluated against the Kirra contract before being passed to actuators. Commands exceeding the contract's bounds are clamped to safe values; commands violating hard invariants result in a full stop.
 

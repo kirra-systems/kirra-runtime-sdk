@@ -2,8 +2,8 @@
 
 use std::env;
 use std::sync::mpsc::channel;
-use kirra_runtime_sdk::config::KirraRuntimeConfig;
-use kirra_runtime_sdk::gateway::{KirraLiveGateway, GatewayConfig};
+use kirra_verifier::config::KirraRuntimeConfig;
+use kirra_verifier::gateway::{KirraLiveGateway, GatewayConfig};
 
 fn main() {
     let args: Vec<String> = env::args().collect();

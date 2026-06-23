@@ -24,12 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
 use ed25519_dalek::SigningKey;
 
-use kirra_runtime_sdk::verifier::{NodeTrustState, RegisteredNode};
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier::{NodeTrustState, RegisteredNode};
+use kirra_verifier::verifier_store::VerifierStore;
 
 // The REAL SG6 impact-event vocabulary, mirrored as literals. We cannot IMPORT
 // the parko-kirra `audit_sink` constants here because `parko-kirra` is only a
-// DEV-dependency of this crate (it depends on `kirra-runtime-sdk`, so a normal
+// DEV-dependency of this crate (it depends on `kirra-verifier`, so a normal
 // dependency would be a cycle). These strings are kept byte-identical to
 // `parko_kirra::audit_sink::{IMPACT_DETECTED_EVENT_TYPE,
 // IMPACT_ESCALATION_RAISED_EVENT_TYPE, IMPACT_AUDIT_SOURCE}` and the

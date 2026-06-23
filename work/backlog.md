@@ -748,7 +748,7 @@ AUTHORITY MODEL (canonical, commits 9943aa9/e1ba1a2/21c3a35):
 FILE: kirra-runtime-sdk/tests/rss_simulation.rs
 
 REQUIREMENTS:
-1. Use ScenarioRunner from kirra_runtime_sdk::scenario_runner.
+1. Use ScenarioRunner from kirra_verifier::scenario_runner.
 2. Use actual clock type from prerequisite check. No sleep().
 3. 10,000 scenarios × 10 ticks. Deterministic seed.
    Include scenarios that reach LockedOut posture as well as Degraded.

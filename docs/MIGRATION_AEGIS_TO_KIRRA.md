@@ -42,7 +42,7 @@ stale. Any integrator still exporting `AEGIS_*` must switch:
 |-----|-----|
 | binary `aegis_verifier_service` | `kirra_verifier_service` |
 | binary `aegis_carla_client` | `kirra_carla_client` |
-| link flag `-laegis_runtime_sdk` | `-lkirra_runtime_sdk` (lib `kirra_runtime_sdk`) |
+| link flag `-laegis_runtime_sdk` | `-lkirra_verifier` (lib `kirra_verifier`) |
 | release archive `aegis-<ver>-<target>.tar.gz` | `kirra-<ver>-<target>.tar.gz` |
 
 ### Deploy / runtime layout

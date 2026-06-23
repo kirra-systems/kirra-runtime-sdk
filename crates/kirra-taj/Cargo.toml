@@ -30,4 +30,4 @@ kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false 
 [dev-dependencies]
 # Integration test only: prove Taj's corridor output feeds the real #131 checker.
 # FleetPosture lives in the SDK; the checker entry + config in the adapter.
-kirra-runtime-sdk = { path = "../.." }
+kirra-verifier = { path = "../.." }

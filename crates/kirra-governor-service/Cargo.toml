@@ -5,7 +5,7 @@
 #
 # DEPENDENCY DISCIPLINE (ADR-0001): this target depends ONLY on serde + bincode
 # + std (via the lean `kirra-core` crate). It deliberately does NOT depend on the
-# parent `kirra-runtime-sdk` crate (which pulls tokio/axum/rusqlite/reqwest) —
+# parent `kirra-verifier` crate (which pulls tokio/axum/rusqlite/reqwest) —
 # instead it depends on `kirra-core`, which carries the EXISTING verdict core (the
 # kinematics-contract talisman) verbatim, so the verdict logic is the real,
 # unmodified one while the dependency tree stays minimal and ROS/async-free for the

@@ -2,7 +2,7 @@
 
 ## Project Identity
 
-- **Crate**: `kirra-runtime-sdk` (lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`)
+- **Crate**: `kirra-verifier` (lib ident `kirra_verifier`; lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`). Renamed from `kirra-runtime-sdk` once nothing lean depended on it (the GitHub repo remains `kirra-runtime-sdk`).
 - **Edition**: 2021
 - **Primary binary**: `kirra_verifier_service` (`src/bin/kirra_verifier_service.rs`)
 - **Secondary binary**: `kirra_carla_client` (`src/bin/kirra_carla_client.rs`)

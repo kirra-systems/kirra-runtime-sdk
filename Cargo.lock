@@ -1981,7 +1981,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
- "kirra-runtime-sdk",
+ "kirra-verifier",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -2046,7 +2046,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "kirra-runtime-sdk"
+name = "kirra-taj"
+version = "0.1.0"
+dependencies = [
+ "kirra-ros2-adapter",
+ "kirra-verifier",
+]
+
+[[package]]
+name = "kirra-verifier"
 version = "1.1.2"
 dependencies = [
  "axum",
@@ -2076,14 +2084,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tss-esapi",
-]
-
-[[package]]
-name = "kirra-taj"
-version = "0.1.0"
-dependencies = [
- "kirra-ros2-adapter",
- "kirra-runtime-sdk",
 ]
 
 [[package]]
@@ -2571,7 +2571,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "kirra-core",
- "kirra-runtime-sdk",
+ "kirra-verifier",
  "parko-core",
  "proptest",
  "serde",

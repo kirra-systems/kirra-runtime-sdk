@@ -47,7 +47,7 @@ use crate::FleetPosture;
 // The capture record wire schema lives in the governor-free
 // `kirra-capture-schema` crate (docs/COLLECTOR_DESIGN.md [C1]); re-export it so
 // every existing `crate::capture::{CaptureRecord, ...}` /
-// `kirra_runtime_sdk::capture::*` path keeps resolving, and so the SDK and the
+// `kirra_verifier::capture::*` path keeps resolving, and so the SDK and the
 // offline collector share ONE authoritative definition with no drift.
 pub use kirra_capture_schema::*;
 

@@ -3,7 +3,7 @@
 // Wire schema for Kirra's learning-loop capture records (docs/COLLECTOR_DESIGN.md
 // [D6 / C1]). This is the SINGLE authoritative definition of the on-disk capture
 // JSONL shape, shared by two sides:
-//   - the SDK emitters (`kirra_runtime_sdk::capture`), which BUILD records via
+//   - the SDK emitters (`kirra_verifier::capture`), which BUILD records via
 //     constructors that touch governor types and SERIALIZE them, and
 //   - the offline `kirra-collector`, which DESERIALIZES them to assemble the
 //     training dataset.

@@ -6,7 +6,7 @@
 //!
 //! 1. **Untrusted carrier (the trust rule).** Zenoh is an UNTRUSTED CARRIER.
 //!    Trust derives from **Ed25519 payload signatures** — federation reports via
-//!    [`kirra_runtime_sdk::federation_reconciliation::verify_federated_report_signature_v2`],
+//!    [`kirra_verifier::federation_reconciliation::verify_federated_report_signature_v2`],
 //!    grants via [`verify_clearance_grant`] — **never** from transport identity, a
 //!    topic name, or Zenoh's own auth. Every ingest **verifies before use**;
 //!    unsigned / bad-signature / malformed payloads are rejected and **counted**
@@ -30,12 +30,12 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use kirra_runtime_sdk::federation_reconciliation::{
+use kirra_verifier::federation_reconciliation::{
     evaluate_federated_report_v2, verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
-use kirra_runtime_sdk::key_registry::{KeyRegistry, KeyRole};
-use kirra_runtime_sdk::verifier::FleetPosture;
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::key_registry::{KeyRegistry, KeyRole};
+use kirra_verifier::verifier::FleetPosture;
+use kirra_verifier::verifier_store::VerifierStore;
 
 pub mod transport;
 
@@ -603,7 +603,7 @@ mod core_tests {
     /// A genuinely signed report, built the way the verifier signs (over the
     /// canonical v2 payload).
     fn signed_report(sk: &SigningKey, asset: &str, gen: Option<u64>) -> FederatedTrustReportV2 {
-        use kirra_runtime_sdk::federation_reconciliation::canonical_federation_payload_v2;
+        use kirra_verifier::federation_reconciliation::canonical_federation_payload_v2;
         let mut report = FederatedTrustReportV2 {
             source_controller_id: "controller-A".into(),
             asset_id: asset.into(),

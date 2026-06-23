@@ -1,7 +1,7 @@
 # --- Workspace ----------------------------------------------------------------
 #
 # Top-level workspace (S131 Phase 1, #131). Members:
-#   - "."                          — the root `kirra-runtime-sdk` crate (lib +
+#   - "."                          — the root `kirra-verifier` crate (lib +
 #                                     bins, this manifest).
 #   - "crates/kirra-ros2-adapter"  — the ROS 2 adapter (Phase 1 skeleton; the
 #                                     entry point for Option-B per-trajectory
@@ -17,7 +17,7 @@ members = [".", "crates/kirra-core", "crates/kirra-ros2-adapter", "crates/kirra-
 resolver = "2"
 
 [package]
-name = "kirra-runtime-sdk"
+name = "kirra-verifier"
 version = "1.1.2"
 edition = "2021"
 description = "Vendor-neutral runtime safety kernel for autonomous vehicles, robots, and drones"
@@ -30,7 +30,7 @@ license-file = "COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [lib]
-name = "kirra_runtime_sdk"
+name = "kirra_verifier"
 crate-type = ["rlib", "cdylib"]
 
 # Release builds use `panic = "abort"` so an unrecoverable panic on the

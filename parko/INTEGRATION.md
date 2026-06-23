@@ -169,7 +169,7 @@ implementation) which returns one of:
 ### 3.1 Linear-axis enforcement
 
 The linear axis is bridged through the Kirra kinematics contract
-(`kirra_runtime_sdk::gateway::kinematics_contract::validate_vehicle_command`).
+(`kirra_verifier::gateway::kinematics_contract::validate_vehicle_command`).
 The relevant fields of `VehicleKinematicsContract`:
 
 | Field | Purpose |
@@ -303,7 +303,7 @@ Fail-closed contract (see `crates/kirra-ros2-adapter/src/bin/kirra_ros2_adapter_
 | URL set + admin token present | `Live` + spawn SSE task | live posture from the verifier |
 | URL set + admin token missing | `ConfiguredNoTransport` + WARN | **Degraded** (held until the operator fixes the config + restarts) |
 
-The state machine itself is `kirra_runtime_sdk::posture_tracker::PostureTracker`
+The state machine itself is `kirra_verifier::posture_tracker::PostureTracker`
 in the kernel — shared between the adapter and parko-ros2.
 
 `POSTURE_STALENESS_TIMEOUT_MS = 6_000` (the staleness derate threshold).
@@ -443,7 +443,7 @@ let camera_mapping = CameraMapping::new(CameraConfig {
 ### 8.2 Kinematics contract
 
 ```rust
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_verifier::gateway::kinematics_contract::{
     URBAN_ODD_SPEED_CAP_MPS, VehicleKinematicsContract,
 };
 

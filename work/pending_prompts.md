@@ -332,7 +332,7 @@ Requirements:
 Create kirra-runtime-sdk/tests/rss_simulation.rs.
 
 Requirements:
-1. Use ScenarioRunner from kirra_runtime_sdk::scenario_runner.
+1. Use ScenarioRunner from kirra_verifier::scenario_runner.
 2. Use MockClock (or VirtualClock — check actual name in src/clock.rs); no sleep.
 3. Generate 10_000 scenarios: each is 10 ticks with varying kinematic state.
    Some gaps below safe distance; some above.

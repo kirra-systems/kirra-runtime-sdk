@@ -15,15 +15,15 @@ use std::sync::Arc;
 
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-use kirra_runtime_sdk::posture_cache::{CachedFleetPosture, SharedPostureCache};
-use kirra_runtime_sdk::posture_engine::recalculate_and_broadcast;
-use kirra_runtime_sdk::posture_engine_v2::apply_rss_state;
-use kirra_runtime_sdk::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
-use kirra_runtime_sdk::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
-use kirra_runtime_sdk::verifier::{
+use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
+use kirra_verifier::posture_engine::recalculate_and_broadcast;
+use kirra_verifier::posture_engine_v2::apply_rss_state;
+use kirra_verifier::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
+use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
+use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier_store::VerifierStore;
 
 use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};

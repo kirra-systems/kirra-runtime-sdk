@@ -10,7 +10,7 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 # §0 SAFETY BOUNDARY: this crate depends on `serde` ONLY. It carries no governor
 # types and no logic — just the leaf record shapes. The offline collector depends
-# on THIS crate (never on `kirra-runtime-sdk`), which is what mechanically
+# on THIS crate (never on `kirra-verifier`), which is what mechanically
 # guarantees the collector cannot link or reach the verdict path.
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

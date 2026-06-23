@@ -16,7 +16,7 @@ target_include_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR
 target_link_directories(kirra_bridge_node PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/release")
 
 ament_target_dependencies(kirra_bridge_node rclcpp geometry_msgs std_msgs)
-target_link_libraries(kirra_bridge_node kirra_runtime_sdk)
+target_link_libraries(kirra_bridge_node kirra_verifier)
 
 set_target_properties(kirra_bridge_node PROPERTIES INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/release")
 
