@@ -16,18 +16,11 @@
 // Ferrocene / `no_std` / ASIL-D factoring and the shared-memory mailbox are a
 // later stage and do not block the demo — see ADR-0001 and the bring-up runbook.
 
-// Compile the real verdict core in verbatim. Path is relative to THIS file:
-// crates/kirra-governor-service/src/ -> ../../../ = repo root -> src/gateway/...
-// `allow(dead_code)`: the core exposes the full contract API (e.g.
-// `enforce_degraded_decel_to_stop`, `mrc_fallback_profile`) that the parent
-// crate uses; this minimal binary only calls `validate_vehicle_command`, so the
-// rest is legitimately unused HERE — not dead. We do not edit the file to
-// silence this (talisman); we scope the allow to the include site.
-#[allow(dead_code)]
-#[path = "../../../src/gateway/kinematics_contract.rs"]
-mod kinematics_contract;
-
-use kinematics_contract::{
+// The real verdict core — the FROZEN kinematics-contract talisman — now lives in the
+// lean `kirra-core` crate (de-monolith Stage 3). This minimal isolated governor depends
+// on it directly (serde-only, no service/runtime deps), replacing the prior relative
+// `#[path]` include of the root `src/gateway/kinematics_contract.rs` (same contract).
+use kirra_core::kinematics_contract::{
     validate_vehicle_command, DenyCode, EnforceAction, ProposedVehicleCommand,
     VehicleKinematicsContract,
 };
