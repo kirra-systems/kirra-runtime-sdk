@@ -53,6 +53,9 @@ pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph};
 pub mod mick;
 pub use mick::{plan_for_intent, MickIntent};
 
+pub mod learned;
+pub use learned::{LearnedPlanner, Teacher};
+
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
 /// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop`,
 /// `Behavioral` and `Yield` decelerate to a hard stop; `Goal` cruises to the goal.
