@@ -7,7 +7,7 @@
 | Deciders | Project / safety-case owner |
 | Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
 | Stack | Perception (Parko) · Planner (Occy / LLM) · KIRRA governor + verifier + console |
-| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
+| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), #480 (Mick `mick` intent seam), #481 (tolerant intent parser), #482 (doer-bound demo — KIRRA bounds a black-box planner), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
 
@@ -45,6 +45,27 @@ LLM / planner output
   → /cmd_vel  (only what survives)
 ```
 
+That path is the **low-level (cmd_vel) altitude** — the LLM as a *controller* emitting a
+single Twist-like `AgentAction`. There is now a **higher-altitude proposal seam** that routes
+the brain through the full planner instead:
+
+```
+LLM output
+  → kirra_planner::mick::MickIntent::from_llm_json   (LLM JSON → a TYPED high-level intent —
+                                                       GoTo / LaneChange / Hold; fail-closed)
+  → plan_for_intent(planner, intent, world)          (intent sets ONLY the goal/maneuver; the
+                                                       world stays perception-derived; Occy plans)
+  → validate_trajectory_slow                          (#131: RSS + SG2 containment + per-pose
+                                                       kinematics + posture — the SAME checker)
+  → verdict: Accept | Clamp | MRCFallback → safe-stop
+  → fast-loop control commands (only what survives)
+```
+
+Both altitudes obey the one rule — the brain **proposes**, KIRRA **disposes** — and differ only
+in *what* the LLM authors: a per-tick command (LLM-as-controller) vs. a high-level intent that
+Occy grounds into a trajectory (LLM-as-planner-of-intent). Mick can express nothing about the
+world or the actuator at either altitude.
+
 ### Corrected architecture
 
 ```
@@ -72,7 +93,7 @@ real state flows out.
 | Stack element | Maps to |
 |---|---|
 | Perception layer | **Parko** (`parko-core` vendor-neutral inference; TensorRT backend on the Orin). No model yet → absent perception → KIRRA fail-closes to degraded/MRC (safe). |
-| Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** the LLM-as-planner. KIRRA governs either identically — the brain can swap without touching the safety case. |
+| Planner | **Occy** (`kirra-planner`, early/Phase-0) **or** the LLM-as-planner (via the `mick` intent seam). KIRRA governs either identically — the brain can swap without touching the safety case. **Now demonstrated:** `tests/adversarial_doer_bounded_by_kirra.rs` (#482) drops a reckless / black-box doer behind the generic `Planner` seam and shows KIRRA rejects its hazardous trajectory *exactly* as it admits Occy's safe one for the identical intent + world — while still admitting the reckless doer on a clear road (the bound is precise, not blanket). The "Doer Bound" console page visualizes it. |
 | Governor / safety | **KIRRA** — `action_filter` + `action_policy` + `kinematics_contract` + RSS/containment. |
 | Ackermann steering | KIRRA's `VehicleKinematicsContract` **already** uses the bicycle model (`a_lat = v²·tan(δ)/L`). Configure it with the R2's wheelbase + steering limits — KIRRA *is* the Ackermann-aware safety translator. |
 | Lidar safety buffer | A **geometric** distance buffer needs **no ML model** — feed it now as an RSS / `perception_monitor` speed-derate input. ML object detection is the Parko-model phase. |
@@ -93,10 +114,19 @@ what an LLM output instructs"*). Forbidden.
 
 - **KIRRA's footprint is ~zero** — Rust, no ROS/tokio in the governor core; it adds nothing to
   the compute/memory budget.
-- **The tight resource is System 2**, not KIRRA: a **Q4 ~8B LLM (~5–6 GB) + a small TensorRT
-  detector (~1–2 GB) + ROS2 + buffers** fits 16 GB unified but must be managed; a *heavy lidar
+- **The tight resource is System 2**, not KIRRA: a small instruct LLM + a small TensorRT
+  detector (~1–2 GB) + ROS2 + buffers fits 16 GB unified but must be managed; a *heavy lidar
   DNN* run concurrently is where it breaks. The **cloud-bridge for slow LLM reasoning**
   (e.g. Gemini Flash) keeps local headroom for perception + the real-time path.
+- **Onboard System-2 model (the proposer).** Because the NX is shared with perception, prefer the
+  **3–4B class over 8B**: **Gemma 3 4B** (best efficiency/headroom on the shared board) or
+  **Llama 3.2 3B** (the most battle-tested small-model tool-calling), Q4 via TensorRT-LLM. Pin
+  generation to the `MickIntent` schema (constrained / grammar-guided decode) so the model
+  *cannot* emit malformed intent; `MickIntent::from_llm_json` is fail-closed and tolerant of
+  small-model framing (fenced `json` blocks / prose preamble, #481) as defense-in-depth. A bigger **cloud
+  brain** (Gemini Flash, or a frontier model for the §5 swap demo) is the alternative when the
+  link exists. KIRRA bounds whichever the integrator picks — a weaker/slower brain costs
+  *availability* (it HOLDs more often), never *safety*.
 - **Fail-closed covers a slow/cloud brain:** if System 2 stalls or the link drops, the governor
   holds (degraded/MRC). A laggy brain is *safe*, not a crash.
 - Power: Orin NX 10–25 W alongside drive motors on the R2's 12.6 V pack — use `nvpmodel`. Orthogonal to KIRRA.
