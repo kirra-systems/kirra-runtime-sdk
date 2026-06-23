@@ -62,10 +62,11 @@ parko-core  = { path = "../parko-core" }
 # loop. This is the safety bridge: Parko produces commands, parko-kirra
 # governs them, KirraGovernor enforces the same envelopes Occy uses.
 parko-kirra = { path = "../parko-kirra" }
-# Kernel — the kinematics contract + FleetPosture come from here.
-# parko-kirra already depends on it; pulling it in directly lets the
-# node read posture and configure kinematics without going through the
-# kirra-runtime-sdk indirection on every call.
+# The lean foundation (de-monolith Stage 5): FleetPosture + the shared PostureTracker
+# state machine the node reads posture through — serde-only, no heavy tree.
+kirra-core = { path = "../../../crates/kirra-core" }
+# Kept for the SQLite `VerifierStore` the clearance gate persists through (heavy,
+# verifier-tier; see clearance_gate) — not on the governor hot path.
 kirra-runtime-sdk = { path = "../../.." }
 
 # Async runtime. Default features so `tokio::spawn` and `mpsc` channels

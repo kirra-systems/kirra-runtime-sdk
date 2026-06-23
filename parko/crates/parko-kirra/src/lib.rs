@@ -37,12 +37,16 @@
 //   sweep, ftti)`. **Status: DRAFT — pending formal safety-engineer
 //   review.**
 
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+// The kinematics-contract talisman + FleetPosture now live in the lean `kirra-core`
+// crate (de-monolith Stages 1/3/5) — same types, no heavy verifier-service tree pulled
+// for them. (parko-kirra keeps `kirra-runtime-sdk` for the SQLite `VerifierStore` it
+// persists clearances/audit through — see audit_sink / clearance_delivery.)
+use kirra_core::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
     STOP_EPSILON_MPS,
 };
 // `DenyCode` is reached via `EnforceAction::DenyBreach` — see the Nominal branch below.
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{

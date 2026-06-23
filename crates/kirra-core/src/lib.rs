@@ -33,6 +33,18 @@ pub mod kinematics_contract;
 /// existing path (the ROS2 adapter, the planner) holds.
 pub mod containment;
 
+/// The shared non-finite governor-input guard (`all_finite`, the #410 convergence point).
+/// A dependency-free predicate every governor entry calls. Relocated here verbatim
+/// (de-monolith Stage 5); re-exported by `kirra_runtime_sdk::governor_guard` so the
+/// SDK's internal callers (the scalar kernel, the C FFI) and parko's diverse governor hold.
+pub mod governor_guard;
+
+/// The fail-closed fleet-posture state machine (`PostureTracker` /
+/// `POSTURE_STALENESS_TIMEOUT_MS`) — a pure, deterministic, clock-injected machine whose
+/// only input is `FleetPosture`. Relocated here verbatim (de-monolith Stage 5); re-exported
+/// by `kirra_runtime_sdk::posture_tracker` so the ROS2 adapter and the parko-ros2 node hold.
+pub mod posture_tracker;
+
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

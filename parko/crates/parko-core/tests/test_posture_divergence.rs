@@ -5,7 +5,7 @@
 // this produces materially different clamping behavior for the same input.
 //
 // Confirmed Kirra profile values (surveyed from
-// kirra_runtime_sdk::gateway::kinematics_contract):
+// kirra_core::kinematics_contract):
 // - nominal_reference_profile().max_speed_mps == 35.0
 // - mrc_fallback_profile().max_speed_mps == 5.0
 //

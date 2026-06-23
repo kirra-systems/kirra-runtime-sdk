@@ -504,7 +504,7 @@ mod tick_pipeline_tests {
     // fail-closed behaviour. Duplicating the state machine is exactly
     // what M2b exists to prevent.
 
-    use kirra_runtime_sdk::verifier::FleetPosture;
+    use kirra_core::FleetPosture;
     use crate::posture_state::ParkoPostureState;
 
     /// **No source → Nominal default (preserves the M2 behaviour).**
