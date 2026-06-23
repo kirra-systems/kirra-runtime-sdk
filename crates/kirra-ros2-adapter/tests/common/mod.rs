@@ -23,22 +23,22 @@ use kirra_ros2_adapter::corridor::Point;
 use kirra_ros2_adapter::perception_ingest::publish_perception_tick;
 use kirra_ros2_adapter::state::PerceivedObject;
 
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_core::kinematics_contract::{
     EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS,
 };
-use kirra_runtime_sdk::gateway::perception_monitor::{
+use kirra_core::perception_monitor::{
     apply_perception_cap, empty_perception_cap, resolve_perception_cap,
 };
 
 // We use `apply_enforcement` from kinematics_sim as the enforcement→command
 // bridge so the gated outcome matches the production clamp logic exactly.
-use kirra_runtime_sdk::kinematics_sim::apply_enforcement;
+use kirra_core::kinematics_sim::apply_enforcement;
 
 // The adapter publisher uses `KinematicPlausibilityContract::urban_reference()`
 // (see node.rs): nominal cap = URBAN_ODD_SPEED_CAP_MPS (22.35), MRC floor = 0.0,
 // ceiling V_OBJECT_MAX_MPS = 60. The publisher ttl reuses the subscription
 // staleness budget (500 ms).
-use kirra_runtime_sdk::gateway::perception_monitor::{
+use kirra_core::perception_monitor::{
     KinematicPlausibilityContract, PerceptionCapPublisher,
 };
 
@@ -163,7 +163,7 @@ pub fn steady_cmd(v: f64) -> ProposedVehicleCommand {
 /// Convenience: the EnforceAction for a commanded velocity under a perception cap
 /// (used where the test wants to assert the action variant directly).
 pub fn gated_action(eff_cap: Option<f64>, commanded_v: f64) -> EnforceAction {
-    use kirra_runtime_sdk::gateway::kinematics_contract::validate_vehicle_command;
+    use kirra_core::kinematics_contract::validate_vehicle_command;
     let base = VehicleKinematicsContract::nominal_reference_profile();
     let contract = apply_perception_cap(&base, eff_cap);
     validate_vehicle_command(&steady_cmd(commanded_v), &contract)

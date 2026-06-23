@@ -49,7 +49,7 @@ use crate::validation::{
 // KIRRA-OCCY-PMON-003 slice-1: pure ingest orchestration (safety logic lives
 // in `perception_ingest` + the kernel; this node only forwards to them).
 use crate::perception_ingest::{perception_derate_enabled, publish_perception_tick};
-use kirra_runtime_sdk::gateway::perception_monitor::{
+use kirra_core::perception_monitor::{
     empty_perception_cap, resolve_perception_cap, KinematicPlausibilityContract,
     PerceptionCapPublisher,
 };
@@ -57,7 +57,7 @@ use kirra_runtime_sdk::gateway::perception_monitor::{
 // slow-loop trajectory emit point. Reuses the SDK's Phase-1 machinery
 // (bounded mpsc + spawn_blocking JSONL drain); DEFAULT OFF via
 // `KIRRA_CAPTURE_ENABLED`. Additive only — never on / altering the verdict.
-use kirra_runtime_sdk::capture::{
+use kirra_core::capture::{
     capture_enabled, record_from_trajectory_verdict, spawn_capture_writer, CaptureRecord,
     PoseSnapshot, TrajectoryCaptureExt, TrajectoryDecision,
 };

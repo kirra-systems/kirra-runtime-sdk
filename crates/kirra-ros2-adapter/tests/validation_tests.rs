@@ -14,7 +14,7 @@ use kirra_ros2_adapter::{
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
     validation::validate_trajectory_slow,
 };
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 /// Build a straight n-pose trajectory along +X at uniform velocity.
 ///
@@ -468,7 +468,7 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
         cfg.max_speed_mps);
     assert_eq!(
         cfg.odd_speed_cap_mps,
-        Some(kirra_runtime_sdk::gateway::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS),
+        Some(kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS),
         "test premise: default_urban must carry the urban ODD cap"
     );
 

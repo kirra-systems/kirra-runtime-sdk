@@ -57,6 +57,34 @@ pub mod corridor;
 /// (de-monolith Stage 6a); the adapter's heavy `AdaptorState` re-exports them.
 pub mod trajectory;
 
+/// The Track-C perception monitor (KIRRA-OCCY-PMON-001) — the deterministic
+/// perception-degradation speed-cap derate (`KinematicPlausibilityContract` /
+/// `apply_perception_cap` / `resolve_perception_cap` / `SharedPerceptionCap`). Pure +
+/// dependency-light (`std::sync` + the kinematics-contract talisman + `PerceptionDerateEvent`),
+/// so it rides on the lean foundation. Relocated verbatim from the SDK's
+/// `gateway::perception_monitor` (de-monolith Stage 7); re-exported by
+/// `kirra_runtime_sdk::gateway::perception_monitor` so every existing path (the verifier
+/// service, the ROS2 adapter) holds.
+pub mod perception_monitor;
+
+/// The kinematic forward simulator (`VehicleState` / `apply_enforcement` /
+/// `apply_enforce_action` / `run_simulation`) — the deterministic bicycle-model integrator
+/// the scenario harness uses to assert physical outcomes. Pure physics over the
+/// kinematics-contract talisman; no service/runtime deps. Relocated verbatim from the SDK
+/// (de-monolith Stage 7); re-exported by `kirra_runtime_sdk::kinematics_sim`.
+pub mod kinematics_sim;
+
+/// The learning-loop capture channel — the record BUILDERS (`record_from_verdict` /
+/// `record_from_trajectory_verdict`) plus the bounded-mpsc JSONL writer
+/// (`spawn_capture_writer`). Touches governor types (now lean, here) so it could not live
+/// in the governor-free `kirra-capture-schema`. Behind the off-by-default `capture` feature
+/// because the writer pulls `tokio` / `serde_json` / `tracing` — crates that only need the
+/// foundation (the planner, the lane map, parko, the governor-service) keep core serde-only.
+/// Relocated verbatim from the SDK (de-monolith Stage 7); re-exported by
+/// `kirra_runtime_sdk::capture`.
+#[cfg(feature = "capture")]
+pub mod capture;
+
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

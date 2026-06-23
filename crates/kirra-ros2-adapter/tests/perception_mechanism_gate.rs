@@ -25,10 +25,10 @@
 mod common;
 
 use common::*;
-use kirra_runtime_sdk::gateway::kinematics_contract::EnforceAction;
-use kirra_runtime_sdk::kinematics_sim::{apply_enforcement, VehicleState};
-use kirra_runtime_sdk::gateway::kinematics_contract::VehicleKinematicsContract;
-use kirra_runtime_sdk::gateway::perception_monitor::apply_perception_cap;
+use kirra_core::kinematics_contract::EnforceAction;
+use kirra_core::kinematics_sim::{apply_enforcement, VehicleState};
+use kirra_core::kinematics_contract::VehicleKinematicsContract;
+use kirra_core::perception_monitor::apply_perception_cap;
 
 const NOW: u64 = 1_000;
 const FRESH_TICK: u64 = 1_000; // now - tick = 0 ≤ ttl → fresh

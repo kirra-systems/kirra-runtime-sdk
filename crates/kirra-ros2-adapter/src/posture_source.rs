@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 use serde_json::Value;
 
 use crate::state::AdaptorState;

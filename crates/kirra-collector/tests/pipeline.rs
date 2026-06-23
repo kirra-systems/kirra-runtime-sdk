@@ -351,7 +351,7 @@ fn manifest_records_lineage_quality_and_partitions() {
             trajectory(0, 2000, 42, CaptureOutcome::Deny),
         ],
     );
-    let (records, inputs) = read_jsonl_with_digests(&[cap.clone()]).unwrap();
+    let (records, inputs) = read_jsonl_with_digests(std::slice::from_ref(&cap)).unwrap();
     let lin = Lineage { inputs, bag_backend: "bag-json".to_string() };
     let out = unique_out("manout");
     let cfg = CollectorConfig { pass_rate: 1.0, window_ms: 100, max_orphan_rate: 1.0, out_dir: out.clone() };

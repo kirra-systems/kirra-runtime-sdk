@@ -20,10 +20,10 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 use crate::config::VehicleConfig;
-use kirra_runtime_sdk::posture_tracker::PostureTracker;
+use kirra_core::posture_tracker::PostureTracker;
 
 // The lean trajectory/perception data types now live in the `kirra-core` crate
 // (de-monolith Stage 6a); re-exported here so every existing `crate::state::*` /

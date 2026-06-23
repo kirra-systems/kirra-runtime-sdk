@@ -28,11 +28,11 @@ pub mod perception_redundancy;
 pub mod perception_ingest;
 
 // `posture_tracker` was relocated to the kernel
-// (`kirra_runtime_sdk::posture_tracker`) by M2b so the parko-ros2 node
+// (`kirra_core::posture_tracker`) by M2b so the parko-ros2 node
 // can share the SAME fail-closed state machine. Re-export here so
 // existing consumers of `kirra_ros2_adapter::PostureTracker` keep
 // working without a code change. Single implementation, two consumers.
-pub use kirra_runtime_sdk::posture_tracker;
+pub use kirra_core::posture_tracker;
 
 #[cfg(feature = "ros2")]
 pub mod node;
@@ -50,7 +50,7 @@ pub use crate::corridor::{CorridorSource, MockCorridorSource, Point};
 #[cfg(feature = "lanelet2")]
 pub use crate::corridor::{Lanelet2CorridorSource, Lanelet2Error};
 pub use crate::geometry::quat_to_yaw;
-pub use kirra_runtime_sdk::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
+pub use kirra_core::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
 pub use crate::state::{
     AcceptedTrajectory, AdaptorState, IncomingTrajectory, PerceivedObject, Pose,
     TrajectoryPoint, TrajectoryVerdict,
