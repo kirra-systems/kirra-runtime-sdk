@@ -13,6 +13,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The FROZEN kinematics-contract talisman — the deterministic vehicle flight-envelope
+/// safety contract (`EnforceAction` / `DenyCode` / `VehicleKinematicsContract` /
+/// `validate_vehicle_command`). Relocated here verbatim (de-monolith Stage 3); re-exported
+/// by `kirra_runtime_sdk::gateway::kinematics_contract` so every existing path holds.
+pub mod kinematics_contract;
+
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
