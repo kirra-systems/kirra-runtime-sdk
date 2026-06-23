@@ -49,6 +49,10 @@ const SLOW_LOOP_MAX_CORRIDOR_AGE_MS: u64 = 500;
 /// is 0.5 s for SAE-Level-4 stacks; we use the conservative end.
 const RSS_REACTION_TIME_S: f64 = 0.5;
 
+/// Speed slack (m/s) on the RSS-Rule-4 assured-clear-distance bound, to avoid
+/// rejecting a trajectory for float noise / a sub-decimetre overshoot of the cap.
+const OCCLUSION_SPEED_TOL_MPS: f64 = 0.1;
+
 /// Distance below which two objects are considered laterally aligned
 /// (and therefore subject to RSS longitudinal evaluation). Anything
 /// beyond this lateral offset is in another corridor; containment
@@ -92,11 +96,12 @@ pub fn validate_trajectory_slow(
     latest_odom: Option<&EgoOdom>,
     posture: FleetPosture,
 ) -> TrajectoryVerdict {
-    // Back-compat delegate: no perception-derate cap (the M1 behaviour). The
-    // ROS2 slow loop calls `validate_trajectory_slow_capped` with the
-    // resolved Track-C cap (KIRRA-OCCY-PMON-003 slice-1).
+    // Back-compat delegate: no perception-derate cap (the M1 behaviour) and no
+    // occlusion/visibility bound. The ROS2 slow loop calls
+    // `validate_trajectory_slow_capped` with the resolved Track-C cap
+    // (KIRRA-OCCY-PMON-003 slice-1).
     validate_trajectory_slow_capped(
-        trajectory, corridor, objects, config, latest_odom, posture, None,
+        trajectory, corridor, objects, config, latest_odom, posture, None, None,
     )
 }
 
@@ -112,6 +117,18 @@ pub fn validate_trajectory_slow(
 /// contract handed to it. Derate-only: `DenyCode` / the deny path are
 /// untouched, and an MRC-floor (0.0) cap surfaces as the existing
 /// `ClampLinear(0.0)` controlled stop.
+///
+/// `visibility_range_m` is the **assured-clear distance ahead** — how far into its
+/// path the ego has actually observed (perception-supplied; `None` → no occlusion
+/// bound, the back-compat path). When present it enforces **RSS Rule 4 (caution under
+/// limited visibility)**: a trajectory that outruns its assured clear distance — i.e.
+/// commands a speed from which the ego could not stop within what it can see, treating
+/// unobserved space as potentially occupied — is refused (`MRCFallback`), exactly as
+/// a containment or RSS breach is. Absent input → no-op, so the Nominal WCET path is
+/// byte-identical.
+// The slow-loop checker legitimately takes many distinct, non-groupable inputs
+// (trajectory, corridor, objects, config, odom, posture, + two optional caps).
+#[allow(clippy::too_many_arguments)]
 pub fn validate_trajectory_slow_capped(
     trajectory: &[TrajectoryPoint],
     corridor: &dyn CorridorSource,
@@ -120,6 +137,7 @@ pub fn validate_trajectory_slow_capped(
     latest_odom: Option<&EgoOdom>,
     posture: FleetPosture,
     effective_perception_cap: Option<f64>,
+    visibility_range_m: Option<f64>,
 ) -> TrajectoryVerdict {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
@@ -335,12 +353,67 @@ pub fn validate_trajectory_slow_capped(
         }
     }
 
-    // ----- D) Aggregate ------------------------------------------------
+    // ----- D) Limited-visibility / occlusion bound (RSS Rule 4) --------
+    //
+    // Gated on a perception-supplied assured-clear distance. A trajectory that
+    // outruns it — commanding a speed from which the ego could not stop within
+    // what it can see — is refused, treating unobserved space as a potential
+    // stopped hazard. Absent input → skipped, so the Nominal path is unchanged.
+    if let Some(vis) = visibility_range_m {
+        if outruns_assured_clear_distance(trajectory, vis, config.max_decel_mps2) {
+            return TrajectoryVerdict::MRCFallback;
+        }
+    }
+
+    // ----- E) Aggregate ------------------------------------------------
     if clamp_seen {
         TrajectoryVerdict::Clamp
     } else {
         TrajectoryVerdict::Accept
     }
+}
+
+/// RSS Rule 4 — the **assured-clear-distance** speed bound. The ego must be able to
+/// brake to a stop within the distance it can actually see (`remaining_m`), treating
+/// unobserved space beyond as potentially occupied by a stopped hazard. Returns the
+/// maximum admissible speed (m/s), including reaction distance (`RSS_REACTION_TIME_S`)
+/// for consistency with the longitudinal RSS primitive.
+///
+/// Solves `v·t + v²/(2a) = remaining` for `v`:
+/// `v = sqrt((a·t)² + 2·a·remaining) − a·t`, clamped at 0.
+fn assured_clear_distance_speed_cap(remaining_m: f64, brake_decel_mps2: f64) -> f64 {
+    let a = brake_decel_mps2.max(0.0);
+    let rem = remaining_m.max(0.0);
+    let t = RSS_REACTION_TIME_S;
+    let v = ((a * t).powi(2) + 2.0 * a * rem).sqrt() - a * t;
+    v.max(0.0)
+}
+
+/// True if any pose commands a speed above the assured-clear-distance cap for its
+/// station along the trajectory (within a small tolerance). `visibility_m` is the
+/// assured-clear distance from the trajectory start; as the ego advances, the
+/// remaining visible distance shrinks by the arc length travelled — we do not assume
+/// new space becomes visible mid-plan (fail-closed; the planner re-plans as it sees
+/// further).
+fn outruns_assured_clear_distance(
+    trajectory: &[TrajectoryPoint],
+    visibility_m: f64,
+    brake_decel_mps2: f64,
+) -> bool {
+    let mut traveled = 0.0;
+    let mut prev: Option<&TrajectoryPoint> = None;
+    for p in trajectory {
+        if let Some(pp) = prev {
+            traveled += (p.pose.x_m - pp.pose.x_m).hypot(p.pose.y_m - pp.pose.y_m);
+        }
+        let remaining = visibility_m - traveled;
+        let cap = assured_clear_distance_speed_cap(remaining, brake_decel_mps2);
+        if p.velocity_mps > cap + OCCLUSION_SPEED_TOL_MPS {
+            return true;
+        }
+        prev = Some(p);
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -554,5 +627,56 @@ mod conversion_tests {
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
         assert!(cmd.steering_angle_deg > 4.0 && cmd.steering_angle_deg < 7.0,
             "expected ~5.6° steering, got {}", cmd.steering_angle_deg);
+    }
+
+    // ----- RSS Rule 4: assured-clear-distance speed bound ------------------
+
+    #[test]
+    fn acda_cap_is_zero_at_zero_visibility() {
+        // Nothing visible ahead → the ego must already be stopped.
+        assert_eq!(assured_clear_distance_speed_cap(0.0, 4.5), 0.0);
+        assert_eq!(assured_clear_distance_speed_cap(-5.0, 4.5), 0.0); // past the horizon
+    }
+
+    #[test]
+    fn acda_cap_is_monotonic_in_visible_distance() {
+        let a = 4.5;
+        let near = assured_clear_distance_speed_cap(5.0, a);
+        let far = assured_clear_distance_speed_cap(30.0, a);
+        assert!(far > near, "more visibility ⇒ higher admissible speed: {near} vs {far}");
+        // Sanity: the ego must be able to stop within what it sees, incl. reaction.
+        let stop_dist = near * RSS_REACTION_TIME_S + near * near / (2.0 * a);
+        assert!(stop_dist <= 5.0 + 1e-6, "stopping distance {stop_dist} must fit in 5 m");
+    }
+
+    #[test]
+    fn outruns_flags_constant_speed_but_not_a_stop_within_visibility() {
+        let dt = 0.1;
+        // Constant 10 m/s into 5 m → outruns.
+        let fast: Vec<TrajectoryPoint> = (0..20)
+            .map(|i| TrajectoryPoint {
+                pose: AdapterPose { x_m: i as f64 * 10.0 * dt, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 10.0,
+                time_from_start_s: i as f64 * dt,
+            })
+            .collect();
+        assert!(outruns_assured_clear_distance(&fast, 5.0, 4.5));
+
+        // A 2 m/s decel-to-stop within ~20 m of visibility → does not outrun.
+        let mut v = 2.0;
+        let mut x = 0.0;
+        let stop: Vec<TrajectoryPoint> = (0..30)
+            .map(|i| {
+                let p = TrajectoryPoint {
+                    pose: AdapterPose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                    velocity_mps: v,
+                    time_from_start_s: i as f64 * dt,
+                };
+                x += v * dt;
+                v = (v - 1.5 * dt).max(0.0);
+                p
+            })
+            .collect();
+        assert!(!outruns_assured_clear_distance(&stop, 20.0, 4.5));
     }
 }

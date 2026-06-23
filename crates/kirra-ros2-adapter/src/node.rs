@@ -427,6 +427,10 @@ pub async fn run_adapter(
                 odom.as_ref(),
                 posture.clone(),
                 effective_perception_cap,
+                // Occlusion / assured-clear-distance bound (RSS Rule 4): perception
+                // does not yet supply a visibility range → None (no-op), mirroring
+                // the perception-derate cap's pre-wiring state.
+                None,
             );
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
