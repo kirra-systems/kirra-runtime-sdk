@@ -33,7 +33,11 @@ kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false 
 # crate (de-monolith Stage 4), so the planner no longer pulls the verifier service's
 # heavy tree directly (the adapter dep remains until the adapter is de-monolithed).
 kirra-core = { path = "../kirra-core" }
-roxmltree = "0.21.1"
+# The shared lane-map crate (de-monolith Stage 6b): LaneGraph / routing / right-of-way,
+# the lane-line crossing rules, and the Lanelet2 `.osm` parser. The planner re-exports
+# from it (lanemap / lanelet2 / behavior's lane-line types). It carries the roxmltree
+# (OSM-XML) dep the planner's own `lanelet2.rs` used to.
+kirra-map = { path = "../kirra-map" }
 # Mick LLM-intent JSON parsing (the System-2 → Occy intent seam).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
