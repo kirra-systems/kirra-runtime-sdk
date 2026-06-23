@@ -246,6 +246,17 @@ pub struct AppState {
     /// sustained #98 WATER_UNTRAVERSABLE vetoes) is a deferred cross-subsystem
     /// follow-up; this flag is read-only in the current code (defaults false).
     pub flood_condition_active: Arc<AtomicBool>,
+    /// C2 supervisor trip flag (review finding C2). Set by `supervisor::spawn_supervised`
+    /// when a CRITICAL background safety loop (the telemetry watchdog, the posture
+    /// engine worker, the HA heartbeat writer / promotion monitor) crashes past its
+    /// restart budget. The posture engine reads it and forces `FleetPosture::LockedOut`
+    /// unconditionally (highest priority, overriding the DAG), so a wedged safety loop
+    /// fails the whole fleet closed instead of silently leaving actuators live. Sticky:
+    /// once tripped it stays tripped until process restart (a recovered loop within the
+    /// restart window clears the supervisor's local counter but NOT this flag — recovery
+    /// from a forced fleet lockout is an explicit human/HA action, matching LockedOut's
+    /// human-reset semantics). Defaults false.
+    pub supervisor_tripped: Arc<AtomicBool>,
     /// Recovery streak for clearing an active RSS violation.
     pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
     /// #104 — the currently-open post-incident forensic sequence (correlation id
@@ -285,6 +296,7 @@ impl AppState {
             transport_identity: TransportIdentityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
             flood_condition_active: Arc::new(AtomicBool::new(false)),
+            supervisor_tripped: Arc::new(AtomicBool::new(false)),
             rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),

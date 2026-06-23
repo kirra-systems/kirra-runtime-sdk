@@ -94,7 +94,16 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let escalate = (app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
         || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst))
         && dag_posture == FleetPosture::Nominal;
-    let new_posture = if escalate {
+    // C2 supervisor escalation has ABSOLUTE priority over the DAG and the
+    // operational (rss/flood) escalation: if a critical background safety loop is
+    // wedged past its restart budget, `supervisor_tripped` is set and the whole
+    // fleet is forced LockedOut here. Because the engine itself honors the flag,
+    // the forced LockedOut STICKS across every subsequent recalc (a recovered DAG
+    // can never silently downgrade it). Recovery is a human/HA reset, matching
+    // LockedOut semantics. SAFETY: SG9 fail-closed on safety-loop death (review C2).
+    let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst) {
+        FleetPosture::LockedOut
+    } else if escalate {
         FleetPosture::Degraded
     } else {
         dag_posture
@@ -225,6 +234,25 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
             "Fleet posture transition"
         );
     }
+}
+
+/// Force the posture cache to `LockedOut` immediately (C2 supervisor escalation).
+///
+/// Writes a `LockedOut` entry with a freshly-bumped generation so it wins the
+/// monotonic compare-and-swap, WITHOUT going through `recalculate_and_broadcast`
+/// (which may be the very task that died). Callers MUST also set
+/// `AppState::supervisor_tripped` so any *surviving* recalc keeps producing
+/// LockedOut — this function only makes the lockout instantaneous; the sticky flag
+/// makes it durable. Fail-closed by construction: a poisoned cache lock is the
+/// gate's own LockedOut signal, so a failed write here still denies.
+pub fn force_lockout(cache: &SharedPostureCache, ts_ms: u64) {
+    let candidate =
+        CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, next_generation(), ts_ms);
+    let wrote = replace_cache_if_newer(cache, candidate);
+    tracing::error!(
+        wrote_cache = wrote,
+        "C2 escalation: posture cache forced to LockedOut (critical safety loop wedged)"
+    );
 }
 
 /// Replaces the cached posture ONLY if `candidate.generation` is strictly
@@ -392,6 +420,59 @@ mod posture_engine_tests {
         let entry = guard.as_ref().unwrap();
         assert_eq!(entry.posture, FleetPosture::Nominal);
         assert!(entry.generation > 0);
+    }
+
+    #[test]
+    fn test_supervisor_tripped_forces_locked_out_over_healthy_dag() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Healthy empty DAG would normally be Nominal (see the test above).
+        // Trip the C2 supervisor flag: recalc must force LockedOut regardless.
+        app.supervisor_tripped.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        {
+            let guard = cache.read().unwrap();
+            assert_eq!(
+                guard.as_ref().unwrap().posture,
+                FleetPosture::LockedOut,
+                "supervisor_tripped must force LockedOut over a healthy DAG"
+            );
+        }
+
+        // Sticky: a subsequent recalc (e.g. DAG still healthy) must NOT downgrade.
+        recalculate_and_broadcast(&app, &cache);
+        {
+            let guard = cache.read().unwrap();
+            assert_eq!(
+                guard.as_ref().unwrap().posture,
+                FleetPosture::LockedOut,
+                "forced LockedOut must STICK across recalcs while the flag is set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_force_lockout_writes_locked_out_with_bumped_generation() {
+        use std::sync::Arc;
+        use crate::posture_cache::CachedFleetPosture;
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 1_000),
+        )));
+
+        force_lockout(&cache, 2_000);
+
+        let guard = cache.read().unwrap();
+        let entry = guard.as_ref().unwrap();
+        assert_eq!(entry.posture, FleetPosture::LockedOut);
+        assert!(entry.generation > 1, "force_lockout must bump the generation to win the CAS");
     }
 
     #[test]
