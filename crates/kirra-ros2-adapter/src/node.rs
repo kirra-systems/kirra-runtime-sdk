@@ -431,6 +431,9 @@ pub async fn run_adapter(
                 // does not yet supply a visibility range → None (no-op), mirroring
                 // the perception-derate cap's pre-wiring state.
                 None,
+                // Multi-modal predictive RSS: prediction does not yet supply per-object
+                // modes here → None (no-op); the snapshot RSS remains the bound.
+                None,
             );
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

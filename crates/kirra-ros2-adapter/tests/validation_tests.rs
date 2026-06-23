@@ -516,7 +516,7 @@ fn occlusion_rejects_a_trajectory_that_outruns_assured_clear_distance() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0),
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0), None,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "10 m/s into 5 m of visibility outruns the assured clear distance; got {verdict:?}");
@@ -532,7 +532,7 @@ fn occlusion_bound_is_gated_off_when_no_visibility_is_supplied() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None,
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None,
     );
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "with no visibility input the occlusion bound is a no-op; got {verdict:?}");
@@ -548,8 +548,90 @@ fn occlusion_admits_a_decel_to_stop_within_visibility() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0),
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0), None,
     );
     assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a decel-to-stop within the assured clear distance is admissible; got {verdict:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Multi-modal predictive RSS (space-time over predicted modes)
+// ---------------------------------------------------------------------------
+
+use kirra_ros2_adapter::validation::{PredictedMode, PredictedSample};
+
+/// Build a predicted mode: an object moving in a straight line from `(x0,y0)` at
+/// `(vx,vy)` m/s, sampled every 0.5 s over `horizon_s`.
+fn linear_mode(id: u64, x0: f64, y0: f64, vx: f64, vy: f64, horizon_s: f64) -> Vec<PredictedSample> {
+    let mut t = 0.0;
+    let mut out = Vec::new();
+    while t <= horizon_s + 1e-9 {
+        out.push(PredictedSample {
+            pos: Point { x_m: x0 + vx * t, y_m: y0 + vy * t },
+            time_from_start_s: t,
+        });
+        t += 0.5;
+    }
+    let _ = id;
+    out
+}
+
+#[test]
+fn predictive_rss_does_not_regress_a_lane_keeping_neighbor() {
+    // A fast car ABREAST in the next lane (y=-3.5), predicted to STAY in its lane.
+    // The §4 lateral gating must keep admitting the ego — the predicted mode never
+    // overlaps the ego's path.
+    let trajectory = straight_trajectory(20, 6.0, 0.1); // ego 6 m/s straight at y=0
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let samples = linear_mode(1, 6.0, -3.5, 9.0, 0.0, 2.0); // fast, but stays at y=-3.5
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes),
+    );
+    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a neighbor predicted to keep its lane must not be rejected; got {verdict:?}");
+}
+
+#[test]
+fn predictive_rss_catches_a_predicted_cut_in() {
+    // The SAME kind of neighbor, but its predicted mode now CUTS IN: it crosses from
+    // the right lane (y=-3.5) INTO the ego's lane just ahead of the ego, then sits
+    // there slow. The snapshot (t=0) shows it laterally clear in another lane, but the
+    // predicted mode brings it into the path within the RSS gap → MRCFallback.
+    let trajectory = straight_trajectory(20, 3.0, 0.1); // ego 3 m/s, x: 5 → ~10.7
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    // Phase 1 (t 0→1.0): cross from (9,-3.5) to (9,0). Phase 2 (t 1.0→2.0): creep
+    // forward in-lane at ~0.6 m/s — 1 m ahead of the ego when it arrives at x=8 (t=1.0).
+    let samples = [
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -1.75 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: 0.0 }, time_from_start_s: 1.0 },
+        PredictedSample { pos: Point { x_m: 9.3, y_m: 0.0 }, time_from_start_s: 1.5 },
+        PredictedSample { pos: Point { x_m: 9.6, y_m: 0.0 }, time_from_start_s: 2.0 },
+    ];
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes),
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
+}
+
+#[test]
+fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
+    // Same cut-in geometry, but no predicted modes → the pass is skipped (snapshot
+    // RSS sees no object at all here), so the trajectory is not MRC'd for prediction.
+    let trajectory = straight_trajectory(20, 6.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, None,
+    );
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "with no predicted modes the predictive pass is a no-op; got {verdict:?}");
 }

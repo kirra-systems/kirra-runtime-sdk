@@ -21,6 +21,8 @@ pub mod corridor;
 pub mod geometry;
 pub mod state;
 pub mod validation;
+// Perception redundancy cross-check (True-Redundancy analog) — pure, non-ros2-gated.
+pub mod perception_redundancy;
 // KIRRA-OCCY-PMON-003 slice-1 — pure perception-ingest shim/orchestration
 // (non-ros2-gated; safety logic tested under default features).
 pub mod perception_ingest;
