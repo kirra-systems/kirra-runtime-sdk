@@ -3,23 +3,18 @@
 // kirra-governor-service — minimal over-the-wire (UDP) KIRRA governor for the
 // two-box governed-car prototype (docs/adr/KIRRA_BRINGUP_RUNBOOK.md, Prompt A).
 //
-// It wraps the EXISTING verdict core — `src/gateway/kinematics_contract.rs` —
-// compiled in VERBATIM via `#[path]`. The file is NOT forked and NOT moved: it
-// stays byte-identical at its canonical location (talisman blob
-// 997fb7ae15ce3e11adec9218044c7c84b049ad3b). Because that file imports only
-// `serde` + `std`, including it here pulls in nothing heavy: this binary's
-// entire dependency tree is serde + bincode + std — NO tokio, ROS 2, r2r, or
-// DDS, per ADR-0001 (the governor is the minimal, async/ROS-free checker; the
-// QNX cert target has none of those anyway).
+// It wraps the EXISTING verdict core — the FROZEN kinematics-contract talisman —
+// which now lives in the lean `kirra-core` crate (de-monolith Stage 3). This binary
+// depends on that crate directly; because `kirra-core` imports only `serde` + `std`,
+// it pulls in nothing heavy: this binary's entire dependency tree is serde + bincode
+// + std — NO tokio, ROS 2, r2r, or DDS, per ADR-0001 (the governor is the minimal,
+// async/ROS-free checker; the QNX cert target has none of those anyway). The contract
+// logic is the real, unmodified one — the talisman is never forked, only relocated.
 //
 // PROTOTYPE STAGE (QM, not the cert build): regular Rust over UDP. The
 // Ferrocene / `no_std` / ASIL-D factoring and the shared-memory mailbox are a
 // later stage and do not block the demo — see ADR-0001 and the bring-up runbook.
 
-// The real verdict core — the FROZEN kinematics-contract talisman — now lives in the
-// lean `kirra-core` crate (de-monolith Stage 3). This minimal isolated governor depends
-// on it directly (serde-only, no service/runtime deps), replacing the prior relative
-// `#[path]` include of the root `src/gateway/kinematics_contract.rs` (same contract).
 use kirra_core::kinematics_contract::{
     validate_vehicle_command, DenyCode, EnforceAction, ProposedVehicleCommand,
     VehicleKinematicsContract,

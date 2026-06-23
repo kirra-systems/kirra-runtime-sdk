@@ -22,3 +22,9 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # The posture types are wire-serialized (federation reports, the SSE stream). serde is
 # lean — the only dependency this crate carries.
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The containment unit tests (Stage 4, moved verbatim) assert the byte-stable
+# SCREAMING_SNAKE_CASE DenyCode token via JSON serialization. Test-only — keeps the
+# shipping crate serde-only.
+serde_json = "1"

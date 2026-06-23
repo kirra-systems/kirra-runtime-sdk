@@ -20,7 +20,7 @@ use kirra_planner::{
 use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 const SEED: u64 = 0xC0FFEE;
 

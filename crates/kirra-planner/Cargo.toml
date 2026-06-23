@@ -8,7 +8,8 @@
 # (`TrajectoryPoint`), the validation entry (`validate_trajectory_slow`, the #131
 # per-trajectory containment path), and the corridor/config/ego types all live in
 # `kirra-ros2-adapter`; `default-features = false` keeps ROS / r2r out of this
-# crate (the adapter's `default = []`). `FleetPosture` is in `kirra-runtime-sdk`.
+# crate (the adapter's `default = []`). `FleetPosture` + the SG2 containment cap are
+# in the lean `kirra-core` crate (de-monolith Stage 4).
 #
 # Phase-0 FINDING (surfaced in the PR, not fixed here): the checked trajectory
 # contract + the validation entry living in the *adapter* (a downstream
@@ -27,8 +28,11 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # The #131 checker entry + the checked trajectory/corridor/config/ego types.
 # default-features = false → no ROS (adapter `default = []`; `ros2` is opt-in).
 kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
-# FleetPosture (verifier.rs) for the posture → planner-mode mapping.
-kirra-runtime-sdk = { path = "../.." }
+# FleetPosture + the SG2 containment cap (MAX_TRAJECTORY_HORIZON) for the posture →
+# planner-mode mapping and the trajectory-length bound — now from the lean `kirra-core`
+# crate (de-monolith Stage 4), so the planner no longer pulls the verifier service's
+# heavy tree directly (the adapter dep remains until the adapter is de-monolithed).
+kirra-core = { path = "../kirra-core" }
 roxmltree = "0.21.1"
 # Mick LLM-intent JSON parsing (the System-2 → Occy intent seam).
 serde = { version = "1", features = ["derive"] }
