@@ -193,7 +193,7 @@ pub fn write_manifest(manifest: &Manifest, out_dir: &Path) -> Result<PathBuf, Co
     std::fs::create_dir_all(out_dir).map_err(CollectorError::Io)?;
     let path = out_dir.join("manifest.json");
     let json = serde_json::to_string_pretty(manifest)
-        .map_err(|e| CollectorError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| CollectorError::Io(std::io::Error::other(e)))?;
     std::fs::write(&path, json).map_err(CollectorError::Io)?;
     Ok(path)
 }

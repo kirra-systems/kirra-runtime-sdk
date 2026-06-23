@@ -31,9 +31,9 @@ fn keys_agree(msg: &BusMessage, rec: &CaptureRecord) -> bool {
     let Some(t) = rec.traj.as_ref() else {
         return true; // gateway records have no cross-check keys
     };
-    let asset_ok = msg.asset_id.as_deref().map_or(true, |a| a == t.asset_id);
-    let traj_ok = msg.trajectory_id.map_or(true, |id| id == t.trajectory_id);
-    let objs_ok = msg.objects_ms.map_or(true, |o| o == t.objects_ms);
+    let asset_ok = msg.asset_id.as_deref().is_none_or(|a| a == t.asset_id);
+    let traj_ok = msg.trajectory_id.is_none_or(|id| id == t.trajectory_id);
+    let objs_ok = msg.objects_ms.is_none_or(|o| o == t.objects_ms);
     asset_ok && traj_ok && objs_ok
 }
 

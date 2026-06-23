@@ -77,7 +77,7 @@ fn main() -> std::io::Result<()> {
     ];
 
     eprintln!("kirra-proposal-bench → {addr} ({} cases)\n", cases.len());
-    println!("{:<20} | {:<26} | {}", "CASE", "REASON", "VERDICT");
+    println!("{:<20} | {:<26} | VERDICT", "CASE", "REASON");
     println!("{}", "-".repeat(78));
 
     let mut buf = [0u8; 4096];
