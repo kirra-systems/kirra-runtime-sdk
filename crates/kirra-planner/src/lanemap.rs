@@ -44,6 +44,11 @@ use std::collections::BTreeMap;
 
 use crate::behavior::{LaneBoundary, LineType};
 
+/// Maximum lanes a [`LaneGraph::route`] may traverse before failing closed — a
+/// bounded graph walk, mirroring the verifier's `MAX_DEPENDENCY_DEPTH`. A route
+/// longer than this (or a pathological graph) returns `None` rather than churning.
+pub const MAX_ROUTE_LANES: usize = 64;
+
 /// A directed connectivity edge out of a [`Lane`]. Mirrors the relations a
 /// Lanelet2 routing graph carries: longitudinal **successors** (drive forward
 /// into) and lateral **neighbors** (the adjacent lane on each side, the lane a
@@ -296,6 +301,88 @@ impl LaneGraph {
         let ego = self.lanes.get(&ego_lane)?;
         let other = self.lanes.get(&self.lane_at(p)?)?;
         Some(other.opposes(ego))
+    }
+
+    /// Shortest lane **route** from `from` to `to` (inclusive) over the connectivity
+    /// graph: longitudinal **successors** (cost 1) and lateral **neighbors** (cost 3,
+    /// so the router prefers driving forward and only changes lanes when the route
+    /// requires it). This is the lane *selection* a Lanelet2 routing graph provides —
+    /// the sequence whose drivable span [`corridor_over`](Self::corridor_over) /
+    /// per-lane [`corridor`](Lane::corridor) then materialize.
+    ///
+    /// Returns the lane-id sequence, or `None` if either endpoint is unknown, `to` is
+    /// unreachable, or the route would exceed [`MAX_ROUTE_LANES`] (fail-closed).
+    /// Deterministic — ties are broken by lane id.
+    #[must_use]
+    pub fn route(&self, from: u64, to: u64) -> Option<Vec<u64>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        self.lane(from)?;
+        self.lane(to)?;
+        if from == to {
+            return Some(vec![from]);
+        }
+
+        const SUCCESSOR_COST: u32 = 1;
+        const LANE_CHANGE_COST: u32 = 3;
+
+        let mut dist: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut prev: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut heap: BinaryHeap<Reverse<(u32, u64)>> = BinaryHeap::new();
+        dist.insert(from, 0);
+        heap.push(Reverse((0, from)));
+
+        while let Some(Reverse((cost, lane_id))) = heap.pop() {
+            if lane_id == to {
+                break;
+            }
+            if cost > *dist.get(&lane_id).unwrap_or(&u32::MAX) {
+                continue; // a stale heap entry superseded by a cheaper path
+            }
+            let Some(lane) = self.lane(lane_id) else { continue };
+            let edges: Vec<(u64, u32)> = lane
+                .successors()
+                .map(|s| (s, SUCCESSOR_COST))
+                .chain(lane.left_neighbor().map(|n| (n, LANE_CHANGE_COST)))
+                .chain(lane.right_neighbor().map(|n| (n, LANE_CHANGE_COST)))
+                .collect();
+            for (next, w) in edges {
+                if self.lane(next).is_none() {
+                    continue; // dangling edge — ignore (fail-closed: never invents a lane)
+                }
+                let nd = cost.saturating_add(w);
+                if nd < *dist.get(&next).unwrap_or(&u32::MAX) {
+                    dist.insert(next, nd);
+                    prev.insert(next, lane_id);
+                    heap.push(Reverse((nd, next)));
+                }
+            }
+        }
+
+        if !dist.contains_key(&to) {
+            return None;
+        }
+        let mut route = vec![to];
+        let mut cur = to;
+        while cur != from {
+            cur = *prev.get(&cur)?;
+            route.push(cur);
+            if route.len() > MAX_ROUTE_LANES {
+                return None; // pathological length → fail closed
+            }
+        }
+        route.reverse();
+        Some(route)
+    }
+
+    /// Route from `from` to the lane containing world point `goal` (resolved via
+    /// [`lane_at`](Self::lane_at)). `None` if the goal is off the mapped road or
+    /// unreachable.
+    #[must_use]
+    pub fn route_to_point(&self, from: u64, goal: Point) -> Option<Vec<u64>> {
+        let to = self.lane_at(goal)?;
+        self.route(from, to)
     }
 
     /// Number of lanes in the graph.
@@ -684,5 +771,84 @@ mod tests {
         // At the straight start the normal is +y → left point sits at y≈+1.
         assert!((left[0].y_m - 1.0).abs() < 1e-9 && left[0].x_m.abs() < 1e-9);
         assert!((right[0].y_m + 1.0).abs() < 1e-9);
+    }
+
+    // ----- Router (lane selection over the connectivity graph) -------------
+
+    /// Two parallel forward lanes, each a 3-segment successor chain:
+    ///   left lane  (y=0):    1 → 2 → 3
+    ///   right lane (y=-3.5): 11 → 12 → 13
+    /// with lateral neighbor links between the abreast segments (1↔11, 2↔12, 3↔13).
+    fn routing_grid() -> LaneGraph {
+        let l = LineType::Solid;
+        let b = LineType::Broken;
+        let seg = |id, y, x0: f64, x1: f64, succ: Option<u64>, neigh: LaneEdge| {
+            let mut lane = Lane::straight(id, y, x0, x1, 1.75, l, b);
+            if let Some(s) = succ {
+                lane = lane.with_edge(LaneEdge::Successor { to: s });
+            }
+            lane.with_edge(neigh)
+        };
+        LaneGraph::new()
+            .with_lane(seg(1, 0.0, 0.0, 30.0, Some(2), LaneEdge::RightNeighbor { to: 11 }))
+            .with_lane(seg(2, 0.0, 30.0, 60.0, Some(3), LaneEdge::RightNeighbor { to: 12 }))
+            .with_lane(seg(3, 0.0, 60.0, 90.0, None, LaneEdge::RightNeighbor { to: 13 }))
+            .with_lane(seg(11, -3.5, 0.0, 30.0, Some(12), LaneEdge::LeftNeighbor { to: 1 }))
+            .with_lane(seg(12, -3.5, 30.0, 60.0, Some(13), LaneEdge::LeftNeighbor { to: 2 }))
+            .with_lane(seg(13, -3.5, 60.0, 90.0, None, LaneEdge::LeftNeighbor { to: 3 }))
+    }
+
+    #[test]
+    fn route_follows_the_successor_chain() {
+        assert_eq!(routing_grid().route(1, 3), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn route_to_self_is_a_singleton() {
+        assert_eq!(routing_grid().route(2, 2), Some(vec![2]));
+    }
+
+    #[test]
+    fn route_takes_a_lane_change_only_when_needed() {
+        // Goal in the right lane, one segment ahead: drive forward then change lanes.
+        assert_eq!(routing_grid().route(1, 12), Some(vec![1, 2, 12]));
+        // Goal directly abreast: a single lane change.
+        assert_eq!(routing_grid().route(1, 11), Some(vec![1, 11]));
+    }
+
+    #[test]
+    fn route_prefers_staying_in_lane_over_weaving() {
+        // 1→3 via the left chain (two successors, cost 2) beats any route that dips
+        // into the right lane and back (≥ two lane changes, cost ≥ 6).
+        assert_eq!(routing_grid().route(1, 3), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn route_to_a_point_resolves_the_goal_lane() {
+        let g = routing_grid();
+        assert_eq!(g.route_to_point(1, Point { x_m: 75.0, y_m: 0.0 }), Some(vec![1, 2, 3]));
+        // Off the mapped road → None.
+        assert_eq!(g.route_to_point(1, Point { x_m: 75.0, y_m: 50.0 }), None);
+    }
+
+    #[test]
+    fn route_fails_closed_on_unknown_or_unreachable() {
+        let g = routing_grid();
+        assert_eq!(g.route(1, 9999), None, "unknown destination");
+        assert_eq!(g.route(9999, 3), None, "unknown source");
+        // A disconnected lane is unreachable.
+        let g2 = g.with_lane(Lane::straight(77, 100.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid));
+        assert_eq!(g2.route(1, 77), None, "no path to an isolated lane");
+    }
+
+    #[test]
+    fn route_terminates_on_a_cycle() {
+        // A → B → A. Routing to an unreachable node must not loop forever.
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 2 }))
+            .with_lane(Lane::straight(2, 0.0, 30.0, 60.0, 1.75, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 1 }))
+            .with_lane(Lane::straight(3, 0.0, 60.0, 90.0, 1.75, LineType::Solid, LineType::Solid));
+        assert_eq!(g.route(1, 3), None);
+        assert_eq!(g.route(1, 2), Some(vec![1, 2]));
     }
 }

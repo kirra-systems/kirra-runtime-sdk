@@ -48,7 +48,7 @@ pub use behavior::{
 };
 
 pub mod lanemap;
-pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph};
+pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph, MAX_ROUTE_LANES};
 
 pub mod mick;
 pub use mick::{plan_for_intent, MickIntent};
