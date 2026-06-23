@@ -19,6 +19,8 @@ pub mod commands;
 // SG5 — map-anchored COMMIT_ZONE_BLOCKED veto foundation (#106).
 pub mod commit_zone;
 pub mod control_loop;
+// Object detector path: sensor → backend → decode (NMS) → detections (#2a / P2).
+pub mod detector;
 // SG6 — post-collision impact latch (IMU/contact/vanished fusion, #102).
 pub mod impact;
 // SG2/SG5 — localization-integrity gate over the map-anchored checks (#123).
