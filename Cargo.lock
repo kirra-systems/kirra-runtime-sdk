@@ -2024,6 +2024,7 @@ dependencies = [
  "cxx-build",
  "dashmap",
  "futures",
+ "kirra-core",
  "kirra-runtime-sdk",
  "parko-core",
  "r2r",
