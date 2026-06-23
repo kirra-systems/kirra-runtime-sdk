@@ -43,19 +43,23 @@ fn now_ms() -> u64 {
 
 /// Resolves the current FleetPosture from the SharedPostureCache.
 ///
-/// None (cold start or expired cache) and a poisoned RwLock both map to
-/// LockedOut — fail-closed in all ambiguous cases.
+/// Delegates to [`resolve_posture_with_reason`] so this inner safety gate is
+/// **independently** fail-closed on every ambiguous case — a STALE cache (age ≥
+/// `POSTURE_CACHE_TTL_MS`), an empty cache (cold start / reset), and a poisoned RwLock
+/// all map to `LockedOut`. (Auth M1) Previously this only handled `None` and poison and
+/// returned a `Some(cached)` posture WITHOUT a staleness check — fail-closed only because
+/// the outer `should_route_command` gate happened to TTL-check first; the inner gate must
+/// not depend on that. The single source of truth for the freshness rule now lives in
+/// `resolve_posture_with_reason`.
 // SAFETY: SG8 SG9 | REQ: posture-resolve-fails-closed-locked-out | TEST: test_none_cache_denies_all_commands,test_empty_posture_cache_fails_closed_as_locked_out
-// (Poisoned-lock and missing-cache both map to LockedOut; SG8 = correct
-//  MRC selection on degraded, SG9 = fail-closed on lock/cache anomaly.)
+// (Stale-cache, missing-cache, and poisoned-lock all map to LockedOut; SG8 = correct
+//  MRC selection on degraded, SG9 = fail-closed on staleness/lock/cache anomaly.)
 fn resolve_posture(svc: &ServiceState) -> FleetPosture {
-    match svc.posture_cache.read() {
-        Ok(guard) => match guard.as_ref() {
-            Some(cached) => cached.posture.clone(),
-            None => FleetPosture::LockedOut,
-        },
-        Err(_) => FleetPosture::LockedOut,
-    }
+    crate::posture_engine_v2::resolve_posture_with_reason(
+        &svc.posture_cache,
+        crate::posture_cache::POSTURE_CACHE_TTL_MS,
+    )
+    .0
 }
 
 /// The enforcement verdict the actuator middleware reached for one command,

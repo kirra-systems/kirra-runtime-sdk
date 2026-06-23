@@ -237,8 +237,23 @@ pub fn spawn_capture_writer() -> mpsc::Sender<CaptureRecord> {
             queue_bound = CAPTURE_QUEUE_BOUND, path = %sink_path,
             "capture writer task started"
         );
+        // Block for the next record, then drain everything already queued without
+        // blocking, then fsync the whole batch. Batching the `sync_data` to the
+        // drain-empty point keeps the durability cost off the per-record path while
+        // guaranteeing that, once the queue is momentarily empty, every record handed to
+        // us is on stable storage — so a crash can lose only in-flight records, never a
+        // torn line that was already acknowledged as written.
         while let Some(rec) = rx.blocking_recv() {
             write_one_capture(&mut sink, &rec);
+            // Drain everything already queued without blocking (Empty = caught up,
+            // Disconnected = last sender dropped — both end the drain; a Disconnected
+            // ends the outer loop on the next `blocking_recv`).
+            while let Ok(rec) = rx.try_recv() {
+                write_one_capture(&mut sink, &rec);
+            }
+            if let Err(e) = sink.sync_data() {
+                tracing::error!(error = %e, "capture writer: sync_data failed — batch may not be durable");
+            }
         }
         tracing::info!("capture writer task exiting (channel closed)");
     });
@@ -249,8 +264,13 @@ pub fn spawn_capture_writer() -> mpsc::Sender<CaptureRecord> {
 /// for capture run (off the verdict path).
 fn write_one_capture(sink: &mut std::fs::File, rec: &CaptureRecord) {
     match serde_json::to_string(rec) {
-        Ok(line) => {
-            if let Err(e) = writeln!(sink, "{line}") {
+        Ok(mut line) => {
+            // One `write_all` of the line + newline in a single buffer, rather than
+            // `writeln!` (which can issue several writes and tear the line on crash).
+            // `write_all` retries short writes for us; the batched `sync_data` in the
+            // writer loop then makes the durably-flushed prefix a whole number of lines.
+            line.push('\n');
+            if let Err(e) = sink.write_all(line.as_bytes()) {
                 tracing::error!(error = %e, "capture writer: JSONL append failed; record dropped");
             }
         }
