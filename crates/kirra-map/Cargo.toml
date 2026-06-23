@@ -1,0 +1,25 @@
+# crates/kirra-map/Cargo.toml
+#
+# kirra-map — the shared lane-map crate (de-monolith Stage 6b). The Lanelet2-lite
+# lane graph (`LaneGraph` / routing / right-of-way), the typed lane-line crossing
+# rules (`LaneBoundary` / `LineType`), and the pure-Rust Lanelet2 `.osm` parser,
+# extracted from the planner so the lane map is reusable (the planner today; parko or
+# other consumers next) and decoupled from the planner's policy logic.
+#
+# Depends ONLY on the lean `kirra-core` (the corridor seam + trajectory/perception
+# data types) + roxmltree (OSM-XML parse). NO adapter, NO verifier service, NO ROS.
+[package]
+name = "kirra-map"
+version = "0.1.0"
+edition = "2021"
+description = "Shared lane-map substrate for the Kirra stack — Lanelet2-lite lane graph, routing, right-of-way, lane-line crossing rules, and a pure-Rust .osm parser. Lean (kirra-core + roxmltree)."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The lean foundation: the corridor seam (`Point`/`CorridorSource`) and the
+# trajectory/perception data types (`PerceivedObject`) the lane map builds on.
+kirra-core = { path = "../kirra-core" }
+# Pure-Rust OSM-XML parse for the Lanelet2 `.osm` loader (no C++ lanelet2_core).
+roxmltree = "0.21.1"

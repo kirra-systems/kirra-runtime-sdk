@@ -1997,13 +1997,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-map"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "roxmltree",
+]
+
+[[package]]
 name = "kirra-planner"
 version = "0.1.0"
 dependencies = [
  "kirra-core",
+ "kirra-map",
  "kirra-ros2-adapter",
  "kirra-taj",
- "roxmltree",
  "serde",
  "serde_json",
 ]
