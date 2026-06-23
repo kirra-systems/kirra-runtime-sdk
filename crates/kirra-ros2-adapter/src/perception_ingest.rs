@@ -20,7 +20,7 @@
 // Scope: kinematic reported-velocity CEILING only (D2a; teleport D2b deferred).
 // Range guard, parko-kirra, and the verifier HTTP/fabric path (D3b) are staged.
 
-use kirra_runtime_sdk::gateway::perception_monitor::{
+use kirra_core::perception_monitor::{
     ingest_perception_output, tracked_object_from_parts, PerceptionCapPublisher, TrackedObject, Vec2,
 };
 
@@ -84,11 +84,11 @@ pub fn publish_perception_tick(
 mod tests {
     use super::*;
     use crate::corridor::Point;
-    use kirra_runtime_sdk::gateway::kinematics_contract::{
+    use kirra_core::kinematics_contract::{
         validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
     };
-    use kirra_runtime_sdk::gateway::perception_monitor::{
-        apply_perception_cap, empty_perception_cap, resolve_perception_cap, DerateCode,
+    use kirra_core::perception_monitor::{
+        apply_perception_cap, empty_perception_cap, resolve_perception_cap,
         KinematicPlausibilityContract,
     };
 
@@ -102,7 +102,7 @@ mod tests {
         }
     }
 
-    fn publisher(cache: &kirra_runtime_sdk::gateway::perception_monitor::SharedPerceptionCap) -> PerceptionCapPublisher {
+    fn publisher(cache: &kirra_core::perception_monitor::SharedPerceptionCap) -> PerceptionCapPublisher {
         PerceptionCapPublisher::new(cache.clone(), KinematicPlausibilityContract::urban_reference(), 500)
     }
 
@@ -129,7 +129,7 @@ mod tests {
         let cap = resolve_perception_cap(true, &cache, 1100);
         assert_eq!(
             cap,
-            Some(kirra_runtime_sdk::gateway::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS)
+            Some(kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS)
         );
     }
 
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(
             verdict,
             EnforceAction::ClampLinear(
-                kirra_runtime_sdk::gateway::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS
+                kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS
             )
         );
     }

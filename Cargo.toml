@@ -50,8 +50,11 @@ tpm = ["dep:tss-esapi"]
 
 [dependencies]
 # Lean safety/contract foundation (de-monolith Stage 1): FleetPosture / NodeTrustState
-# live here; this crate re-exports them so existing paths are unchanged.
-kirra-core = { path = "crates/kirra-core" }
+# live here; this crate re-exports them so existing paths are unchanged. The `capture`
+# feature pulls the relocated perception_monitor/kinematics_sim/capture modules' writer
+# deps (de-monolith Stage 7) so `crate::capture` / `crate::kinematics_sim` /
+# `crate::gateway::perception_monitor` keep resolving as thin re-export shims.
+kirra-core = { path = "crates/kirra-core", features = ["capture"] }
 parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.

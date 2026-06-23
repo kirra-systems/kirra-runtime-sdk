@@ -16,14 +16,14 @@
 // kinematics is recorded but does NOT short-circuit — containment +
 // RSS still get a vote.
 
-use kirra_runtime_sdk::gateway::containment::{
+use kirra_core::containment::{
     self as containment, Corridor, Pose as KernelPose,
     Point as KernelPoint,
 };
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
 };
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, opposite_direction_safe_distance,
     RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
@@ -37,7 +37,7 @@ use crate::state::{
 };
 
 /// Minimum corridor confidence the slow loop accepts. Tracks the
-/// `kirra_runtime_sdk::gateway::containment::Corridor::min_confidence`
+/// `kirra_core::containment::Corridor::min_confidence`
 /// gate; below this the kernel returns DrivableSpaceDeparture
 /// regardless of geometry.
 const SLOW_LOOP_MIN_CORRIDOR_CONFIDENCE: f32 = 0.5;
@@ -237,7 +237,7 @@ pub fn validate_trajectory_slow_capped(
     // ceiling; an MRC-floor (0.0) cap tightens the ceiling to 0 → controlled
     // stop via the existing per-pose `ClampLinear`. `validate_vehicle_command`
     // is unchanged.
-    let kinematics = kirra_runtime_sdk::gateway::perception_monitor::apply_perception_cap(
+    let kinematics = kirra_core::perception_monitor::apply_perception_cap(
         &base_kinematics,
         effective_perception_cap,
     );

@@ -151,7 +151,7 @@ use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
 use kirra_ros2_adapter::node::run_adapter;
 use kirra_ros2_adapter::perception_ingest::perception_derate_enabled;
 use kirra_ros2_adapter::state::{AdaptorState, TrajectoryVerdict};
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 /// Adapter node name + namespace the harness publishes INTO. `run_adapter`
 /// creates the node in namespace `"kirra"`; the harness picks the name, so the

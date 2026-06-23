@@ -18,13 +18,33 @@ repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
+[features]
+# Off by default so the shipping crate stays serde-only for the consumers that only
+# need the foundation (the planner, the lane map, parko, the governor-service). The
+# `capture` module's JSONL writer pulls tokio + serde_json + tracing + the wire schema;
+# the SDK and the ROS2 adapter enable this feature (de-monolith Stage 7).
+capture = ["dep:tokio", "dep:serde_json", "dep:kirra-capture-schema"]
+
 [dependencies]
 # The posture types are wire-serialized (federation reports, the SSE stream). serde is
-# lean — the only dependency this crate carries.
+# lean — the spine dependency this crate carries.
 serde = { version = "1", features = ["derive"] }
+# Lightweight logging FACADE (not a runtime): the relocated kinematics_sim emits one
+# `tracing::debug!` on a held command, and the capture writer logs drops. Compiles to
+# near-nothing without a subscriber; carrying it keeps those modules verbatim. This is
+# NOT one of the heavy runtime deps the lean foundation excludes (tokio/axum/rusqlite).
+tracing = "0.1"
+
+# --- `capture` feature only (de-monolith Stage 7) --------------------------------------
+# The capture writer is a bounded mpsc + spawn_blocking JSONL drain; it needs only
+# tokio's sync + rt, not the full runtime. serde_json serializes the JSONL line. The
+# record wire schema is shared verbatim with the offline collector.
+tokio = { version = "1", features = ["sync", "rt", "macros"], optional = true }
+serde_json = { version = "1", optional = true }
+kirra-capture-schema = { path = "../kirra-capture-schema", optional = true }
 
 [dev-dependencies]
 # The containment unit tests (Stage 4, moved verbatim) assert the byte-stable
-# SCREAMING_SNAKE_CASE DenyCode token via JSON serialization. Test-only — keeps the
-# shipping crate serde-only.
+# SCREAMING_SNAKE_CASE DenyCode token via JSON serialization. Test-only for the
+# default (serde-only) build — the `capture` feature promotes serde_json to a normal dep.
 serde_json = "1"

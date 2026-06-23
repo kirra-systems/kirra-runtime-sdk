@@ -10,10 +10,12 @@
 #
 # Current state (the Option-B wiring is LIVE; this header began as a Phase-1
 # skeleton note and is updated to match reality):
-#   - This crate DOES depend on `kirra-runtime-sdk` (see `[dependencies]` below).
+#   - This crate depends ONLY on the lean `kirra-core` for safety logic
+#     (de-monolith Stage 7); the heavy `kirra-runtime-sdk` verifier service is
+#     no longer a dependency.
 #   - The slow loop CALLS `validate_trajectory_containment` per accepted
 #     trajectory at `src/validation.rs:161` (from
-#     `kirra_runtime_sdk::gateway::containment`). SG2 is ENFORCED via this
+#     `kirra_core::containment`). SG2 is ENFORCED via this
 #     Option-B wiring (#131; see `docs/safety/TRACEABILITY_MATRIX.md`).
 #   - Phase 1 originally stubbed both (own shared types, no containment call);
 #     wired since #131.
@@ -49,7 +51,7 @@ default = []
 # This feature pulls NO C++ / no cxx / no lanelet2 — that is the separate
 # `lanelet2` feature below (the perception governance path is independent of
 # the map/corridor layer). See README.
-ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes"]
+ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes", "kirra-core/capture"]
 
 # Enable the real Lanelet2CorridorSource — a cxx/C++ wrap of `lanelet2_core`'s
 # boost::serialization deserializer (`fromBinMsg`). Implies `ros2` (the only
@@ -71,12 +73,15 @@ tracing = "0.1"
 # and the trajectory/perception data types (`Pose`/`TrajectoryPoint`/`TrajectoryVerdict`/
 # `PerceivedObject`) live here (de-monolith Stage 6a), so the shared lane map and the
 # planner build on them without the heavy adapter. serde-only, no ROS/async.
+# Lean foundation — now the adapter's ONLY safety dependency (de-monolith Stage 7).
+# Everything the adapter needs lives here: the corridor seam + trajectory/perception data
+# types (Stage 6a), the SG2 containment checker (`validate_trajectory_containment`) and the
+# kinematics-contract talisman (`validate_vehicle_command`), the `PostureTracker`, the
+# Track-C `perception_monitor`, the `kinematics_sim` integrator, and (behind the `capture`
+# feature, enabled by `ros2` below) the learning-loop capture builders + writer. The heavy
+# `kirra-runtime-sdk` (axum/rusqlite/reqwest verifier service) is NO LONGER a dependency —
+# this severs the adapter→SDK edge and, transitively, the planner's last SDK pull.
 kirra-core        = { path = "../kirra-core" }
-# Safety kernel — pulled in Phase 2A so the slow-loop validator can call
-# `validate_trajectory_containment` (SG2) and `validate_vehicle_command`
-# (per-pose kinematics). NOT feature-gated: the algorithm is needed in
-# `cargo test` runs that don't enable the ros2 feature.
-kirra-runtime-sdk = { path = "../.." }
 parko-core        = { path = "../../parko/crates/parko-core" }
 
 # ROS 2 bindings — feature-gated. Pinned (`=`) because r2r explicitly does

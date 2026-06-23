@@ -106,7 +106,11 @@ src/
 │                               ReconciliationOutcome, authoritative_posture
 ├── audit_chain.rs            — SHA-256 hash-chained audit log
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
-├── kinematics_sim.rs         — VehicleState, SimulationResult, apply_enforcement, run_simulation
+├── kinematics_sim.rs         — re-export shim → kirra_core::kinematics_sim (relocated
+│                               Stage 7; VehicleState, apply_enforcement, run_simulation)
+├── capture.rs                — re-export shim → kirra_core::capture (relocated Stage 7;
+│                               record_from_verdict, spawn_capture_writer; needs the
+│                               kirra-core `capture` feature, enabled in the SDK manifest)
 ├── action_filter.rs          — ActionFilter<C>, ActionClaim, evaluate_action_claim
 ├── action_policy.rs          — UnstructuredTextParser (LLM JSON → typed AgentAction)
 ├── security.rs               — constant_time_compare
@@ -131,7 +135,9 @@ src/
 │   ├── cmd_vel.rs            — CmdVel validation, DEFAULT_CMD_VEL_LIMITS
 │   ├── interceptor.rs        — gateway interceptor
 │   ├── kinematics_contract.rs — VehicleKinematicsContract, validate_vehicle_command
-│   └── kinematics_proptest.rs — property-based tests for validate_vehicle_command
+│   ├── kinematics_proptest.rs — property-based tests for validate_vehicle_command
+│   └── perception_monitor.rs — re-export shim → kirra_core::perception_monitor (relocated
+│                               Stage 7; KinematicPlausibilityContract, apply_perception_cap)
 └── bin/
     ├── kirra_verifier_service.rs  — axum HTTP service, all route handlers
     └── kirra_carla_client.rs      — CARLA simulator integration client

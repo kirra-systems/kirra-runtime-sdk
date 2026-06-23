@@ -8,8 +8,8 @@
 // conversions to the kernel-side types. Phase 4 may grow per-asset
 // config and a deserializer.
 
-use kirra_runtime_sdk::gateway::containment::VehicleFootprint;
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_core::containment::VehicleFootprint;
+use kirra_core::kinematics_contract::{
     VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS,
 };
 

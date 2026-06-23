@@ -1968,8 +1968,11 @@ dependencies = [
 name = "kirra-core"
 version = "0.1.0"
 dependencies = [
+ "kirra-capture-schema",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2033,7 +2036,6 @@ dependencies = [
  "dashmap",
  "futures",
  "kirra-core",
- "kirra-runtime-sdk",
  "parko-core",
  "r2r",
  "reqwest",
