@@ -23,5 +23,9 @@ name = "kirra-governor-service"
 path = "src/main.rs"
 
 [dependencies]
+# The FROZEN kinematics-contract talisman (de-monolith Stage 3) — lean (serde-only),
+# so this isolated governor stays minimal. Was a relative `#[path]` include of the
+# root `src/gateway/kinematics_contract.rs`; now a proper dependency on the same code.
+kirra-core = { path = "../kirra-core" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
