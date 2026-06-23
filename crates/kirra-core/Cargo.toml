@@ -20,8 +20,11 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
 # The posture types are wire-serialized (federation reports, the SSE stream). serde is
-# lean — the only dependency this crate carries.
+# lean — the foundational dependency this crate carries.
 serde = { version = "1", features = ["derive"] }
+# Lightweight logging facade (no runtime) — used by the relocated kinematics simulator's
+# denial-path debug log (Stage 7a). Facade only; stays clear of the forbidden heavy tree.
+tracing = "0.1"
 
 [dev-dependencies]
 # The containment unit tests (Stage 4, moved verbatim) assert the byte-stable

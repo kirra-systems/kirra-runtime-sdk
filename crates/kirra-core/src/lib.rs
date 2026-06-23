@@ -57,6 +57,19 @@ pub mod corridor;
 /// (de-monolith Stage 6a); the adapter's heavy `AdaptorState` re-exports them.
 pub mod trajectory;
 
+/// The Track-C perception-derate monitor (KIRRA-OCCY-PMON-001) — pure stateless
+/// kinematic-plausibility / range-support guards + the `SharedPerceptionCap` cache and
+/// its publisher (stdlib `Arc<RwLock>` only, no async). Relocated verbatim
+/// (de-monolith Stage 7a); re-exported by `kirra_runtime_sdk::gateway::perception_monitor`
+/// so the policy layer, fabric governor, and the ROS2 adapter hold.
+pub mod perception_monitor;
+
+/// The deterministic vehicle kinematic simulator (`VehicleState` / `apply_enforcement` /
+/// `run_simulation`) — pure forward-integration math over the kinematics contract.
+/// Relocated verbatim (de-monolith Stage 7a); re-exported by `kirra_runtime_sdk::
+/// kinematics_sim` so the verifier service, the CARLA client, and the adapter tests hold.
+pub mod kinematics_sim;
+
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
