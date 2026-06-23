@@ -48,7 +48,7 @@ pub use behavior::{
 };
 
 pub mod lanemap;
-pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph, MAX_ROUTE_LANES};
+pub use lanemap::{JunctionContext, Lane, LaneCorridor, LaneEdge, LaneGraph, MAX_ROUTE_LANES};
 
 pub mod lanelet2;
 pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
@@ -2735,6 +2735,37 @@ mod tests {
         let proceeded = p.plan(&inp);
         let p_max = proceeded.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(p_max > 22.0, "ceding agent → ego asserts priority and proceeds, got {p_max}");
+    }
+
+    #[test]
+    fn junction_context_integration_derives_the_cede_list_occy_consumes() {
+        // THE INTEGRATION LAYER, end-to-end: a Lanelet2-style map (ego lane 100 has
+        // right-of-way over the crossing lane 200) → `junction_context(ego_pose, objs)`
+        // → the cede list Occy consumes → the ego asserts priority and proceeds. The
+        // MAP derives what `junction_right_of_way_lets_the_ego_proceed` supplied by hand.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 5.0, 0.0, -3.0)]; // id 1, in the crossing lane
+
+        let map = LaneGraph::new()
+            .with_lane(Lane::straight(100, 0.0, 0.0, 100.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(200, 5.0, 0.0, 40.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_right_of_way(100, 200);
+
+        // The integration call: ego POSE + objects → both junction sets.
+        let ctx = map.junction_context(Point { x_m: 8.0, y_m: 0.0 }, &objs);
+        assert_eq!(ctx.ego_lane, Some(100));
+        assert_eq!(ctx.cedes_to_ego, vec![1], "map derives the cede list");
+        assert!(ctx.must_yield_to.is_empty());
+
+        // Feed the DERIVED cede list straight into Occy → it proceeds against the agent.
+        let mut p = GeometricPlanner::default();
+        let inp = PlanInput {
+            cedes_to_ego_ids: &ctx.cedes_to_ego,
+            ..input_with_objects(&corridor, 8.0, 35.0, &objs)
+        };
+        let out = p.plan(&inp);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 22.0, "map-derived cede list → ego proceeds, got {max_x}");
     }
 
     #[test]

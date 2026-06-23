@@ -249,6 +249,20 @@ impl CorridorSource for LaneCorridor {
     }
 }
 
+/// The map-derived junction reasoning for one tick — the output of
+/// [`LaneGraph::junction_context`]. Carries the resolved ego lane and BOTH
+/// consumer-ready right-of-way sets, derived from the one `priority_over` map so they
+/// cannot disagree. The deployment maps each set to its path's runtime type.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JunctionContext {
+    /// The ego's lane, or `None` if it is off the mapped road (→ empty sets).
+    pub ego_lane: Option<u64>,
+    /// Objects that cede to the ego → Occy's `PlanInput.cedes_to_ego_ids`.
+    pub cedes_to_ego: Vec<u64>,
+    /// Objects the ego must yield to / wait for → Parko SG5's `NonYieldingScene`.
+    pub must_yield_to: Vec<u64>,
+}
+
 /// A collection of connected [`Lane`]s — the Lanelet2-lite lane graph. Lanes are
 /// keyed by id (deterministic iteration). The planner derives a corridor + typed
 /// boundaries from a chosen span of lanes; a real route (the preferred-primitive
@@ -343,6 +357,30 @@ impl LaneGraph {
             .filter(|o| self.lane_at(o.pos).is_some_and(|l| priority_lanes.contains(&l)))
             .map(|o| o.id)
             .collect()
+    }
+
+    /// **The junction integration entry point.** Resolve the ego's lane from its
+    /// *pose* (the input a deployment actually has — not a lane id) and derive BOTH
+    /// consumer-ready sets from the one right-of-way map, in a single pass:
+    ///
+    /// * `cedes_to_ego` → drop straight into Occy's `PlanInput.cedes_to_ego_ids`;
+    /// * `must_yield_to` → map to Parko SG5's `NonYieldingScene` at the parko boundary.
+    ///
+    /// This is the deployment-integration step packaged: it turns *ego pose + perceived
+    /// objects* into the two junction sets either path consumes, consistent by
+    /// construction (both from `priority_over`). Fail-safe: an ego off the mapped road
+    /// yields empty sets (no `ego_lane`) — the path's own gates (Occy's snapshot yield,
+    /// Parko's fail-closed veto, KIRRA's RSS) still apply.
+    #[must_use]
+    pub fn junction_context(&self, ego_pos: Point, objects: &[PerceivedObject]) -> JunctionContext {
+        match self.lane_at(ego_pos) {
+            Some(ego_lane) => JunctionContext {
+                ego_lane: Some(ego_lane),
+                cedes_to_ego: self.cedes_to_ego(ego_lane, objects),
+                must_yield_to: self.non_yielding_to_ego(ego_lane, objects),
+            },
+            None => JunctionContext::default(),
+        }
     }
 
     /// Insert (or replace) a lane.
@@ -966,5 +1004,34 @@ mod tests {
         let in_l1 = [obj(9, 15.0, 0.0)];
         assert_eq!(g.non_yielding_to_ego(2, &in_l1), vec![9]);
         assert!(g.cedes_to_ego(2, &in_l1).is_empty());
+    }
+
+    #[test]
+    fn junction_context_resolves_the_ego_lane_and_both_sets() {
+        use kirra_ros2_adapter::state::PerceivedObject;
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(2, 10.0, 0.0, 30.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_right_of_way(1, 2);
+        let obj = |id, x, y| PerceivedObject {
+            id,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 3.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 3.0, y_m: 0.0 },
+        };
+        let objs = [obj(7, 15.0, 10.0)];
+
+        // Ego in lane 1 (priority): one call resolves the lane + both sets.
+        let ctx = g.junction_context(Point { x_m: 15.0, y_m: 0.0 }, &objs);
+        assert_eq!(ctx.ego_lane, Some(1));
+        assert_eq!(ctx.cedes_to_ego, vec![7]);
+        assert!(ctx.must_yield_to.is_empty());
+
+        // Off the mapped road → empty context (fail-safe).
+        assert_eq!(
+            g.junction_context(Point { x_m: 15.0, y_m: 99.0 }, &objs),
+            JunctionContext::default()
+        );
     }
 }
