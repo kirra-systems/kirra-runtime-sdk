@@ -67,6 +67,11 @@ dashmap = "6"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
+# Lean foundation — the corridor seam (`Point`/`CorridorSource`/`MockCorridorSource`)
+# and the trajectory/perception data types (`Pose`/`TrajectoryPoint`/`TrajectoryVerdict`/
+# `PerceivedObject`) live here (de-monolith Stage 6a), so the shared lane map and the
+# planner build on them without the heavy adapter. serde-only, no ROS/async.
+kirra-core        = { path = "../kirra-core" }
 # Safety kernel — pulled in Phase 2A so the slow-loop validator can call
 # `validate_trajectory_containment` (SG2) and `validate_vehicle_command`
 # (per-pose kinematics). NOT feature-gated: the algorithm is needed in

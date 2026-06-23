@@ -23,51 +23,17 @@ use std::sync::{Arc, RwLock};
 use kirra_runtime_sdk::verifier::FleetPosture;
 
 use crate::config::VehicleConfig;
-use crate::corridor::Point;
 use kirra_runtime_sdk::posture_tracker::PostureTracker;
 
-/// One pose along a trajectory, in world frame. The shape matches
-/// `kirra_runtime_sdk::gateway::containment::Pose` so a Phase 2 conversion
-/// is field-for-field (no semantic translation required).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pose {
-    pub x_m: f64,
-    pub y_m: f64,
-    pub heading_rad: f64,
-}
+// The lean trajectory/perception data types now live in the `kirra-core` crate
+// (de-monolith Stage 6a); re-exported here so every existing `crate::state::*` /
+// `kirra_ros2_adapter::state::*` path keeps the SAME type. `AdaptorState` and
+// `AcceptedTrajectory` (below, both heavy/DashMap-coupled — they stay) consume them
+// unchanged.
+pub use kirra_core::trajectory::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
 
-/// One sample from an Autoware-shaped trajectory. The `time_from_start_s`
-/// is the planner's intended time-to-pose; the slow loop uses it to derive
-/// per-step `delta_time_s` for the kinematics check.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TrajectoryPoint {
-    pub pose: Pose,
-    pub velocity_mps: f64,
-    pub time_from_start_s: f64,
-}
-
-/// Outcome of validating a candidate trajectory. The slow loop emits this
-/// when it promotes (or refuses to promote) a new trajectory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrajectoryVerdict {
-    /// Promoted — the per-asset slot now holds this trajectory; the fast
-    /// loop will conform commands to it.
-    Accept,
-    /// Clamp-only path: per-pose kinematics requested a Clamp (linear or
-    /// steering) on at least one pose, but containment + RSS both passed.
-    /// The caller's policy is "promote a speed-derated variant" — see
-    /// design §3. Fast loop treats this as a special Accept where the
-    /// permissible-velocity envelope is below the planner's commanded
-    /// velocity; safe to drive but not at the planned speed.
-    Clamp,
-    /// Refused — the slow loop rejected the candidate (or no candidate
-    /// has ever been validated). Fast loop must MRC.
-    MRCFallback,
-    /// Initial / transitional state, set when an asset is registered but
-    /// no validation has completed yet. Always fails closed
-    /// (`fail_closed()` collapses this to `MRCFallback`).
-    Pending,
-}
+// `Pose`, `TrajectoryPoint`, and `TrajectoryVerdict` were relocated verbatim to
+// `kirra_core::trajectory` (de-monolith Stage 6a) and are re-exported above.
 
 /// The per-asset accepted-trajectory record held in `AdaptorState`.
 #[derive(Debug, Clone)]
@@ -177,25 +143,8 @@ impl AcceptedTrajectory {
     }
 }
 
-/// A perceived object reported by the integrator's perception stack.
-/// The fields are the minimal set RSS needs (the slow loop runs
-/// `longitudinal_safe_distance` + `lateral_safe_distance` per object × per
-/// pose). Position is the centroid in world frame; heading is the object's
-/// motion direction.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PerceivedObject {
-    pub id: u64,
-    pub pos: Point,
-    pub velocity_mps: f64,
-    pub heading_rad: f64,
-    /// Reported map-frame ground-velocity **vector** `{x_m, y_m}` (m/s),
-    /// preserved from the upstream Autoware twist (KIRRA-OCCY-PMON-003 §5
-    /// sub-decision = PRESERVE). `velocity_mps` stays the magnitude RSS uses;
-    /// `vel` feeds the Track-C kinematic-plausibility ceiling (a vector-
-    /// magnitude check). Frame note: rests on the upstream message contract
-    /// being map/world-frame absolute — see PMON-003 §4 / D4.
-    pub vel: Point,
-}
+// `PerceivedObject` was relocated verbatim to `kirra_core::trajectory`
+// (de-monolith Stage 6a) and is re-exported above.
 
 /// Phase 4c — typed-payload envelope for a freshly-received trajectory
 /// after the r2r-side parser has extracted the planner-published points.

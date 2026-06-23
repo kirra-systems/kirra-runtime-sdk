@@ -45,6 +45,18 @@ pub mod governor_guard;
 /// by `kirra_runtime_sdk::posture_tracker` so the ROS2 adapter and the parko-ros2 node hold.
 pub mod posture_tracker;
 
+/// The lean drivable-corridor seam (`Point` / `CorridorSource` / `MockCorridorSource`).
+/// Relocated verbatim from the kirra-ros2-adapter (de-monolith Stage 6a) so the shared
+/// lane map (kirra-map) and the planner can build on it without the heavy adapter; the
+/// adapter re-exports it (and the feature-gated Lanelet2 cxx source impls the trait).
+pub mod corridor;
+
+/// The lean trajectory/perception data types (`Pose` / `TrajectoryPoint` /
+/// `TrajectoryVerdict` / `PerceivedObject`) — pure plain-old-data the planner and the
+/// shared lane map consume. Relocated verbatim from the kirra-ros2-adapter `state` module
+/// (de-monolith Stage 6a); the adapter's heavy `AdaptorState` re-exports them.
+pub mod trajectory;
+
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
