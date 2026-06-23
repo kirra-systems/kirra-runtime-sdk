@@ -109,11 +109,13 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 futures = { version = "0.3", optional = true }
 
 # M1b — SSE client for the verifier's /system/posture/stream endpoint.
-# `reqwest` is already a workspace-wide dep (via the kernel's
-# kirra_carla_client); the adapter binary uses its streaming API to pump
-# posture events into `PostureTracker`. Gated on `ros2` because the
-# transport only matters when the binary is built.
-reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+# The adapter binary uses its streaming API to pump posture events into
+# `PostureTracker`, and `response.json()` to parse them. Gated on `ros2`
+# because the transport only matters when the binary is built. The `json`
+# feature is declared explicitly here (de-monolith Stage 7): it was previously
+# activated transitively via the now-severed `kirra-runtime-sdk` reqwest dep
+# through Cargo feature unification.
+reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"], optional = true }
 serde_json = { version = "1",    optional = true }
 bytes      = { version = "1",    optional = true }
 
