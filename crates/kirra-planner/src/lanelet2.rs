@@ -50,6 +50,8 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     let mut nodes: BTreeMap<u64, Point> = BTreeMap::new();
     let mut ways: BTreeMap<u64, Way> = BTreeMap::new();
     let mut raw_lanelets: Vec<RawLanelet> = Vec::new();
+    // `right_of_way` regulatory elements, as (priority lanes, yielding lanes).
+    let mut right_of_way: Vec<(Vec<u64>, Vec<u64>)> = Vec::new();
 
     for el in root.children().filter(roxmltree::Node::is_element) {
         match el.tag_name().name() {
@@ -71,22 +73,41 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                 let line = line_type_of(tag_value(&el, "type"), tag_value(&el, "subtype"));
                 ways.insert(id, Way { node_ids, line });
             }
-            "relation" => {
-                if tag_value(&el, "type") != Some("lanelet") {
-                    continue;
+            "relation" => match tag_value(&el, "type") {
+                Some("lanelet") => {
+                    // Driveable-subtype filter: a vehicle planner must not route over a
+                    // walkway / crosswalk / bicycle lane. Skip explicitly non-vehicle
+                    // lanelets; include road/highway and untagged ones (fail-open on a
+                    // missing subtype, the common case in simple maps).
+                    if !is_driveable_subtype(tag_value(&el, "subtype")) {
+                        continue;
+                    }
+                    let Some(id) = attr_u64(&el, "id") else { continue };
+                    let first_ref = |r: &str| {
+                        el.children()
+                            .filter(|c| c.has_tag_name("member"))
+                            .find(|c| c.attribute("role") == Some(r))
+                            .and_then(|c| attr_u64(&c, "ref"))
+                    };
+                    let (Some(left), Some(right)) = (first_ref("left"), first_ref("right")) else {
+                        return Err(Lanelet2ParseError::IncompleteLanelet(id));
+                    };
+                    raw_lanelets.push(RawLanelet { id, left, right });
                 }
-                let Some(id) = attr_u64(&el, "id") else { continue };
-                let role = |r: &str| {
-                    el.children()
-                        .filter(|c| c.has_tag_name("member"))
-                        .find(|c| c.attribute("role") == Some(r))
-                        .and_then(|c| attr_u64(&c, "ref"))
-                };
-                let (Some(left), Some(right)) = (role("left"), role("right")) else {
-                    return Err(Lanelet2ParseError::IncompleteLanelet(id));
-                };
-                raw_lanelets.push(RawLanelet { id, left, right });
-            }
+                Some("regulatory_element") if tag_value(&el, "subtype") == Some("right_of_way") => {
+                    // Members reference lanelets by id: role `right_of_way` = the lanes
+                    // with priority, role `yield` = the lanes that must cede.
+                    let refs_with_role = |r: &str| -> Vec<u64> {
+                        el.children()
+                            .filter(|c| c.has_tag_name("member"))
+                            .filter(|c| c.attribute("role") == Some(r))
+                            .filter_map(|c| attr_u64(&c, "ref"))
+                            .collect()
+                    };
+                    right_of_way.push((refs_with_role("right_of_way"), refs_with_role("yield")));
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -121,7 +142,30 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
             edges: connectivity(ll, &raw_lanelets, &ways),
         });
     }
+
+    // Apply right-of-way: every priority lane gains a yields-to edge to each yield
+    // lane (the cross product within each regulatory element). `cedes_to_ego` then
+    // derives the cede list at runtime from these + object→lane attribution.
+    for (priorities, yields) in &right_of_way {
+        for &p in priorities {
+            for &y in yields {
+                graph.add_right_of_way(p, y);
+            }
+        }
+    }
     Ok(graph)
+}
+
+/// Whether a Lanelet2 lanelet `subtype` is **vehicle-driveable**. Explicitly
+/// non-vehicle subtypes (walkway / crosswalk / bicycle lane / stairs) are excluded so
+/// the router never routes a car over them; `road` / `highway` and an **absent**
+/// subtype (common in simple/test maps) are driveable. A `participants:vehicle=no`
+/// refinement is a follow-up.
+fn is_driveable_subtype(subtype: Option<&str>) -> bool {
+    !matches!(
+        subtype,
+        Some("walkway") | Some("crosswalk") | Some("bicycle_lane") | Some("stairs")
+    )
 }
 
 struct Way {
@@ -317,5 +361,63 @@ mod tests {
 </osm>"#;
         assert!(matches!(parse_lanelet2_osm(missing), Err(Lanelet2ParseError::IncompleteLanelet(1))));
         assert!(matches!(parse_lanelet2_osm("<osm><relation"), Err(Lanelet2ParseError::Xml(_))));
+    }
+
+    #[test]
+    fn right_of_way_regulatory_element_derives_the_cede_list() {
+        use kirra_ros2_adapter::state::PerceivedObject;
+        // Lanelet 1 (priority, along y=0) and lanelet 2 (yielding, along y=10), plus a
+        // right_of_way regulatory element granting 1 priority over 2.
+        let xml = r#"<osm>
+  <node id="1"><tag k="local_x" v="0"/><tag k="local_y" v="1.75"/></node>
+  <node id="2"><tag k="local_x" v="30"/><tag k="local_y" v="1.75"/></node>
+  <node id="3"><tag k="local_x" v="0"/><tag k="local_y" v="-1.75"/></node>
+  <node id="4"><tag k="local_x" v="30"/><tag k="local_y" v="-1.75"/></node>
+  <node id="5"><tag k="local_x" v="0"/><tag k="local_y" v="11.75"/></node>
+  <node id="6"><tag k="local_x" v="30"/><tag k="local_y" v="11.75"/></node>
+  <node id="7"><tag k="local_x" v="0"/><tag k="local_y" v="8.25"/></node>
+  <node id="8"><tag k="local_x" v="30"/><tag k="local_y" v="8.25"/></node>
+  <way id="10"><nd ref="1"/><nd ref="2"/><tag k="subtype" v="solid"/></way>
+  <way id="11"><nd ref="3"/><nd ref="4"/><tag k="subtype" v="solid"/></way>
+  <way id="20"><nd ref="5"/><nd ref="6"/><tag k="subtype" v="solid"/></way>
+  <way id="21"><nd ref="7"/><nd ref="8"/><tag k="subtype" v="solid"/></way>
+  <relation id="1"><tag k="type" v="lanelet"/><tag k="subtype" v="road"/><member type="way" role="left" ref="10"/><member type="way" role="right" ref="11"/></relation>
+  <relation id="2"><tag k="type" v="lanelet"/><tag k="subtype" v="road"/><member type="way" role="left" ref="20"/><member type="way" role="right" ref="21"/></relation>
+  <relation id="9"><tag k="type" v="regulatory_element"/><tag k="subtype" v="right_of_way"/><member type="relation" role="right_of_way" ref="1"/><member type="relation" role="yield" ref="2"/></relation>
+</osm>"#;
+        let g = parse_lanelet2_osm(xml).unwrap();
+        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2]);
+
+        let obj = |id, x, y| PerceivedObject {
+            id,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 3.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 3.0, y_m: 0.0 },
+        };
+        // An object in the yielding lane 2 cedes to an ego in lane 1; one in the ego's
+        // own lane (or off-map) does not.
+        let objs = [obj(42, 15.0, 10.0), obj(7, 15.0, 0.0), obj(8, 15.0, 99.0)];
+        assert_eq!(g.cedes_to_ego(1, &objs), vec![42]);
+        // The ego in the yielding lane asserts no priority.
+        assert!(g.cedes_to_ego(2, &objs).is_empty());
+    }
+
+    #[test]
+    fn non_vehicle_lanelets_are_filtered_out() {
+        // A road lanelet and a crosswalk lanelet; only the road becomes a lane.
+        let xml = r#"<osm>
+  <node id="1"><tag k="local_x" v="0"/><tag k="local_y" v="1"/></node>
+  <node id="2"><tag k="local_x" v="30"/><tag k="local_y" v="1"/></node>
+  <node id="3"><tag k="local_x" v="0"/><tag k="local_y" v="-1"/></node>
+  <node id="4"><tag k="local_x" v="30"/><tag k="local_y" v="-1"/></node>
+  <way id="10"><nd ref="1"/><nd ref="2"/><tag k="subtype" v="solid"/></way>
+  <way id="11"><nd ref="3"/><nd ref="4"/><tag k="subtype" v="solid"/></way>
+  <relation id="1"><tag k="type" v="lanelet"/><tag k="subtype" v="road"/><member type="way" role="left" ref="10"/><member type="way" role="right" ref="11"/></relation>
+  <relation id="2"><tag k="type" v="lanelet"/><tag k="subtype" v="crosswalk"/><member type="way" role="left" ref="10"/><member type="way" role="right" ref="11"/></relation>
+</osm>"#;
+        let g = parse_lanelet2_osm(xml).unwrap();
+        assert_eq!(g.len(), 1, "the crosswalk lanelet is excluded");
+        assert!(g.lane(1).is_some() && g.lane(2).is_none());
     }
 }
