@@ -5,8 +5,8 @@
 
 use zenoh::Session;
 
-use kirra_runtime_sdk::federation_reconciliation::FederatedTrustReportV2;
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::federation_reconciliation::FederatedTrustReportV2;
+use kirra_verifier::verifier_store::VerifierStore;
 
 use crate::{
     accept_report, encode_report, ingest_clearance_grant, key_clearance_grant, key_posture,
@@ -144,7 +144,7 @@ mod transport_tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
-    use kirra_runtime_sdk::federation_reconciliation::canonical_federation_payload_v2;
+    use kirra_verifier::federation_reconciliation::canonical_federation_payload_v2;
 
     use crate::{sign_clearance_grant, key_trust_report};
 

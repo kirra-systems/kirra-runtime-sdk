@@ -24,7 +24,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{ClearanceLoop, OperatorClearanceGrant, DEFAULT_MAX_GRANT_AGE_MS};
 
 /// The result of one [`ClearanceDelivery::poll_and_deliver`].

@@ -6,7 +6,7 @@
 # sole source of truth. This crate exists so the dev bench and the (future) car
 # bridge node share ONE definition of the wire types instead of each re-rolling
 # them. Pure serde + bincode + std; it deliberately does NOT depend on
-# kirra-runtime-sdk.
+# kirra-verifier.
 [package]
 name = "kirra-wire-client"
 version = "0.1.0"

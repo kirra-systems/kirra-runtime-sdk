@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use kirra_runtime_sdk::{
+use kirra_verifier::{
     posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache},
     verifier::{AppState, FleetPosture, VerifierOperationMode},
     verifier_store::VerifierStore,
@@ -26,13 +26,13 @@ fn build_state(posture: FleetPosture) -> Arc<ServiceState> {
     Arc::new(ServiceState {
         app,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     })
 }
@@ -44,13 +44,13 @@ fn build_state_empty_cache() -> Arc<ServiceState> {
     Arc::new(ServiceState {
         app,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     })
 }

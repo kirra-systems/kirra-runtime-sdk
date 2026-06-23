@@ -32,21 +32,21 @@ use axum::{Extension, Json, Router};
 use serde_json::Value;
 use tower::ServiceExt; // oneshot
 
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_verifier::gateway::kinematics_contract::{
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
-use kirra_runtime_sdk::gateway::policy_layer::{
+use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, EnforcementOutcome,
 };
-use kirra_runtime_sdk::kinematics_sim::VehicleState;
-use kirra_runtime_sdk::posture_cache::{
+use kirra_verifier::kinematics_sim::VehicleState;
+use kirra_verifier::posture_cache::{
     CachedFleetPosture, ServiceState, SharedPostureCache,
 };
-use kirra_runtime_sdk::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
-use kirra_runtime_sdk::verifier::{
+use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
+use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier_store::VerifierStore;
 
 const DT_S: f64 = 0.05;
 const TOL: f64 = 1e-6;
@@ -74,13 +74,13 @@ fn service_state_from(app: Arc<AppState>, cache: SharedPostureCache) -> Arc<Serv
     Arc::new(ServiceState {
         app,
         posture_cache: cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     })
 }

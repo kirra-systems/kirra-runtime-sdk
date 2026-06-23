@@ -18,17 +18,17 @@ use axum::{Extension, Json, Router};
 use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
 
-use kirra_runtime_sdk::gateway::kinematics_contract::{
+use kirra_verifier::gateway::kinematics_contract::{
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
-use kirra_runtime_sdk::gateway::policy_layer::{
+use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
-use kirra_runtime_sdk::posture_cache::{
+use kirra_verifier::posture_cache::{
     CachedFleetPosture, ServiceState, SharedPostureCache,
 };
-use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+use kirra_verifier::verifier_store::VerifierStore;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -42,13 +42,13 @@ fn build_state_with_posture(posture: FleetPosture) -> Arc<ServiceState> {
     Arc::new(ServiceState {
         app,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     })
 }
@@ -448,10 +448,10 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
     let app_state = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     let posture_cache: SharedPostureCache =
         Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
-    let perception_cap = kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap();
+    let perception_cap = kirra_verifier::gateway::perception_monitor::empty_perception_cap();
     {
-        use kirra_runtime_sdk::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
-        let now = kirra_runtime_sdk::posture_cache::now_ms();
+        use kirra_verifier::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
+        let now = kirra_verifier::posture_cache::now_ms();
         *perception_cap.write().unwrap() = Some(CachedPerceptionCap {
             cap_mps: 3.0,
             generated_at_ms: now,
@@ -462,11 +462,11 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
     let svc = Arc::new(ServiceState {
         app: app_state,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
@@ -502,9 +502,9 @@ async fn test_perception_cap_enabled_stale_controlled_stop() {
     let app_state = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     let posture_cache: SharedPostureCache =
         Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
-    let perception_cap = kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap();
+    let perception_cap = kirra_verifier::gateway::perception_monitor::empty_perception_cap();
     {
-        use kirra_runtime_sdk::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
+        use kirra_verifier::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
         // generated far in the past relative to a tiny TTL → stale on read.
         *perception_cap.write().unwrap() = Some(CachedPerceptionCap {
             cap_mps: 9.0,
@@ -516,11 +516,11 @@ async fn test_perception_cap_enabled_stale_controlled_stop() {
     let svc = Arc::new(ServiceState {
         app: app_state,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
@@ -559,10 +559,10 @@ async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() 
 /// Build a Nominal state with a capture writer installed; return (svc, rx) so the
 /// test can both drive the gateway and observe the emitted records.
 fn build_state_with_capture()
-    -> (Arc<ServiceState>, tokio::sync::mpsc::Receiver<kirra_runtime_sdk::capture::CaptureRecord>)
+    -> (Arc<ServiceState>, tokio::sync::mpsc::Receiver<kirra_verifier::capture::CaptureRecord>)
 {
-    use kirra_runtime_sdk::verifier::{AppState, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier::{AppState, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -572,13 +572,13 @@ fn build_state_with_capture()
     let svc = Arc::new(ServiceState {
         app,
         posture_cache,
-        started_at_ms: kirra_runtime_sdk::posture_cache::now_ms(),
+        started_at_ms: kirra_verifier::posture_cache::now_ms(),
         audit_verifying_key: None,
-        fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-        fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+        fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
         posture_engine_tx: std::sync::OnceLock::new(),
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     });
     (svc, rx)
@@ -608,7 +608,7 @@ async fn test_capture_on_vs_off_responses_identical() {
 /// outcome + the substituted safe value — passes included (selection-bias).
 #[tokio::test]
 async fn test_capture_emits_a_record_per_arm() {
-    use kirra_runtime_sdk::capture::CaptureOutcome;
+    use kirra_verifier::capture::CaptureOutcome;
 
     // Allow.
     let (svc, mut rx) = build_state_with_capture();

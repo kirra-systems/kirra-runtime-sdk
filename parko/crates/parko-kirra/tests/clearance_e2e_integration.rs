@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
-use kirra_runtime_sdk::attestation::{
+use kirra_verifier::attestation::{
     operator_grant_signing_payload, operator_key_fingerprint, verify_ed25519_pem_signature,
 };
-use kirra_runtime_sdk::verifier::{AppState, VerifierOperationMode};
-use kirra_runtime_sdk::verifier_store::{AuditExportPage, VerifierStore};
+use kirra_verifier::verifier::{AppState, VerifierOperationMode};
+use kirra_verifier::verifier_store::{AuditExportPage, VerifierStore};
 
 use parko_core::{
     impact_cfg_for_class, is_impact, ClearanceLoop, ClearanceState, ImpactCfg, ImpactEvidence,

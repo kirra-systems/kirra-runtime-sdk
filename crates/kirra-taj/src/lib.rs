@@ -640,7 +640,7 @@ mod tests {
     fn taj_corridor_feeds_the_checker() {
         use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
         use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-        use kirra_runtime_sdk::verifier::FleetPosture;
+        use kirra_verifier::verifier::FleetPosture;
 
         // A 3 m half-width corridor from walls; feed a short centered trajectory.
         let taj = TajPhaseA::default();
@@ -787,7 +787,7 @@ mod tests {
         use kirra_ros2_adapter::corridor::MockCorridorSource;
         use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
         use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-        use kirra_runtime_sdk::verifier::FleetPosture;
+        use kirra_verifier::verifier::FleetPosture;
 
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let tp = |x: f64, t: f64| TrajectoryPoint {
@@ -869,7 +869,7 @@ mod tests {
         use kirra_ros2_adapter::corridor::CorridorSource as _;
         use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
         use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-        use kirra_runtime_sdk::verifier::FleetPosture;
+        use kirra_verifier::verifier::FleetPosture;
 
         let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
         let perception = taj.process(&walls_scan(5.0, 30.0), 0);

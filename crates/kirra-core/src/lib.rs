@@ -9,9 +9,9 @@
 //! unchanged.
 //!
 //! Stage 1: the fleet posture / node trust types, previously defined in the heavy
-//! `kirra_runtime_sdk::verifier` module and imported across the whole stack.
+//! `kirra_verifier::verifier` module and imported across the whole stack.
 
-// Mirror the parent crate's doc-lint posture (`kirra_runtime_sdk` lib root) so the
+// Mirror the parent crate's doc-lint posture (`kirra_verifier` lib root) so the
 // verbatim-relocated modules (the kinematics-contract talisman, the SG2 containment
 // checker) keep their byte-identical doc comments — the safety-derivation tables use
 // aligned arithmetic continuations that these two pedantic doc lints would otherwise
@@ -23,26 +23,26 @@ use serde::{Deserialize, Serialize};
 /// The FROZEN kinematics-contract talisman — the deterministic vehicle flight-envelope
 /// safety contract (`EnforceAction` / `DenyCode` / `VehicleKinematicsContract` /
 /// `validate_vehicle_command`). Relocated here verbatim (de-monolith Stage 3); re-exported
-/// by `kirra_runtime_sdk::gateway::kinematics_contract` so every existing path holds.
+/// by `kirra_verifier::gateway::kinematics_contract` so every existing path holds.
 pub mod kinematics_contract;
 
 /// The SG2 drivable-space containment checker — the per-trajectory corridor-containment
 /// sibling of `validate_vehicle_command` (`VehicleFootprint` / `Corridor` / `Pose` /
 /// `validate_trajectory_containment` / `MAX_TRAJECTORY_HORIZON`). Relocated here verbatim
-/// (de-monolith Stage 4); re-exported by `kirra_runtime_sdk::gateway::containment` so every
+/// (de-monolith Stage 4); re-exported by `kirra_verifier::gateway::containment` so every
 /// existing path (the ROS2 adapter, the planner) holds.
 pub mod containment;
 
 /// The shared non-finite governor-input guard (`all_finite`, the #410 convergence point).
 /// A dependency-free predicate every governor entry calls. Relocated here verbatim
-/// (de-monolith Stage 5); re-exported by `kirra_runtime_sdk::governor_guard` so the
+/// (de-monolith Stage 5); re-exported by `kirra_verifier::governor_guard` so the
 /// SDK's internal callers (the scalar kernel, the C FFI) and parko's diverse governor hold.
 pub mod governor_guard;
 
 /// The fail-closed fleet-posture state machine (`PostureTracker` /
 /// `POSTURE_STALENESS_TIMEOUT_MS`) — a pure, deterministic, clock-injected machine whose
 /// only input is `FleetPosture`. Relocated here verbatim (de-monolith Stage 5); re-exported
-/// by `kirra_runtime_sdk::posture_tracker` so the ROS2 adapter and the parko-ros2 node hold.
+/// by `kirra_verifier::posture_tracker` so the ROS2 adapter and the parko-ros2 node hold.
 pub mod posture_tracker;
 
 /// The lean drivable-corridor seam (`Point` / `CorridorSource` / `MockCorridorSource`).
@@ -63,7 +63,7 @@ pub mod trajectory;
 /// dependency-light (`std::sync` + the kinematics-contract talisman + `PerceptionDerateEvent`),
 /// so it rides on the lean foundation. Relocated verbatim from the SDK's
 /// `gateway::perception_monitor` (de-monolith Stage 7); re-exported by
-/// `kirra_runtime_sdk::gateway::perception_monitor` so every existing path (the verifier
+/// `kirra_verifier::gateway::perception_monitor` so every existing path (the verifier
 /// service, the ROS2 adapter) holds.
 pub mod perception_monitor;
 
@@ -71,7 +71,7 @@ pub mod perception_monitor;
 /// `apply_enforce_action` / `run_simulation`) — the deterministic bicycle-model integrator
 /// the scenario harness uses to assert physical outcomes. Pure physics over the
 /// kinematics-contract talisman; no service/runtime deps. Relocated verbatim from the SDK
-/// (de-monolith Stage 7); re-exported by `kirra_runtime_sdk::kinematics_sim`.
+/// (de-monolith Stage 7); re-exported by `kirra_verifier::kinematics_sim`.
 pub mod kinematics_sim;
 
 /// The learning-loop capture channel — the record BUILDERS (`record_from_verdict` /
@@ -81,7 +81,7 @@ pub mod kinematics_sim;
 /// because the writer pulls `tokio` / `serde_json` / `tracing` — crates that only need the
 /// foundation (the planner, the lane map, parko, the governor-service) keep core serde-only.
 /// Relocated verbatim from the SDK (de-monolith Stage 7); re-exported by
-/// `kirra_runtime_sdk::capture`.
+/// `kirra_verifier::capture`.
 #[cfg(feature = "capture")]
 pub mod capture;
 

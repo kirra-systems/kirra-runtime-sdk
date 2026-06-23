@@ -3,7 +3,7 @@
 # S131 Phase 1 — Option-B per-trajectory wiring adapter (skeleton).
 #
 # Owns the ROS 2 ↔ Rust bridge for the Kirra Governor. Built as a separate
-# crate so the safety kernel (`kirra-runtime-sdk`) stays free of ROS deps
+# crate so the safety kernel (`kirra-verifier`) stays free of ROS deps
 # and can ship on platforms that don't carry rclpy / ros-base. Production
 # integrators that DO run ROS 2 (e.g. Autoware) enable the `ros2` feature
 # here and link this crate into their node graph.
@@ -11,7 +11,7 @@
 # Current state (the Option-B wiring is LIVE; this header began as a Phase-1
 # skeleton note and is updated to match reality):
 #   - This crate depends ONLY on the lean `kirra-core` for safety logic
-#     (de-monolith Stage 7); the heavy `kirra-runtime-sdk` verifier service is
+#     (de-monolith Stage 7); the heavy `kirra-verifier` verifier service is
 #     no longer a dependency.
 #   - The slow loop CALLS `validate_trajectory_containment` per accepted
 #     trajectory at `src/validation.rs:161` (from
@@ -79,7 +79,7 @@ tracing = "0.1"
 # kinematics-contract talisman (`validate_vehicle_command`), the `PostureTracker`, the
 # Track-C `perception_monitor`, the `kinematics_sim` integrator, and (behind the `capture`
 # feature, enabled by `ros2` below) the learning-loop capture builders + writer. The heavy
-# `kirra-runtime-sdk` (axum/rusqlite/reqwest verifier service) is NO LONGER a dependency —
+# `kirra-verifier` (axum/rusqlite/reqwest verifier service) is NO LONGER a dependency —
 # this severs the adapter→SDK edge and, transitively, the planner's last SDK pull.
 kirra-core        = { path = "../kirra-core" }
 parko-core        = { path = "../../parko/crates/parko-core" }
@@ -113,7 +113,7 @@ futures = { version = "0.3", optional = true }
 # `PostureTracker`, and `response.json()` to parse them. Gated on `ros2`
 # because the transport only matters when the binary is built. The `json`
 # feature is declared explicitly here (de-monolith Stage 7): it was previously
-# activated transitively via the now-severed `kirra-runtime-sdk` reqwest dep
+# activated transitively via the now-severed `kirra-verifier` reqwest dep
 # through Cargo feature unification.
 reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"], optional = true }
 serde_json = { version = "1",    optional = true }

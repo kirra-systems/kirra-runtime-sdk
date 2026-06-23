@@ -18,41 +18,41 @@ use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
-use kirra_runtime_sdk::verifier::{
+use kirra_verifier::verifier::{
     validate_client_identity_headers, AppState, BackupExport, FlapStatus, FleetNodePosture,
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
-use kirra_runtime_sdk::verifier_store::{DurableWriteError, VerifierStore};
-use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
-use kirra_runtime_sdk::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
-use kirra_runtime_sdk::security::{admin_token_ok, constant_time_compare};
-use kirra_runtime_sdk::action_filter::{evaluate_action_claim, ActionClaim};
-use kirra_runtime_sdk::protocol_adapter::{
+use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
+use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
+use kirra_verifier::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
+use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
+use kirra_verifier::protocol_adapter::{
     evaluate_unified_industrial_request, UnifiedIndustrialRequest,
 };
-use kirra_runtime_sdk::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
-use kirra_runtime_sdk::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
-use kirra_runtime_sdk::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
-use kirra_runtime_sdk::federation::{
+use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
+use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
+use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
+use kirra_verifier::federation::{
     evaluate_federated_report,
     verify_federated_report_signature,
     FederatedTrustReport,
     RegisterFederationControllerRequest,
     ReportEvaluation,
 };
-use kirra_runtime_sdk::standby_monitor::{
+use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor,
     HEARTBEAT_KEY, PROMOTION_TIMEOUT_MS,
 };
-use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
-use kirra_runtime_sdk::gateway::policy_layer::{
+use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
+use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
-use kirra_runtime_sdk::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
-use kirra_runtime_sdk::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
-use kirra_runtime_sdk::fabric::router::FabricRouter;
-use kirra_runtime_sdk::fabric::telemetry::FabricTelemetry;
-use kirra_runtime_sdk::fabric::causal_log::FabricCausalLog;
+use kirra_verifier::recovery_hysteresis::{evaluate_recovery_report, HysteresisDecision};
+use kirra_verifier::fabric::asset::{AssetPosture, AssetType, FabricAsset, KinematicProfileType};
+use kirra_verifier::fabric::router::FabricRouter;
+use kirra_verifier::fabric::telemetry::FabricTelemetry;
+use kirra_verifier::fabric::causal_log::FabricCausalLog;
 
 // --- Auth middleware ---------------------------------------------------------
 
@@ -183,7 +183,7 @@ async fn require_client_identity(
 /// not maintain a posture cache. A `try_send` failure (channel full or
 /// worker gone) is logged; the periodic-refresh loop will fail-close the
 /// cache and gate on its own if the worker has truly died.
-fn enqueue_recalc(svc: &ServiceState, trigger: kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger) {
+fn enqueue_recalc(svc: &ServiceState, trigger: kirra_verifier::posture_engine_v2::PostureRecalcTrigger) {
     if let Some(tx) = svc.posture_engine_tx.get() {
         if let Err(e) = tx.try_send(trigger) {
             tracing::warn!(error = %e,
@@ -555,7 +555,7 @@ async fn issue_challenge(
     // clock. A `SystemTime`-derived nonce is predictable and can collide within
     // a single nanosecond; single-use + TTL + node-binding are enforced by the
     // challenge store and the verify-then-consume order in `verify_attestation`.
-    let nonce = kirra_runtime_sdk::verifier::generate_challenge_nonce();
+    let nonce = kirra_verifier::verifier::generate_challenge_nonce();
     svc.app.issue_challenge(&node_id, nonce, now_ms());
     (StatusCode::OK, Json(json!({ "node_id": node_id, "nonce": nonce }))).into_response()
 }
@@ -586,7 +586,7 @@ async fn verify_attestation(
                         Json(json!({ "error": "node not registered" }))).into_response(),
     };
 
-    if let Err(reason) = kirra_runtime_sdk::attestation::verify_attestation_proof(
+    if let Err(reason) = kirra_verifier::attestation::verify_attestation_proof(
         ak_public_pem.as_deref(),
         &req.node_id,
         req.nonce,
@@ -596,7 +596,7 @@ async fn verify_attestation(
         // failing proof is an authentication failure (401). Either way the
         // attestation is REFUSED — never accepted by default.
         let status = match reason {
-            kirra_runtime_sdk::attestation::AttestationError::NoRegisteredKey => {
+            kirra_verifier::attestation::AttestationError::NoRegisteredKey => {
                 StatusCode::FORBIDDEN
             }
             _ => StatusCode::UNAUTHORIZED,
@@ -643,7 +643,7 @@ async fn verify_attestation(
         }
     }
     emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.node_id.clone()));
-    enqueue_recalc(&svc, kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+    enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
         node_id: req.node_id.clone(),
         reason:  "ATTESTATION_TRUSTED".to_string(),
     });
@@ -749,7 +749,7 @@ async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoRespon
                         let active = r.is_active();
                         OperatorView {
                             operator_key_fingerprint:
-                                kirra_runtime_sdk::attestation::operator_key_fingerprint(&r.pubkey_pem)
+                                kirra_verifier::attestation::operator_key_fingerprint(&r.pubkey_pem)
                                     .unwrap_or_else(|| "unparseable".to_string()),
                             operator_id: r.operator_id,
                             registered_at_ms: r.registered_at_ms,
@@ -795,7 +795,7 @@ async fn register_dependencies(
         }
     }
     emit_posture_event(&svc.app, "DEPENDENCY_GRAPH_MUTATED", Some(req.node_id.clone()));
-    enqueue_recalc(&svc, kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged);
+    enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged);
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "dependencies_registered": true }))).into_response()
 }
@@ -924,7 +924,7 @@ async fn handle_audit_rotate_key(
                 Json(json!({ "error": "new_signing_key_b64 must be a base64 32-byte ed25519 seed" }))).into_response(),
         }
     };
-    let new_key_id = kirra_runtime_sdk::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
+    let new_key_id = kirra_verifier::audit_chain::verifying_key_id(&new_signing_key.verifying_key());
     // #79: pass our held fencing token so the durable write re-checks it INSIDE
     // the transaction, closing the gate→commit TOCTOU.
     let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -1142,7 +1142,7 @@ async fn evaluate_ethernet_ip_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = EtherNetIpAdapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_runtime_sdk::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     if !allowed {
@@ -1206,7 +1206,7 @@ async fn evaluate_canopen_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = CanOpenAdapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_runtime_sdk::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     // #84: resolve the CANopen bus node-id to a FLEET node so an NMT-offline
@@ -1214,7 +1214,7 @@ async fn evaluate_canopen_adapter(
     // unregistered ids are FAIL-CLOSED — surfaced as an unattributed offline
     // (distinct audit event + warning + response flag), never a silent no-op.
     let offline_outcome = if eval.triggers_recalculation {
-        use kirra_runtime_sdk::adapters::canopen::{classify_nmt_offline, global_resolve};
+        use kirra_verifier::adapters::canopen::{classify_nmt_offline, global_resolve};
         let resolved = global_resolve(eval.node_id);
         let registered = resolved
             .as_deref()
@@ -1229,8 +1229,8 @@ async fn evaluate_canopen_adapter(
     // actually marked offline (if any) is recorded for the audit + response.
     let mut attributed_fleet_node: Option<String> = None;
     if let Some(outcome) = &offline_outcome {
-        use kirra_runtime_sdk::adapters::canopen::{NmtOfflineOutcome, UnattributedReason};
-        use kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger;
+        use kirra_verifier::adapters::canopen::{NmtOfflineOutcome, UnattributedReason};
+        use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
         match outcome {
             NmtOfflineOutcome::Attributed { fleet_node_id } => {
                 match svc.app.mark_node_untrusted(fleet_node_id, "CANOPEN_NMT_OFFLINE", now_ms()) {
@@ -1355,7 +1355,7 @@ async fn evaluate_dnp3_adapter(
 
     let posture_str = format!("{:?}", posture);
     let eval = Dnp3Adapter::evaluate(&msg);
-    let (allowed, denial_reason) = kirra_runtime_sdk::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
+    let (allowed, denial_reason) = kirra_verifier::protocol_adapter::command_allowed_for_posture_pub(&eval.command, &posture);
     let audit_ref = now_ms().to_string();
 
     // SG-012 / H-011 — a DNP3 broadcast control command must carry a
@@ -1716,7 +1716,7 @@ async fn handle_sensor_fault_report(
         }
 
         emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
-        enqueue_recalc(&svc, kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+        enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
             node_id: req.source_node_id.clone(),
             reason:  format!("SENSOR_FAULT:{reason}"),
         });
@@ -1791,7 +1791,7 @@ async fn handle_sensor_fault_report(
             }
 
             emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
-            enqueue_recalc(&svc, kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+            enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
                 node_id: req.source_node_id.clone(),
                 reason:  "SENSOR_RECOVERY_CONFIRMED".to_string(),
             });
@@ -1959,14 +1959,14 @@ async fn handle_fabric_command(
     // KIRRA-OCCY-PMON-002: resolve the perception-derate cap O(1) here (the
     // handler holds `svc`/`ServiceState`) and thread it through to the fabric
     // governor's Nominal arm. `None` while the monitor is disabled (default).
-    let perception_cap = kirra_runtime_sdk::gateway::perception_monitor::resolve_perception_cap(
+    let perception_cap = kirra_verifier::gateway::perception_monitor::resolve_perception_cap(
         svc.perception_monitor_enabled,
         &svc.perception_cap,
         now_ms(),
     );
     match svc.fabric_router.route_command(&asset_id, &cmd, perception_cap) {
         Ok(action) => {
-            use kirra_runtime_sdk::gateway::kinematics_contract::EnforceAction;
+            use kirra_verifier::gateway::kinematics_contract::EnforceAction;
             let action_str = format!("{:?}", action);
             let now = now_ms();
             let fabric_generation = svc.fabric_router.fabric_state().fabric_generation;
@@ -1981,7 +1981,7 @@ async fn handle_fabric_command(
             // FAIL-CLOSED: deny when no enforced command can be produced —
             // `DenyBreach`, OR (defensively) a clamp whose enforced value is
             // non-finite. We NEVER return the unclamped command.
-            let enforced = kirra_runtime_sdk::kinematics_sim::apply_enforce_action(&cmd, &action)
+            let enforced = kirra_verifier::kinematics_sim::apply_enforce_action(&cmd, &action)
                 .filter(|c| c.linear_velocity_mps.is_finite() && c.steering_angle_deg.is_finite());
 
             match enforced {
@@ -2087,7 +2087,7 @@ async fn handle_fabric_causal_log(
     // inside export_page so a forensic export is never unbounded.
     let limit = q
         .limit
-        .unwrap_or(kirra_runtime_sdk::fabric::causal_log::CAUSAL_EXPORT_MAX_PAGE);
+        .unwrap_or(kirra_verifier::fabric::causal_log::CAUSAL_EXPORT_MAX_PAGE);
     let offset = q.offset.unwrap_or(0);
     let entries = svc.fabric_causal_log.export_page(from, to, limit, offset);
     let total = entries.len();
@@ -2244,7 +2244,7 @@ async fn main() {
     // node-offline event marks the correct asset (effectful recalc). Sourced
     // from KIRRA_CANOPEN_NODE_MAP; unset → empty map (every offline is then
     // unattributed, handled fail-closed in evaluate_canopen_adapter).
-    kirra_runtime_sdk::adapters::canopen::init_node_map_from_env();
+    kirra_verifier::adapters::canopen::init_node_map_from_env();
 
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
@@ -2274,7 +2274,7 @@ async fn main() {
         let admission = store
             .admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms())
             .expect("failed to admit audit signing key against the durable trust map");
-        use kirra_runtime_sdk::verifier_store::KeyAdmission;
+        use kirra_verifier::verifier_store::KeyAdmission;
         match admission {
             KeyAdmission::Resumed
             | KeyAdmission::BackfilledGenesis
@@ -2315,15 +2315,15 @@ async fn main() {
     // kinematic-violation audit record off the verdict path. Done before
     // the listener binds so no request can race the install.
     let audit_tx =
-        kirra_runtime_sdk::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
+        kirra_verifier::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
     app_state.install_audit_writer(audit_tx);
 
     // Learning-loop capture writer (Phase 1, #190) — DEFAULT OFF. Only spawned +
     // installed when KIRRA_CAPTURE_ENABLED is set; unset → no writer, and the
     // gateway emit is a pure no-op (capture_writer_tx stays None). Non-safety
     // side channel; mirrors the audit writer wiring above.
-    if kirra_runtime_sdk::capture::capture_enabled() {
-        let capture_tx = kirra_runtime_sdk::capture::spawn_capture_writer();
+    if kirra_verifier::capture::capture_enabled() {
+        let capture_tx = kirra_verifier::capture::spawn_capture_writer();
         app_state.install_capture_writer(capture_tx);
         tracing::info!("learning-loop capture ENABLED (KIRRA_CAPTURE_ENABLED) — verdict records → JSONL sink");
     }
@@ -2359,7 +2359,7 @@ async fn main() {
         // KIRRA-OCCY-PMON-002: perception-derate composition. DEFAULT OFF —
         // pure no-op (state 1) until #126 wires a real perception ingest and a
         // deployment enables the monitor + starts the publisher worker.
-        perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+        perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     });
 
@@ -2587,13 +2587,13 @@ async fn main() {
     // not require it there).
     let mut watchdog_spawned = false;
     if svc_state.app.is_active() {
-        kirra_runtime_sdk::posture_engine::recalculate_and_broadcast(
+        kirra_verifier::posture_engine::recalculate_and_broadcast(
             &svc_state.app,
             &svc_state.posture_cache,
         );
         tracing::info!("posture: initial recalc complete; cache populated");
 
-        let posture_tx = kirra_runtime_sdk::posture_engine_v2::start_posture_engine_worker(
+        let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
             Arc::clone(&svc_state.app),
             Arc::clone(&svc_state.posture_cache),
         );
@@ -2614,20 +2614,20 @@ async fn main() {
         // worker consumes and recomputes the posture (typically
         // collapsing to LockedOut for the affected node, which fails
         // the actuator gate closed).
-        kirra_runtime_sdk::telemetry_watchdog::spawn_telemetry_watchdog(
+        kirra_verifier::telemetry_watchdog::spawn_telemetry_watchdog(
             Arc::clone(&svc_state.app),
             posture_tx.clone(),
         );
         watchdog_spawned = true;
         tracing::info!(
-            timeout_ms = kirra_runtime_sdk::telemetry_watchdog::AV_TELEMETRY_TIMEOUT_MS,
+            timeout_ms = kirra_verifier::telemetry_watchdog::AV_TELEMETRY_TIMEOUT_MS,
             "telemetry watchdog spawned (SG9 sensor-liveness)"
         );
 
         let refresh_tx = posture_tx;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(
-                kirra_runtime_sdk::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
+                kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
             ));
             // First tick fires immediately; skip it (the synchronous
             // initial recalc above already covered cold start).
@@ -2635,7 +2635,7 @@ async fn main() {
             loop {
                 tick.tick().await;
                 if refresh_tx
-                    .try_send(kirra_runtime_sdk::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh)
+                    .try_send(kirra_verifier::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh)
                     .is_err()
                 {
                     tracing::error!(
@@ -2646,8 +2646,8 @@ async fn main() {
             }
         });
         tracing::info!(
-            interval_ms = kirra_runtime_sdk::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
-            ttl_ms = kirra_runtime_sdk::posture_cache::POSTURE_CACHE_TTL_MS,
+            interval_ms = kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
+            ttl_ms = kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
             "posture: periodic refresh loop started"
         );
 
@@ -2934,7 +2934,7 @@ async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> impl IntoRespo
     Json(json!({
         "mode": mode,
         "uptime_ms": now.saturating_sub(svc.started_at_ms),
-        "posture_generation": kirra_runtime_sdk::posture_engine::POSTURE_GENERATION
+        "posture_generation": kirra_verifier::posture_engine::POSTURE_GENERATION
             .load(std::sync::atomic::Ordering::SeqCst),
         "last_recalc_ms": last_recalc_ms,
         "posture_cache_ttl_ms": POSTURE_CACHE_TTL_MS,
@@ -3204,7 +3204,7 @@ fn check_supervisor_key(headers: &HeaderMap) -> Result<(), StatusCode> {
 
 /// Audit a clearance-grant rejection (never records key bytes / signatures).
 fn audit_grant_rejection(
-    app: &kirra_runtime_sdk::verifier::AppState,
+    app: &kirra_verifier::verifier::AppState,
     reason: &str,
     node_id: &str,
     operator_id: &str,
@@ -3278,7 +3278,7 @@ async fn register_operator(
         }))).into_response();
     }
     // Fail-closed: the PEM must parse as a valid Ed25519 SPKI public key.
-    let fingerprint = match kirra_runtime_sdk::attestation::operator_key_fingerprint(
+    let fingerprint = match kirra_verifier::attestation::operator_key_fingerprint(
         &req.ed25519_pubkey_pem,
     ) {
         Some(fp) => fp,
@@ -3405,7 +3405,7 @@ async fn clearance_challenge(
         Err(_) => false,
     };
     // Hex string (not a u64) so the in-browser signing flow never loses precision.
-    let nonce_hex = format!("{:016x}", kirra_runtime_sdk::verifier::generate_challenge_nonce());
+    let nonce_hex = format!("{:016x}", kirra_verifier::verifier::generate_challenge_nonce());
     // #325: store a REAL challenge only for an active operator; everyone else gets a
     // decoy nonce that is never recorded (no oracle, no map growth). #326: the
     // challenge-map key is length-prefixed (unambiguous operator/node split).
@@ -3510,10 +3510,10 @@ async fn console_clearance_grant(
                 }))).into_response();
             }
         };
-        let payload = kirra_runtime_sdk::attestation::operator_grant_signing_payload(
+        let payload = kirra_verifier::attestation::operator_grant_signing_payload(
             &operator_id, &node_id, &nonce,
         );
-        if !kirra_runtime_sdk::attestation::verify_ed25519_pem_signature(
+        if !kirra_verifier::attestation::verify_ed25519_pem_signature(
             &operator.pubkey_pem, &payload, &sig_bytes,
         ) {
             audit_grant_rejection(&svc.app, "bad_signature", &node_id, &operator_id, now);
@@ -3531,7 +3531,7 @@ async fn console_clearance_grant(
                 "reason": "challenge nonce absent, expired, or already used (replay rejected)"
             }))).into_response();
         }
-        let fp = kirra_runtime_sdk::attestation::operator_key_fingerprint(&operator.pubkey_pem);
+        let fp = kirra_verifier::attestation::operator_key_fingerprint(&operator.pubkey_pem);
         ("operator-signed", fp)
     } else {
         // === BREAK-GLASS PATH — the named, distinctly-audited supervisor fallback.
@@ -3892,11 +3892,11 @@ mod posture_gate_real_router_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // for `oneshot`
 
-    use kirra_runtime_sdk::posture_cache::{
+    use kirra_verifier::posture_cache::{
         now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
     };
-    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
 
     /// Builds an Active `ServiceState` with the given seeded posture (or a
     /// cold cache when `None`), mirroring the production field set.
@@ -3909,11 +3909,11 @@ mod posture_gate_real_router_tests {
             posture_cache,
             started_at_ms: now_ms(),
             audit_verifying_key: None,
-            fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4089,15 +4089,15 @@ mod fabric_posture_feed_tests {
 
     use std::sync::Arc;
 
-    use kirra_runtime_sdk::fabric::asset::{
+    use kirra_verifier::fabric::asset::{
         AssetType, FabricAsset, KinematicProfileType,
     };
-    use kirra_runtime_sdk::fabric::router::FabricRouter;
-    use kirra_runtime_sdk::posture_cache::{
+    use kirra_verifier::fabric::router::FabricRouter;
+    use kirra_verifier::posture_cache::{
         now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
     };
-    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
 
     const LOCAL: &str = "local-asset";
 
@@ -4128,10 +4128,10 @@ mod fabric_posture_feed_tests {
             started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4236,14 +4236,14 @@ mod fabric_command_authoritative_tests {
     use axum::response::IntoResponse;
     use axum::Json;
 
-    use kirra_runtime_sdk::fabric::asset::{
+    use kirra_verifier::fabric::asset::{
         AssetPosture, AssetType, FabricAsset, KinematicProfileType,
     };
-    use kirra_runtime_sdk::fabric::router::FabricRouter;
-    use kirra_runtime_sdk::gateway::kinematics_contract::ProposedVehicleCommand;
-    use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, SharedPostureCache};
-    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::fabric::router::FabricRouter;
+    use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
+    use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
 
     const ASSET: &str = "av-01";
 
@@ -4282,10 +4282,10 @@ mod fabric_command_authoritative_tests {
             started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4367,12 +4367,12 @@ mod attestation_nonce_handler_tests {
     use axum::Json;
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
-    use kirra_runtime_sdk::attestation::attestation_signing_payload;
-    use kirra_runtime_sdk::posture_cache::{now_ms, ServiceState, SharedPostureCache};
-    use kirra_runtime_sdk::verifier::{
+    use kirra_verifier::attestation::attestation_signing_payload;
+    use kirra_verifier::posture_cache::{now_ms, ServiceState, SharedPostureCache};
+    use kirra_verifier::verifier::{
         AppState, NodeTrustState, RegisteredNode, VerifierOperationMode,
     };
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier_store::VerifierStore;
 
     const NODE: &str = "edge-node-1";
 
@@ -4413,11 +4413,11 @@ mod attestation_nonce_handler_tests {
             posture_cache,
             started_at_ms: now_ms(),
             audit_verifying_key: None,
-            fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4472,13 +4472,13 @@ mod local_asset_lockedout_seed_tests {
 
     use std::sync::Arc;
 
-    use kirra_runtime_sdk::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
-    use kirra_runtime_sdk::fabric::router::FabricRouter;
-    use kirra_runtime_sdk::posture_cache::{
+    use kirra_verifier::fabric::asset::{AssetType, FabricAsset, KinematicProfileType};
+    use kirra_verifier::fabric::router::FabricRouter;
+    use kirra_verifier::posture_cache::{
         now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
     };
-    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
 
     const LOCAL: &str = "av-local";
     const PEER: &str = "av-peer";
@@ -4511,10 +4511,10 @@ mod local_asset_lockedout_seed_tests {
             started_at_ms: now_ms(),
             audit_verifying_key: None,
             fabric_router,
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4590,10 +4590,10 @@ mod dnp3_mandatory_audit_tests {
     use axum::response::IntoResponse;
     use axum::Json;
 
-    use kirra_runtime_sdk::adapters::dnp3::{Dnp3Message, Dnp3Object, DNP3_BROADCAST_ADDRESS};
-    use kirra_runtime_sdk::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
-    use kirra_runtime_sdk::verifier::{AppState, FleetPosture, VerifierOperationMode};
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::adapters::dnp3::{Dnp3Message, Dnp3Object, DNP3_BROADCAST_ADDRESS};
+    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
 
     fn svc() -> Arc<ServiceState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -4607,11 +4607,11 @@ mod dnp3_mandatory_audit_tests {
             posture_cache,
             started_at_ms: now_ms(),
             audit_verifying_key: None,
-            fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4737,13 +4737,13 @@ mod console_phase_a_tests {
     use axum::response::IntoResponse;
     use tower::ServiceExt; // oneshot
 
-    use kirra_runtime_sdk::posture_cache::{
+    use kirra_verifier::posture_cache::{
         now_ms, ServiceState, SharedPostureCache, POSTURE_CACHE_TTL_MS,
     };
-    use kirra_runtime_sdk::verifier::{
+    use kirra_verifier::verifier::{
         AppState, NodeTrustState, RegisteredNode, VerifierOperationMode,
     };
-    use kirra_runtime_sdk::verifier_store::VerifierStore;
+    use kirra_verifier::verifier_store::VerifierStore;
 
     fn build_state() -> Arc<ServiceState> {
         let store = VerifierStore::new(":memory:").expect("in-memory store");
@@ -4754,13 +4754,13 @@ mod console_phase_a_tests {
             posture_cache,
             started_at_ms: now_ms(),
             audit_verifying_key: None,
-            fabric_router: Arc::new(kirra_runtime_sdk::fabric::router::FabricRouter::new()),
-            fabric_telemetry: Arc::new(kirra_runtime_sdk::fabric::telemetry::FabricTelemetry::new()),
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
             fabric_causal_log: Arc::new(
-                kirra_runtime_sdk::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
             ),
             posture_engine_tx: std::sync::OnceLock::new(),
-            perception_cap: kirra_runtime_sdk::gateway::perception_monitor::empty_perception_cap(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
         })
     }
@@ -4974,7 +4974,7 @@ mod console_phase_a_tests {
         {
             let mut store = svc.app.store.lock().unwrap();
             let posture_json =
-                serde_json::to_string(&kirra_runtime_sdk::verifier::FleetPosture::Nominal).unwrap();
+                serde_json::to_string(&kirra_verifier::verifier::FleetPosture::Nominal).unwrap();
             store
                 .save_posture_event_chained(
                     "robot-09",
@@ -5117,7 +5117,7 @@ mod console_phase_a_tests {
 
     fn sign_grant_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
         use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-        let payload = kirra_runtime_sdk::attestation::operator_grant_signing_payload(
+        let payload = kirra_verifier::attestation::operator_grant_signing_payload(
             operator_id, node_id, nonce,
         );
         b64e.encode(sk.sign(&payload).to_bytes())
@@ -5314,7 +5314,7 @@ mod console_phase_a_tests {
         let (gs, gb) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
         assert_eq!(gs, StatusCode::OK, "operator-signed grant recorded; body={gb}");
         assert!(gb.contains("operator-signed"), "auth_method in response");
-        let fp = kirra_runtime_sdk::attestation::operator_key_fingerprint(&pem).unwrap();
+        let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
         assert!(gb.contains(&fp), "response carries the key fingerprint");
 
         let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;

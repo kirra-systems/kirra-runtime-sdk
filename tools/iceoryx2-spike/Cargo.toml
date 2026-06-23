@@ -1,4 +1,4 @@
-# Standalone spike crate — NOT a member of the kirra-runtime-sdk workspace.
+# Standalone spike crate — NOT a member of the kirra-verifier workspace.
 # The empty [workspace] table below makes this its own workspace root, so it
 # carries its own Cargo.lock and iceoryx2 never enters any SDK/parko crate's
 # dependency tree (this is a spike, not an adoption — adoption is the #275 ADR's

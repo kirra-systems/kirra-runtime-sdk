@@ -1,7 +1,7 @@
 # crates/kirra-core/Cargo.toml
 #
 # kirra-core — the LEAN safety/contract foundation extracted from the
-# kirra-runtime-sdk monolith (de-monolith Stage 1, ADR pending). Deliberately
+# kirra-verifier monolith (de-monolith Stage 1, ADR pending). Deliberately
 # dependency-light: NO tokio / axum / rusqlite / reqwest / ML. Crates that need the
 # foundational types (the adapter, the planner, the map, parko) depend on THIS, so the
 # certified-governor surface does not drag the verifier service's heavy tree.

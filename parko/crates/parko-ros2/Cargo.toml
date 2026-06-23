@@ -67,7 +67,7 @@ parko-kirra = { path = "../parko-kirra" }
 kirra-core = { path = "../../../crates/kirra-core" }
 # Kept for the SQLite `VerifierStore` the clearance gate persists through (heavy,
 # verifier-tier; see clearance_gate) — not on the governor hot path.
-kirra-runtime-sdk = { path = "../../.." }
+kirra-verifier = { path = "../../.." }
 
 # Async runtime. Default features so `tokio::spawn` and `mpsc` channels
 # are available in both lanes (the scheduler already uses them).

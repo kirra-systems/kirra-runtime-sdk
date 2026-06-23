@@ -14,7 +14,7 @@ parko-core = { path = "../parko-core" }
 kirra-core = { path = "../../../crates/kirra-core" }
 # Kept for the SQLite `VerifierStore` durable audit/clearance sink (heavy, verifier-tier;
 # see audit_sink / clearance_delivery) — not on the governor hot path.
-kirra-runtime-sdk = { path = "../../.." }
+kirra-verifier = { path = "../../.." }
 # CERT-006 durable divergence sink: serialise DivergenceEvent → JSON and persist
 # it through the SDK's hash-chained, signed audit log (VerifierStore).
 serde = { version = "1", features = ["derive"] }

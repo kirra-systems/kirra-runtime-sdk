@@ -91,7 +91,7 @@ jobs:
         # Authoritative WCET measurement. Runs on stable, non-instrumented,
         # without llvm-cov. The coverage job above skips these tests because
         # instrumentation overhead invalidates wall-clock thresholds.
-        run: cargo test -p kirra-runtime-sdk --lib wcet_gate::ci_gate_tests
+        run: cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests
 
   parko-safety:
     name: Parko Safety Tests (no ROS, no ORT)

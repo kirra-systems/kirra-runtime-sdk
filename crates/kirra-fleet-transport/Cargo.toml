@@ -26,7 +26,7 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # FederatedTrustReportV2 / verify_federated_report_signature_v2 / FleetPosture and
 # the Phase-A clearance-grant store path. This crate adds NO new payload trust
 # logic of its own beyond a grant envelope that reuses the same Ed25519 pattern.
-kirra-runtime-sdk = { path = "../.." }
+kirra-verifier = { path = "../.." }
 
 # The fleet carrier. default-features OFF (no TLS/QUIC — see the manifest note);
 # `transport_tcp` = the localhost peer transport; `unstable` only for the explicit

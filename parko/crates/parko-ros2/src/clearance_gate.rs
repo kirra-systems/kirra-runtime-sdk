@@ -70,7 +70,7 @@ use parko_core::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use kirra_runtime_sdk::verifier_store::VerifierStore;
+use kirra_verifier::verifier_store::VerifierStore;
 use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 
 use crate::command_mapping::OutgoingTwist;

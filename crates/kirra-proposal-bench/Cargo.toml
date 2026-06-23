@@ -3,7 +3,7 @@
 # DEV/TEST ONLY — a UDP bench tool that exercises a running
 # kirra-governor-service across a sweep of proposals and prints the verdicts.
 # NOT a shipped or safety artifact. Depends only on the shared wire mirror
-# (kirra-wire-client) → serde + bincode + std; no kirra-runtime-sdk, no ROS/async.
+# (kirra-wire-client) → serde + bincode + std; no kirra-verifier, no ROS/async.
 [package]
 name = "kirra-proposal-bench"
 version = "0.1.0"
