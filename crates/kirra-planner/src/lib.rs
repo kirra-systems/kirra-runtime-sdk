@@ -50,6 +50,9 @@ pub use behavior::{
 pub mod lanemap;
 pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph, MAX_ROUTE_LANES};
 
+pub mod lanelet2;
+pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
+
 pub mod mick;
 pub use mick::{plan_for_intent, MickIntent};
 
