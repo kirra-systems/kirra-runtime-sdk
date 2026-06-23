@@ -41,21 +41,25 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Resolves the current FleetPosture from the SharedPostureCache.
+/// Resolves the current FleetPosture from the SharedPostureCache for the inner
+/// actuator-envelope gate.
 ///
-/// None (cold start or expired cache) and a poisoned RwLock both map to
-/// LockedOut — fail-closed in all ambiguous cases.
+/// Auth-M1: this delegates to `resolve_posture_with_reason` at the single TTL
+/// authority (`POSTURE_CACHE_TTL_MS`), so a STALE cache fails closed to LockedOut
+/// here too — not just empty/poisoned. Previously the inner gate served a stale
+/// `Nominal`/`Degraded` as current and relied entirely on the outer
+/// `enforce_posture_routing` gate to catch staleness; now the inner safety gate is
+/// independently fail-closed on stale/empty/poisoned, matching its doc and the
+/// outer gate's behavior (defense-in-depth).
 // SAFETY: SG8 SG9 | REQ: posture-resolve-fails-closed-locked-out | TEST: test_none_cache_denies_all_commands,test_empty_posture_cache_fails_closed_as_locked_out
-// (Poisoned-lock and missing-cache both map to LockedOut; SG8 = correct
-//  MRC selection on degraded, SG9 = fail-closed on lock/cache anomaly.)
+// (Stale, missing, and poisoned-lock all map to LockedOut; SG8 = correct
+//  MRC selection on degraded, SG9 = fail-closed on staleness/lock/cache anomaly.)
 fn resolve_posture(svc: &ServiceState) -> FleetPosture {
-    match svc.posture_cache.read() {
-        Ok(guard) => match guard.as_ref() {
-            Some(cached) => cached.posture.clone(),
-            None => FleetPosture::LockedOut,
-        },
-        Err(_) => FleetPosture::LockedOut,
-    }
+    let (posture, _reason) = crate::posture_engine_v2::resolve_posture_with_reason(
+        &svc.posture_cache,
+        crate::posture_cache::POSTURE_CACHE_TTL_MS,
+    );
+    posture
 }
 
 /// The enforcement verdict the actuator middleware reached for one command,

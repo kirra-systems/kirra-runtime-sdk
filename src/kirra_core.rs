@@ -144,7 +144,7 @@ impl<C: SafetyContract> KirraKernelGovernor<C> {
 }
 
 impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
-    fn evaluate(&mut self, proposed_demand: f64, mut dt: f64) -> GovernorInterceptResult {
+    fn evaluate(&mut self, proposed_demand: f64, dt: f64) -> GovernorInterceptResult {
         // Priority 0 (fail-closed): non-finite input. IEEE-754 `NaN` compares
         // `false` against every envelope/rate threshold, so an unguarded `NaN`
         // would fall straight through the `ExecuteUnrestricted` passthrough as a
@@ -163,7 +163,23 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                 was_rate_breached: false,
             };
         }
-        if dt <= 0.001 { dt = 0.050; }
+        // Priority 0b (fail-closed, Gov-M2): a non-positive timestep is not a
+        // physical sample. Previously this substituted a fabricated 0.050 s, which
+        // SILENTLY under-counted the rate-of-change (an instantaneous large step
+        // scored against a 50 ms window could slip past the rate limit). Reject it,
+        // mirroring the AV path's `DenyCode::InvalidTimeDelta`. A genuinely small
+        // positive dt is kept as-is — a large step over it correctly trips the rate
+        // clamp (conservative), so only `dt <= 0.0` fails closed.
+        if dt <= 0.0 {
+            self.trust_engine.decay_trust(30);
+            return GovernorInterceptResult {
+                sanitized_scalar: self.contract.fallback(),
+                asset_in_safe_control_state: false,
+                mitigation_narrative: "INVALID_TIME_DELTA_REJECTED_FAILSAFE".to_string(),
+                was_unsafe_attempt: true,
+                was_rate_breached: false,
+            };
+        }
 
         let prior_trust_mode = self.trust_mode();
         let prior_system_state = match prior_trust_mode {
@@ -201,7 +217,16 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                     (core_bounded_demand, "ENVELOPE_CLAMP_TAKES_PRIORITY".to_string())
                 } else if is_rate_breached {
                     let step_direction = (proposed_demand - self.last_validated_scalar).signum();
-                    let rate_clamped_value = self.last_validated_scalar + (self.contract.max_rate() * dt * step_direction);
+                    // Gov-M1 (invariant #8 — envelope ALWAYS wins over rate): re-clamp
+                    // the rate-limited result to the hard envelope. This branch anchors
+                    // on `last_validated_scalar`, which a prior Degraded
+                    // (`ApplyVelocityCap`) tick may have left outside the contract
+                    // envelope when the constructor caps are wider than the bounds; the
+                    // unconditional clamp guarantees the emitted scalar is in-envelope,
+                    // matching the AV path's `validate_vehicle_command`.
+                    let rate_clamped_value = (self.last_validated_scalar
+                        + (self.contract.max_rate() * dt * step_direction))
+                        .clamp(self.contract.min_bound(), self.contract.max_bound());
                     (rate_clamped_value, format!("RATE_CLAMP_ENFORCED: Max {} GPM/s", self.contract.max_rate()))
                 } else {
                     (proposed_demand, "PASSTHROUGH_UNRESTRICTED_NORMAL".to_string())
@@ -347,5 +372,42 @@ mod governor_nonfinite_tests {
         assert!(out.asset_in_safe_control_state, "a nominal in-envelope, in-rate command must read safe");
         assert!(!out.was_unsafe_attempt);
         assert!((out.sanitized_scalar - 0.4).abs() < 1e-9, "got {}", out.sanitized_scalar);
+    }
+
+    #[test]
+    fn nonpositive_dt_is_rejected_failsafe_not_substituted() {
+        // Gov-M2: dt <= 0 must fail closed (like the AV path's InvalidTimeDelta),
+        // NOT be replaced by a fabricated timestep that under-counts the rate.
+        let mut g = gov();
+        for dt in [0.0, -0.01] {
+            let out = g.evaluate(1.0, dt);
+            assert_eq!(out.sanitized_scalar, g.contract.fallback(),
+                "dt={dt} must command the fallback");
+            assert!(!out.asset_in_safe_control_state, "dt={dt} must not read safe");
+            assert!(out.was_unsafe_attempt, "dt={dt} must flag an unsafe attempt");
+        }
+    }
+
+    #[test]
+    fn rate_clamp_result_is_reclamped_to_hard_envelope() {
+        // Gov-M1: the rate-clamp branch anchors on last_validated_scalar, which a
+        // prior wide-cap Degraded tick can leave OUTSIDE the contract envelope.
+        // Construct exactly that: contract bounds are ±2.0, but the governor's
+        // last_validated_scalar starts at 5.0 (constructor caps deliberately wide).
+        // An in-envelope proposed command (0.0) is rate-breached (|0-5|/0.05 ≫ cap),
+        // so the rate branch runs; its output MUST be re-clamped into [-2, 2].
+        let contract = KinematicContract {
+            max_linear_velocity: 2.0,
+            max_angular_velocity: 1.0,
+            max_linear_acceleration: 10.0,
+            fallback_linear_speed: 0.0,
+        };
+        let mut g = KirraKernelGovernor::new(contract, 5.0, -10.0, 10.0);
+        let out = g.evaluate(0.0, 0.05);
+        assert!(
+            out.sanitized_scalar <= 2.0 + 1e-9 && out.sanitized_scalar >= -2.0 - 1e-9,
+            "rate-clamped output {} must be inside the hard envelope [-2, 2] (invariant #8)",
+            out.sanitized_scalar
+        );
     }
 }

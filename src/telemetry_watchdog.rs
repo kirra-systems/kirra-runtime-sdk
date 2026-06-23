@@ -242,7 +242,8 @@ pub(crate) fn watchdog_sweep_once(
 
         match load_result {
             Ok(node_ids) => {
-                for node_id in node_ids {
+                let live: std::collections::HashSet<String> = node_ids.into_iter().collect();
+                for node_id in &live {
                     // Insert new nodes; don't overwrite existing entries
                     // (that would reset their last_seen_ms).
                     node_health.entry(node_id.clone()).or_insert_with(|| {
@@ -250,7 +251,7 @@ pub(crate) fn watchdog_sweep_once(
                         // Safe: outer guard already released above.
                         let last_seen = app.store.lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .get_last_telemetry_timestamp(&node_id)
+                            .get_last_telemetry_timestamp(node_id)
                             .unwrap_or(0);
                         WatchdogNodeEntry {
                             node_id: node_id.clone(),
@@ -259,9 +260,17 @@ pub(crate) fn watchdog_sweep_once(
                         }
                     });
                 }
+                // Prune entries for nodes no longer registered (review M1): the map
+                // previously only ever grew, so deregistered nodes left stale entries
+                // that kept being swept (wasted per-tick store lookups) and leaked
+                // memory under fleet churn. Drop anything absent from the fresh set.
+                let before = node_health.len();
+                node_health.retain(|id, _| live.contains(id));
+                let pruned = before.saturating_sub(node_health.len());
                 *last_node_refresh_ms = now;
                 tracing::debug!(
                     node_count = node_health.len(),
+                    pruned = pruned,
                     "Watchdog: node list refreshed from store"
                 );
             }
