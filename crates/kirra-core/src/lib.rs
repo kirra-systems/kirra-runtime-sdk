@@ -31,3 +31,18 @@ pub enum FleetPosture {
     Degraded,
     LockedOut,
 }
+
+/// Event payload written to the audit chain when the Track-C perception
+/// monitor (KIRRA-OCCY-PMON-001) applies a derate. `reason` is the byte-stable
+/// `DerateCode` token (SCREAMING_SNAKE_CASE) and is used as the chain
+/// `event_type`; `cap_mps` is the resulting permitted-speed cap (`0.0` =
+/// controlled stop). All fields are included in the SHA-256 hash.
+///
+/// Stage 2: relocated here (a lean, dependency-light event payload) so the gateway's
+/// `perception_monitor` does not import the heavy `audit_chain` (rusqlite) to name it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerceptionDerateEvent {
+    pub reason: String,
+    pub cap_mps: f64,
+    pub timestamp_ms: u64,
+}

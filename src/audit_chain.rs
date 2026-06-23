@@ -16,17 +16,10 @@ pub struct RssViolationEvent {
     pub timestamp_ms: u64,
 }
 
-/// Event payload written to the audit chain when the Track-C perception
-/// monitor (KIRRA-OCCY-PMON-001) applies a derate. `reason` is the byte-stable
-/// `DerateCode` token (SCREAMING_SNAKE_CASE) and is used as the chain
-/// `event_type`; `cap_mps` is the resulting permitted-speed cap (`0.0` =
-/// controlled stop). All fields are included in the SHA-256 hash.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PerceptionDerateEvent {
-    pub reason: String,
-    pub cap_mps: f64,
-    pub timestamp_ms: u64,
-}
+// `PerceptionDerateEvent` moved to the lean `kirra-core` crate (de-monolith Stage 2)
+// so the gateway's `perception_monitor` can name it without importing this heavy
+// (rusqlite) module. Re-exported so every existing `crate::audit_chain::*` path holds.
+pub use kirra_core::PerceptionDerateEvent;
 
 /// Typed audit entries for the hash-chained ledger.
 /// Each variant is serialised to JSON and becomes the `event_json` column value.
