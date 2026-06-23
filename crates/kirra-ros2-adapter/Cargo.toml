@@ -51,7 +51,7 @@ default = []
 # This feature pulls NO C++ / no cxx / no lanelet2 — that is the separate
 # `lanelet2` feature below (the perception governance path is independent of
 # the map/corridor layer). See README.
-ros2 = ["dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes", "kirra-core/capture"]
+ros2 = ["dep:tokio", "dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes", "kirra-core/capture"]
 
 # Enable the real Lanelet2CorridorSource — a cxx/C++ wrap of `lanelet2_core`'s
 # boost::serialization deserializer (`fromBinMsg`). Implies `ros2` (the only
@@ -66,7 +66,14 @@ lanelet2 = ["ros2", "dep:cxx", "dep:cxx-build"]
 [dependencies]
 # Concurrency primitives shared with the safety kernel.
 dashmap = "6"
-tokio = { version = "1", features = ["full"] }
+# Build hygiene (review H4): tokio is OPTIONAL and gated on `ros2`. Every tokio use
+# site is in a ros2-gated module (`node.rs`, `posture_source.rs`) or the
+# `required-features = ["ros2"]` binary — the default (non-ros2) library uses none.
+# Before this, the non-optional `tokio = "full"` rode into `kirra-planner` /
+# `kirra-taj` via their adapter dep, defeating the de-monolith. (Kept at `full`
+# rather than a trimmed subset to avoid risking the ros2 build, which can only be
+# compiled with a sourced ROS distro in CI; under `ros2` the heavy tree is expected.)
+tokio = { version = "1", features = ["full"], optional = true }
 tracing = "0.1"
 
 # Lean foundation — the corridor seam (`Point`/`CorridorSource`/`MockCorridorSource`)
@@ -126,8 +133,9 @@ bytes      = { version = "1",    optional = true }
 cxx-build = { version = "1.0", optional = true }
 
 [dev-dependencies]
-# State-machine tests don't need the ros2 feature.
-tokio = { version = "1", features = ["full", "test-util"] }
+# State-machine tests don't need the ros2 feature. (`test-util` dropped — review L5:
+# no test uses start_paused / tokio::time::advance / #[tokio::test].)
+tokio = { version = "1", features = ["full"] }
 
 # Phase 4: the adapter node binary. Feature-gated to `ros2`; the default
 # cargo build does not see this entry. `tracing-subscriber` is only

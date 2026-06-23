@@ -33,12 +33,16 @@
 // Import (never redefine) the locked upstream types. Re-exported so a Phase-1
 // consumer names them from one place — but they remain the adapter's / SDK's
 // definitions.
-pub use kirra_ros2_adapter::state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
+pub use kirra_core::trajectory::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
 // FleetPosture + the containment cap now live in the lean `kirra-core` crate
 // (de-monolith Stage 4) — same types, no heavy verifier-service tree pulled directly.
 pub use kirra_core::FleetPosture;
 
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
+// Build hygiene (review M3): import the corridor seam from the lean `kirra-core`
+// (Stage 6a) rather than the heavy adapter, so the planner's library no longer
+// pulls `kirra-ros2-adapter` (and its ros2/tokio tree). The adapter stays a
+// dev-dependency — its `validate_trajectory_slow` checker entry is used only by tests.
+use kirra_core::corridor::{CorridorSource, Point};
 // Derive (never guess) the checker's hard trajectory-length cap: the #131
 // containment gate rejects `len > MAX_TRAJECTORY_HORIZON`, so a proposal must
 // stay within it (including the terminal stop point) to be admissible.

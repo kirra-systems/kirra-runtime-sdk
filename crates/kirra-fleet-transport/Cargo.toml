@@ -40,8 +40,9 @@ serde = { version = "1", features = ["derive"] }
 # trust and buys cross-tooling debuggability.
 serde_json = "1"
 # The grant envelope reuses the federation Ed25519 pattern (sign a canonical
-# payload; verify against the controller's registered public key).
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+# payload; verify against the controller's registered public key). No `rand_core`
+# feature — keys are built via `SigningKey::from_bytes`, never `generate` (review L4).
+ed25519-dalek = { version = "2" }
 base64 = "0.22"
 # Per-grant nonce minting on the signing side (#322 replay defense): 16 random
 # bytes → hex, burned exactly once at ingest (verify-AND-consume).

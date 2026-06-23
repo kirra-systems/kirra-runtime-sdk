@@ -23,11 +23,15 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
-# The perception-input contract types Taj produces: CorridorSource + Point and
-# PerceivedObject. default-features = false → no ROS (adapter `default = []`).
-kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+# The perception-input contract types Taj produces — CorridorSource + Point and
+# PerceivedObject — live in the lean `kirra-core` (de-monolith Stage 6a). Depending
+# on it directly (instead of the heavy `kirra-ros2-adapter`) keeps taj's library off
+# the adapter's ros2/tokio tree (review M3).
+kirra-core = { path = "../kirra-core" }
 
 [dev-dependencies]
-# Integration test only: prove Taj's corridor output feeds the real #131 checker.
-# FleetPosture lives in the SDK; the checker entry + config in the adapter.
+# Integration tests only: prove Taj's corridor output feeds the real #131 checker.
+# FleetPosture lives in the verifier crate; the checker entry (`validate_trajectory_slow`)
+# + `VehicleConfig` in the adapter — both used solely by the tests, hence dev-deps.
 kirra-verifier = { path = "../.." }
+kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
