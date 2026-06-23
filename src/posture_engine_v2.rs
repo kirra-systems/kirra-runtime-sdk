@@ -264,44 +264,76 @@ pub fn start_posture_engine_worker(
     app: Arc<AppState>,
     cache: SharedPostureCache,
 ) -> PostureEngineSender {
-    let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+    let (tx, rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+    // C2: the worker is supervised, so its receiver must survive a re-spawn. The
+    // `mpsc::Receiver` is not `Clone`, so it lives behind an `Arc<Mutex<…>>` that
+    // each (re)started future re-locks. Only ever one task holds the lock at a time.
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
-    tokio::spawn(async move {
-        loop {
-            let first = match rx.recv().await {
-                Some(t) => t,
-                None    => {
-                    tracing::info!("Posture engine worker: trigger channel closed, exiting");
-                    break;
+    // C2 escalation: a wedged posture worker means recalculation stops. That is
+    // ALREADY fail-closed after `POSTURE_CACHE_TTL_MS` (the cache goes stale and the
+    // gate denies), but we make it immediate and sticky: set the flag and force the
+    // cache to LockedOut directly (the worker is the dead task, so we cannot rely on
+    // a recalc to apply the flag).
+    let escalate: crate::supervisor::Escalation = {
+        let app = Arc::clone(&app);
+        let cache = cache.clone();
+        Arc::new(move || {
+            app.supervisor_tripped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::posture_engine::force_lockout(&cache, now_ms_engine());
+        })
+    };
+
+    crate::supervisor::spawn_supervised(
+        "posture_engine_worker",
+        /* critical   */ true,
+        /* run-forever */ false, // a closed trigger channel is a legitimate shutdown exit
+        Some(escalate),
+        move || {
+            let app = Arc::clone(&app);
+            let cache = cache.clone();
+            let rx = Arc::clone(&rx);
+            async move {
+                let mut rx = rx.lock().await;
+                loop {
+                    let first = match rx.recv().await {
+                        Some(t) => t,
+                        None => {
+                            tracing::info!("Posture engine worker: trigger channel closed, exiting");
+                            break;
+                        }
+                    };
+
+                    let mut batch: Vec<PostureRecalcTrigger> = vec![first];
+                    while let Ok(trigger) = rx.try_recv() {
+                        batch.push(trigger);
+                    }
+
+                    let batch_size = batch.len();
+                    let trigger_summary: Vec<String> =
+                        batch.iter().map(|t| t.to_string()).collect();
+
+                    if batch_size > 1 {
+                        tracing::debug!(
+                            batch_size = batch_size,
+                            triggers   = ?trigger_summary,
+                            "Posture engine: coalescing {batch_size} triggers into single recalculation"
+                        );
+                    }
+
+                    let now = now_ms_engine();
+                    for trigger in &batch {
+                        if let PostureRecalcTrigger::RssViolation(ref rss) = *trigger {
+                            apply_rss_state(&app, rss, now);
+                        }
+                    }
+
+                    recalculate_and_broadcast_with_context(&app, &cache, &trigger_summary);
                 }
-            };
-
-            let mut batch: Vec<PostureRecalcTrigger> = vec![first];
-            while let Ok(trigger) = rx.try_recv() {
-                batch.push(trigger);
             }
-
-            let batch_size = batch.len();
-            let trigger_summary: Vec<String> = batch.iter().map(|t| t.to_string()).collect();
-
-            if batch_size > 1 {
-                tracing::debug!(
-                    batch_size = batch_size,
-                    triggers   = ?trigger_summary,
-                    "Posture engine: coalescing {batch_size} triggers into single recalculation"
-                );
-            }
-
-            let now = now_ms_engine();
-            for trigger in &batch {
-                if let PostureRecalcTrigger::RssViolation(ref rss) = *trigger {
-                    apply_rss_state(&app, rss, now);
-                }
-            }
-
-            recalculate_and_broadcast_with_context(&app, &cache, &trigger_summary);
-        }
-    });
+        },
+    );
 
     tx
 }

@@ -104,9 +104,45 @@ pub fn instance_id() -> String {
         }
     }
     static FALLBACK_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FALLBACK_ID.get_or_init(|| {
-        format!("kirra-{}", now_ms())
-    }).clone()
+    FALLBACK_ID.get_or_init(stable_fallback_instance_id).clone()
+}
+
+/// Derive a fallback instance id that is STABLE across process restarts (HA
+/// Part B / review H3+L2). The startup epoch-reclaim path keys on the instance
+/// id: a node that crashed mid-promotion must present the SAME id on reboot to
+/// reclaim its own durable epoch. The previous `kirra-<now_ms>` fallback changed
+/// on every restart, breaking that reclaim. Resolution order (most→least stable):
+///   1. `/etc/machine-id` — the canonical per-host stable identity (distinct per
+///      container/host in an HA deployment).
+///   2. A persisted id file (`KIRRA_INSTANCE_ID_FILE`, else `kirra_instance_id`
+///      in the CWD): read if present, else generate once and best-effort persist.
+///   3. Last resort: `kirra-<now_ms>` with a LOUD warning (not stable — operators
+///      should set `KIRRA_INSTANCE_ID` / `HOSTNAME` in any real HA deployment).
+fn stable_fallback_instance_id() -> String {
+    if let Ok(mid) = std::fs::read_to_string("/etc/machine-id") {
+        let mid = mid.trim();
+        if !mid.is_empty() {
+            return format!("kirra-{mid}");
+        }
+    }
+
+    let path = std::env::var("KIRRA_INSTANCE_ID_FILE")
+        .unwrap_or_else(|_| "kirra_instance_id".to_string());
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty() {
+            return existing.to_string();
+        }
+    }
+    let generated = format!("kirra-{}", now_ms());
+    if let Err(e) = std::fs::write(&path, &generated) {
+        tracing::warn!(
+            error = %e, path = %path, instance_id = %generated,
+            "instance_id: could not persist generated fallback id — it will NOT be stable across \
+             restarts; set KIRRA_INSTANCE_ID or HOSTNAME for HA"
+        );
+    }
+    generated
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +166,20 @@ pub fn instance_id() -> String {
 /// in PassiveStandby mode.
 pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
     let id = instance_id();
-    tokio::spawn(async move {
+    // C2: supervised so a panic doesn't silently stop heartbeats (which would
+    // trigger a spurious standby promotion). NON-critical — a genuinely dead
+    // heartbeat is the DESIGNED failover signal, so no LockedOut escalation;
+    // run_forever=false because exiting on fence / promoted-over is legitimate.
+    crate::supervisor::spawn_supervised(
+        "ha_heartbeat_writer",
+        /* critical   */ false,
+        /* run-forever */ false,
+        None,
+        move || heartbeat_loop(Arc::clone(&app), id.clone()),
+    );
+}
+
+async fn heartbeat_loop(app: Arc<AppState>, id: String) {
         let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -226,7 +275,6 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
                 }
             }
         }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +374,19 @@ impl HeartbeatFreshness {
 /// of heartbeat state. Use for manual failover or testing.
 pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
     let id = instance_id();
-    tokio::spawn(async move {
+    // C2: supervised so a panic doesn't permanently disable failover. NON-critical
+    // (a standby cannot serve writes anyway, so a LockedOut escalation is moot);
+    // run_forever=false because exiting after a successful promotion is legitimate.
+    crate::supervisor::spawn_supervised(
+        "ha_promotion_monitor",
+        /* critical   */ false,
+        /* run-forever */ false,
+        None,
+        move || promotion_loop(Arc::clone(&app), cache.clone(), id.clone()),
+    );
+}
+
+async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: String) {
         let poll_ms = std::env::var("KIRRA_PROMOTION_POLL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -346,7 +406,12 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                 instance_id = %id,
                 "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
             );
-            perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await;
+            if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
+                // HA Part B (review H3): a newly-Active node MUST start heartbeating
+                // so any tertiary standby sees it as alive — otherwise it is Active
+                // but invisible, inviting a spurious second promotion / epoch churn.
+                spawn_heartbeat_writer(Arc::clone(&app));
+            }
             return;
         }
 
@@ -418,7 +483,12 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                     timeout_ms  = timeout_ms,
                     "Primary heartbeat token unchanged past timeout — promoting to Active"
                 );
-                perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await;
+                if perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await {
+                    // HA Part B (review H3): start heartbeating as the new Active so
+                    // a tertiary standby sees this node alive (no invisible-Active
+                    // window / spurious re-promotion).
+                    spawn_heartbeat_writer(Arc::clone(&app));
+                }
                 return;
             } else {
                 tracing::debug!(
@@ -428,7 +498,6 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
                 );
             }
         }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +509,7 @@ async fn perform_promotion(
     cache: &SharedPostureCache,
     id: &str,
     reason: &str,
-) {
+) -> bool {
     let ts = now_ms();
 
     // Step 1: DURABLE epoch claim (the real split-brain fence).
@@ -458,13 +527,13 @@ async fn perform_promotion(
             Err(e) => {
                 tracing::error!(error = %e, instance_id = %id,
                     "promotion: cannot read epoch — aborting");
-                return;
+                return false;
             }
         },
         Err(_) => {
             tracing::error!(instance_id = %id,
                 "promotion: store lock poisoned reading epoch — aborting");
-            return;
+            return false;
         }
     };
 
@@ -480,18 +549,18 @@ async fn perform_promotion(
                     reason      = %reason,
                     "promotion ABORTED — epoch already advanced by another instance (durable fence held)"
                 );
-                return;
+                return false;
             }
             Err(e) => {
                 tracing::error!(error = %e, instance_id = %id,
                     "promotion: epoch claim execute failed — aborting");
-                return;
+                return false;
             }
         },
         Err(_) => {
             tracing::error!(instance_id = %id,
                 "promotion: store lock poisoned during claim — aborting");
-            return;
+            return false;
         }
     };
 
@@ -518,7 +587,7 @@ async fn perform_promotion(
                     error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
                     "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
                 );
-                return;
+                return false;
             }
         }
         Err(_) => {
@@ -526,7 +595,7 @@ async fn perform_promotion(
                 instance_id = %id, epoch = new_epoch, reason = %reason,
                 "promotion ABORTED — store lock poisoned ensuring hash-v2 audit anchor; staying PassiveStandby (fail-closed)"
             );
-            return;
+            return false;
         }
     }
 
@@ -633,6 +702,9 @@ async fn perform_promotion(
             "Promotion recalc did NOT yield a fresh posture — node FAIL-CLOSED (non-serving) until posture recovers; the mutation gate blocks commands on the stale cache"
         ),
     }
+
+    // Promotion succeeded (durable epoch claimed, audit anchored, mode flipped).
+    true
 }
 
 // ---------------------------------------------------------------------------

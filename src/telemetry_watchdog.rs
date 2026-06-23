@@ -140,21 +140,49 @@ pub fn spawn_telemetry_watchdog_with_clock(
     posture_engine_tx: PostureEngineSender,
     clock: Arc<dyn Clock>,
 ) {
-    tokio::spawn(async move {
-        let mut sweep_interval = interval(Duration::from_millis(AV_WATCHDOG_SWEEP_MS));
-        let mut last_node_refresh_ms: u64 = 0;
-        let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
-        loop {
-            sweep_interval.tick().await;
-            watchdog_sweep_once(
-                &app,
-                &posture_engine_tx,
-                clock.as_ref(),
-                &mut node_health,
-                &mut last_node_refresh_ms,
-            );
-        }
-    });
+    // C2: a wedged watchdog is fail-OPEN (a silent sensor would never be marked
+    // Untrusted), so it is supervised as CRITICAL. On repeated panic the
+    // escalation sets the sticky `supervisor_tripped` flag and nudges the
+    // (surviving) posture engine to recompute — which then reads the flag and
+    // forces LockedOut. The watchdog holds no cache handle, so it escalates via
+    // the engine; if the engine ITSELF is the dead task, its own supervisor
+    // force-writes the cache directly.
+    let escalate: crate::supervisor::Escalation = {
+        let app = Arc::clone(&app);
+        let tx = posture_engine_tx.clone();
+        Arc::new(move || {
+            app.supervisor_tripped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = tx.try_send(PostureRecalcTrigger::PeriodicRefresh);
+        })
+    };
+
+    crate::supervisor::spawn_supervised(
+        "telemetry_watchdog",
+        /* critical   */ true,
+        /* run-forever */ true,
+        Some(escalate),
+        move || {
+            let app = Arc::clone(&app);
+            let posture_engine_tx = posture_engine_tx.clone();
+            let clock = Arc::clone(&clock);
+            async move {
+                let mut sweep_interval = interval(Duration::from_millis(AV_WATCHDOG_SWEEP_MS));
+                let mut last_node_refresh_ms: u64 = 0;
+                let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
+                loop {
+                    sweep_interval.tick().await;
+                    watchdog_sweep_once(
+                        &app,
+                        &posture_engine_tx,
+                        clock.as_ref(),
+                        &mut node_health,
+                        &mut last_node_refresh_ms,
+                    );
+                }
+            }
+        },
+    );
 }
 
 /// One sweep cycle of the watchdog: refresh the node list (rate-limited

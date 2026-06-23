@@ -59,6 +59,9 @@ pub mod protocol_adapter;
 pub mod adapters;
 pub mod fabric;
 pub mod standby_monitor;
+/// Background-task supervisor (review finding C2): re-spawns dead safety loops and
+/// escalates the fleet to fail-closed LockedOut if a critical loop is wedged.
+pub mod supervisor;
 pub mod kinematics_sim;
 
 #[cfg(test)]
