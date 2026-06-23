@@ -714,16 +714,49 @@ impl GeometricPlanner {
         if speed < self.cfg.crossing_speed_threshold_mps {
             return None; // not a mover worth predicting
         }
-        // INTENTION prior: if the tracker supplied a predicted path (the object's
-        // lane-following intent), roll the object ALONG it at its speed. Otherwise
-        // fall back to the turn-aware CTRV kinematic rollout (yaw rate 0 → CV).
-        let path = predicted_paths
-            .iter()
-            .find(|p| p.id == obj.id && p.points.len() >= 2);
+        // INTENTION prior + MULTI-MODAL: an object may carry SEVERAL predicted modes
+        // (e.g. lane-follow vs. cut-in vs. turn). Yield against the WORST CASE — the
+        // nearest conflict over all modes — so a single dangerous hypothesis is enough
+        // to slow the ego, while a mode that stays clear cannot relax that. One mode →
+        // the single intention path; no modes → the turn-aware CTRV kinematic rollout.
+        // This is the planner-side complement to KIRRA's multi-modal predictive RSS:
+        // Occy proposes conservatively over modes, the checker bounds over modes.
         let yaw_rate = motion
             .iter()
             .find(|m| m.id == obj.id)
             .map_or(0.0, |m| m.yaw_rate_rad_s);
+        let modes: Vec<&PredictedPath> = predicted_paths
+            .iter()
+            .filter(|p| p.id == obj.id && p.points.len() >= 2)
+            .collect();
+        if modes.is_empty() {
+            return self.yield_for_mode(obj, None, speed, yaw_rate, guide, s_ego, ego_speed, ego_target);
+        }
+        modes
+            .iter()
+            .filter_map(|m| {
+                self.yield_for_mode(obj, Some(m), speed, yaw_rate, guide, s_ego, ego_speed, ego_target)
+            })
+            .min_by(|a, b| a.total_cmp(b))
+    }
+
+    /// Yield arc-length for ONE predicted mode: `Some(path)` rolls the object along it
+    /// at its speed; `None` is the turn-aware CTRV kinematic rollout (yaw rate 0 → CV).
+    /// Returns the conflict arc-length, or `None` if this mode produces no space-time
+    /// conflict (including the temporal-overlap relaxation below). The per-mode core of
+    /// [`predict_yield_s`]; multi-mode worst-casing happens in the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn yield_for_mode(
+        &self,
+        obj: &PerceivedObject,
+        path: Option<&PredictedPath>,
+        speed: f64,
+        yaw_rate: f64,
+        guide: &[(f64, f64)],
+        s_ego: f64,
+        ego_speed: f64,
+        ego_target: f64,
+    ) -> Option<f64> {
         let dt = self.cfg.prediction_dt_s.max(0.05);
         let steps = (self.cfg.prediction_horizon_s / dt).ceil() as usize;
         let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
@@ -2635,6 +2668,44 @@ mod tests {
         let out = p.plan(&inp);
         let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(max_x < 26.0, "path turns into the lane → yields, got {max_x}");
+    }
+
+    #[test]
+    fn multi_modal_yields_against_the_worst_case_mode() {
+        // ONE object, TWO predicted modes (same id): a benign lane-keep (stays at y=4,
+        // never enters) AND a cut-in that turns into the ego lane. Either mode alone:
+        // the lane-keep would NOT yield, the cut-in WOULD. Multi-modal must yield
+        // against the worst case (the cut-in) — a single dangerous hypothesis is enough.
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_obj_at(20.0, 4.0, 5.0, 0.0)];
+        let lane_keep = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 90.0, y_m: 4.0 }];
+        let cut_in = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 28.0, y_m: 0.0 }];
+        let mut p = GeometricPlanner::default();
+
+        // Benign mode alone → drives on (control).
+        let benign = [PredictedPath { id: 1, points: &lane_keep }];
+        let benign_out = p.plan(&PlanInput {
+            predicted_paths: &benign,
+            cedes_to_ego_ids: &[],
+            ..input_with_objects(&corridor, 8.0, 40.0, &objs)
+        });
+        let benign_max = benign_out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(benign_max > 30.0, "benign mode alone → no yield, got {benign_max}");
+
+        // Both modes present → must yield against the cut-in, regardless of order.
+        for order in [[lane_keep, cut_in], [cut_in, lane_keep]] {
+            let modes = [
+                PredictedPath { id: 1, points: &order[0] },
+                PredictedPath { id: 1, points: &order[1] },
+            ];
+            let out = p.plan(&PlanInput {
+                predicted_paths: &modes,
+                cedes_to_ego_ids: &[],
+                ..input_with_objects(&corridor, 8.0, 40.0, &objs)
+            });
+            let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+            assert!(max_x < 26.0, "worst-case (cut-in) mode forces a yield, got {max_x}");
+        }
     }
 
     // --- Junction right-of-way negotiation ---------------------------------
