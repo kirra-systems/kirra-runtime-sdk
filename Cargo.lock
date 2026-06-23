@@ -1965,6 +1965,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "kirra-fleet-transport"
 version = "0.1.0"
 dependencies = [
@@ -2038,6 +2045,7 @@ dependencies = [
  "hmac",
  "http",
  "kirra-capture-schema",
+ "kirra-core",
  "parko-core",
  "parko-kirra",
  "proptest",

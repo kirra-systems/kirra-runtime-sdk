@@ -1,0 +1,24 @@
+# crates/kirra-core/Cargo.toml
+#
+# kirra-core — the LEAN safety/contract foundation extracted from the
+# kirra-runtime-sdk monolith (de-monolith Stage 1, ADR pending). Deliberately
+# dependency-light: NO tokio / axum / rusqlite / reqwest / ML. Crates that need the
+# foundational types (the adapter, the planner, the map, parko) depend on THIS, so the
+# certified-governor surface does not drag the verifier service's heavy tree.
+#
+# Stage 1 holds the foundational posture types (FleetPosture / NodeTrustState),
+# previously trapped in the heavy `verifier.rs`. Later stages move the governor / the
+# kinematics-contract talisman here as verbatim, re-exported blocks.
+[package]
+name = "kirra-core"
+version = "0.1.0"
+edition = "2021"
+description = "Lean safety/contract foundation for the Kirra stack — no service/runtime deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The posture types are wire-serialized (federation reports, the SSE stream). serde is
+# lean — the only dependency this crate carries.
+serde = { version = "1", features = ["derive"] }

@@ -16,19 +16,10 @@ pub const MAX_DEPENDENCY_DEPTH: usize = 10;
 /// short enough to limit the replay window if a response is intercepted.
 const CHALLENGE_TTL_MS: u64 = 30_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum NodeTrustState {
-    Trusted,
-    Untrusted(String),
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum FleetPosture {
-    Nominal,
-    Degraded,
-    LockedOut,
-}
+// `FleetPosture` / `NodeTrustState` moved to the lean `kirra-core` crate (de-monolith
+// Stage 1) so the governor/contract surface need not pull this heavy module. Re-exported
+// here so every existing `crate::verifier::FleetPosture` path keeps the same type.
+pub use kirra_core::{FleetPosture, NodeTrustState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredNode {
