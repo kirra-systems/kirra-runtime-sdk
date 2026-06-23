@@ -199,7 +199,16 @@ pub(crate) fn watchdog_sweep_once(
         || *last_node_refresh_ms == 0
     {
         let load_result = {
-            let store = app.store.lock().unwrap();
+            // SG-003 fail-CLOSED: recover a poisoned store lock rather than
+            // `.unwrap()`-panicking. The watchdog is the ASIL-D dead-man's
+            // switch — if a sibling task panics while holding `app.store`,
+            // this sweep must keep running, because a dead watchdog is
+            // fail-OPEN (a silent sensor would never be marked Untrusted and
+            // posture would never recalculate). Mirrors the graceful lock
+            // recovery already used in standby_monitor.rs / audit_writer.rs.
+            // The guard data is a transactional SQLite handle, safe to reuse
+            // after a poisoning.
+            let store = app.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             store.load_all_registered_av_node_ids()
         }; // outer guard released here — before any per-node re-lock below
 
@@ -211,7 +220,8 @@ pub(crate) fn watchdog_sweep_once(
                     node_health.entry(node_id.clone()).or_insert_with(|| {
                         // Load initial last_seen from persistent store.
                         // Safe: outer guard already released above.
-                        let last_seen = app.store.lock().unwrap()
+                        let last_seen = app.store.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .get_last_telemetry_timestamp(&node_id)
                             .unwrap_or(0);
                         WatchdogNodeEntry {
@@ -246,7 +256,7 @@ pub(crate) fn watchdog_sweep_once(
         // Sync last_seen_ms from the store on each sweep.
         // Lightweight in-memory read path; SQLite is only hit on the node
         // refresh cycle above.
-        if let Ok(ts) = app.store.lock().unwrap().get_last_telemetry_timestamp(&entry.node_id) {
+        if let Ok(ts) = app.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_last_telemetry_timestamp(&entry.node_id) {
             if ts > entry.last_seen_ms {
                 // Fresh telemetry received since last sweep — reset warn flag.
                 entry.last_seen_ms = ts;
@@ -494,6 +504,60 @@ mod watchdog_di_tests {
             }
             other => panic!("expected WatchdogTimeout, got {other:?}"),
         }
+    }
+
+    /// SG-003 fail-CLOSED regression (C1): a POISONED `app.store` mutex must NOT
+    /// take the watchdog down. Before the fix, `app.store.lock().unwrap()` in the
+    /// sweep panicked on a poisoned lock — silently killing the dead-man's switch
+    /// (fail-OPEN: a silent sensor would never be marked Untrusted). After the fix
+    /// the sweep recovers the poisoned guard (`unwrap_or_else(into_inner)`) and
+    /// still fires the timeout. We poison the mutex by panicking a thread while it
+    /// holds the lock, then assert one sweep still marks the silent node Untrusted.
+    #[test]
+    fn test_watchdog_survives_poisoned_store_lock() {
+        let anchor: u64 = 1_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 250;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "lidar_front", anchor);
+
+        // Poison app.store: a thread panics while holding the lock.
+        {
+            let app_poison = Arc::clone(&app);
+            let _ = std::thread::spawn(move || {
+                let _guard = app_poison.store.lock().unwrap();
+                panic!("intentional poison for regression test");
+            })
+            .join(); // Err — the thread panicked; the mutex is now poisoned.
+            assert!(
+                app.store.lock().is_err(),
+                "precondition: store mutex must be poisoned for this regression test"
+            );
+        }
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = prepopulated_node_health("lidar_front", anchor);
+        let mut last_node_refresh_ms: u64 = now; // bypass refresh arm
+
+        // Must NOT panic despite the poisoned lock — the sweep re-locks
+        // `app.store` at the per-node telemetry read (the old `.unwrap()` site).
+        watchdog_sweep_once(
+            &app, &tx, clock.as_ref(),
+            &mut node_health, &mut last_node_refresh_ms,
+        );
+
+        // And the dead-man's switch must still fire.
+        assert_eq!(
+            app.nodes.get("lidar_front").unwrap().status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "watchdog must still mark a silent node Untrusted despite a poisoned store lock"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "watchdog must still send a WatchdogTimeout trigger after recovering the poisoned lock"
+        );
     }
 
     /// Companion: in the warn band (silence > WARN, < TIMEOUT) the
