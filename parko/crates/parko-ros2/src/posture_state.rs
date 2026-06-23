@@ -1,11 +1,11 @@
 // parko/crates/parko-ros2/src/posture_state.rs
 //
-// M2b — wrapper around the SHARED `kirra_runtime_sdk::posture_tracker::PostureTracker`
+// M2b — wrapper around the SHARED `kirra_core::posture_tracker::PostureTracker`
 // for the Parko ROS 2 node.
 //
-// The fail-closed state machine lives in the kernel
-// (`kirra_runtime_sdk::posture_tracker::PostureTracker`) so the
-// adapter (`kirra-ros2-adapter`) and this node share ONE
+// The fail-closed state machine lives in the lean `kirra-core` crate
+// (`kirra_core::posture_tracker::PostureTracker`; relocated there in de-monolith
+// Stage 5) so the adapter (`kirra-ros2-adapter`) and this node share ONE
 // implementation — duplicating safety logic is the one thing M2b
 // exists to prevent.
 //
@@ -30,8 +30,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kirra_runtime_sdk::posture_tracker::PostureTracker;
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::posture_tracker::PostureTracker;
+use kirra_core::FleetPosture;
 use parko_core::safety::SafetyPosture;
 
 /// Owning wrapper around the kernel's `PostureTracker` for parko-ros2.

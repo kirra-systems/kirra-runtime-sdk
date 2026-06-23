@@ -68,7 +68,7 @@
 //      `AngularVelocityBound`), which is the "same limits, computed
 //      differently" the safety case requires.
 
-use kirra_runtime_sdk::gateway::kinematics_contract::VehicleKinematicsContract;
+use kirra_core::kinematics_contract::VehicleKinematicsContract;
 
 use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
@@ -77,7 +77,7 @@ use parko_core::RssState;
 use crate::angular_bound::{AngularVelocityBound, PlatformParams};
 use crate::comparator::RssAwareGovernor;
 use crate::{degraded_channel_violation, MRC_VELOCITY_CEILING_MPS, STOP_EPSILON_RAD_S};
-use kirra_runtime_sdk::gateway::kinematics_contract::STOP_EPSILON_MPS;
+use kirra_core::kinematics_contract::STOP_EPSILON_MPS;
 
 /// Acceleration-space tolerance used by the primary's rate checks
 /// (`max_accel_mps2 + 1e-9`). Mirrored here so the diverse interval test
@@ -287,7 +287,7 @@ impl DiverseKirraGovernor {
         // offending field; the comparator compares physical EFFECT (a hard
         // stop is a hard stop), so a single combined guard with a generic
         // reason is the diverse — and equivalent — form.
-        if !kirra_runtime_sdk::governor_guard::all_finite(&[v, current, delta_time_s]) {
+        if !kirra_core::governor_guard::all_finite(&[v, current, delta_time_s]) {
             return EnforcementAction::Deny {
                 reason: "DiverseKirraGovernor: non-finite command input — hard stop".to_string(),
             };

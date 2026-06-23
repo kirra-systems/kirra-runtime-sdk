@@ -2,13 +2,18 @@
 name = "parko-kirra"
 version = "0.1.0"
 edition = "2021"
-description = "Adapter that bridges parko-core's SafetyGovernor trait to the kirra-runtime-sdk kinematics contract"
+description = "Adapter that bridges parko-core's SafetyGovernor trait to the kirra-core kinematics contract"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
 parko-core = { path = "../parko-core" }
+# The lean foundation (de-monolith Stage 5): the kinematics-contract talisman,
+# FleetPosture, and the shared `all_finite` governor guard — serde-only, no heavy tree.
+kirra-core = { path = "../../../crates/kirra-core" }
+# Kept for the SQLite `VerifierStore` durable audit/clearance sink (heavy, verifier-tier;
+# see audit_sink / clearance_delivery) — not on the governor hot path.
 kirra-runtime-sdk = { path = "../../.." }
 # CERT-006 durable divergence sink: serialise DivergenceEvent → JSON and persist
 # it through the SDK's hash-chained, signed audit log (VerifierStore).
