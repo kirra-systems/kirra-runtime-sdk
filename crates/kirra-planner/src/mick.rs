@@ -53,9 +53,17 @@ impl MickIntent {
     /// malformed / unknown-tag / non-finite payload returns `Err` so the caller
     /// HOLDs rather than acting on garbage — a hallucinated `NaN` goal must never
     /// flow into the planner.
+    ///
+    /// Tolerant of small-model framing: Gemma-class models routinely wrap the object
+    /// in a ```json fence or prepend a sentence of prose. We extract the first
+    /// balanced `{…}` object before parsing, so well-formed intent inside that
+    /// framing is recovered rather than needlessly rejected. This widens *parse
+    /// acceptance only* — the typed-schema, unknown-tag, and finiteness checks below
+    /// are unchanged, so a genuinely malformed payload still fails closed.
     pub fn from_llm_json(raw: &str) -> Result<Self, &'static str> {
+        let json = extract_first_json_object(raw).ok_or("MICK_JSON_PARSE_ERROR")?;
         let parsed: IntentJson =
-            serde_json::from_str(raw).map_err(|_| "MICK_JSON_PARSE_ERROR")?;
+            serde_json::from_str(json).map_err(|_| "MICK_JSON_PARSE_ERROR")?;
         let intent = match parsed {
             IntentJson::GoTo { x_m, y_m } => MickIntent::GoTo { x_m, y_m },
             IntentJson::LaneChange { target_offset_m } => MickIntent::LaneChange { target_offset_m },
@@ -74,6 +82,47 @@ impl MickIntent {
             MickIntent::Hold => true,
         }
     }
+}
+
+/// Extract the first balanced top-level JSON object `{…}` from arbitrary LLM text.
+/// Brace-matching is **string-aware**: braces and quotes inside a JSON string value
+/// (and `\`-escaped quotes) do not count, so a stray `{` in prose or a `{` inside a
+/// string field cannot mis-terminate the object. Returns the `{…}` slice, or `None`
+/// if there is no balanced object — which keeps [`MickIntent::from_llm_json`]
+/// fail-closed on text that merely *looks* like it might contain intent.
+///
+/// All structural bytes (`{` `}` `"` `\`) are ASCII, so the byte offsets used for
+/// slicing always fall on `char` boundaries even when the prose is multi-byte UTF-8.
+fn extract_first_json_object(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let start = raw.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &c) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&raw[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Ground a Mick intent into a trajectory: the intent overrides ONLY the goal /
@@ -232,9 +281,12 @@ mod tests {
 
     #[test]
     fn malformed_or_adversarial_llm_json_is_fail_closed() {
-        // Not JSON; unknown action tag; and a non-finite (overflow → Inf) number all
-        // reject — the caller HOLDs rather than acting on a hallucination.
+        // No object; prose with only a stray brace; unknown action tag; and a
+        // non-finite (overflow → Inf) number all reject — the caller HOLDs rather
+        // than acting on a hallucination. The stray-brace case proves the tolerant
+        // extractor widens *acceptance* without weakening the schema/finiteness gate.
         assert!(MickIntent::from_llm_json("the robot should floor it").is_err());
+        assert!(MickIntent::from_llm_json("floor it {now}!").is_err());
         assert!(MickIntent::from_llm_json(r#"{"intent":"deploy_at_max_velocity"}"#).is_err());
         assert!(MickIntent::from_llm_json(r#"{"intent":"go_to","x_m":1e400,"y_m":0.0}"#).is_err());
         // A well-formed intent parses to the typed value.
@@ -243,5 +295,34 @@ mod tests {
             MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }
         );
         assert_eq!(MickIntent::from_llm_json(r#"{"intent":"hold"}"#).unwrap(), MickIntent::Hold);
+    }
+
+    #[test]
+    fn gemma_style_fenced_or_preambled_output_still_parses() {
+        // Small models (Gemma especially) wrap intent in a ```json fence, prepend a
+        // sentence of prose, or trail an offer to help. The tolerant extractor
+        // recovers the object instead of forcing a needless HOLD.
+        let fenced = "```json\n{\"intent\":\"go_to\",\"x_m\":40.0,\"y_m\":0.0}\n```";
+        assert_eq!(
+            MickIntent::from_llm_json(fenced).unwrap(),
+            MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }
+        );
+
+        let preamble = "Sure — given the goal ahead, the intent is:\n{\"intent\":\"hold\"}";
+        assert_eq!(MickIntent::from_llm_json(preamble).unwrap(), MickIntent::Hold);
+
+        let trailing =
+            "{\"intent\":\"lane_change\",\"target_offset_m\":-3.0}\nLet me know if you'd like to adjust.";
+        assert_eq!(
+            MickIntent::from_llm_json(trailing).unwrap(),
+            MickIntent::LaneChange { target_offset_m: -3.0 }
+        );
+
+        // A brace inside a string value must not mis-terminate the object.
+        let nested = "{\"intent\":\"go_to\",\"x_m\":1.0,\"y_m\":2.0,\"note\":\"pass the {gate}\"}";
+        assert_eq!(
+            MickIntent::from_llm_json(nested).unwrap(),
+            MickIntent::GoTo { x_m: 1.0, y_m: 2.0 }
+        );
     }
 }
