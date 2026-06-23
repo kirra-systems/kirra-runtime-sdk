@@ -163,8 +163,12 @@ parameters — both levers, not one.
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
    oncoming lane (gated by lane-line type + drivable fit); KIRRA's head-on RSS
    governs the oncoming risk, and the §4 RSS conjunction-gating now admits a
-   centered-lane pass as readily as Occy proposes it. **Remaining:** merge /
-   unprotected-turn negotiation.
+   centered-lane pass as readily as Occy proposes it. **Done (junction right-of-way):**
+   `PlanInput.cedes_to_ego_ids` — the ego asserts priority over agents that must cede
+   to it (proceeds through the junction) while still space-time-yielding to every
+   other crossing agent; right-of-way is decided upstream (signs + lane priority),
+   Occy executes it, KIRRA backstops. **Remaining:** the upstream right-of-way
+   *derivation* from the lane graph + controls (currently integrator-supplied).
 5. **The strategic one** — prove KIRRA bounds a **learned planner**: swap a
    NVIDIA / Hydra-MDP-style net in as the doer and show the safety case is
    *unchanged*. That is the Kirra thesis's killer demo, and it is why Occy's
