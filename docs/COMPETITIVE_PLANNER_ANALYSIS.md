@@ -179,6 +179,13 @@ parameters — both levers, not one.
    `plan_for_intent` bridge is generic over the `Planner` (geometric Occy today, a
    learned doer tomorrow), and the tests show an unsafe/hallucinated intent is
    stopped-short / refused / fail-closed — the doer is bounded whatever authored it.
+   **Demo realized (`tests/adversarial_doer_bounded_by_kirra.rs`):** a `RecklessDoer`
+   that ignores obstacles/corridor is dropped in behind that same seam, and KIRRA
+   rejects its hazardous trajectory (`MRCFallback` → safe-stop fallback) *exactly* as
+   it admits Occy's safe one for the identical intent + world — while still admitting
+   the reckless doer on a clear road (the bound is precise, not blanket). What remains
+   for the full demo is swapping the stand-in for a real learned net; the safety
+   harness it answers to is already proven invariant to the doer.
 
 **Net:** Occy is a strong *reference proposer* and a deliberately-thin one; its
 planner-capability gaps vs. Autoware / NVIDIA are large but mostly orthogonal to
