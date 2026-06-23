@@ -945,8 +945,13 @@ async fn handle_audit_rotate_key(
                 (StatusCode::SERVICE_UNAVAILABLE,
                  Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
             }
-            Err(DurableWriteError::Db(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to record key rotation" }))).into_response(),
+            // NonceReplay is unreachable for key rotation (it burns no nonce); fold it
+            // into the generic write-failure 500 so the match stays exhaustive and any
+            // impossible occurrence still fails closed.
+            Err(DurableWriteError::Db(_)) | Err(DurableWriteError::NonceReplay) => {
+                (StatusCode::INTERNAL_SERVER_ERROR,
+                 Json(json!({ "error": "failed to record key rotation" }))).into_response()
+            }
         },
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "store lock poisoned" }))).into_response(),
@@ -1565,6 +1570,23 @@ async fn submit_federated_report(
 
     match store.save_federated_report_chained(&report, received_at_ms, held_epoch) {
         Ok(()) => Json(evaluation).into_response(),
+        Err(DurableWriteError::NonceReplay) => {
+            // Lost the burn race: a concurrent submit (or an earlier one between our
+            // has_seen check and this commit) already claimed this nonce. The report was
+            // NOT persisted (tx rolled back). Same disposition as the pre-check replay
+            // path — audit + reject as a replay, NOT a 500.
+            let event = json!({ "source_controller_id": report.source_controller_id,
+                                "nonce_hex": report.nonce_hex,
+                                "reason": "FEDERATION_NONCE_REPLAY" });
+            let _ = store.save_posture_event_chained(
+                "federation_gateway", "FEDERATION_REJECTED",
+                &event.to_string(), Some("nonce replay (lost burn race)"), received_at_ms,
+            );
+            Json(ReportEvaluation {
+                accepted: false,
+                reason: "FEDERATED_NONCE_REPLAY".to_string(),
+            }).into_response()
+        }
         Err(DurableWriteError::Fenced(reason)) => {
             // Superseded between the request-path gate and this commit. Mirror
             // the gate: self-demote and reject fail-closed — the report was NOT

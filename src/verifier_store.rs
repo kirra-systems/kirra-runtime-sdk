@@ -147,12 +147,19 @@ pub enum FenceError {
     EpochUnreadable,
 }
 
-/// Error from a top-tier (durable, `synchronous=FULL`) state mutation: either
-/// the HA epoch fence fired (`Fenced`) or the underlying SQLite write failed
-/// (`Db`). Callers self-demote on `Fenced`; both are denials (no partial write).
+/// Error from a top-tier (durable, `synchronous=FULL`) state mutation: the HA epoch
+/// fence fired (`Fenced`), the single-use nonce was already burned (`NonceReplay`), or
+/// the underlying SQLite write failed (`Db`). Callers self-demote on `Fenced`; all are
+/// denials (no partial write — the transaction rolls back).
 #[derive(Debug)]
 pub enum DurableWriteError {
     Fenced(FenceError),
+    /// The federation nonce INSERT hit a PRIMARY KEY conflict — the nonce is already
+    /// burned (a concurrent submit won the race, or it was seen before). This is the
+    /// AUTHORITATIVE replay signal: the nonce row, not the handler's prior
+    /// `has_seen_federation_nonce` check, is what makes a report single-use under
+    /// concurrency. Callers map it to a clean replay rejection, NOT a 500.
+    NonceReplay,
     Db(rusqlite::Error),
 }
 
@@ -177,6 +184,9 @@ impl std::fmt::Display for DurableWriteError {
             ),
             DurableWriteError::Fenced(FenceError::EpochUnreadable) => {
                 write!(f, "durable write fenced: HA epoch unreadable (fail-closed)")
+            }
+            DurableWriteError::NonceReplay => {
+                write!(f, "durable write rejected: federation nonce already burned (replay)")
             }
             DurableWriteError::Db(e) => write!(f, "durable write failed: {e}"),
         }
@@ -1753,11 +1763,28 @@ impl VerifierStore {
             ],
         )?;
 
-        tx.execute(
+        // Burn the nonce — the AUTHORITATIVE single-use claim. This MUST stay a plain
+        // INSERT (never `INSERT OR IGNORE`): the `nonce_hex` PRIMARY KEY makes a duplicate
+        // FAIL right here, and that failure IS the anti-replay guarantee under
+        // concurrency. The handler's prior `has_seen_federation_nonce` check is only a
+        // fast-path optimization — two requests carrying the same nonce can both pass it
+        // and reach this point, where exactly one wins the PK and the other is rejected as
+        // a replay. `INSERT OR IGNORE` would silently skip the duplicate nonce row and let
+        // the report below commit anyway = DOUBLE-ACCEPT. A PK conflict here maps to
+        // `NonceReplay` (the tx rolls back on return), not a generic 500.
+        match tx.execute(
             "INSERT INTO federation_report_nonces (nonce_hex, source_controller_id, seen_at_ms)
              VALUES (?1, ?2, ?3)",
             params![report.nonce_hex, report.source_controller_id, received_at_ms as i64],
-        )?;
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(DurableWriteError::NonceReplay);
+            }
+            Err(e) => return Err(DurableWriteError::Db(e)),
+        }
 
         let audit = serde_json::json!({
             "source_controller_id": report.source_controller_id,
@@ -4165,6 +4192,29 @@ mod durability_tests {
         // #79: held == durable epoch (1) → the fence admits the legitimate write.
         s.save_federated_report_chained(&report("aa"), 2_000, 1).unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
+    }
+
+    /// H1 — the nonce INSERT is the AUTHORITATIVE single-use claim. A second report
+    /// carrying an already-burned nonce must be rejected as `NonceReplay` (not a generic
+    /// `Db` error → 500), even with the handler's prior `has_seen_federation_nonce` check
+    /// bypassed — this is the concurrency race the handler maps to FEDERATED_NONCE_REPLAY.
+    #[test]
+    fn duplicate_nonce_burn_is_rejected_as_replay() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = s.try_claim_epoch(0, "node", 1).unwrap().unwrap();
+        // First submit burns the nonce.
+        s.save_federated_report_chained(&report("abc123"), 2_000, held).unwrap();
+        // A second submit with the SAME nonce (simulating the lost check→burn race) must
+        // hit the PRIMARY KEY and surface as NonceReplay, NOT DurableWriteError::Db.
+        let err = s
+            .save_federated_report_chained(&report("abc123"), 3_000, held)
+            .unwrap_err();
+        assert!(
+            matches!(err, DurableWriteError::NonceReplay),
+            "duplicate nonce must map to NonceReplay, got {err:?}"
+        );
+        // The replay tx rolled back; the original burn is intact.
+        assert!(s.has_seen_federation_nonce("abc123").unwrap());
     }
 
     /// EPOCH NON-REGRESSION (the fence-correctness core of #74): a claim
