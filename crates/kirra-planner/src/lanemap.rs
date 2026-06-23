@@ -308,6 +308,43 @@ impl LaneGraph {
             .collect()
     }
 
+    /// The lanes that have right-of-way **over** `ego_lane` — i.e. the lanes the ego
+    /// must yield to. The inverse of [`lanes_yielding_to`](Self::lanes_yielding_to),
+    /// read from the **same** `priority_over` map: lane `p` is returned iff
+    /// `ego_lane ∈ priority_over[p]`.
+    pub fn lanes_with_priority_over(&self, ego_lane: u64) -> impl Iterator<Item = u64> + '_ {
+        self.priority_over
+            .iter()
+            .filter(move |(_, yields)| yields.contains(&ego_lane))
+            .map(|(p, _)| *p)
+    }
+
+    /// The counterpart to [`cedes_to_ego`](Self::cedes_to_ego): the perceived objects
+    /// the ego must **yield to / wait for** at a junction — those in a lane that has
+    /// right-of-way over `ego_lane`. This is the map-derived **non-yielding** set
+    /// (Parko's SG5 `NonYieldingScene` / the Occy junction-negotiation "still yield to
+    /// everyone not on the cede list"), produced from the *same* `priority_over`
+    /// relation as `cedes_to_ego` — so the two are **consistent by construction**: no
+    /// agent can be both "cedes to me" and "I yield to it" unless the map itself
+    /// asserts mutual priority (a map error). Fail-safe: an off-map object is excluded;
+    /// KIRRA backstops every crossing agent regardless.
+    ///
+    /// Cross-stack note: Parko (a separate workspace) owns the runtime
+    /// `NonYieldingScene` / `CommitZoneMap` veto; this method is the map-side *source*
+    /// either path consumes, mapped to that path's types at the deployment boundary.
+    #[must_use]
+    pub fn non_yielding_to_ego(&self, ego_lane: u64, objects: &[PerceivedObject]) -> Vec<u64> {
+        let priority_lanes: BTreeSet<u64> = self.lanes_with_priority_over(ego_lane).collect();
+        if priority_lanes.is_empty() {
+            return Vec::new();
+        }
+        objects
+            .iter()
+            .filter(|o| self.lane_at(o.pos).is_some_and(|l| priority_lanes.contains(&l)))
+            .map(|o| o.id)
+            .collect()
+    }
+
     /// Insert (or replace) a lane.
     pub fn add_lane(&mut self, lane: Lane) {
         self.lanes.insert(lane.id, lane);
@@ -894,5 +931,40 @@ mod tests {
             .with_lane(Lane::straight(3, 0.0, 60.0, 90.0, 1.75, LineType::Solid, LineType::Solid));
         assert_eq!(g.route(1, 3), None);
         assert_eq!(g.route(1, 2), Some(vec![1, 2]));
+    }
+
+    // ----- Right-of-way: cede vs non-yield, consistent from one source -----
+
+    #[test]
+    fn cedes_and_non_yielding_are_consistent_inverses() {
+        use kirra_ros2_adapter::state::PerceivedObject;
+        // Lane 1 (along y=0) has priority over lane 2 (along y=10).
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(2, 10.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid))
+            .with_right_of_way(1, 2);
+        let obj = |id, x, y| PerceivedObject {
+            id,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 3.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 3.0, y_m: 0.0 },
+        };
+
+        // The inverse priority queries agree on one fact from one map.
+        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(g.lanes_with_priority_over(2).collect::<Vec<_>>(), vec![1]);
+
+        // From the PRIORITY lane (ego in 1): an agent in lane 2 cedes to me, and is
+        // NOT something I yield to — the two sets are disjoint by construction.
+        let in_l2 = [obj(7, 15.0, 10.0)];
+        assert_eq!(g.cedes_to_ego(1, &in_l2), vec![7]);
+        assert!(g.non_yielding_to_ego(1, &in_l2).is_empty());
+
+        // From the YIELDING lane (ego in 2): an agent in lane 1 is non-yielding (I must
+        // wait for it), and does NOT cede to me — the exact inverse, same source.
+        let in_l1 = [obj(9, 15.0, 0.0)];
+        assert_eq!(g.non_yielding_to_ego(2, &in_l1), vec![9]);
+        assert!(g.cedes_to_ego(2, &in_l1).is_empty());
     }
 }
