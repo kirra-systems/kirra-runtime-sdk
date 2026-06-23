@@ -7,4 +7,5 @@
 pub use crate::posture_cache::{
     CachedFleetPosture, SharedPostureCache, now_ms, should_route_command,
 };
-pub use crate::verifier::{FleetPosture, NodeTrustState};
+// From the lean foundation, not the heavy `verifier` module (Stage 2) — same types.
+pub use kirra_core::{FleetPosture, NodeTrustState};

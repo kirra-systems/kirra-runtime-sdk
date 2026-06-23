@@ -28,7 +28,9 @@
 //     not yet a single function (see doc §5.2 / §7).
 //   - `wcet_gate` budget registration for both guards.
 
-use crate::audit_chain::PerceptionDerateEvent;
+// Imported from the lean foundation, not the heavy `audit_chain` (Stage 2): the
+// gateway/governor surface stays free of the verifier service's deps.
+use kirra_core::PerceptionDerateEvent;
 
 // ---------------------------------------------------------------------------
 // Bounds & constants

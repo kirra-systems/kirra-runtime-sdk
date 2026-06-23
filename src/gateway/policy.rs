@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_unrecognized_write_path_denied_in_all_postures() {
         use crate::posture_cache::{should_route_command, CachedFleetPosture, POSTURE_CACHE_TTL_MS};
-        use crate::verifier::FleetPosture;
+        use kirra_core::FleetPosture;
 
         let cmd = classify_http_command("POST", "/admin/shutdown");
         assert_eq!(cmd, OperationalCommand::Unknown);
