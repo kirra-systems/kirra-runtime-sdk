@@ -1,4 +1,4 @@
-import { LayoutDashboard, Globe, Boxes, ShieldCheck, Activity, Radio, Route, Rss, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings } from 'lucide-react'
+import { LayoutDashboard, Globe, Boxes, ShieldCheck, Activity, Radio, Route, Rss, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings, Crosshair } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 // `preview: true` marks a route whose screen renders bundled mock data (no live
@@ -28,6 +28,7 @@ export const navGroups: NavGroup[] = [
     label: 'Governance',
     items: [
       { href: '/oversight', label: 'AI Oversight', icon: Brain },
+      { href: '/doer-bound', label: 'Doer Bound', icon: Crosshair, preview: true },
       { href: '/events', label: 'Events', icon: Bell },
       { href: '/incidents', label: 'Incident Review', icon: AlertTriangle },
       { href: '/compliance', label: 'Compliance', icon: FileCheck2 },
