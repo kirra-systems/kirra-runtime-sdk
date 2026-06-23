@@ -14,9 +14,9 @@
 //! scalar → governor sanitization): that is a *command* gate; this is the
 //! *intent → plan* bridge that routes Mick through the full Occy + KIRRA pipeline.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{Goal, PlanInput, PlanOutput, Planner, Pose};
+use crate::{FleetPosture, Goal, PlanInput, PlanOutput, Planner, Pose};
 
 /// A high-level intent the LLM brain proposes — the Mick → Occy contract. It maps
 /// ONLY to the goal / maneuver of a plan; it can express nothing about the world
@@ -156,6 +156,177 @@ pub fn plan_for_intent(
             }
             planner.plan(&PlanInput { lane_change_to_m: Some(target_offset_m), ..world.clone() })
         }
+    }
+}
+
+// ===========================================================================
+// The Mick BRAIN seam — the pluggable System-2 driver.
+//
+// `plan_for_intent` above grounds ONE intent. The pieces below close the loop: a
+// bounded, owned snapshot of the world (`WorldContext`) the brain reasons over, the
+// `MickBrain` trait a model plugs into, and `mick_drive_once` — ask the brain → ground
+// through Occy → (downstream) KIRRA bounds it. The brain is NEVER trusted: it authors
+// INTENT only, sees a derived view (never the safety-bearing borrows), and any failure
+// fails closed to a safe stop. The whole point of the chauffeur is that Mick may be as
+// smart — or as wrong — as it likes, because the doer grounds and the checker bounds.
+// ===========================================================================
+
+/// Max objects surfaced to the brain — bounds the prompt size and per-tick work. Excess
+/// objects are dropped *after* a nearest-first sort, so the closest (most relevant) are
+/// always kept; KIRRA still sees every object regardless of what the brain was shown.
+pub const MICK_MAX_OBJECTS: usize = 24;
+
+/// Lateral probe distance (m) used to report whether a lane change to each side is
+/// lawful. A context hint only — the real crossing rule is enforced when the maneuver
+/// grounds (`behavior::lateral_move_permitted`), so an over/under-eager hint cannot make
+/// an unlawful change happen.
+const MICK_LANE_PROBE_M: f64 = 2.0;
+
+/// Error from Mick's brain. ANY failure — parse error, timeout, refusal, a non-finite
+/// or out-of-vocabulary intent — collapses to this, and the caller HOLDs (fail-closed).
+/// The brain is never trusted, so a failure is simply "no new intent → keep it safe."
+pub type MickError = &'static str;
+
+/// One nearby object as the brain sees it — **ego-relative**, finite, bounded. The
+/// brain never receives raw world borrows; it gets this owned view.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ObjectView {
+    pub id: u64,
+    /// Longitudinal distance from the ego along its heading (+ = ahead), meters.
+    pub ahead_m: f64,
+    /// Lateral offset from the ego (+ = to the ego's left), meters.
+    pub left_m: f64,
+    /// Object ground speed magnitude, m/s.
+    pub speed_mps: f64,
+}
+
+/// An owned, bounded, finite snapshot of the world for Mick's brain — the factual
+/// content of the prompt. The brain reasons over THIS, never the borrowed `PlanInput`;
+/// grounding re-borrows the real world, so nothing the brain "sees" can be smuggled into
+/// a safety-bearing field. Ego-relative where that aids the model. `Serialize` so it
+/// renders straight into a prompt (the model backend owns the exact framing).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorldContext {
+    /// Ego forward speed, m/s.
+    pub ego_speed_mps: f64,
+    /// Fleet posture token (`NOMINAL` / `DEGRADED` / `LOCKED_OUT`). The brain should be
+    /// more conservative off-Nominal; the stack enforces it regardless.
+    pub posture: &'static str,
+    /// The current goal in the ego frame: meters ahead / to the left of the ego.
+    pub goal_ahead_m: f64,
+    pub goal_left_m: f64,
+    /// Whether a lane change to each side is lawful per the lane lines (a hard rule the
+    /// brain need not re-derive — Occy enforces it on grounding).
+    pub may_change_left: bool,
+    pub may_change_right: bool,
+    /// Nearby objects, ego-relative, NEAREST-FIRST, capped at [`MICK_MAX_OBJECTS`].
+    pub objects: Vec<ObjectView>,
+}
+
+impl WorldContext {
+    /// Derive the brain's view from the perception/map-derived `PlanInput`. Pure: copies
+    /// out owned, finite, ego-relative facts; surfaces no borrow and no actuator handle.
+    #[must_use]
+    pub fn from_plan_input(world: &PlanInput<'_>) -> Self {
+        let ego = world.ego.pose;
+        let (sin_h, cos_h) = ego.heading_rad.sin_cos();
+        // World point → ego frame (ahead along heading, left along the left-normal).
+        let to_ego = |x: f64, y: f64| -> (f64, f64) {
+            let (dx, dy) = (x - ego.x_m, y - ego.y_m);
+            (dx * cos_h + dy * sin_h, -dx * sin_h + dy * cos_h)
+        };
+
+        let (goal_ahead_m, goal_left_m) = to_ego(world.goal.target.x_m, world.goal.target.y_m);
+
+        let mut objects: Vec<ObjectView> = world
+            .objects
+            .iter()
+            .map(|o| {
+                let (ahead_m, left_m) = to_ego(o.pos.x_m, o.pos.y_m);
+                ObjectView { id: o.id, ahead_m, left_m, speed_mps: o.velocity_mps }
+            })
+            .collect();
+        // Nearest-first so the truncation keeps the most relevant objects.
+        objects.sort_by(|a, b| {
+            a.ahead_m.hypot(a.left_m).total_cmp(&b.ahead_m.hypot(b.left_m))
+        });
+        objects.truncate(MICK_MAX_OBJECTS);
+
+        WorldContext {
+            ego_speed_mps: world.ego.linear_x_mps,
+            posture: posture_token(world.posture.clone()),
+            goal_ahead_m,
+            goal_left_m,
+            may_change_left: crate::behavior::lateral_move_permitted(
+                world.lane_boundaries, 0.0, MICK_LANE_PROBE_M,
+            ),
+            may_change_right: crate::behavior::lateral_move_permitted(
+                world.lane_boundaries, 0.0, -MICK_LANE_PROBE_M,
+            ),
+            objects,
+        }
+    }
+}
+
+/// The pluggable System-2 brain behind Mick. Given the bounded [`WorldContext`], it
+/// returns a high-level [`MickIntent`] — or an `Err`, on which the caller fail-closes to
+/// a safe stop. This is the ONLY seam a model plugs into: a local Gemma, a cloud model,
+/// or a scripted policy. The brain authors INTENT only; Occy grounds it and KIRRA bounds
+/// it, so the safety case is independent of how good — or bad, or adversarial — it is.
+pub trait MickBrain {
+    /// Decide the next intent for `ctx`. Returning `Err` means "no usable intent" and the
+    /// caller HOLDs — the brain is expected to be fallible and is never trusted for safety.
+    fn decide(&mut self, ctx: &WorldContext) -> Result<MickIntent, MickError>;
+}
+
+/// A deterministic stub brain for tests / sim: replays a fixed intent script, then HOLDs.
+/// Exercises the whole Mick → Occy → KIRRA loop — including deliberately adversarial
+/// intents — with zero model dependency.
+pub struct ScriptedBrain {
+    script: std::vec::IntoIter<MickIntent>,
+}
+
+impl ScriptedBrain {
+    #[must_use]
+    pub fn new(intents: Vec<MickIntent>) -> Self {
+        Self { script: intents.into_iter() }
+    }
+}
+
+impl MickBrain for ScriptedBrain {
+    fn decide(&mut self, _ctx: &WorldContext) -> Result<MickIntent, MickError> {
+        // Past the end of the script, keep driving safely rather than erroring.
+        Ok(self.script.next().unwrap_or(MickIntent::Hold))
+    }
+}
+
+/// One tick of the Mick chauffeur loop: derive the brain's view of the world, ask the
+/// brain for an intent, and ground it through Occy. **Fail-closed**: a brain error yields
+/// a safe stop, never a propagated bad command. The returned `PlanOutput` is STILL a
+/// proposal — the #131 checker (KIRRA) bounds it downstream, so even a malicious intent
+/// that grounds into a trajectory cannot reach the actuator unchecked.
+///
+/// Generic over both the brain and the planner: any model behind the seam, any doer.
+pub fn mick_drive_once(
+    brain: &mut impl MickBrain,
+    world: &PlanInput<'_>,
+    planner: &mut impl Planner,
+) -> PlanOutput {
+    let ctx = WorldContext::from_plan_input(world);
+    match brain.decide(&ctx) {
+        Ok(intent) => plan_for_intent(planner, &intent, world),
+        // The brain failed / refused → HOLD. The doer never invents motion on a
+        // brain fault; the safe disposition is a controlled stop.
+        Err(_) => PlanOutput::safe_stop(world.ego.pose),
+    }
+}
+
+/// Posture → stable prompt token. Kept in lock-step with `FleetPosture`.
+fn posture_token(p: FleetPosture) -> &'static str {
+    match p {
+        FleetPosture::Nominal => "NOMINAL",
+        FleetPosture::Degraded => "DEGRADED",
+        FleetPosture::LockedOut => "LOCKED_OUT",
     }
 }
 
@@ -324,5 +495,93 @@ mod tests {
             MickIntent::from_llm_json(nested).unwrap(),
             MickIntent::GoTo { x_m: 1.0, y_m: 2.0 }
         );
+    }
+
+    // ----- the brain seam: WorldContext + MickBrain + mick_drive_once -----
+
+    #[test]
+    fn world_context_is_ego_relative() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // Ego facing +y (heading π/2) at (5,0); a goal 40 m in +y is "40 ahead, 0 left".
+        let w = PlanInput {
+            ego: EgoState {
+                pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: std::f64::consts::FRAC_PI_2 },
+                linear_x_mps: 3.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal { target: Pose { x_m: 5.0, y_m: 40.0, heading_rad: 0.0 } },
+            ..world(&corr, &[], &[])
+        };
+        let ctx = WorldContext::from_plan_input(&w);
+        assert!((ctx.goal_ahead_m - 40.0).abs() < 1e-9, "goal 40 m ahead, got {}", ctx.goal_ahead_m);
+        assert!(ctx.goal_left_m.abs() < 1e-9, "goal dead ahead (0 left), got {}", ctx.goal_left_m);
+        assert_eq!(ctx.ego_speed_mps, 3.0);
+        assert_eq!(ctx.posture, "NOMINAL");
+    }
+
+    #[test]
+    fn world_context_objects_bounded_and_nearest_first() {
+        let corr = MockCorridorSource::straight_5m_half_width(500.0);
+        // More objects than the cap, at increasing distance ahead of the ego (x=5).
+        let objs: Vec<PerceivedObject> = (0..(MICK_MAX_OBJECTS as u64 + 10))
+            .map(|i| PerceivedObject {
+                id: i,
+                pos: Point { x_m: 10.0 + i as f64 * 5.0, y_m: 0.0 },
+                velocity_mps: 1.0,
+                heading_rad: 0.0,
+                vel: Point { x_m: 1.0, y_m: 0.0 },
+            })
+            .collect();
+        let w = world(&corr, &objs, &[]);
+        let ctx = WorldContext::from_plan_input(&w);
+        assert_eq!(ctx.objects.len(), MICK_MAX_OBJECTS, "the brain's object list is capped");
+        assert_eq!(ctx.objects[0].id, 0, "nearest object (id 0 at x=10) is first");
+        assert!(ctx.objects[0].ahead_m < ctx.objects[1].ahead_m, "sorted nearest-first");
+    }
+
+    #[test]
+    fn scripted_brain_drives_the_loop_toward_the_goal() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }]);
+        let mut p = GeometricPlanner::default();
+        let out = mick_drive_once(&mut brain, &w, &mut p);
+        assert_eq!(out.kind, ProposalKind::Motion);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 10.0, "the brain's GoTo drives the loop forward, got {max_x}");
+        assert!(admits(&out.trajectory, &corr, &[]), "and KIRRA admits the grounded plan");
+    }
+
+    #[test]
+    fn mick_loop_bounds_an_adversarial_brain() {
+        // The brain insists on driving to x=40 straight through a stopped car at x=25.
+        // The loop grounds it (stops short) and KIRRA admits the safe result — the brain
+        // is not obeyed past the safety floor, end to end.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [stopped_car(25.0)];
+        let w = world(&corr, &objs, &[]);
+        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }]);
+        let mut p = GeometricPlanner::default();
+        let out = mick_drive_once(&mut brain, &w, &mut p);
+        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x < 25.0, "loop stops short of the obstacle the brain drove at, got {max_x}");
+        assert!(admits(&out.trajectory, &corr, &objs), "the bounded plan is admissible");
+    }
+
+    #[test]
+    fn brain_failure_fails_closed_to_safe_stop() {
+        struct ErrBrain;
+        impl MickBrain for ErrBrain {
+            fn decide(&mut self, _ctx: &WorldContext) -> Result<MickIntent, MickError> {
+                Err("MICK_TEST_REFUSAL")
+            }
+        }
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let mut p = GeometricPlanner::default();
+        let out = mick_drive_once(&mut ErrBrain, &w, &mut p);
+        assert_eq!(out.kind, ProposalKind::SafeStop, "a brain failure must HOLD, not drive");
+        assert!(out.trajectory.iter().all(|t| t.velocity_mps == 0.0));
     }
 }
