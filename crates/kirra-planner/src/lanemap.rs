@@ -40,7 +40,8 @@
 //! derivation is follow-up, exactly as elsewhere in the stack.
 
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use std::collections::BTreeMap;
+use kirra_ros2_adapter::state::PerceivedObject;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::behavior::{LaneBoundary, LineType};
 
@@ -255,13 +256,56 @@ impl CorridorSource for LaneCorridor {
 #[derive(Debug, Clone, Default)]
 pub struct LaneGraph {
     lanes: BTreeMap<u64, Lane>,
+    /// Right-of-way: `priority lane → lanes that must yield to it`. Populated from a
+    /// Lanelet2 `right_of_way` regulatory element. Drives [`cedes_to_ego`] so the cede
+    /// list is *derived from the map* rather than integrator-supplied.
+    ///
+    /// [`cedes_to_ego`]: Self::cedes_to_ego
+    priority_over: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 impl LaneGraph {
     /// An empty graph.
     #[must_use]
     pub fn new() -> Self {
-        Self { lanes: BTreeMap::new() }
+        Self { lanes: BTreeMap::new(), priority_over: BTreeMap::new() }
+    }
+
+    /// Record that `priority_lane` has right-of-way over `yielding_lane` — traffic in
+    /// the yielding lane must cede to traffic in the priority lane at their conflict.
+    pub fn add_right_of_way(&mut self, priority_lane: u64, yielding_lane: u64) {
+        self.priority_over.entry(priority_lane).or_default().insert(yielding_lane);
+    }
+
+    /// Builder form of [`add_right_of_way`](Self::add_right_of_way).
+    #[must_use]
+    pub fn with_right_of_way(mut self, priority_lane: u64, yielding_lane: u64) -> Self {
+        self.add_right_of_way(priority_lane, yielding_lane);
+        self
+    }
+
+    /// The lanes that must yield to `priority_lane` (empty if it has no asserted priority).
+    pub fn lanes_yielding_to(&self, priority_lane: u64) -> impl Iterator<Item = u64> + '_ {
+        self.priority_over.get(&priority_lane).into_iter().flatten().copied()
+    }
+
+    /// Derive the **`cedes_to_ego_ids`** list for an ego in `ego_lane`: every perceived
+    /// object currently in a lane that yields to the ego's lane (per the map's
+    /// right-of-way). This closes the gap where `cedes_to_ego_ids` was
+    /// integrator-supplied — it now falls out of the Lanelet2 right-of-way relations.
+    /// An object off the mapped road, or in a non-yielding lane, is **not** included
+    /// (fail-safe: the ego asserts priority only where the map grants it; KIRRA still
+    /// backstops every crossing agent regardless).
+    #[must_use]
+    pub fn cedes_to_ego(&self, ego_lane: u64, objects: &[PerceivedObject]) -> Vec<u64> {
+        let Some(yielding) = self.priority_over.get(&ego_lane) else {
+            return Vec::new();
+        };
+        objects
+            .iter()
+            .filter(|o| self.lane_at(o.pos).is_some_and(|l| yielding.contains(&l)))
+            .map(|o| o.id)
+            .collect()
     }
 
     /// Insert (or replace) a lane.
