@@ -172,7 +172,13 @@ parameters — both levers, not one.
 5. **The strategic one** — prove KIRRA bounds a **learned planner**: swap a
    NVIDIA / Hydra-MDP-style net in as the doer and show the safety case is
    *unchanged*. That is the Kirra thesis's killer demo, and it is why Occy's
-   planner-gaps do not threaten the architecture.
+   planner-gaps do not threaten the architecture. **First step (Mick intent seam):**
+   `kirra_planner::mick` — the LLM brain proposes high-level typed *intent* (`GoTo`,
+   `LaneChange`, `Hold`) that sets ONLY the goal/maneuver; the world stays
+   perception-derived, Occy grounds the intent, KIRRA bounds the trajectory. The
+   `plan_for_intent` bridge is generic over the `Planner` (geometric Occy today, a
+   learned doer tomorrow), and the tests show an unsafe/hallucinated intent is
+   stopped-short / refused / fail-closed — the doer is bounded whatever authored it.
 
 **Net:** Occy is a strong *reference proposer* and a deliberately-thin one; its
 planner-capability gaps vs. Autoware / NVIDIA are large but mostly orthogonal to
