@@ -29,8 +29,13 @@
 //! Parko ML detector, semantic objects, temporal velocity) is later work; the
 //! safety plumbing proven here is reused unchanged.
 
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::state::PerceivedObject;
+// Build hygiene (review M3): the perception-input contract types live in the lean
+// `kirra-core` (Stage 6a relocation); import them directly instead of through the
+// heavy `kirra-ros2-adapter`, so taj's library no longer pulls the adapter (and its
+// ros2/tokio tree). The adapter is now a dev-dependency only (its `validate_trajectory_slow`
+// + `VehicleConfig` are used solely by the integration tests).
+use kirra_core::corridor::{CorridorSource, Point};
+use kirra_core::trajectory::PerceivedObject;
 
 /// Minimal range-scan input — a `sensor_msgs/LaserScan` subset.
 ///

@@ -25,13 +25,12 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
-# The #131 checker entry + the checked trajectory/corridor/config/ego types.
-# default-features = false → no ROS (adapter `default = []`; `ros2` is opt-in).
-kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
-# FleetPosture + the SG2 containment cap (MAX_TRAJECTORY_HORIZON) for the posture →
-# planner-mode mapping and the trajectory-length bound — now from the lean `kirra-core`
-# crate (de-monolith Stage 4), so the planner no longer pulls the verifier service's
-# heavy tree directly (the adapter dep remains until the adapter is de-monolithed).
+# Build hygiene (review M3): the planner's library needs only the lean contract
+# types — the corridor seam + trajectory/perception types (kirra-core, Stage 6a) and
+# FleetPosture + the SG2 containment cap (kirra-core, Stage 4). The heavy
+# `kirra-ros2-adapter` is now a DEV-dependency only: its `validate_trajectory_slow`
+# checker entry is exercised solely by the tests. So the planner no longer pulls the
+# adapter (and its ros2/tokio tree) into its normal build at all.
 kirra-core = { path = "../kirra-core" }
 # The shared lane-map crate (de-monolith Stage 6b): LaneGraph / routing / right-of-way,
 # the lane-line crossing rules, and the Lanelet2 `.osm` parser. The planner re-exports

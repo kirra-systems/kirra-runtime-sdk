@@ -47,6 +47,11 @@ jobs:
         run: cargo test --workspace --locked
       - name: Fault injection tests (ISO 26262 safe-state verification — CERT-004)
         run: cargo test --test fault_injection --locked
+      - name: kirra-core capture-feature tests (review M2 — feature-gated module)
+        # The off-by-default `capture` module is only reached via feature
+        # unification in the workspace run; test it on its own terms so it can
+        # never silently rot if the unification path changes.
+        run: cargo test -p kirra-core --features capture --locked
 
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)
