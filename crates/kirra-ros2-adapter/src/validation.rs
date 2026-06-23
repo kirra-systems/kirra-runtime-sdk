@@ -59,6 +59,25 @@ const OCCLUSION_SPEED_TOL_MPS: f64 = 0.1;
 /// covers it.
 const RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
 
+/// One predicted future position of an object at a time, in the world frame. A
+/// sequence of these forms one predicted **mode** (hypothesis); the inter-sample
+/// motion supplies the predicted velocity (no separate speed field to keep stale).
+#[derive(Debug, Clone, Copy)]
+pub struct PredictedSample {
+    pub pos: Point,
+    pub time_from_start_s: f64,
+}
+
+/// One predicted **mode** for an object — e.g. lane-follow, a cut-in, or a turn. An
+/// object may carry several modes; the predictive RSS pass requires the ego to be
+/// safe against **every** mode (worst-case), so a single dangerous hypothesis is
+/// enough to refuse. Modes are perception/prediction-supplied (`None` → the pass is a
+/// no-op and the snapshot RSS is the sole bound, the back-compat behaviour).
+pub struct PredictedMode<'a> {
+    pub object_id: u64,
+    pub samples: &'a [PredictedSample],
+}
+
 /// Compose the three slow-loop checks into one verdict. First-rejection-
 /// wins on containment and RSS; Clamp is recorded but does not
 /// short-circuit (containment + RSS still vote).
@@ -101,7 +120,7 @@ pub fn validate_trajectory_slow(
     // `validate_trajectory_slow_capped` with the resolved Track-C cap
     // (KIRRA-OCCY-PMON-003 slice-1).
     validate_trajectory_slow_capped(
-        trajectory, corridor, objects, config, latest_odom, posture, None, None,
+        trajectory, corridor, objects, config, latest_odom, posture, None, None, None,
     )
 }
 
@@ -138,6 +157,7 @@ pub fn validate_trajectory_slow_capped(
     posture: FleetPosture,
     effective_perception_cap: Option<f64>,
     visibility_range_m: Option<f64>,
+    predicted_modes: Option<&[PredictedMode<'_>]>,
 ) -> TrajectoryVerdict {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
@@ -353,6 +373,22 @@ pub fn validate_trajectory_slow_capped(
         }
     }
 
+    // ----- C2) Multi-modal predictive RSS (space-time over modes) ------
+    //
+    // The snapshot RSS above extrapolates each object from its instantaneous
+    // velocity (the CV mode). When perception supplies predicted MODES, also
+    // require the ego to be safe against each one, time-matched: at the moment
+    // the ego reaches a pose, where could the object be? A predicted cut-in /
+    // turn that brings the object into the ego's path is caught here even though
+    // the snapshot showed it laterally clear. Uses the SAME §4 lateral-alignment +
+    // longitudinal-overlap gating, so a mode that stays in its own lane is skipped
+    // (this generalizes §4, it does not regress it). Absent input → no-op.
+    if let Some(modes) = predicted_modes {
+        if predictive_rss_breach(trajectory, modes, config) {
+            return TrajectoryVerdict::MRCFallback;
+        }
+    }
+
     // ----- D) Limited-visibility / occlusion bound (RSS Rule 4) --------
     //
     // Gated on a perception-supplied assured-clear distance. A trajectory that
@@ -412,6 +448,78 @@ fn outruns_assured_clear_distance(
             return true;
         }
         prev = Some(p);
+    }
+    false
+}
+
+/// The trajectory pose closest in TIME to `t` (the ego's where-am-I-when index).
+fn nearest_in_time(trajectory: &[TrajectoryPoint], t: f64) -> Option<&TrajectoryPoint> {
+    trajectory
+        .iter()
+        .min_by(|a, b| (a.time_from_start_s - t).abs().total_cmp(&(b.time_from_start_s - t).abs()))
+}
+
+/// True if any predicted mode brings an object into a longitudinal RSS shortfall with
+/// the time-matched ego pose. Mirrors the snapshot RSS pass (same `dx_ego`/`dy_ego`
+/// ego-frame projection, same §4 lateral-alignment + longitudinal-overlap gating, same
+/// same-/opposite-direction primitive), but evaluates the object at its PREDICTED
+/// position+velocity (derived from the inter-sample motion) rather than its snapshot.
+fn predictive_rss_breach(
+    trajectory: &[TrajectoryPoint],
+    modes: &[PredictedMode<'_>],
+    config: &VehicleConfig,
+) -> bool {
+    for mode in modes {
+        for pair in mode.samples.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let dt = b.time_from_start_s - a.time_from_start_s;
+            if dt <= 0.0 {
+                continue; // non-monotonic samples — skip (fail-open on malformed *input*,
+                          // the snapshot RSS still bounds the real object)
+            }
+            let ovx = (b.pos.x_m - a.pos.x_m) / dt;
+            let ovy = (b.pos.y_m - a.pos.y_m) / dt;
+
+            let Some(ego) = nearest_in_time(trajectory, a.time_from_start_s) else { continue };
+            let dx = a.pos.x_m - ego.pose.x_m;
+            let dy = a.pos.y_m - ego.pose.y_m;
+            let cos_h = ego.pose.heading_rad.cos();
+            let sin_h = ego.pose.heading_rad.sin();
+            let dx_ego = cos_h * dx + sin_h * dy; // longitudinal
+            let dy_ego = -sin_h * dx + cos_h * dy; // lateral
+
+            if dx_ego <= 0.0 {
+                continue; // behind the ego at that time
+            }
+            if dy_ego.abs() > RSS_LATERAL_ALIGNMENT_TOLERANCE_M {
+                continue; // predicted to be in another corridor — containment covers it
+            }
+            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M {
+                let obj_lon_v = ovx * cos_h + ovy * sin_h; // predicted closing component
+                let lon_required = if obj_lon_v < 0.0 {
+                    opposite_direction_safe_distance(
+                        ego.velocity_mps,
+                        obj_lon_v.abs(),
+                        RSS_REACTION_TIME_S,
+                        config.max_accel_mps2,
+                        config.max_decel_mps2,
+                        config.max_decel_mps2,
+                    )
+                } else {
+                    longitudinal_safe_distance(
+                        ego.velocity_mps,
+                        obj_lon_v,
+                        RSS_REACTION_TIME_S,
+                        config.max_accel_mps2,
+                        config.max_decel_mps2,
+                        config.max_decel_mps2,
+                    )
+                };
+                if dx_ego < lon_required {
+                    return true;
+                }
+            }
+        }
     }
     false
 }
