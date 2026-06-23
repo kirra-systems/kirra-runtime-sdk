@@ -168,7 +168,7 @@ mod tests {
     };
     use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
     use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-    use kirra_runtime_sdk::verifier::FleetPosture;
+    use kirra_core::FleetPosture;
 
     /// A perception-derived world: ego at x=5, a placeholder goal (the intent
     /// overrides it), and whatever objects / lane lines the test supplies.

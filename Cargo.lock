@@ -1969,6 +1969,7 @@ name = "kirra-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1999,8 +2000,8 @@ dependencies = [
 name = "kirra-planner"
 version = "0.1.0"
 dependencies = [
+ "kirra-core",
  "kirra-ros2-adapter",
- "kirra-runtime-sdk",
  "kirra-taj",
  "roxmltree",
  "serde",

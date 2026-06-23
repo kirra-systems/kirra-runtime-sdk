@@ -11,6 +11,13 @@
 //! Stage 1: the fleet posture / node trust types, previously defined in the heavy
 //! `kirra_runtime_sdk::verifier` module and imported across the whole stack.
 
+// Mirror the parent crate's doc-lint posture (`kirra_runtime_sdk` lib root) so the
+// verbatim-relocated modules (the kinematics-contract talisman, the SG2 containment
+// checker) keep their byte-identical doc comments — the safety-derivation tables use
+// aligned arithmetic continuations that these two pedantic doc lints would otherwise
+// reject. No logic, no behavior — purely the same lint allowance traveling with the code.
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
+
 use serde::{Deserialize, Serialize};
 
 /// The FROZEN kinematics-contract talisman — the deterministic vehicle flight-envelope
@@ -18,6 +25,13 @@ use serde::{Deserialize, Serialize};
 /// `validate_vehicle_command`). Relocated here verbatim (de-monolith Stage 3); re-exported
 /// by `kirra_runtime_sdk::gateway::kinematics_contract` so every existing path holds.
 pub mod kinematics_contract;
+
+/// The SG2 drivable-space containment checker — the per-trajectory corridor-containment
+/// sibling of `validate_vehicle_command` (`VehicleFootprint` / `Corridor` / `Pose` /
+/// `validate_trajectory_containment` / `MAX_TRAJECTORY_HORIZON`). Relocated here verbatim
+/// (de-monolith Stage 4); re-exported by `kirra_runtime_sdk::gateway::containment` so every
+/// existing path (the ROS2 adapter, the planner) holds.
+pub mod containment;
 
 /// A registered node's trust state, as decided by attestation and the recovery
 /// hysteresis. `Untrusted` carries a human-readable reason tag.

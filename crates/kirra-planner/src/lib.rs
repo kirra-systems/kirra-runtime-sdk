@@ -16,7 +16,7 @@
 //!   **#131** per-trajectory containment path), which consumes `&[TrajectoryPoint]`.
 //!   So [`PlanOutput`] carries exactly `Vec<TrajectoryPoint>` — the same type,
 //!   imported, never redefined.
-//! - Posture is [`kirra_runtime_sdk::verifier::FleetPosture`].
+//! - Posture is [`kirra_core::FleetPosture`].
 //! - **The planner does NOT produce scenes.** Scenes are perception-side inputs
 //!   (`parko_kirra::…evaluate_scene*`); the planner consumes a world-state.
 //!
@@ -34,13 +34,15 @@
 // consumer names them from one place — but they remain the adapter's / SDK's
 // definitions.
 pub use kirra_ros2_adapter::state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
-pub use kirra_runtime_sdk::verifier::FleetPosture;
+// FleetPosture + the containment cap now live in the lean `kirra-core` crate
+// (de-monolith Stage 4) — same types, no heavy verifier-service tree pulled directly.
+pub use kirra_core::FleetPosture;
 
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 // Derive (never guess) the checker's hard trajectory-length cap: the #131
 // containment gate rejects `len > MAX_TRAJECTORY_HORIZON`, so a proposal must
 // stay within it (including the terminal stop point) to be admissible.
-use kirra_runtime_sdk::gateway::containment::MAX_TRAJECTORY_HORIZON;
+use kirra_core::containment::MAX_TRAJECTORY_HORIZON;
 
 pub mod behavior;
 pub use behavior::{
@@ -272,7 +274,7 @@ pub enum PlannerMode {
     MrcOnly,
 }
 
-// PHASE-0 LOCKED — derived from kirra_runtime_sdk::verifier::FleetPosture.
+// PHASE-0 LOCKED — derived from kirra_core::FleetPosture.
 /// Map fleet posture to planner mode.
 #[must_use]
 pub fn planner_mode(posture: FleetPosture) -> PlannerMode {

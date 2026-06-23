@@ -26,10 +26,10 @@ use kirra_planner::{
 use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
-use kirra_runtime_sdk::verifier::FleetPosture;
+use kirra_core::FleetPosture;
 
 /// KIRRA refuses to certify a trajectory longer than this many poses — a WCET bound
-/// on the containment check (`kirra_runtime_sdk::gateway::containment::
+/// on the containment check (`kirra_core::containment::
 /// MAX_TRAJECTORY_HORIZON`). Any *valid* planner respects it; the reckless doer must
 /// too, so that its rejections come from the HAZARD it ignores, not a length overrun.
 const MAX_TRAJECTORY_HORIZON: usize = 50;
