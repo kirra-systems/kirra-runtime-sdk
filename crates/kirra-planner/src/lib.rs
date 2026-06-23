@@ -50,6 +50,9 @@ pub use behavior::{
 pub mod lanemap;
 pub use lanemap::{Lane, LaneCorridor, LaneEdge, LaneGraph};
 
+pub mod mick;
+pub use mick::{plan_for_intent, MickIntent};
+
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
 /// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop`,
 /// `Behavioral` and `Yield` decelerate to a hard stop; `Goal` cruises to the goal.
@@ -119,6 +122,11 @@ pub struct PredictedPath<'a> {
 /// state, the drivable-space handle (the **same** [`CorridorSource`] trait
 /// `validate_trajectory_slow` consumes), and the fleet posture. Borrowed `map`
 /// keeps it allocation-free and lets the planner and the checker read one corridor.
+///
+/// `Clone` is cheap — every field is a `Copy` reference or a small `Copy`/`Clone`
+/// value — and lets the Mick intent bridge build a plan that overrides only the
+/// goal/maneuver while re-borrowing the same perception-derived world.
+#[derive(Clone)]
 pub struct PlanInput<'a> {
     pub ego: EgoState,
     pub goal: Goal,

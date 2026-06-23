@@ -29,6 +29,9 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
 # FleetPosture (verifier.rs) for the posture → planner-mode mapping.
 kirra-runtime-sdk = { path = "../.." }
+# Mick LLM-intent JSON parsing (the System-2 → Occy intent seam).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # End-to-end stack integration test (tests/taj_occy_kirra_stack.rs):
