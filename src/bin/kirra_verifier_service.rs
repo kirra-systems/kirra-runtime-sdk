@@ -945,7 +945,9 @@ async fn handle_audit_rotate_key(
                 (StatusCode::SERVICE_UNAVAILABLE,
                  Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
             }
-            Err(DurableWriteError::Db(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
+            // NonceReplay cannot arise here (key rotation never touches the nonce
+            // table); fold it into the generic server-error arm for exhaustiveness.
+            Err(DurableWriteError::Db(_) | DurableWriteError::NonceReplay) => (StatusCode::INTERNAL_SERVER_ERROR,
                        Json(json!({ "error": "failed to record key rotation" }))).into_response(),
         },
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
@@ -1565,6 +1567,23 @@ async fn submit_federated_report(
 
     match store.save_federated_report_chained(&report, received_at_ms, held_epoch) {
         Ok(()) => Json(evaluation).into_response(),
+        Err(DurableWriteError::NonceReplay) => {
+            // H1: a replay raced past the `has_seen_federation_nonce` gate above and
+            // lost the durable single-use claim (PRIMARY KEY violation aborted the
+            // transaction — report NOT persisted, nonce NOT double-burned). Map it to
+            // the SAME clean rejection + audit as the gate path, not an opaque 500.
+            let event = json!({ "source_controller_id": report.source_controller_id,
+                                "nonce_hex": report.nonce_hex,
+                                "reason": "FEDERATION_NONCE_REPLAY" });
+            let _ = store.save_posture_event_chained(
+                "federation_gateway", "FEDERATION_REJECTED",
+                &event.to_string(), Some("nonce replay (concurrent)"), received_at_ms,
+            );
+            Json(ReportEvaluation {
+                accepted: false,
+                reason: "FEDERATED_NONCE_REPLAY".to_string(),
+            }).into_response()
+        }
         Err(DurableWriteError::Fenced(reason)) => {
             // Superseded between the request-path gate and this commit. Mirror
             // the gate: self-demote and reject fail-closed — the report was NOT

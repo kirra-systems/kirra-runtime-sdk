@@ -237,8 +237,25 @@ pub fn spawn_capture_writer() -> mpsc::Sender<CaptureRecord> {
             queue_bound = CAPTURE_QUEUE_BOUND, path = %sink_path,
             "capture writer task started"
         );
+        // H2: durability. Write each record atomically, then `sync_data()` once the
+        // queue is momentarily drained (coalesced fsync per burst — not per record,
+        // which would be needlessly heavy for best-effort training data). This bounds
+        // the lost-tail-on-crash window to the in-flight burst while keeping the hot
+        // producer path wait-free (producers only `try_send`). The final burst before
+        // channel close is synced too, since `try_recv` drains all buffered records
+        // before returning `Disconnected`.
         while let Some(rec) = rx.blocking_recv() {
-            write_one_capture(&mut sink, &rec);
+            let mut wrote = write_one_capture(&mut sink, &rec);
+            // Drain any immediately-available records (try_recv Err = Empty/Disconnected)
+            // before syncing, so the fsync is coalesced per burst.
+            while let Ok(rec) = rx.try_recv() {
+                wrote |= write_one_capture(&mut sink, &rec);
+            }
+            if wrote {
+                if let Err(e) = sink.sync_data() {
+                    tracing::error!(error = %e, "capture writer: fsync (sync_data) failed");
+                }
+            }
         }
         tracing::info!("capture writer task exiting (channel closed)");
     });
@@ -246,16 +263,26 @@ pub fn spawn_capture_writer() -> mpsc::Sender<CaptureRecord> {
 }
 
 /// Single-record write — JSONL line append. The only place serialization + I/O
-/// for capture run (off the verdict path).
-fn write_one_capture(sink: &mut std::fs::File, rec: &CaptureRecord) {
+/// for capture run (off the verdict path). Returns `true` if a record was written
+/// (so the caller knows a deferred `sync_data` is pending).
+///
+/// H2: the line and its terminating `\n` are written in ONE `write_all` (not a
+/// `writeln!`, which can issue body and newline as separate `write(2)` calls) so a
+/// crash can never leave a torn final JSONL line that breaks downstream parsing.
+fn write_one_capture(sink: &mut std::fs::File, rec: &CaptureRecord) -> bool {
     match serde_json::to_string(rec) {
-        Ok(line) => {
-            if let Err(e) = writeln!(sink, "{line}") {
+        Ok(mut line) => {
+            line.push('\n');
+            if let Err(e) = sink.write_all(line.as_bytes()) {
                 tracing::error!(error = %e, "capture writer: JSONL append failed; record dropped");
+                false
+            } else {
+                true
             }
         }
         Err(e) => {
             tracing::error!(error = %e, "capture writer: record serialize failed; dropped");
+            false
         }
     }
 }

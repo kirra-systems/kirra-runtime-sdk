@@ -153,6 +153,12 @@ pub enum FenceError {
 #[derive(Debug)]
 pub enum DurableWriteError {
     Fenced(FenceError),
+    /// H1: the federation nonce was already burned — a replay that raced past the
+    /// request-path `has_seen_federation_nonce` check and lost the durable
+    /// single-use claim (the `nonce_hex PRIMARY KEY` UNIQUE violation aborted the
+    /// transaction). Distinct from `Db` so the handler maps it to a clean
+    /// `FEDERATED_NONCE_REPLAY` rejection (+ audit), NOT an opaque HTTP 500.
+    NonceReplay,
     Db(rusqlite::Error),
 }
 
@@ -178,12 +184,32 @@ impl std::fmt::Display for DurableWriteError {
             DurableWriteError::Fenced(FenceError::EpochUnreadable) => {
                 write!(f, "durable write fenced: HA epoch unreadable (fail-closed)")
             }
+            DurableWriteError::NonceReplay => {
+                write!(f, "durable write rejected: federation nonce already burned (replay)")
+            }
             DurableWriteError::Db(e) => write!(f, "durable write failed: {e}"),
         }
     }
 }
 
 impl std::error::Error for DurableWriteError {}
+
+/// Retention horizon for burned federation nonces (review M2). Far larger than
+/// `FEDERATION_REPLAY_WINDOW_MS` (5 s) so a pruned nonce can never reopen a replay
+/// slot — a report bearing an aged nonce fails the freshness gate on its fixed,
+/// signed `issued_at_ms` regardless of the nonce row. 1 hour absorbs clock skew.
+const FEDERATION_NONCE_RETENTION_MS: i64 = 3_600_000;
+
+/// True iff a rusqlite error is a UNIQUE / PRIMARY KEY constraint violation. Used
+/// (H1) to map a raced federation-nonce double-INSERT — the durable single-use
+/// claim losing to a concurrent replay — onto `DurableWriteError::NonceReplay`.
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
 
 pub struct VerifierStore {
     /// Hot/read connection — `synchronous=NORMAL`. Carries the verdict-adjacent
@@ -1753,11 +1779,24 @@ impl VerifierStore {
             ],
         )?;
 
-        tx.execute(
+        // H1 — AUTHORITATIVE single-use nonce claim. This MUST stay a plain `INSERT`
+        // (never `INSERT OR IGNORE`): the `nonce_hex PRIMARY KEY` UNIQUE violation is
+        // what atomically rejects a concurrent replay that raced past the request-path
+        // `has_seen_federation_nonce` check. `OR IGNORE` would let the report row above
+        // commit while silently no-op-ing the burn → DOUBLE-ACCEPT. The violation is
+        // surfaced as the distinct `NonceReplay` (not a generic Db error) so the caller
+        // returns a clean replay rejection + audit instead of an opaque 500.
+        if let Err(e) = tx.execute(
             "INSERT INTO federation_report_nonces (nonce_hex, source_controller_id, seen_at_ms)
              VALUES (?1, ?2, ?3)",
             params![report.nonce_hex, report.source_controller_id, received_at_ms as i64],
-        )?;
+        ) {
+            if is_unique_violation(&e) {
+                // tx drops here → the report INSERT above is rolled back atomically.
+                return Err(DurableWriteError::NonceReplay);
+            }
+            return Err(DurableWriteError::Db(e));
+        }
 
         let audit = serde_json::json!({
             "source_controller_id": report.source_controller_id,
@@ -1774,6 +1813,20 @@ impl VerifierStore {
             &audit.to_string(),
             received_at_ms as i64,
             signing_key.as_ref(),
+        )?;
+
+        // Bounded retention (review M2): the nonce table is the durable anti-replay
+        // set, but it only ever grew (rising disk + fsync cost). A nonce aged past
+        // the retention horizon can NEVER reopen a replay slot — a report bearing it
+        // carries a FIXED, signed `issued_at_ms`, so a replay fails the freshness
+        // gate (`FEDERATION_REPLAY_WINDOW_MS`) regardless of whether the nonce row
+        // still exists. The horizon is set FAR above the freshness window to absorb
+        // clock skew; we never delete a nonce that could still be inside any
+        // plausible replay window. Pruned in the same accept transaction.
+        let cutoff = (received_at_ms as i64).saturating_sub(FEDERATION_NONCE_RETENTION_MS);
+        tx.execute(
+            "DELETE FROM federation_report_nonces WHERE seen_at_ms < ?1",
+            params![cutoff],
         )?;
 
         tx.commit()?;
@@ -4165,6 +4218,46 @@ mod durability_tests {
         // #79: held == durable epoch (1) → the fence admits the legitimate write.
         s.save_federated_report_chained(&report("aa"), 2_000, 1).unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
+    }
+
+    /// H1: a second commit bearing the SAME nonce maps the PRIMARY KEY violation to
+    /// `NonceReplay` (a clean replay rejection), not an opaque Db error, and rolls
+    /// back atomically so no second report row is persisted. This is the durable
+    /// single-use claim that closes the check-then-act race in the submit handler.
+    #[test]
+    fn duplicate_nonce_chain_returns_nonce_replay_and_rolls_back() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("dup"), 2_000, 1).unwrap();
+
+        let second = s.save_federated_report_chained(&report("dup"), 2_001, 1);
+        assert!(
+            matches!(second, Err(DurableWriteError::NonceReplay)),
+            "a duplicate nonce must surface as NonceReplay, got {second:?}"
+        );
+        let count: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "the replayed report must NOT have been persisted (atomic rollback)");
+    }
+
+    /// M2: accepting a report prunes nonces older than the retention horizon, so the
+    /// anti-replay table stays bounded. Pruning an aged nonce is safe — a replay of
+    /// its report fails the freshness gate on its fixed signed issued_at_ms — this
+    /// test only asserts the bound is enforced.
+    #[test]
+    fn aged_nonces_are_pruned_on_accept() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("old"), 2_000, 1).unwrap();
+        assert!(s.has_seen_federation_nonce("old").unwrap());
+
+        // A later accept whose received_at is past the retention horizon over "old".
+        s.save_federated_report_chained(&report("new"), 2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1, 1).unwrap();
+        assert!(!s.has_seen_federation_nonce("old").unwrap(),
+            "an aged nonce must be pruned once an accept lands past the retention horizon");
+        assert!(s.has_seen_federation_nonce("new").unwrap(), "the fresh nonce stays");
     }
 
     /// EPOCH NON-REGRESSION (the fence-correctness core of #74): a claim
