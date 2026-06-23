@@ -798,7 +798,13 @@ mod tests {
         let traj = vec![tp(10.0, 0.0), tp(12.0, 0.25), tp(14.0, 0.5)];
         let obj = |vmag: f64, vx: f64| PerceivedObject {
             id: 1,
-            pos: Point { x_m: 22.0, y_m: 3.0 },
+            // In the ego's path (within the checker's longitudinal footprint-overlap
+            // band, 2.5 m) so a STATIC lead is a real longitudinal conflict, yet
+            // beyond the lateral side-gap (~1.75 m) so a RECEDING lead — pulling away
+            // → no longitudinal threat — is admitted. (Post the §4 RSS-conjunction
+            // gating: an object 3 m aside is correctly passable, so velocity, not
+            // mere presence, must drive the verdict here.)
+            pos: Point { x_m: 22.0, y_m: 2.0 },
             velocity_mps: vmag,
             heading_rad: 0.0,
             vel: Point { x_m: vx, y_m: 0.0 },
