@@ -480,3 +480,76 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
          NOT Accept-at-30. Before H2 + M1 reconciliation this case silently passed \
          at 35 m/s vehicle max. Got: {verdict:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Limited-visibility / occlusion bound (RSS Rule 4)
+// ---------------------------------------------------------------------------
+
+use kirra_ros2_adapter::validation::validate_trajectory_slow_capped;
+
+/// A decel-to-stop straight trajectory: starts at `v0`, brakes at `decel` to 0,
+/// then holds. Stays at y=0 from x=5 (inside the corridor).
+fn decel_to_stop_trajectory(v0: f64, decel: f64, dt: f64, n: usize) -> Vec<TrajectoryPoint> {
+    let mut v = v0;
+    let mut x = 5.0;
+    (0..n)
+        .map(|i| {
+            let p = TrajectoryPoint {
+                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: v,
+                time_from_start_s: i as f64 * dt,
+            };
+            x += v * dt;
+            v = (v - decel * dt).max(0.0);
+            p
+        })
+        .collect()
+}
+
+#[test]
+fn occlusion_rejects_a_trajectory_that_outruns_assured_clear_distance() {
+    // 10 m/s for 2 s into only 5 m of assured-clear distance: the ego could never
+    // stop within what it can see → RSS Rule 4 refuses it (MRCFallback).
+    let trajectory = straight_trajectory(20, 10.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0),
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "10 m/s into 5 m of visibility outruns the assured clear distance; got {verdict:?}");
+}
+
+#[test]
+fn occlusion_bound_is_gated_off_when_no_visibility_is_supplied() {
+    // The SAME trajectory with no visibility input is unaffected by the occlusion
+    // pass (it Clamps to the ODD cap on its own merits, but is NOT MRC'd for occlusion).
+    let trajectory = straight_trajectory(20, 10.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None,
+    );
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "with no visibility input the occlusion bound is a no-op; got {verdict:?}");
+}
+
+#[test]
+fn occlusion_admits_a_decel_to_stop_within_visibility() {
+    // A 3 m/s trajectory that brakes to a stop within ~3 m, against 20 m of visibility:
+    // it always could stop within what it sees → admitted.
+    let trajectory = decel_to_stop_trajectory(3.0, 1.5, 0.1, 30);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0),
+    );
+    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a decel-to-stop within the assured clear distance is admissible; got {verdict:?}");
+}
