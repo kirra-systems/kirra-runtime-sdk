@@ -47,7 +47,7 @@ fn left_turn(r: f64, half: f64) -> LaneGraph {
         right_line: line,
         heading_rad: std::f64::consts::FRAC_PI_4,
         edges: vec![LaneEdge::Successor { to: 3 }],
-    };
+        control: None,    };
     let exit = Lane {
         id: 3,
         centerline: vec![Point { x_m: 20.0 + r, y_m: r }, Point { x_m: 20.0 + r, y_m: r + 20.0 }],
@@ -56,6 +56,7 @@ fn left_turn(r: f64, half: f64) -> LaneGraph {
         right_line: line,
         heading_rad: std::f64::consts::FRAC_PI_2,
         edges: Vec::new(),
+        control: None,
     };
     LaneGraph::new()
         .with_lane(

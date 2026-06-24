@@ -64,6 +64,19 @@ pub enum LaneEdge {
     RightNeighbor { to: u64 },
 }
 
+/// A regulatory control the ego faces at the **end** of a lane — the static sign at the
+/// junction approach, the stop line being the lane's terminus. (A Lanelet2 `traffic_sign` /
+/// `right_of_way` regulatory element.) Dynamic signals — a traffic light's red/green state —
+/// are deliberately NOT modeled here: they need a live perception / V2X state source, a
+/// tracked follow-up. Maps to a [`crate::behavior::TrafficControl`] at the loop boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneControl {
+    /// STOP sign (MUTCD R1-1): full stop at the line, then proceed.
+    Stop,
+    /// YIELD / give-way (R1-2): slow, prepared to stop.
+    Yield,
+}
+
 /// One lane: a centerline polyline, a typed boundary on each side, and its
 /// connectivity. The boundary `LineType`s carry the crossing rules
 /// ([`LaneBoundary::may_cross`]) that gate Occy's lateral maneuvers; the
@@ -93,6 +106,11 @@ pub struct Lane {
     pub heading_rad: f64,
     /// Connectivity (successors + lateral neighbors).
     pub edges: Vec<LaneEdge>,
+    /// Optional regulatory control the ego faces at this lane's END (its junction
+    /// approach) — a STOP / YIELD sign whose stop line is the lane terminus. `None` = no
+    /// control (the common open lane). Derived into a [`crate::behavior::TrafficControl`]
+    /// at the loop boundary; a too-far / behind control is a no-op.
+    pub control: Option<LaneControl>,
 }
 
 impl Lane {
@@ -120,6 +138,7 @@ impl Lane {
             right_line,
             heading_rad: 0.0, // forward (+X) by default; oncoming lanes set π
             edges: Vec::new(),
+            control: None,
         }
     }
 
@@ -128,6 +147,21 @@ impl Lane {
     pub fn with_edge(mut self, edge: LaneEdge) -> Self {
         self.edges.push(edge);
         self
+    }
+
+    /// Builder: set the regulatory control the ego faces at this lane's end.
+    #[must_use]
+    pub fn with_control(mut self, control: LaneControl) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// World-frame x of this lane's terminus along travel — where a junction control's stop
+    /// line sits (the last centerline vertex). Straight-approach assumption, matching the
+    /// behavioral layer's longitudinal (ego-frame-x) stop-line model.
+    #[must_use]
+    pub fn stop_line_x(&self) -> f64 {
+        self.centerline.last().map_or(0.0, |p| p.x_m)
     }
 
     /// Builder: set the lane's travel direction (world heading, radians). Use `π`
@@ -1065,7 +1099,7 @@ mod tests {
             right_line: LineType::Solid,
             heading_rad: std::f64::consts::FRAC_PI_4, // mean of the turn; not load-bearing here
             edges: vec![LaneEdge::Successor { to: 3 }],
-        };
+            control: None,        };
         let exit = Lane {
             id: 3,
             centerline: vec![Point { x_m: 30.0, y_m: 10.0 }, Point { x_m: 30.0, y_m: 30.0 }],
@@ -1074,6 +1108,7 @@ mod tests {
             right_line: LineType::Solid,
             heading_rad: std::f64::consts::FRAC_PI_2, // north
             edges: Vec::new(),
+            control: None,
         };
         let g = LaneGraph::new()
             .with_lane(

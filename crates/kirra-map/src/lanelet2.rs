@@ -140,6 +140,9 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
             right_line: ways[&ll.right].line,
             heading_rad,
             edges: connectivity(ll, &raw_lanelets, &ways),
+            // Regulatory controls (stop / yield signs) are a separate Lanelet2
+            // regulatory-element parse — not wired from the .osm yet; None for now.
+            control: None,
         });
     }
 

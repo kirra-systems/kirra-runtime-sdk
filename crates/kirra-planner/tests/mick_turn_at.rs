@@ -33,7 +33,7 @@ fn arc(cx: f64, cy: f64, r: f64, start: f64, sweep: f64, n: usize) -> Vec<Point>
 
 fn lane(id: u64, centerline: Vec<Point>, heading_rad: f64, succ: Option<u64>) -> Lane {
     let edges = succ.map(|s| vec![LaneEdge::Successor { to: s }]).unwrap_or_default();
-    Lane { id, centerline, half_width_m: HALF, left_line: LineType::Solid, right_line: LineType::Solid, heading_rad, edges }
+    Lane { id, centerline, half_width_m: HALF, left_line: LineType::Solid, right_line: LineType::Solid, heading_rad, edges, control: None }
 }
 
 /// A junction with a LEFT and a RIGHT branch off a straight approach (no straight branch):
