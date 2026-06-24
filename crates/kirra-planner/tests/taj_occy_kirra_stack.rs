@@ -134,19 +134,18 @@ fn clear_corridor_nominal_stack_admits() {
 }
 
 #[test]
-fn obstacle_in_path_stack_fails_closed() {
-    // Same corridor but a blob dead ahead at ~4 m. Defense in depth, both layers
-    // active: Occy is now obstacle-aware so it brakes/HOLDs short of the object
-    // (a controlled stop, not driving in), AND KIRRA independently MRCs the
-    // lane-blocking object (it is the safety authority). The stack fails closed
-    // end-to-end regardless of which layer you trust.
+fn obstacle_in_path_stack_admits_a_controlled_stop_behind_it() {
+    // A blob dead ahead at ~4 m. Occy is obstacle-aware → it brakes/HOLDs to a controlled stop a
+    // safe distance behind it (not driving in), and — with the §4 RSS-conjunction fix — KIRRA now
+    // ADMITS that safe same-lane stop instead of spuriously MRC'ing it. A vehicle halting behind a
+    // stopped hazard is the *correct*, admissible outcome; the stack still fails closed on genuine
+    // danger (see `lockedout_posture_flows_through_stack` and the driving-into checker test).
     let scan = corridor_scan(5.0, Some((4.0, 0.12)));
     let (_kind, verdict) = run_stack(&scan, 2.0, 6.0, FleetPosture::Nominal);
 
-    assert_eq!(
-        verdict,
-        TrajectoryVerdict::MRCFallback,
-        "lane-blocking hazard → KIRRA stops the plan, got {verdict:?}"
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the controlled stop behind the lane-blocking hazard is admitted, got {verdict:?}"
     );
 }
 

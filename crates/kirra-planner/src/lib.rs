@@ -2305,30 +2305,36 @@ mod tests {
     }
 
     #[test]
-    fn checker_mrcs_blocked_lane_despite_stop_short() {
-        // INDEPENDENCE: a dead-center object blocks the lane — even though Occy now
-        // proposes a controlled stop short of it (good behavior), KIRRA is the
-        // authority and MRCs the blocked lane (lateral RSS: a same-lane forward
-        // object can't be cleared). Obstacle-awareness = the planner PROPOSING
-        // safety, never overriding the checker.
+    fn checker_admits_a_safe_stop_behind_but_mrcs_driving_into_a_stopped_object() {
+        // A dead-center stopped object. The §4 RSS-conjunction fix: a controlled stop a safe
+        // distance BEHIND it (a stopped queue) is now ADMITTED — the lateral side-RSS no longer
+        // spuriously MRCs a longitudinally-safe, laterally-stationary lead. But KIRRA remains the
+        // authority: a trajectory that drives INTO the object at speed (longitudinally unsafe) is
+        // still MRC'd. The planner proposes safety; the checker bounds genuine danger.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [obj_at(30.0, 0.0)];
+        let cfg = VehicleConfig::default_urban();
+
+        // Occy's controlled stop short of the object → now admitted (safe same-lane stop).
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
+        let safe = validate_trajectory_slow(&out.trajectory, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert!(
+            matches!(safe, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "a controlled stop a safe distance behind a stopped object is admitted, got {safe:?}"
+        );
 
-        let verdict = validate_trajectory_slow(
-            &out.trajectory,
-            &corridor,
-            &objs,
-            &VehicleConfig::default_urban(),
-            None,
-            FleetPosture::Nominal,
-        );
-        assert_eq!(
-            verdict,
-            TrajectoryVerdict::MRCFallback,
-            "checker MRCs a lane-blocking object regardless of the proposal, got {verdict:?}"
-        );
+        // A trajectory barreling INTO the object at speed (way inside the longitudinal RSS
+        // distance) is still MRC'd — independence preserved.
+        let into: Vec<TrajectoryPoint> = (0..5)
+            .map(|i| TrajectoryPoint {
+                pose: Pose { x_m: 26.0 + i as f64, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 8.0,
+                time_from_start_s: i as f64 * 0.1,
+            })
+            .collect();
+        let danger = validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert_eq!(danger, TrajectoryVerdict::MRCFallback, "driving into the object at speed is MRC'd, got {danger:?}");
     }
 
     #[test]

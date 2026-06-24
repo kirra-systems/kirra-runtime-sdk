@@ -659,3 +659,85 @@ fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "with no predicted modes the predictive pass is a no-op; got {verdict:?}");
 }
+
+// ---------------------------------------------------------------------------
+// RSS conjunction (§4): a safe stationary queue is admitted; genuine danger
+// (driving in, or a lateral cut-in) is still rejected. A deterministic SWEEP —
+// property-style coverage of the invariant that the lateral side-RSS only fires
+// on an actual side-collision possibility (abreast OR lateral closing).
+// ---------------------------------------------------------------------------
+
+fn held_ego(x_m: f64) -> Vec<TrajectoryPoint> {
+    (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m, y_m: 0.0, heading_rad: 0.0 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect()
+}
+
+fn stopped_object(x_m: f64, y_m: f64) -> PerceivedObject {
+    PerceivedObject { id: 1, pos: Point { x_m, y_m }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+}
+
+#[test]
+fn rss_conjunction_admits_a_safe_stationary_queue() {
+    // INVARIANT (the fix): a STOPPED ego a safe longitudinal distance behind a STOPPED
+    // dead-center object — a stationary queue — is ADMITTED across the whole gap range, not
+    // spuriously MRC'd by the lateral side-RSS (the §4 over-rejection of a safe same-lane stop).
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0);
+    for gap_dm in 20..=80 {
+        let gap = gap_dm as f64 / 10.0; // 2.0 .. 8.0 m, 0.1 m steps
+        let objs = [stopped_object(10.0 + gap, 0.0)];
+        let v = validate_trajectory_slow(&ego, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert_ne!(v, TrajectoryVerdict::MRCFallback, "a stopped queue at gap {gap} m must be admitted, got {v:?}");
+    }
+}
+
+#[test]
+fn rss_conjunction_still_rejects_driving_into_a_stopped_object() {
+    // INVARIANT (safety preserved): an ego at SPEED inside the longitudinal RSS distance of a
+    // stopped object — driving into it — is still MRC'd, across a range of speeds.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let objs = [stopped_object(30.0, 0.0)];
+    for speed in [3.0, 5.0, 7.0, 9.0] {
+        let into: Vec<TrajectoryPoint> = (0..3)
+            .map(|i| TrajectoryPoint {
+                pose: Pose { x_m: 27.0 + (i as f64), y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: speed,
+                time_from_start_s: (i as f64) * 0.1,
+            })
+            .collect();
+        let v = validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert_eq!(v, TrajectoryVerdict::MRCFallback, "driving into a stopped object at {speed} m/s must be MRC'd, got {v:?}");
+    }
+}
+
+#[test]
+fn rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance() {
+    // INVARIANT (cut-in defense preserved): even with the ego HELD and the object at a SAFE
+    // longitudinal distance (so the longitudinal check alone would pass), an object CLOSING
+    // LATERALLY (a cut-in: nonzero lateral velocity) within the side-gap is still MRC'd — the
+    // fix narrows the lateral check to a genuine side-collision possibility, it does not remove
+    // it. Sweep the lateral approach speed.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0);
+    for lat_speed in [1.0, 2.0, 4.0] {
+        // Object 3 m ahead (longitudinally safe for a stopped ego), 0.3 m to the side, heading
+        // across the ego (lateral velocity component) → a cut-in.
+        let cut_in = PerceivedObject {
+            id: 2,
+            pos: Point { x_m: 13.0, y_m: 0.3 },
+            velocity_mps: lat_speed,
+            heading_rad: std::f64::consts::FRAC_PI_2,
+            vel: Point { x_m: 0.0, y_m: lat_speed },
+        };
+        let v = validate_trajectory_slow(&ego, &corridor, &[cut_in], &cfg, None, FleetPosture::Nominal);
+        assert_eq!(v, TrajectoryVerdict::MRCFallback, "a lateral cut-in at {lat_speed} m/s must be MRC'd, got {v:?}");
+    }
+}
