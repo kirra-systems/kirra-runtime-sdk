@@ -237,6 +237,28 @@ pub fn localization_trusted(integrity: &FrameIntegrity, cfg: &FrameIntegrityCfg)
 
 parko's existing `test_loc_*` tests become adapter tests over the unified resolver (same boundary cases; `Degraded` band now asserts `localization_trusted == false`, which is the existing 0.10 m semantics preserved). `gate_commit_zone_scene` / `gate_water_scene` and their tests are **unchanged**.
 
+**As-built (S-FI1c) — unified at the parko-kirra boundary, NOT via parko-core re-export.**
+Discovery: `parko-core` deliberately has **no** `kirra-core` dependency (the manifest
+keeps the ML inference pipeline independent of the safety-kernel build); only
+`parko-kirra` depends on `kirra-core`, and the localization type is used
+*exclusively* there. So rather than couple `parko-core` → `kirra-core` (the literal
+re-export plan above), the unification was done at the consumer:
+- `parko-core/src/localization.rs`: **removed** `LocalizationIntegrity` /
+  `LocalizationCfg` / `localization_trusted` (+ their `test_loc_*`); **kept** only
+  the bool-driven `gate_commit_zone_scene` / `gate_water_scene` (+ `test_gate_*`).
+  `parko-core` stays `kirra-core`-free.
+- `parko-kirra` wrappers (`evaluate_scene_with_commit_zone_localized`,
+  `evaluate_scene_with_water_localized`) now take `&FrameIntegrity` /
+  `&FrameIntegrityCfg` and compute the **strict** view inline:
+  `matches!(resolve_frame_trust(loc, cfg), FrameTrust::Trusted)` → the bool the
+  gates already consume. Behaviour is identical to the old 0.10 m gate (ε in the
+  0.10–0.30 Degraded band reads as untrusted for these discrete map-anchored
+  vetoes), so no parko behaviour change; the `test_loc_*` boundary coverage now
+  lives in kirra-core's `frame_integrity` tests, and the strict-view path is
+  exercised end-to-end by the parko-kirra wrapper tests.
+- Net: one canonical type/resolver (kirra-core), no drift, `parko-core`
+  independence preserved. (Owner-approved deviation, 2026-06-24.)
+
 ---
 
 ## 6. Posture wiring (`src/posture_engine_v2.rs`)
@@ -339,7 +361,7 @@ stage close.
 
 S-FI1a: ✅ DONE — `frame_integrity` module + types + resolver + tests (kirra-core, no call-site change).
 S-FI1b: ✅ DONE — gated `validate_trajectory_containment_checked` + trust-asserting shim; `DenyCode::FrameIntegrityUntrusted` (appended last); forced matches discharged (`reason()` + display test, governor-service `deny_code_num` → 11, wire-client `ClientDenyCode` mirror + drift test); 3 new containment tests (untrusted-refuses, degraded-stricter-than-trusted, shim==checked). Workspace compiles (default features); call sites untouched.
-S-FI1c: parko re-point.
+S-FI1c: ✅ DONE — unified at the parko-kirra boundary (parko-core stays kirra-core-free; type+resolver removed from parko-core, wrappers take `&FrameIntegrity` with a strict `Trusted`-only view). parko-core 198 + parko-kirra 148 tests pass; parko clippy + root workspace check clean.
 S-FI1d: posture wiring + hysteresis escalation.
 S-FI1e: four call sites + integrator-contract surfacing; remove shim.
 S-FI1f: safety-case/AoU updates; ADR-0016 to Accepted.

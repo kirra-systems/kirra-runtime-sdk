@@ -79,10 +79,7 @@ pub use impact::{
     ImpactEvidence, ImpactLatch, OperatorClearanceGrant, VanishedCfg, VanishedObjectDetector,
     VehicleClass, DEFAULT_MAX_GRANT_AGE_MS,
 };
-pub use localization::{
-    gate_commit_zone_scene, gate_water_scene, localization_trusted, LocalizationCfg,
-    LocalizationIntegrity,
-};
+pub use localization::{gate_commit_zone_scene, gate_water_scene};
 pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 pub use water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};
 pub use scheduler::{DegradationThresholds, InferenceLoop};

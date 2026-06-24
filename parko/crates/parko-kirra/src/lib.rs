@@ -53,12 +53,13 @@ use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
     opposite_direction_safe_distance, RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
 };
+use kirra_core::frame_integrity::{resolve_frame_trust, FrameIntegrity, FrameIntegrityCfg, FrameTrust};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::{
-    commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, localization_trusted,
-    water_untraversable_veto, AgentScene, ClearanceLoop, CommitZoneCfg, CommitZoneScene,
-    ImpactEvidence, ImpactLatch, LocalizationCfg, LocalizationIntegrity, OcclusionScene, RssParams,
-    RssState, VanishedCfg, VanishedObjectDetector, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
+    commit_zone_blocked, gate_commit_zone_scene, gate_water_scene, water_untraversable_veto,
+    AgentScene, ClearanceLoop, CommitZoneCfg, CommitZoneScene, ImpactEvidence, ImpactLatch,
+    OcclusionScene, RssParams, RssState, VanishedCfg, VanishedObjectDetector, WaterScene,
+    WaterVetoConfig, MAX_RSS_AGENTS,
 };
 
 pub mod angular_bound;
@@ -847,11 +848,15 @@ impl KirraGovernor {
         scene: &AgentScene,
         commit_zone: &CommitZoneScene,
         cz_cfg: &CommitZoneCfg,
-        localization: &LocalizationIntegrity,
-        loc_cfg: &LocalizationCfg,
+        localization: &FrameIntegrity,
+        loc_cfg: &FrameIntegrityCfg,
         params: &RssParams,
     ) -> EnforcementAction {
-        let trusted = localization_trusted(localization, loc_cfg);
+        // STRICT view: a map-anchored commit-zone location may only be trusted
+        // under full `Trusted` (≤ 0.10 m). The `Degraded` fallback band is good
+        // enough for graduated containment but NOT for trusting a mapped zone's
+        // placement, so anything short of `Trusted` gates the scene fail-closed.
+        let trusted = matches!(resolve_frame_trust(localization, loc_cfg), FrameTrust::Trusted);
         let gated = gate_commit_zone_scene(*commit_zone, trusted);
         self.evaluate_scene_with_commit_zone(
             proposed, previous, delta_time_s, posture, scene, &gated, cz_cfg, params,
@@ -875,11 +880,13 @@ impl KirraGovernor {
         scene: &AgentScene,
         water: &WaterScene,
         water_cfg: &WaterVetoConfig,
-        localization: &LocalizationIntegrity,
-        loc_cfg: &LocalizationCfg,
+        localization: &FrameIntegrity,
+        loc_cfg: &FrameIntegrityCfg,
         params: &RssParams,
     ) -> EnforcementAction {
-        let trusted = localization_trusted(localization, loc_cfg);
+        // STRICT view (see commit-zone wrapper): a map-frame ford earn-back may
+        // only be trusted under full `Trusted`; the `Degraded` band gates it.
+        let trusted = matches!(resolve_frame_trust(localization, loc_cfg), FrameTrust::Trusted);
         let gated = gate_water_scene(*water, trusted);
         self.evaluate_scene_with_water(
             proposed, previous, delta_time_s, posture, scene, &gated, water_cfg, params,
@@ -1652,12 +1659,13 @@ mod scene_rss_tests {
     use super::{compute_occlusion_cap, compute_scene_rss, impact_evidence_with_vanished, KirraGovernor};
     use parko_core::commands::ControlCommand;
     use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
+    use kirra_core::frame_integrity::{FrameIntegrity, FrameIntegrityCfg, LocalizationChannel};
     use parko_core::{
         non_yielding_clearance, AgentScene, ClearanceLoop, ClearanceState, CommitZoneCfg,
-        CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence, ImpactLatch, LocalizationCfg,
-        LocalizationIntegrity, NonYieldingAgent, NonYieldingScene, OcclusionScene,
-        OperatorClearanceGrant, RssAgent, RssParams, RssState, TraversalEvidence, VanishedCfg,
-        VanishedObjectDetector, WaterScene, WaterVetoConfig, MAX_RSS_AGENTS,
+        CommitZoneMap, CommitZoneScene, ImpactCfg, ImpactEvidence, ImpactLatch, NonYieldingAgent,
+        NonYieldingScene, OcclusionScene, OperatorClearanceGrant, RssAgent, RssParams, RssState,
+        TraversalEvidence, VanishedCfg, VanishedObjectDetector, WaterScene, WaterVetoConfig,
+        MAX_RSS_AGENTS,
     };
 
     fn params() -> RssParams {
@@ -2276,19 +2284,21 @@ mod scene_rss_tests {
             zone_length_m: 30.0, proposed_stop_distance_m: None,
         };
         // Sanity: trusted localization → the confirmed zone passes through.
-        let trusted = LocalizationIntegrity::Reported { lateral_error_95_m: 0.05, age_ms: 50 };
+        let trusted = FrameIntegrity::Reported {
+            localization: LocalizationChannel { lateral_error_95_m: 0.05, age_ms: 50 },
+        };
         let ok = gov.evaluate_scene_with_commit_zone_localized(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
             &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
-            &trusted, &LocalizationCfg::default(), &params());
+            &trusted, &FrameIntegrityCfg::default(), &params());
         assert!(matches!(ok, EnforcementAction::Allow),
             "a confirmed zone under trusted localization must pass, got {ok:?}");
         // Untrusted (absent report) → scene degrades to Unknown → overridden.
-        let untrusted = LocalizationIntegrity::Unknown;
+        let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_commit_zone_localized(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
             &AgentScene::KnownEmpty, &confirmed, &CommitZoneCfg::default(),
-            &untrusted, &LocalizationCfg::default(), &params());
+            &untrusted, &FrameIntegrityCfg::default(), &params());
         assert!(!matches!(action, EnforcementAction::Allow),
             "untrusted localization must override a healthy commit zone → MRC, got {action:?}");
     }
@@ -2302,17 +2312,19 @@ mod scene_rss_tests {
         let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::MapKnownSafe };
         let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
         // Trusted → the mapped ford permits traversal.
-        let trusted = LocalizationIntegrity::Reported { lateral_error_95_m: 0.05, age_ms: 50 };
+        let trusted = FrameIntegrity::Reported {
+            localization: LocalizationChannel { lateral_error_95_m: 0.05, age_ms: 50 },
+        };
         let ok = gov.evaluate_scene_with_water_localized(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &trusted, &LocalizationCfg::default(), &params());
+            &AgentScene::KnownEmpty, &ford, &wcfg, &trusted, &FrameIntegrityCfg::default(), &params());
         assert!(matches!(ok, EnforcementAction::Allow),
             "a mapped ford under trusted localization must pass, got {ok:?}");
         // Untrusted → MapKnownSafe stripped → veto.
-        let untrusted = LocalizationIntegrity::Unknown;
+        let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_water_localized(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &LocalizationCfg::default(), &params());
+            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &FrameIntegrityCfg::default(), &params());
         assert!(!matches!(action, EnforcementAction::Allow),
             "untrusted localization must strip the MapKnownSafe ford → veto, got {action:?}");
     }
@@ -2325,10 +2337,10 @@ mod scene_rss_tests {
         gov.update_rss_state(RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX });
         let ford = WaterScene::EarnedTraversable { evidence: TraversalEvidence::OperatorAuthorized };
         let wcfg = WaterVetoConfig { max_exit_distance_m: 5.0, max_puddle_extent_m: 5.0 };
-        let untrusted = LocalizationIntegrity::Unknown;
+        let untrusted = FrameIntegrity::Unknown;
         let action = gov.evaluate_scene_with_water_localized(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal,
-            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &LocalizationCfg::default(), &params());
+            &AgentScene::KnownEmpty, &ford, &wcfg, &untrusted, &FrameIntegrityCfg::default(), &params());
         assert!(matches!(action, EnforcementAction::Allow),
             "operator authority must survive untrusted localization, got {action:?}");
     }
