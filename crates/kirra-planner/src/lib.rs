@@ -70,7 +70,7 @@ pub use mick::{
 /// seam). Pure + testable with a `MockModel`; a concrete `ModelClient` (local Gemma via
 /// Ollama, etc.) plugs in behind a feature/crate.
 pub mod mick_llm;
-pub use mick_llm::{build_prompt, LlmBrain, MockModel, ModelClient, ModelError};
+pub use mick_llm::{build_prompt, intent_schema, LlmBrain, MockModel, ModelClient, ModelError};
 
 pub mod learned;
 pub use learned::{LearnedPlanner, Teacher};

@@ -68,6 +68,43 @@ Intent:"
     )
 }
 
+/// The intent **JSON Schema** — the machine-readable form of the output contract that
+/// `build_prompt` states in prose and that [`MickIntent::from_llm_json`] parses. A backend
+/// that supports schema-constrained / grammar-constrained decoding (e.g. Ollama's `format`)
+/// passes this so the model can ONLY emit a JSON object whose `intent` is one of the known
+/// tags — eliminating the unknown-tag and non-JSON failure modes at the decoder, before a
+/// token is sampled, rather than catching them after the fact with a fail-closed HOLD.
+///
+/// Deliberately constrains the **tag + JSON validity**, not every per-variant field: it
+/// admits the union of the typed fields and requires only `intent`. The remaining checks —
+/// that `go_to` carries finite `x_m`/`y_m`, that a number is not `Inf`/`NaN`, etc. — stay
+/// with [`MickIntent::from_llm_json`], because a schema/grammar cannot express finiteness
+/// and the binding safety decision must remain in our fail-closed parse, never delegated to
+/// the model's decoder. So this is a strict improvement over plain `"json"` that can never
+/// regress: worst case it is exactly as permissive on fields, and strictly tighter on tags.
+///
+/// Source of truth: keep the `enum` below in lockstep with [`MickIntent::from_llm_json`]'s
+/// tags and `build_prompt`'s listed forms (the `intent_schema_lists_every_parseable_tag`
+/// test pins this).
+#[must_use]
+pub fn intent_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["go_to", "lane_change", "hold", "cruise", "overtake", "pull_over"]
+            },
+            "x_m": { "type": "number" },
+            "y_m": { "type": "number" },
+            "target_offset_m": { "type": "number" },
+            "target_speed_mps": { "type": "number" }
+        },
+        "required": ["intent"],
+        "additionalProperties": false
+    })
+}
+
 /// A [`MickBrain`] driven by any [`ModelClient`]: render the prompt, ask the model, parse
 /// the reply into a typed intent. Fail-closed at every step — a transport error or an
 /// unparseable / out-of-schema reply returns `Err`, on which the caller HOLDs.
@@ -144,6 +181,46 @@ mod tests {
         assert!(p.contains("ego_speed_mps") && p.contains("posture"), "prompt must embed the situation");
         // Few-shot worked examples are present (small models lean on them heavily).
         assert!(p.contains("Examples"), "prompt must carry few-shot examples");
+    }
+
+    #[test]
+    fn intent_schema_is_a_well_formed_object_schema_requiring_the_tag() {
+        let s = intent_schema();
+        assert_eq!(s["type"], "object", "the schema is an object schema");
+        assert_eq!(s["required"], serde_json::json!(["intent"]), "the intent tag is required");
+        assert_eq!(s["additionalProperties"], serde_json::json!(false), "no stray fields admitted");
+        // It must serialize as a JSON object (this is what Ollama's `format` receives).
+        assert!(serde_json::to_string(&s).is_ok(), "the schema serializes");
+    }
+
+    /// THE source-of-truth pin: every tag the schema constrains the model to MUST be one
+    /// the fail-closed parser accepts (with that tag's fields), and vice-versa — so the
+    /// decoder grammar and the typed parse can never drift apart.
+    #[test]
+    fn intent_schema_lists_every_parseable_tag() {
+        let s = intent_schema();
+        let enum_tags: Vec<String> = s["properties"]["intent"]["enum"]
+            .as_array()
+            .expect("intent.enum is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        // A minimal VALID object for each tag, and the typed intent it must parse to.
+        let cases = [
+            (r#"{"intent":"go_to","x_m":1.0,"y_m":2.0}"#, "go_to"),
+            (r#"{"intent":"lane_change","target_offset_m":3.5}"#, "lane_change"),
+            (r#"{"intent":"hold"}"#, "hold"),
+            (r#"{"intent":"cruise","target_speed_mps":5.0}"#, "cruise"),
+            (r#"{"intent":"overtake"}"#, "overtake"),
+            (r#"{"intent":"pull_over"}"#, "pull_over"),
+        ];
+        for (json, tag) in cases {
+            assert!(enum_tags.contains(&tag.to_string()), "schema enum must list {tag}");
+            assert!(MickIntent::from_llm_json(json).is_ok(), "parser must accept the schema-valid {tag}");
+        }
+        // No extra tags the parser would reject (the enum is exactly the parseable set).
+        assert_eq!(enum_tags.len(), cases.len(), "schema enum lists exactly the parseable tags");
     }
 
     #[test]
