@@ -82,6 +82,7 @@ fn lane_change_across_broken_divider_admits() {
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -133,6 +134,7 @@ fn lane_change_across_solid_divider_is_refused() {
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

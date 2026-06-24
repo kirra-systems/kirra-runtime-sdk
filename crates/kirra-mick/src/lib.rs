@@ -10,7 +10,8 @@
 //!
 //! let mut mick = LlmBrain::new(OllamaClient::new()); // reads KIRRA_OLLAMA_URL / KIRRA_MICK_MODEL
 //! let ctx = WorldContext { ego_speed_mps: 3.0, posture: "NOMINAL", goal_ahead_m: 40.0,
-//!     goal_left_m: 0.0, may_change_left: true, may_change_right: false, objects: Vec::new() };
+//!     goal_left_m: 0.0, may_change_left: true, may_change_right: false, objects: Vec::new(),
+//!     available_turns: Vec::new() };
 //! match mick.decide(&ctx) {
 //!     Ok(intent) => { /* Occy grounds it, KIRRA bounds it */ }
 //!     Err(_)     => { /* model unreachable / hallucinated → HOLD (fail-closed) */ }
@@ -141,6 +142,7 @@ mod tests {
             may_change_left: true,
             may_change_right: false,
             objects: Vec::new(),
+            available_turns: Vec::new(),
         }
     }
 

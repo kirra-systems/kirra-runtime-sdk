@@ -58,6 +58,9 @@ pub struct MickDecisionRecord {
     /// `cruise` requested speed, if applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_speed_mps: Option<f64>,
+    /// `turn_at` direction (`left` / `right` / `straight`), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_direction: Option<&'static str>,
 
     // ----- grounding (what Occy produced) -----
     /// `motion` | `safe_stop`.
@@ -91,6 +94,11 @@ impl MickDecisionRecord {
             MickIntent::Cruise { target_speed_mps } => ("cruise", None, None, None, Some(target_speed_mps)),
             MickIntent::Overtake => ("overtake", None, None, None, None),
             MickIntent::PullOver => ("pull_over", None, None, None, None),
+            MickIntent::TurnAt { .. } => ("turn_at", None, None, None, None),
+        };
+        let turn_direction = match *intent {
+            MickIntent::TurnAt { direction } => Some(direction.as_str()),
+            _ => None,
         };
 
         let proposal_kind = match plan.kind {
@@ -119,6 +127,7 @@ impl MickDecisionRecord {
             goal_x_m,
             goal_y_m,
             lane_offset_m,
+            turn_direction,
             target_speed_mps,
             proposal_kind,
             points: traj.len(),
@@ -217,18 +226,24 @@ mod tests {
     #[test]
     fn intent_kind_and_params_map_per_variant() {
         let plan = motion_plan();
-        let cases: [(MickIntent, &str); 6] = [
+        let cases: [(MickIntent, &str); 7] = [
             (MickIntent::GoTo { x_m: 20.0, y_m: -4.0 }, "go_to"),
             (MickIntent::LaneChange { target_offset_m: 3.5 }, "lane_change"),
             (MickIntent::Hold, "hold"),
             (MickIntent::Cruise { target_speed_mps: 5.0 }, "cruise"),
             (MickIntent::Overtake, "overtake"),
             (MickIntent::PullOver, "pull_over"),
+            (MickIntent::TurnAt { direction: crate::TurnDirection::Left }, "turn_at"),
         ];
         for (intent, kind) in cases {
             let r = MickDecisionRecord::new(0, 0, &intent, &plan, TrajectoryVerdict::Accept);
             assert_eq!(r.intent_kind, kind);
         }
+        // TurnAt carries its direction; non-turn intents leave it None.
+        let turn = MickDecisionRecord::new(0, 0, &MickIntent::TurnAt { direction: crate::TurnDirection::Right }, &plan, TrajectoryVerdict::Accept);
+        assert_eq!(turn.turn_direction, Some("right"));
+        let hold = MickDecisionRecord::new(0, 0, &MickIntent::Hold, &plan, TrajectoryVerdict::Accept);
+        assert_eq!(hold.turn_direction, None);
         // The one relevant parameter is carried; the others stay None.
         let goto = MickDecisionRecord::new(0, 0, &MickIntent::GoTo { x_m: 20.0, y_m: -4.0 }, &plan, TrajectoryVerdict::Accept);
         assert_eq!((goto.goal_x_m, goto.goal_y_m, goto.lane_offset_m, goto.target_speed_mps), (Some(20.0), Some(-4.0), None, None));

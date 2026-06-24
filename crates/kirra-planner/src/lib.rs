@@ -62,8 +62,8 @@ pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
 pub mod mick;
 pub use mick::{
     mick_drive_once, plan_for_intent, MickBrain, MickDriver, MickError, MickIntent, ObjectView,
-    ScriptedBrain, WorldContext, DEFAULT_DECIDE_INTERVAL_MS, DEFAULT_INTENT_STALENESS_MS,
-    MICK_MAX_OBJECTS,
+    ScriptedBrain, TurnDirection, WorldContext, DEFAULT_DECIDE_INTERVAL_MS,
+    DEFAULT_INTENT_STALENESS_MS, MICK_MAX_OBJECTS,
 };
 
 /// Mick's model-agnostic LLM brain (prompt render + reply parse behind the `MickBrain`
@@ -252,6 +252,15 @@ pub struct PlanInput<'a> {
     /// binds first (never drives past a hazard to finish parking), and KIRRA independently
     /// bounds the maneuver. `false` = byte-for-byte prior behavior.
     pub request_pull_over: bool,
+    /// **Lane graph** for junction routing, if available — the substrate Mick's `TurnAt`
+    /// intent grounds against. When `Some`, `plan_for_intent` can resolve the ego lane from
+    /// its pose, pick the direction's turn branch (successor by heading), route through it,
+    /// and follow the materialized route corridor (`LaneGraph::route_corridor`) through the
+    /// turn. `None` = no junction routing (a `TurnAt` intent then fails closed to HOLD), and
+    /// byte-for-byte prior behavior for every other intent. The planner's own corridor-
+    /// following / containment is unchanged; this only supplies the route corridor a turn
+    /// needs, which KIRRA bounds exactly as it bounds any corridor.
+    pub lane_graph: Option<&'a LaneGraph>,
 }
 
 /// Intent label on a proposal.
@@ -1644,6 +1653,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -1720,6 +1730,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -1868,6 +1879,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -2240,6 +2252,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -2490,6 +2503,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -2603,6 +2617,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -3003,6 +3018,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 

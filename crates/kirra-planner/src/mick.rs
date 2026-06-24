@@ -16,7 +16,44 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{FleetPosture, Goal, PlanInput, PlanOutput, Planner, Pose};
+use crate::{FleetPosture, Goal, LaneGraph, PlanInput, PlanOutput, Planner, Pose, MAX_ROUTE_LANES};
+use kirra_core::corridor::Point as MapPoint;
+
+/// Which way a [`MickIntent::TurnAt`] heads at the next junction, relative to the ego
+/// lane's travel direction. Resolved to a successor lane by heading at grounding time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDirection {
+    /// A left turn (the successor whose heading rotates ≈ +90°).
+    Left,
+    /// A right turn (≈ −90°).
+    Right,
+    /// Continue straight through the junction (≈ 0°).
+    Straight,
+}
+
+impl TurnDirection {
+    /// The wire / capture token (`left` / `right` / `straight`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TurnDirection::Left => "left",
+            TurnDirection::Right => "right",
+            TurnDirection::Straight => "straight",
+        }
+    }
+
+    /// Does a successor whose heading differs from the ego lane by `delta_rad`
+    /// (wrapped to (−π, π]) count as this turn? A ±45° band splits straight from the
+    /// left/right quadrants (+ve = left / CCW).
+    fn matches(self, delta_rad: f64) -> bool {
+        const STRAIGHT_BAND: f64 = std::f64::consts::FRAC_PI_4; // ±45°
+        match self {
+            TurnDirection::Straight => delta_rad.abs() < STRAIGHT_BAND,
+            TurnDirection::Left => delta_rad >= STRAIGHT_BAND,
+            TurnDirection::Right => delta_rad <= -STRAIGHT_BAND,
+        }
+    }
+}
 
 /// A high-level intent the LLM brain proposes — the Mick → Occy contract. It maps
 /// ONLY to the goal / maneuver of a plan; it can express nothing about the world
@@ -49,6 +86,13 @@ pub enum MickIntent {
     /// decelerates to a controlled stop. Honored only if the rightward move is lawful and
     /// fits; a nearer hazard still stops the ego first, and KIRRA bounds the parked pose.
     PullOver,
+    /// Take the `direction` branch at the next junction. Honored only if a `lane_graph` is
+    /// supplied, the ego resolves to a lane, and that lane has a successor turning the
+    /// requested way; grounding routes through the branch and follows the materialized
+    /// route corridor through the turn. No graph / no such branch → fail-closed HOLD. KIRRA
+    /// bounds the route corridor exactly as it bounds any corridor (a too-tight turn is
+    /// refused).
+    TurnAt { direction: TurnDirection },
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -68,6 +112,8 @@ enum IntentJson {
     Overtake,
     #[serde(rename = "pull_over")]
     PullOver,
+    #[serde(rename = "turn_at")]
+    TurnAt { direction: String },
 }
 
 impl MickIntent {
@@ -93,6 +139,15 @@ impl MickIntent {
             IntentJson::Cruise { target_speed_mps } => MickIntent::Cruise { target_speed_mps },
             IntentJson::Overtake => MickIntent::Overtake,
             IntentJson::PullOver => MickIntent::PullOver,
+            IntentJson::TurnAt { direction } => {
+                let dir = match direction.as_str() {
+                    "left" => TurnDirection::Left,
+                    "right" => TurnDirection::Right,
+                    "straight" => TurnDirection::Straight,
+                    _ => return Err("MICK_UNKNOWN_TURN_DIRECTION"),
+                };
+                MickIntent::TurnAt { direction: dir }
+            }
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -108,6 +163,7 @@ impl MickIntent {
             MickIntent::Cruise { target_speed_mps } => target_speed_mps.is_finite(),
             MickIntent::Overtake => true,
             MickIntent::PullOver => true,
+            MickIntent::TurnAt { .. } => true,
         }
     }
 }
@@ -207,7 +263,86 @@ pub fn plan_for_intent(
             // stops the ego first, and KIRRA bounds the parked pose. Safe by construction.
             planner.plan(&PlanInput { request_pull_over: true, ..world.clone() })
         }
+        MickIntent::TurnAt { direction } => {
+            // Resolve the turn against the lane graph, FAIL-CLOSED at every step (no graph
+            // / ego off-map / no branch that way / unroutable / degenerate corridor → HOLD).
+            // On success, follow the materialized route corridor through the junction; KIRRA
+            // bounds it like any corridor (a too-tight turn is refused — proven in #526).
+            let Some(graph) = world.lane_graph else {
+                return PlanOutput::safe_stop(world.ego.pose);
+            };
+            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            let Some(ego_lane) = graph.lane_at(ego_pt) else {
+                return PlanOutput::safe_stop(world.ego.pose);
+            };
+            let Some(route) = turn_route(graph, ego_lane, direction) else {
+                return PlanOutput::safe_stop(world.ego.pose);
+            };
+            let Some(corridor) = graph.route_corridor(&route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
+            else {
+                return PlanOutput::safe_stop(world.ego.pose);
+            };
+            planner.plan(&PlanInput { map: &corridor, ..world.clone() })
+        }
     }
+}
+
+/// Map-server health stamped on a route corridor materialized for a `TurnAt`: fresh and
+/// confident, so the checker's corridor-health gate admits it (the geometry, not staleness,
+/// is what a turn is judged on).
+const ROUTE_CORRIDOR_CONFIDENCE: f32 = 0.95;
+const ROUTE_CORRIDOR_AGE_MS: u64 = 0;
+
+/// Pick the ego lane's successor that turns `direction` (successor-by-heading): the matching
+/// successor whose heading change from the ego lane is smallest in magnitude, ties by id for
+/// determinism. `None` if no successor turns that way.
+fn turn_target(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Option<u64> {
+    let ego = graph.lane(ego_lane)?;
+    let mut best: Option<(u64, f64)> = None; // (lane id, |delta heading|)
+    for s in ego.successors() {
+        let Some(succ) = graph.lane(s) else { continue };
+        let delta = wrap_pi(succ.heading_rad - ego.heading_rad);
+        if direction.matches(delta) {
+            let score = delta.abs();
+            // Smaller heading change wins; equal scores break by lower id (deterministic).
+            if best.is_none_or(|(bid, bscore)| score < bscore || (score == bscore && s < bid)) {
+                best = Some((s, score));
+            }
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// The route through a `direction` turn: the ego lane, the chosen turn branch, then the
+/// branch's forward successors (deterministic lowest-id, cycle-guarded, bounded by
+/// `MAX_ROUTE_LANES`) so the route corridor spans the approach, the turn, and the exit.
+/// `None` if no successor turns that way.
+fn turn_route(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Option<Vec<u64>> {
+    let branch = turn_target(graph, ego_lane, direction)?;
+    let mut route = vec![ego_lane, branch];
+    let mut cur = branch;
+    while route.len() < MAX_ROUTE_LANES {
+        match graph.lane(cur).and_then(|l| l.successors().min()) {
+            Some(next) if !route.contains(&next) => {
+                route.push(next);
+                cur = next;
+            }
+            _ => break,
+        }
+    }
+    Some(route)
+}
+
+/// Wrap an angle to `(−π, π]` (the heading-difference frame `TurnDirection::matches` reads).
+fn wrap_pi(a: f64) -> f64 {
+    use std::f64::consts::PI;
+    let mut x = a % (2.0 * PI);
+    if x > PI {
+        x -= 2.0 * PI;
+    } else if x <= -PI {
+        x += 2.0 * PI;
+    }
+    x
 }
 
 // ===========================================================================
@@ -272,6 +407,11 @@ pub struct WorldContext {
     pub may_change_right: bool,
     /// Nearby objects, ego-relative, NEAREST-FIRST, capped at [`MICK_MAX_OBJECTS`].
     pub objects: Vec<ObjectView>,
+    /// Turn branches available at the next junction (`left` / `right` / `straight`), derived
+    /// from the lane graph when one is supplied — so the brain only chooses `turn_at` where a
+    /// branch actually exists (a `turn_at` with no such branch fails closed to HOLD anyway).
+    /// Empty when there is no graph or the ego is off the mapped road.
+    pub available_turns: Vec<&'static str>,
 }
 
 impl WorldContext {
@@ -315,8 +455,28 @@ impl WorldContext {
                 world.lane_boundaries, 0.0, -MICK_LANE_PROBE_M,
             ),
             objects,
+            available_turns: available_turns(world),
         }
     }
+}
+
+/// The turn branches available to the ego at the next junction, derived from the
+/// `lane_graph` (empty if none / ego off-map). Uses the same successor-by-heading
+/// resolution `TurnAt` grounds with, so what the brain is offered is exactly what will
+/// ground.
+fn available_turns(world: &PlanInput<'_>) -> Vec<&'static str> {
+    let Some(graph) = world.lane_graph else {
+        return Vec::new();
+    };
+    let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+    let Some(ego_lane) = graph.lane_at(ego_pt) else {
+        return Vec::new();
+    };
+    [TurnDirection::Left, TurnDirection::Right, TurnDirection::Straight]
+        .into_iter()
+        .filter(|d| turn_target(graph, ego_lane, *d).is_some())
+        .map(TurnDirection::as_str)
+        .collect()
 }
 
 /// The pluggable System-2 brain behind Mick. Given the bounded [`WorldContext`], it
@@ -512,6 +672,7 @@ mod tests {
             target_speed_mps: None,
             request_overtake: false,
             request_pull_over: false,
+            lane_graph: None,
         }
     }
 
@@ -846,6 +1007,45 @@ mod tests {
     #[test]
     fn pull_over_llm_json_parses() {
         assert_eq!(MickIntent::from_llm_json(r#"{"intent":"pull_over"}"#).unwrap(), MickIntent::PullOver);
+    }
+
+    // ----- the TurnAt intent (junction turn) -----
+
+    #[test]
+    fn turn_at_llm_json_parses_each_direction_and_fails_closed_otherwise() {
+        let parse = |s| MickIntent::from_llm_json(s);
+        assert_eq!(parse(r#"{"intent":"turn_at","direction":"left"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Left });
+        assert_eq!(parse(r#"{"intent":"turn_at","direction":"right"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Right });
+        assert_eq!(parse(r#"{"intent":"turn_at","direction":"straight"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Straight });
+        assert!(parse(r#"{"intent":"turn_at","direction":"sideways"}"#).is_err(), "unknown direction fails closed");
+        assert!(parse(r#"{"intent":"turn_at"}"#).is_err(), "missing direction fails closed");
+    }
+
+    #[test]
+    fn world_context_lists_the_available_turns_from_the_graph() {
+        use std::f64::consts::FRAC_PI_2;
+        // Approach lane 1 (east) branches LEFT (succ 2, heading +π/2) and RIGHT (succ 4,
+        // heading −π/2); there is no straight branch.
+        let g = crate::LaneGraph::new()
+            .with_lane(
+                crate::Lane::straight(1, 0.0, 0.0, 20.0, 2.0, crate::LineType::Solid, crate::LineType::Solid)
+                    .with_edge(crate::LaneEdge::Successor { to: 2 })
+                    .with_edge(crate::LaneEdge::Successor { to: 4 }),
+            )
+            .with_lane(crate::Lane::straight(2, 10.0, 20.0, 40.0, 2.0, crate::LineType::Solid, crate::LineType::Solid).with_heading(FRAC_PI_2))
+            .with_lane(crate::Lane::straight(4, -10.0, 20.0, 40.0, 2.0, crate::LineType::Solid, crate::LineType::Solid).with_heading(-FRAC_PI_2));
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+
+        // Ego inside lane 1 → both turns surface; no straight branch.
+        let with_graph = PlanInput { map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let ctx = WorldContext::from_plan_input(&with_graph);
+        assert!(ctx.available_turns.contains(&"left"), "left branch surfaced: {:?}", ctx.available_turns);
+        assert!(ctx.available_turns.contains(&"right"), "right branch surfaced: {:?}", ctx.available_turns);
+        assert!(!ctx.available_turns.contains(&"straight"), "no straight branch: {:?}", ctx.available_turns);
+
+        // No graph → empty (the brain is offered no turns, and a TurnAt would HOLD anyway).
+        let no_graph = WorldContext::from_plan_input(&world(&corr, &[], &[]));
+        assert!(no_graph.available_turns.is_empty());
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----

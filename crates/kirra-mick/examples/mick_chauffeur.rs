@@ -47,6 +47,7 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     }
 }
 
