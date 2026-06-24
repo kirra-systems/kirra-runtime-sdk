@@ -61,7 +61,7 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 fn verdict(out: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {

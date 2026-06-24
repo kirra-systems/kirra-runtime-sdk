@@ -86,7 +86,7 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 fn kirra_admits(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> bool {

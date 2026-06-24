@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::behavior::TrafficControl;
+use crate::behavior::{SignalState, TrafficControl};
 use crate::{
     FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
     MAX_ROUTE_LANES,
@@ -374,16 +374,19 @@ const STOP_SATISFIED_SPEED_MPS: f64 = 0.3;
 const STOP_SATISFIED_DIST_M: f64 = 2.0;
 
 /// Derive the regulatory [`TrafficControl`]s the ego currently faces from the lane graph:
-/// the STOP / YIELD sign at the end of the ego's lane (its junction approach), mapped to the
-/// behavioral-layer control. Empty if there is no graph, the ego is off the mapped road, or
-/// its lane carries no control (fail-safe → nothing beyond what objects/posture impose).
+/// the STOP / YIELD sign or TRAFFIC LIGHT at the end of the ego's lane (its junction
+/// approach), mapped to the behavioral-layer control. Empty if there is no graph, the ego is
+/// off the mapped road, or its lane carries no control (fail-safe → nothing beyond what
+/// objects/posture impose).
 ///
 /// STOP is **stateless stop-and-go**: `satisfied` once the ego is essentially stopped just
 /// before the line (`< STOP_SATISFIED_SPEED_MPS` within `STOP_SATISFIED_DIST_M`), so it
 /// proceeds. This approximates the legal full-stop dwell without loop memory — in the closed
 /// loop the ego decelerates to the line then creeps across; a precisely-latched full-stop
 /// dwell is a tracked follow-up. KIRRA bounds the actual motion regardless. YIELD is exact
-/// (a speed cap at the line).
+/// (a speed cap at the line). A TRAFFIC LIGHT takes its live state from `world.signal_states`
+/// (keyed by the governed lane id), **fail-closed to red** when absent — the behavioral
+/// layer then holds on red / amber-dilemma and clears on green.
 fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
     let Some(graph) = world.lane_graph else {
         return Vec::new();
@@ -404,6 +407,16 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
                 && dist > 0.0
                 && dist < STOP_SATISFIED_DIST_M;
             TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
+        }
+        LaneControl::TrafficLight => {
+            // Live signal state for the governed (ego) lane — fail-closed to RED when the
+            // perception/V2X feed has no entry, so an unknown light HOLDS rather than runs it.
+            let state = world
+                .signal_states
+                .iter()
+                .find(|(id, _)| *id == lane_id)
+                .map_or(SignalState::Red, |(_, s)| *s);
+            TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
         }
     };
     vec![tc]
@@ -789,7 +802,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     fn stopped_car(x: f64) -> PerceivedObject {
@@ -1314,6 +1327,43 @@ mod tests {
             "and comes to a stop at the line (final v {})",
             plan.trajectory.last().unwrap().velocity_mps
         );
+    }
+
+    #[test]
+    fn a_traffic_light_takes_its_live_state_and_fails_closed_to_red() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = lane_with_control(LaneControl::TrafficLight);
+
+        // No signal feed → RED (fail-closed): an unknown light HOLDS.
+        let red_default = derived_controls_for(&g, ego_at(5.0, 2.0), &corr);
+        assert_eq!(red_default, vec![TrafficControl::TrafficLight { stop_line_x_m: 18.0, state: SignalState::Red }]);
+
+        // Live GREEN supplied for the ego's lane → the light passes through as green.
+        let green = [(1u64, SignalState::Green)];
+        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), signal_states: &green, ..world(&corr, &[], &[]) };
+        let mut rec = ControlRecorder { controls: Vec::new() };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+        assert_eq!(rec.controls, vec![TrafficControl::TrafficLight { stop_line_x_m: 18.0, state: SignalState::Green }]);
+    }
+
+    #[test]
+    fn the_planner_stops_on_red_and_drives_through_on_green() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = lane_with_control(LaneControl::TrafficLight);
+
+        // RED (absent state → red): decelerate to a stop at the line, not past it.
+        let w_red = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let red = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w_red);
+        let red_max_x = red.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+        assert!(red_max_x <= 18.5, "red light → stop at the line x=18, got max_x {red_max_x}");
+        assert!(red.trajectory.last().unwrap().velocity_mps < 0.5, "and comes to a stop");
+
+        // GREEN: drive through the line toward the goal.
+        let green = [(1u64, SignalState::Green)];
+        let w_green = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), signal_states: &green, ..world(&corr, &[], &[]) };
+        let go = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w_green);
+        let green_max_x = go.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+        assert!(green_max_x > 18.5, "green light → drive through the line, got max_x {green_max_x}");
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----

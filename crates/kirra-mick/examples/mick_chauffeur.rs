@@ -48,7 +48,7 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 fn verdict(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {

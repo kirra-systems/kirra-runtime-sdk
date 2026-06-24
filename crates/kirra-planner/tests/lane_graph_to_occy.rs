@@ -83,7 +83,7 @@ fn lane_change_across_broken_divider_admits() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(
@@ -135,7 +135,7 @@ fn lane_change_across_solid_divider_is_refused() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
 

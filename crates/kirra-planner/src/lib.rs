@@ -263,6 +263,13 @@ pub struct PlanInput<'a> {
     /// following / containment is unchanged; this only supplies the route corridor a turn
     /// needs, which KIRRA bounds exactly as it bounds any corridor.
     pub lane_graph: Option<&'a LaneGraph>,
+    /// **Live traffic-signal states** by governed lane id `(lane_id, state)` — the dynamic
+    /// input a `LaneControl::TrafficLight` needs (perception / V2X). When the ego's lane
+    /// carries a traffic light, its state is looked up here; **absent → red (stop),
+    /// fail-closed**. Empty = no signal info (a light with no state then reads red). Ignored
+    /// for lanes with no light. Only consulted when `lane_graph` is set and the integrator
+    /// did not hand-supply `controls`.
+    pub signal_states: &'a [(u64, behavior::SignalState)],
 }
 
 /// Intent label on a proposal.
@@ -1656,7 +1663,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]
@@ -1733,7 +1740,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]
@@ -1882,7 +1889,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     /// Corridor that turns ~22° at x=20 and continues well past it; ego starts
@@ -2255,7 +2262,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]
@@ -2506,7 +2513,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]
@@ -2620,7 +2627,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]
@@ -3021,7 +3028,7 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-        }
+            signal_states: &[],        }
     }
 
     #[test]

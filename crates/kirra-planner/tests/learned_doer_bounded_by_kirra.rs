@@ -48,7 +48,7 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 fn stopped_car(x: f64) -> PerceivedObject {

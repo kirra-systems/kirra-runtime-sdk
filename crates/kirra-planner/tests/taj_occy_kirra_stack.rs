@@ -103,7 +103,7 @@ fn run_stack(
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
 
@@ -202,7 +202,7 @@ fn route_around_in_corridor_object_admits() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(

@@ -76,7 +76,7 @@ fn ground_turn<'a>(g: &'a LaneGraph, ego_corr: &'a dyn kirra_ros2_adapter::corri
         request_overtake: false,
         request_pull_over: false,
         lane_graph: Some(g),
-    };
+        signal_states: &[],    };
     plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: dir }, &input)
 }
 
@@ -147,7 +147,7 @@ fn a_turn_without_a_lane_graph_fails_closed_to_hold() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: TurnDirection::Left }, &input);
     assert_eq!(plan.kind, ProposalKind::SafeStop, "no graph → fail-closed HOLD");
 }
