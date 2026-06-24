@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::behavior::TrafficControl;
 use crate::{
-    FleetPosture, Goal, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
+    FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
     MAX_ROUTE_LANES,
 };
-use kirra_core::corridor::Point as MapPoint;
+use kirra_core::corridor::{CorridorSource, Point as MapPoint};
 
 /// Which way a [`MickIntent::TurnAt`] heads at the next junction, relative to the ego
 /// lane's travel direction. Resolved to a successor lane by heading at grounding time.
@@ -315,7 +315,34 @@ pub fn plan_for_intent(
             else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            planner.plan(&PlanInput { map: &corridor, ..world.clone() })
+            // Widen the turn: the route's full width (route + lateral neighbors) is the
+            // `drivable` area a route-around / lane-change may borrow WITHIN the turn, and the
+            // typed lines over the ego lane + its neighbors gate that lateral move. Only when
+            // the integrator didn't supply them; `None`/empty → the single-lane turn-follow.
+            let drivable = if world.drivable.is_none() {
+                graph.route_drivable(&route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
+            } else {
+                None
+            };
+            let lane = graph.lane(ego_lane);
+            let neighbors: Vec<u64> = std::iter::once(ego_lane)
+                .chain(lane.and_then(Lane::left_neighbor))
+                .chain(lane.and_then(Lane::right_neighbor))
+                .collect();
+            let boundaries = if world.lane_boundaries.is_empty() {
+                graph.boundaries_relative_to(ego_lane, &neighbors)
+            } else {
+                None
+            };
+            planner.plan(&PlanInput {
+                map: &corridor,
+                drivable: drivable
+                    .as_ref()
+                    .map(|d| d as &dyn CorridorSource)
+                    .or(world.drivable),
+                lane_boundaries: boundaries.as_deref().unwrap_or(world.lane_boundaries),
+                ..world.clone()
+            })
         }
     }
 }
