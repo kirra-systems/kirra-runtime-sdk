@@ -341,6 +341,97 @@ pub fn mick_drive_once(
     }
 }
 
+/// Default System-2 cadence: re-ask the brain for an intent at ~2 Hz. A local 4B model
+/// cannot be called at the fast-loop rate (10–50 Hz) on a vehicle, and the *maneuver*
+/// rarely needs to change that fast. VALIDATION-PENDING (tune per model latency + ODD).
+pub const DEFAULT_DECIDE_INTERVAL_MS: u64 = 500;
+/// Default intent staleness bound: if the brain has produced no fresh intent within this
+/// window (it is timing out / erroring), the driver fails closed to `Hold` rather than
+/// grounding an arbitrarily-old maneuver. ~4× the decide interval — tolerates a few missed
+/// decisions before holding. VALIDATION-PENDING.
+pub const DEFAULT_INTENT_STALENESS_MS: u64 = 2_000;
+
+/// **The dual-rate Mick driver — the deployable form of the brain seam.**
+///
+/// `mick_drive_once` asks the brain *every* call; that is fine for sim but wrong for a
+/// vehicle, where the brain is a slow System-2 model. `MickDriver` separates the two rates:
+/// the **slow path** re-asks the brain for an *intent* only every `decide_interval_ms`
+/// (System-2), while the **fast path** grounds the cached intent against the FRESH world on
+/// *every* tick (System-1) — so the trajectory tracks live perception even though the
+/// maneuver is stable, and KIRRA still bounds every grounded trajectory.
+///
+/// **Fail-closed on a stale brain.** A re-decide that fails keeps the last cached intent
+/// (still safe — it is re-grounded live and re-checked by KIRRA), but the intent *ages*; if
+/// no fresh intent arrives within `intent_staleness_ms`, the driver grounds `Hold` instead
+/// (a controlled stop), mirroring the posture-tracker staleness rule. Cold start with no
+/// intent yet also grounds `Hold`.
+pub struct MickDriver<B: MickBrain> {
+    brain: B,
+    decide_interval_ms: u64,
+    intent_staleness_ms: u64,
+    /// The last intent the brain produced and when (`now_ms`). `None` until the first
+    /// successful decision.
+    cached: Option<(MickIntent, u64)>,
+}
+
+impl<B: MickBrain> MickDriver<B> {
+    /// Construct with the default System-2 cadence + staleness bound.
+    #[must_use]
+    pub fn new(brain: B) -> Self {
+        Self::with_rates(brain, DEFAULT_DECIDE_INTERVAL_MS, DEFAULT_INTENT_STALENESS_MS)
+    }
+
+    /// Construct with explicit `decide_interval_ms` (re-decide cadence) and
+    /// `intent_staleness_ms` (beyond which a non-refreshed intent → `Hold`).
+    #[must_use]
+    pub fn with_rates(brain: B, decide_interval_ms: u64, intent_staleness_ms: u64) -> Self {
+        Self { brain, decide_interval_ms, intent_staleness_ms, cached: None }
+    }
+
+    /// The current cached intent (for observability / tests), if any.
+    #[must_use]
+    pub fn current_intent(&self) -> Option<MickIntent> {
+        self.cached.map(|(intent, _)| intent)
+    }
+
+    /// One fast-loop tick at wall-clock `now_ms`: re-ask the brain only if the System-2
+    /// interval has elapsed (or there is no intent yet), then ground the current intent
+    /// against the fresh `world`. Always returns a grounded `PlanOutput` — a stale/absent
+    /// intent grounds `Hold` (fail-closed). The result is still a proposal KIRRA bounds.
+    pub fn drive_tick(
+        &mut self,
+        world: &PlanInput<'_>,
+        planner: &mut impl Planner,
+        now_ms: u64,
+    ) -> PlanOutput {
+        // Slow path: re-decide when due (interval elapsed) or no intent cached yet.
+        let due = match self.cached {
+            Some((_, decided_at)) => now_ms.saturating_sub(decided_at) >= self.decide_interval_ms,
+            None => true,
+        };
+        if due {
+            let ctx = WorldContext::from_plan_input(world);
+            if let Ok(intent) = self.brain.decide(&ctx) {
+                self.cached = Some((intent, now_ms));
+            }
+            // On a brain failure we KEEP the (now-ageing) cached intent — it is still
+            // re-grounded live and re-checked by KIRRA — and let the staleness gate below
+            // decide whether it is too old to use.
+        }
+
+        // Choose the intent to ground: the cached one iff still fresh, else fail closed.
+        let intent = match self.cached {
+            Some((intent, decided_at)) if now_ms.saturating_sub(decided_at) <= self.intent_staleness_ms => {
+                intent
+            }
+            _ => MickIntent::Hold,
+        };
+
+        // Fast path: ground the chosen intent against the FRESH world, every tick.
+        plan_for_intent(planner, &intent, world)
+    }
+}
+
 /// Posture → stable prompt token. Kept in lock-step with `FleetPosture`.
 fn posture_token(p: FleetPosture) -> &'static str {
     match p {
@@ -662,5 +753,108 @@ mod tests {
         );
         // 1e400 overflows to Inf → finiteness gate rejects it (fail-closed).
         assert!(MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":1e400}"#).is_err());
+    }
+
+    // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A brain that counts its `decide` calls (via a shared counter) and returns a fixed reply.
+    struct CountingBrain {
+        calls: Rc<Cell<u32>>,
+        reply: Result<MickIntent, MickError>,
+    }
+    impl MickBrain for CountingBrain {
+        fn decide(&mut self, _ctx: &WorldContext) -> Result<MickIntent, MickError> {
+            self.calls.set(self.calls.get() + 1);
+            self.reply
+        }
+    }
+
+    #[test]
+    fn driver_asks_the_brain_at_the_slow_rate_but_grounds_every_tick() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = cruising_world(&corr);
+        let mut p = GeometricPlanner::default();
+        let calls = Rc::new(Cell::new(0));
+        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Ok(MickIntent::Cruise { target_speed_mps: 5.0 }) };
+        // Decide at 2 Hz (500 ms); run 20 fast ticks at 100 ms (10 Hz).
+        let mut driver = MickDriver::with_rates(brain, 500, 2_000);
+
+        let mut grounded = 0;
+        for tick in 1..=20u64 {
+            let out = driver.drive_tick(&w, &mut p, tick * 100);
+            // Fast path runs EVERY tick — always a grounded proposal.
+            assert!(matches!(out.kind, ProposalKind::Motion | ProposalKind::SafeStop));
+            grounded += 1;
+        }
+        assert_eq!(grounded, 20, "the fast path grounds an output on every tick");
+        // Slow path: ~1 decision per 500 ms over 2 s (+ the cold-start one), NOT 20.
+        let n = calls.get();
+        assert!((3..=6).contains(&n), "brain decided at the System-2 rate, not every tick: {n} calls / 20 ticks");
+        assert_eq!(driver.current_intent(), Some(MickIntent::Cruise { target_speed_mps: 5.0 }));
+    }
+
+    #[test]
+    fn driver_grounds_the_cached_intent_between_decisions() {
+        // The brain replies once, then would change its mind — but between re-decides the
+        // SAME cached intent is grounded each fast tick.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let mut p = GeometricPlanner::default();
+        let calls = Rc::new(Cell::new(0));
+        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Ok(MickIntent::Hold) };
+        let mut driver = MickDriver::with_rates(brain, 1_000, 5_000);
+
+        driver.drive_tick(&w, &mut p, 100); // cold decide → Hold cached
+        assert_eq!(calls.get(), 1);
+        // Three more fast ticks before the 1 s interval elapses → no new decision.
+        for t in [200u64, 300, 400] {
+            driver.drive_tick(&w, &mut p, t);
+        }
+        assert_eq!(calls.get(), 1, "no re-decision before the interval elapses");
+        assert_eq!(driver.current_intent(), Some(MickIntent::Hold));
+    }
+
+    #[test]
+    fn driver_fails_closed_to_hold_when_the_brain_goes_stale() {
+        // The brain succeeds once (Cruise), then errors forever. After the staleness window
+        // the driver must HOLD rather than keep grounding the arbitrarily-old intent.
+        struct OnceThenErr { calls: Rc<Cell<u32>> }
+        impl MickBrain for OnceThenErr {
+            fn decide(&mut self, _ctx: &WorldContext) -> Result<MickIntent, MickError> {
+                self.calls.set(self.calls.get() + 1);
+                if self.calls.get() == 1 { Ok(MickIntent::Cruise { target_speed_mps: 5.0 }) } else { Err("down") }
+            }
+        }
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = cruising_world(&corr); // far goal so a fresh Cruise grounds to motion
+        let mut p = GeometricPlanner::default();
+        let calls = Rc::new(Cell::new(0));
+        // decide every 500 ms, stale after 1500 ms.
+        let mut driver = MickDriver::with_rates(OnceThenErr { calls: Rc::clone(&calls) }, 500, 1_500);
+
+        let out0 = driver.drive_tick(&w, &mut p, 0); // succeeds → Cruise (Motion)
+        assert_eq!(out0.kind, ProposalKind::Motion, "fresh Cruise grounds to motion");
+        // Within the staleness window the (now-erroring) brain leaves the last intent usable.
+        let out1 = driver.drive_tick(&w, &mut p, 1_000);
+        assert_eq!(out1.kind, ProposalKind::Motion, "intent still fresh enough → still driving");
+        // Past the staleness window → fail closed to Hold (a controlled stop).
+        let out2 = driver.drive_tick(&w, &mut p, 2_000);
+        assert_eq!(out2.kind, ProposalKind::SafeStop, "stale brain → HOLD (fail-closed)");
+    }
+
+    #[test]
+    fn driver_cold_start_with_a_failing_brain_holds() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let mut p = GeometricPlanner::default();
+        let calls = Rc::new(Cell::new(0));
+        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Err("no model") };
+        let mut driver = MickDriver::new(brain);
+        let out = driver.drive_tick(&w, &mut p, 0);
+        assert_eq!(out.kind, ProposalKind::SafeStop, "no intent ever → HOLD");
+        assert_eq!(driver.current_intent(), None);
     }
 }
