@@ -657,6 +657,7 @@ mod tests {
             reconciled_lin: 0.0,
             reconciled_ang: 0.0,
             escalated_to_lockout: true,
+            recommended_posture: "locked_out",
         }
     }
 
