@@ -1,5 +1,13 @@
 # Stage S-FI1 — Unified Frame-Integrity Gate (kirra-core)
 
+> ## ⚠ PROPOSED — NOT A SAFETY CLAIM
+> This document is a **design proposal**. It is **not implementation** and confers
+> **no safety coverage** until **ACCEPTED via ADR-0016** and all sub-stages
+> (S-FI1a–f) have landed. **The RTM / `TRACEABILITY_MATRIX` must NOT list S-FI1
+> (or its SGs / `DenyCode::FrameIntegrityUntrusted`) as ENFORCED until S-FI1f.**
+> A PROPOSED safety doc in `docs/safety/` is fine; a PROPOSED doc *counted as
+> coverage* is the failure mode this banner exists to prevent.
+
 **Status:** PROPOSED — design-for-review. No code written. Awaiting owner sign-off before implementation, per de-monolith stage discipline.
 **Date:** 2026-06-24
 **Owner:** Kirra Systems, LLC
@@ -131,6 +139,32 @@ pub fn containment_margin_m(trust: FrameTrust) -> Option<f64> {
 }
 ```
 
+### Finding — staleness × speed are coupled through the margin (keep the defaults honest)
+
+The defaults (0.30 m fallback, 500 ms staleness) are **documented, sourced,
+VALIDATION-PENDING placeholders** — *not* manufactured FTTI numbers. We do **not**
+tie them to a specific FTTI now: the localization-path FTTI is unallocated, and
+inventing one would be false precision violating the project's host-indicative
+vs QNX-target-FIFO discipline (the `TBD-QNX-TARGET` pattern). They are recorded as
+named, sourced, pending constants with their derivation dependency, to be resolved
+by a later FTTI allocation — not re-guessed.
+
+But the fixed `max_age_ms` quietly hides a coupling the spec must name so nobody
+reads it as "safe at any speed": **a stale pose is unobserved travel, and
+unobserved travel consumes the containment margin.** A 500 ms-stale pose at 5 m/s
+is **2.5 m** of unobserved motion — which blows the 0.75 m fallback margin. The
+honest invariant is:
+
+> `max_stale_travel ≤ margin`  ⇒  the staleness bound is only safe below
+> `v ≈ margin / max_age` (≈ **1.5 m/s** at 0.75 m / 500 ms).
+
+Above that speed you must either tighten staleness or **cap speed under degraded
+localization**. The 500 ms is a fine *liveness* placeholder; it is **not** a
+standalone safety bound. This coupling is exactly what the eventual FTTI allocation
+(and any degraded-localization speed cap) must resolve — captured here so the
+placeholder stays honest in the interim. *(Speed-cap-under-degraded-localization is
+a tracked follow-on, not S-FI1.)*
+
 ---
 
 ## 4. Containment change (`crates/kirra-core/src/containment.rs`)
@@ -209,9 +243,36 @@ FrameIntegrityChanged { trust: FrameTrust },
 | `Untrusted` (transient) | refuse → MRC stop | **Degraded** (MRC) | automatic on reacquire |
 | `Untrusted` (sustained / flapping) | refuse → MRC stop | **LockedOut** | human reset |
 
-Rationale: localization loss (GNSS dropout, NDT divergence) is a classic *transient* — forcing a human reset on every dropout is operationally untenable and not safety-required (the vehicle is already safely stopped). So transient `Untrusted` → Degraded-MRC (auto-recover); **sustained/flapping** `Untrusted` escalates to LockedOut by **reusing the existing AV recovery-hysteresis machinery** (`recovery_hysteresis.rs`: streak/window, `AV_RECOVERY_*`). This keeps the decel-to-stop-and-HOLD semantics self-consistent: Degraded posture + containment-refuses = exactly the decel-to-stop MRC the governor already authors, and the governor never authors re-acceleration.
+**The drop to Degraded is IMMEDIATE — fail-closed on the FIRST `Untrusted` tick.**
+There is **no grace period** on the initial response. Hysteresis governs ONLY the
+*Degraded → LockedOut escalation* (and the *earn-back* to Trusted) — never a delay
+on the initial fail-closed. Fail-closed-immediately and auto-recovery are separate
+axes; this stage must not conflate them.
 
-**Open question for you:** confirm transient `Untrusted` → Degraded (not straight to LockedOut). I believe Degraded-with-escalation is correct and matches SS-002, but it's the load-bearing choice in this stage.
+**Why Degraded is the *correct* response, not merely the convenient one.**
+Degraded's MRC — decel-to-stop along the current heading — is the
+**frame-trust-minimal maneuver**: braking on your current path is a *relative*
+action (IMU / wheel-odometry: slow down, hold heading) that **does not depend on
+the untrusted global pose**. So when localization is lost, "stop where you are" is
+precisely the action that needs the *least* of the thing you have lost. That is
+why straight-to-LockedOut would be *over*-conservative: it would demand a human
+reset to perform the one maneuver that was always safe to do *without* trustworthy
+localization. Degraded here is the safety-correct posture, not just the usable one.
+
+**The escalation is the honest part.** *Sustained* or *flapping* `Untrusted` is a
+**fault signature, not a transient** — a genuine sensor failure, or (worth naming
+explicitly) **possible GNSS spoofing** — and that earns LockedOut / human-reset.
+Reuse the existing machinery: an **inverted streak** over `recovery_hysteresis.rs`
+(N consecutive `Untrusted` ticks, or `Untrusted` persisting past a bounded window)
+plus the existing flapping detector (`fleet/flapping`). Net: **instant Degraded →
+auto-recover if transient → escalate to LockedOut if it persists/flaps.** This is
+consistent with SS-002 and keeps the decel-to-stop-and-HOLD semantics
+self-consistent (Degraded + containment-refuses = exactly the MRC the governor
+already authors; the governor never authors re-acceleration).
+
+**Decision: CONFIRMED** (owner, 2026-06-24) — immediate Degraded, hysteretic
+escalation to LockedOut, with the frame-trust-minimal-maneuver rationale above as
+the safety argument of record.
 
 ---
 
@@ -242,6 +303,8 @@ A temporary `validate_trajectory_containment_assuming_trusted(...)` shim (delega
 - **New AOU-FRAME-INTEGRITY-SELFREPORT-001** (OPEN): the integrity channel is integrator self-reported; independent KIRRA-computed integrity (map-matching residual, multi-source divergence, RAIM-style cross-check) is the de-risking endgame — **Stage S-FI3**, not this stage.
 - **AOU-TIMESYNC-001**: cross-reference — the reserved `time_sync`/`calibration` channels (Stage S-FI2) are the runtime home for its frame-affecting component.
 - New `wcet_gate` rows for `resolve_frame_trust` / `containment_margin_m` (O(1), branch-only, no alloc).
+- **RTM guardrail:** `TRACEABILITY_MATRIX` must NOT count S-FI1 / its SGs / `DenyCode::FrameIntegrityUntrusted` as ENFORCED until S-FI1f lands (see top banner).
+- **Record the staleness × speed coupling** (§3 Finding) as an open derivation dependency on the localization-path FTTI allocation, with degraded-localization speed-cap as the tracked follow-on.
 
 ## 10. What this stage explicitly does NOT do
 
