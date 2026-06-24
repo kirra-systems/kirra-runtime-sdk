@@ -257,6 +257,20 @@ pub enum DenyCode {
     /// and the actuator falls to the MRC controlled-stop. Issued by
     /// `enforce_degraded_decel_to_stop`. (Issue #70.)
     DegradedSpeedIncreaseDenied,
+    /// Safety: SG-002 ≅ SG2. Frame/localization integrity is UNTRUSTED this tick
+    /// (absent / stale / non-finite / 95th-pct lateral error beyond the
+    /// conservative-fallback bound), so the map-anchored corridor cannot be
+    /// trusted to be correctly placed relative to the ego. Containment refuses to
+    /// validate (it does not reason about geometry in an untrusted frame) and the
+    /// actuator falls to the MRC controlled-stop — the frame-trust-minimal
+    /// maneuver. Issued by `containment::validate_trajectory_containment_checked`
+    /// when the [`crate::frame_integrity::FrameTrust`] verdict is `Untrusted`.
+    /// (Stage S-FI1 — behind AOU-LOCALIZATION-001.)
+    ///
+    /// APPENDED LAST deliberately: the bincode variant index is the wire tag
+    /// (see `kirra-wire-client` `ClientDenyCode`), so existing indices 0–9 must
+    /// not shift.
+    FrameIntegrityUntrusted,
 }
 
 impl DenyCode {
@@ -276,6 +290,7 @@ impl DenyCode {
             Self::DrivableSpaceDeparture => "DRIVABLE_SPACE_DEPARTURE",
             Self::DegradedReinitiationDenied  => "DEGRADED_REINITIATION_DENIED",
             Self::DegradedSpeedIncreaseDenied => "DEGRADED_SPEED_INCREASE_DENIED",
+            Self::FrameIntegrityUntrusted     => "FRAME_INTEGRITY_UNTRUSTED",
         }
     }
 }
@@ -1217,6 +1232,8 @@ mod kinematics_contract_tests {
             // Issue #70 — Degraded decel-to-stop-and-hold reason codes.
             DenyCode::DegradedReinitiationDenied,
             DenyCode::DegradedSpeedIncreaseDenied,
+            // Stage S-FI1 — frame/localization-integrity gate (AOU-LOCALIZATION-001).
+            DenyCode::FrameIntegrityUntrusted,
         ];
         for code in all {
             assert_eq!(

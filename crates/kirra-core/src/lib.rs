@@ -33,6 +33,14 @@ pub mod kinematics_contract;
 /// existing path (the ROS2 adapter, the planner) holds.
 pub mod containment;
 
+/// The fail-closed frame-integrity gate (Stage S-FI1a, behind AOU-LOCALIZATION-001) —
+/// the graduated localization-trust verdict (`FrameIntegrity` / `FrameTrust` /
+/// `resolve_frame_trust` / `containment_margin_m`) that selects the SG2 containment
+/// margin and (later sub-stages) drives the posture engine. Pure, scalar, WCET-clean;
+/// PROPOSED design of record in `docs/safety/STAGE_S-FI1_FRAME_INTEGRITY_GATE.md`.
+/// This sub-stage is the module only — it does not yet touch containment / posture / parko.
+pub mod frame_integrity;
+
 /// The shared non-finite governor-input guard (`all_finite`, the #410 convergence point).
 /// A dependency-free predicate every governor entry calls. Relocated here verbatim
 /// (de-monolith Stage 5); re-exported by `kirra_verifier::governor_guard` so the
