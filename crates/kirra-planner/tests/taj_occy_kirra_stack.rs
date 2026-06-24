@@ -99,6 +99,7 @@ fn run_stack(
         no_overtake_ids: &[],
         drivable: None,
         posture: posture.clone(),
+        target_speed_mps: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -194,6 +195,7 @@ fn route_around_in_corridor_object_admits() {
         no_overtake_ids: &[],
         drivable: None,
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

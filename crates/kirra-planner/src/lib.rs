@@ -208,6 +208,14 @@ pub struct PlanInput<'a> {
     pub drivable: Option<&'a dyn CorridorSource>,
     /// Fleet posture → planner mode (see [`planner_mode`]).
     pub posture: FleetPosture,
+    /// **Requested cruise speed** (m/s), if any — Mick's "ease off here" / "you can go up
+    /// to the limit" knob. A `Some` value can only LOWER the posture-derived cruise
+    /// ceiling (`min(ceiling, request)`): the caller can slow the chauffeur but can NEVER
+    /// raise it above the configured envelope, and KIRRA still caps independently. A
+    /// non-finite or negative request is ignored (fail-safe → the ceiling stands). In
+    /// `Degraded` it only lowers an already non-increasing target, preserving the
+    /// decel-only invariant. `None` = use the posture ceiling (byte-for-byte prior behavior).
+    pub target_speed_mps: Option<f64>,
 }
 
 /// Intent label on a proposal.
@@ -926,6 +934,15 @@ impl Planner for GeometricPlanner {
             PlannerMode::MrcOnly => unreachable!("handled above"),
         };
 
+        // A requested cruise speed (Mick's chauffeur knob) may only SLOW the planner —
+        // `min(ceiling, request)` — never raise it above the posture-derived ceiling. A
+        // non-finite / negative request is ignored (fail-safe). In Degraded this only
+        // lowers an already non-increasing target, so the decel-only invariant holds.
+        let target = match input.target_speed_mps {
+            Some(req) if req.is_finite() && req >= 0.0 => target.min(req),
+            _ => target,
+        };
+
         // Guide path: corridor centerline if usable, else a straight ego→goal line.
         let center = centerline_from(input.map.left_boundary(), input.map.right_boundary());
         let raw_guide: Vec<(f64, f64)> = if center.len() >= 2 {
@@ -1485,6 +1502,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -1558,6 +1576,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -1703,6 +1722,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -2072,6 +2092,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -2319,6 +2340,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -2429,6 +2451,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -2826,6 +2849,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 

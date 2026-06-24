@@ -57,6 +57,7 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         controls: &[], lane_boundaries: &[], motion: &[], predicted_paths: &[],
         cedes_to_ego_ids: &[], lane_change_to_m: None, no_overtake_ids: &[], drivable: None,
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     }
 }
 

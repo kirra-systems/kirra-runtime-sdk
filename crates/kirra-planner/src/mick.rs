@@ -33,6 +33,11 @@ pub enum MickIntent {
     LaneChange { target_offset_m: f64 },
     /// Stop and hold.
     Hold,
+    /// Cruise at a requested speed (m/s), keeping the current goal / lane. The request can
+    /// only SLOW the chauffeur: Occy clamps it to `min(posture_ceiling, request)` and KIRRA
+    /// caps it again, so "go faster" never exceeds the safe envelope. A non-finite request
+    /// fails closed (the caller HOLDs).
+    Cruise { target_speed_mps: f64 },
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -46,6 +51,8 @@ enum IntentJson {
     LaneChange { target_offset_m: f64 },
     #[serde(rename = "hold")]
     Hold,
+    #[serde(rename = "cruise")]
+    Cruise { target_speed_mps: f64 },
 }
 
 impl MickIntent {
@@ -68,6 +75,7 @@ impl MickIntent {
             IntentJson::GoTo { x_m, y_m } => MickIntent::GoTo { x_m, y_m },
             IntentJson::LaneChange { target_offset_m } => MickIntent::LaneChange { target_offset_m },
             IntentJson::Hold => MickIntent::Hold,
+            IntentJson::Cruise { target_speed_mps } => MickIntent::Cruise { target_speed_mps },
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -80,6 +88,7 @@ impl MickIntent {
             MickIntent::GoTo { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
             MickIntent::LaneChange { target_offset_m } => target_offset_m.is_finite(),
             MickIntent::Hold => true,
+            MickIntent::Cruise { target_speed_mps } => target_speed_mps.is_finite(),
         }
     }
 }
@@ -155,6 +164,17 @@ pub fn plan_for_intent(
                 return PlanOutput::safe_stop(world.ego.pose);
             }
             planner.plan(&PlanInput { lane_change_to_m: Some(target_offset_m), ..world.clone() })
+        }
+        MickIntent::Cruise { target_speed_mps } => {
+            if !target_speed_mps.is_finite() {
+                return PlanOutput::safe_stop(world.ego.pose);
+            }
+            // A negative "cruise" is a hold, not reverse → cap at 0. The planner then
+            // clamps to the posture ceiling and KIRRA caps again, so this only ever slows.
+            planner.plan(&PlanInput {
+                target_speed_mps: Some(target_speed_mps.max(0.0)),
+                ..world.clone()
+            })
         }
     }
 }
@@ -367,6 +387,7 @@ mod tests {
             no_overtake_ids: &[],
             drivable: None,
             posture: FleetPosture::Nominal,
+            target_speed_mps: None,
         }
     }
 
@@ -583,5 +604,63 @@ mod tests {
         let out = mick_drive_once(&mut ErrBrain, &w, &mut p);
         assert_eq!(out.kind, ProposalKind::SafeStop, "a brain failure must HOLD, not drive");
         assert!(out.trajectory.iter().all(|t| t.velocity_mps == 0.0));
+    }
+
+    // ----- speed control: the Cruise intent / target_speed_mps knob -----
+
+    /// A world with a far goal so the planner actually cruises (uncapped it heads toward
+    /// the default 8 m/s).
+    fn cruising_world(corr: &dyn CorridorSource) -> PlanInput<'_> {
+        PlanInput {
+            goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+            ..world(corr, &[], &[])
+        }
+    }
+
+    fn vmax(out: &PlanOutput) -> f64 {
+        out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn cruise_intent_slows_the_chauffeur_below_the_default() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = cruising_world(&corr);
+        let mut p = GeometricPlanner::default(); // cruise ceiling 8 m/s
+
+        let fast = plan_for_intent(&mut p, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
+        let slow = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: 3.0 }, &w);
+
+        assert!(vmax(&slow) <= 3.0 + 1e-6, "Cruise(3) caps speed at 3, got {}", vmax(&slow));
+        assert!(vmax(&fast) > vmax(&slow), "and it is slower than the uncapped GoTo ({} vs {})", vmax(&fast), vmax(&slow));
+    }
+
+    #[test]
+    fn cruise_request_above_the_ceiling_cannot_speed_up() {
+        // The chauffeur asking to "go 50 m/s" can NEVER exceed the configured envelope —
+        // the request is clamped to the posture ceiling (8), and KIRRA caps again.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = cruising_world(&corr);
+        let mut p = GeometricPlanner::default();
+        let over = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: 50.0 }, &w);
+        assert!(vmax(&over) <= 8.0 + 1e-6, "a request above the ceiling clamps to the cruise config (8), got {}", vmax(&over));
+    }
+
+    #[test]
+    fn nonfinite_cruise_intent_fails_closed() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = cruising_world(&corr);
+        let mut p = GeometricPlanner::default();
+        let out = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: f64::NAN }, &w);
+        assert_eq!(out.kind, ProposalKind::SafeStop, "a NaN cruise speed must HOLD, not flow into the planner");
+    }
+
+    #[test]
+    fn cruise_llm_json_parses_and_rejects_nonfinite() {
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":5.0}"#).unwrap(),
+            MickIntent::Cruise { target_speed_mps: 5.0 }
+        );
+        // 1e400 overflows to Inf → finiteness gate rejects it (fail-closed).
+        assert!(MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":1e400}"#).is_err());
     }
 }
