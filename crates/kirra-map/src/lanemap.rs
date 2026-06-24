@@ -605,6 +605,34 @@ impl LaneGraph {
         (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor { left, right, confidence, age_ms })
     }
 
+    /// Materialize a **wide** route corridor — the route's lanes PLUS their direct lateral
+    /// neighbors — as the *drivable area* a turn may borrow (the longitudinal counterpart to
+    /// [`corridor_over`], and the wide sibling of [`route_corridor`]). Per route lane the
+    /// outer envelope takes the LEFT edge of its left neighbor (if any, else its own) and the
+    /// RIGHT edge of its right neighbor (if any, else its own); the per-lane outer boundaries
+    /// are concatenated longitudinally (seam-deduped) so the area follows the route at full
+    /// width through any turns.
+    ///
+    /// This is what lets the planner route-around an obstacle or lane-change ACROSS a
+    /// crossable divider *within* a turn: [`route_corridor`] is the reference path (`map`);
+    /// this is the `drivable` width; the typed lines come from [`boundaries_relative_to`]
+    /// over the same lane + neighbors. Returns `None` if `route` is empty, any id is unknown,
+    /// or the result degenerates. **Scope:** one level of lateral neighbor each side (covers
+    /// a two-wide turn); the same smooth-arc geometry caveat as `route_corridor` applies.
+    #[must_use]
+    pub fn route_drivable(&self, route: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+        let lanes = self.resolve(route)?;
+        let mut left: Vec<Point> = Vec::new();
+        let mut right: Vec<Point> = Vec::new();
+        for lane in lanes {
+            let left_lane = lane.left_neighbor().and_then(|n| self.lanes.get(&n)).unwrap_or(lane);
+            let right_lane = lane.right_neighbor().and_then(|n| self.lanes.get(&n)).unwrap_or(lane);
+            concat_dedup(&mut left, &offset_polyline(&left_lane.centerline, left_lane.half_width_m));
+            concat_dedup(&mut right, &offset_polyline(&right_lane.centerline, -right_lane.half_width_m));
+        }
+        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor { left, right, confidence, age_ms })
+    }
+
     /// Derive the typed lane boundaries across a span of lanes, expressed as
     /// lateral offsets **relative to `ego_lane`'s centerline** (the frame Occy's
     /// `lane_boundaries` input uses). Boundaries shared between adjacent lanes are
@@ -1137,6 +1165,32 @@ mod tests {
             .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid));
         assert!(g.route_corridor(&[], 0.95, 10).is_none(), "empty route → None");
         assert!(g.route_corridor(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
+    }
+
+    #[test]
+    fn route_drivable_widens_to_include_lateral_neighbors() {
+        // Lane 1 (y=0, half 1.75) with a LEFT neighbor lane 2 (y=3.5). A route over lane 1
+        // alone yields a drivable area spanning BOTH lanes (the borrowable turn width),
+        // where route_corridor stays single-lane.
+        let g = LaneGraph::new()
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Broken, LineType::Solid)
+                    .with_edge(LaneEdge::LeftNeighbor { to: 2 }),
+            )
+            .with_lane(
+                Lane::straight(2, 3.5, 0.0, 30.0, 1.75, LineType::Solid, LineType::Broken)
+                    .with_edge(LaneEdge::RightNeighbor { to: 1 }),
+            );
+
+        let d = g.route_drivable(&[1], 0.95, 10).expect("widen");
+        assert!((d.left_boundary()[0].y_m - 5.25).abs() < 1e-9, "left widened to the neighbor edge (3.5+1.75), got {}", d.left_boundary()[0].y_m);
+        assert!((d.right_boundary()[0].y_m + 1.75).abs() < 1e-9, "right stays at lane 1's edge");
+
+        let c = g.route_corridor(&[1], 0.95, 10).expect("narrow");
+        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "route_corridor stays single-lane (+1.75)");
+
+        assert!(g.route_drivable(&[], 0.95, 10).is_none(), "empty → None");
+        assert!(g.route_drivable(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
     }
 
     // ----- Right-of-way: cede vs non-yield, consistent from one source -----
