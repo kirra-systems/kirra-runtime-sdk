@@ -190,6 +190,179 @@ impl MickEvalLog {
     }
 }
 
+/// Acceptance tally for one intent kind — how the brain's choices of THIS intent fared
+/// against the checker (the per-intent breakdown of [`MickEvalSummary`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct IntentStats {
+    /// Decisions of this intent kind.
+    pub count: usize,
+    /// …that KIRRA admitted (`accept` | `clamp`).
+    pub admitted: usize,
+    /// …that KIRRA refused (`mrc_fallback` | `pending`).
+    pub refused: usize,
+}
+
+impl IntentStats {
+    /// Admitted fraction for this intent kind (0.0 when unseen).
+    #[must_use]
+    pub fn acceptance_rate(&self) -> f64 {
+        ratio(self.admitted, self.count)
+    }
+}
+
+/// Minimal owned view of a logged decision — only the fields the scorer reads — so a JSONL
+/// log written from [`MickDecisionRecord`] (whose tokens are `&'static str`, not
+/// deserializable) can be read back without changing the hot record.
+#[derive(serde::Deserialize)]
+struct EvalRow {
+    intent_kind: String,
+    proposal_kind: String,
+    verdict: String,
+    #[serde(default)]
+    max_speed_mps: f64,
+    #[serde(default)]
+    path_len_m: f64,
+}
+
+/// **The eval scorecard** — aggregates a stream of [`MickDecisionRecord`]s (or a JSONL log of
+/// them) into brain-quality metrics measured against the checker: how often the model's intent
+/// grounds to a plan KIRRA ADMITS vs REFUSES, how often it ends in a HOLD, the speed-derate
+/// (clamp) rate, a per-intent-kind breakdown, and aggregate motion progress. Pure; build it
+/// from in-memory records ([`from_records`](Self::from_records)) or an offline log
+/// ([`read_jsonl`](Self::read_jsonl)), then read the rates or print the [`Display`] report.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct MickEvalSummary {
+    /// Total decisions scored.
+    pub total: usize,
+    /// `Accept` verdicts (admitted, full speed).
+    pub accepted: usize,
+    /// `Clamp` verdicts (admitted, speed-derated).
+    pub clamped: usize,
+    /// `MRCFallback` verdicts (refused).
+    pub mrc_fallback: usize,
+    /// `Pending` (or unknown) verdicts (refused).
+    pub pending: usize,
+    /// Groundings that moved (`motion`).
+    pub motion: usize,
+    /// Groundings that were a controlled stop / HOLD (`safe_stop`).
+    pub safe_stop: usize,
+    /// Per-intent-kind acceptance breakdown, keyed by the intent tag.
+    pub by_intent: std::collections::BTreeMap<String, IntentStats>,
+    /// Sum of per-decision peak speeds (divide by `total` for the mean).
+    pub sum_max_speed_mps: f64,
+    /// Sum of per-decision grounded path lengths.
+    pub sum_path_len_m: f64,
+}
+
+impl MickEvalSummary {
+    /// Admitted = `accept` + `clamp`.
+    #[must_use]
+    pub fn admitted(&self) -> usize {
+        self.accepted + self.clamped
+    }
+    /// Refused = `mrc_fallback` + `pending`.
+    #[must_use]
+    pub fn refused(&self) -> usize {
+        self.mrc_fallback + self.pending
+    }
+    /// Fraction of decisions KIRRA admitted — the headline brain-quality signal.
+    #[must_use]
+    pub fn acceptance_rate(&self) -> f64 {
+        ratio(self.admitted(), self.total)
+    }
+    /// Fraction KIRRA refused (the model overreached or the world forced a refusal).
+    #[must_use]
+    pub fn refusal_rate(&self) -> f64 {
+        ratio(self.refused(), self.total)
+    }
+    /// Fraction that grounded to a HOLD (conservative or forced stop).
+    #[must_use]
+    pub fn hold_rate(&self) -> f64 {
+        ratio(self.safe_stop, self.total)
+    }
+    /// Fraction admitted but speed-derated (`clamp`).
+    #[must_use]
+    pub fn clamp_rate(&self) -> f64 {
+        ratio(self.clamped, self.total)
+    }
+    /// Mean per-decision peak speed (0.0 when empty).
+    #[must_use]
+    pub fn mean_max_speed_mps(&self) -> f64 {
+        if self.total == 0 { 0.0 } else { self.sum_max_speed_mps / self.total as f64 }
+    }
+
+    fn tally(&mut self, intent_kind: &str, proposal_kind: &str, verdict: &str, max_speed_mps: f64, path_len_m: f64) {
+        self.total += 1;
+        match verdict {
+            "accept" => self.accepted += 1,
+            "clamp" => self.clamped += 1,
+            "mrc_fallback" => self.mrc_fallback += 1,
+            _ => self.pending += 1, // `pending` or any unknown token → refused, fail-closed
+        }
+        if proposal_kind == "safe_stop" {
+            self.safe_stop += 1;
+        } else {
+            self.motion += 1;
+        }
+        let admitted = verdict == "accept" || verdict == "clamp";
+        let e = self.by_intent.entry(intent_kind.to_string()).or_default();
+        e.count += 1;
+        if admitted {
+            e.admitted += 1;
+        } else {
+            e.refused += 1;
+        }
+        self.sum_max_speed_mps += max_speed_mps;
+        self.sum_path_len_m += path_len_m;
+    }
+
+    /// Score an in-memory stream of decision records.
+    #[must_use]
+    pub fn from_records<'a>(records: impl IntoIterator<Item = &'a MickDecisionRecord>) -> Self {
+        let mut s = Self::default();
+        for r in records {
+            s.tally(r.intent_kind, r.proposal_kind, r.verdict, r.max_speed_mps, r.path_len_m);
+        }
+        s
+    }
+
+    /// Score an offline JSONL log (one [`MickDecisionRecord`] per line); blank lines skipped.
+    ///
+    /// # Errors
+    /// Returns an [`std::io::Error`] on a read failure or a line that is not a valid record.
+    pub fn read_jsonl(reader: impl std::io::BufRead) -> std::io::Result<Self> {
+        let mut s = Self::default();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let row: EvalRow = serde_json::from_str(&line).map_err(std::io::Error::other)?;
+            s.tally(&row.intent_kind, &row.proposal_kind, &row.verdict, row.max_speed_mps, row.path_len_m);
+        }
+        Ok(s)
+    }
+}
+
+impl std::fmt::Display for MickEvalSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Mick eval — {} decisions", self.total)?;
+        writeln!(f, "  admitted {:>5} ({:>5.1}%)   [accept {}, clamp {}]", self.admitted(), 100.0 * self.acceptance_rate(), self.accepted, self.clamped)?;
+        writeln!(f, "  refused  {:>5} ({:>5.1}%)   [mrc_fallback {}, pending {}]", self.refused(), 100.0 * self.refusal_rate(), self.mrc_fallback, self.pending)?;
+        writeln!(f, "  motion   {:>5} | holds {} ({:.1}%)", self.motion, self.safe_stop, 100.0 * self.hold_rate())?;
+        writeln!(f, "  by intent:")?;
+        for (kind, st) in &self.by_intent {
+            writeln!(f, "    {:<11} {:>4}   admit {:>5.1}%   refuse {:>5.1}%", kind, st.count, 100.0 * st.acceptance_rate(), 100.0 * ratio(st.refused, st.count))?;
+        }
+        write!(f, "  progress: total {:.1} m, mean peak speed {:.2} m/s", self.sum_path_len_m, self.mean_max_speed_mps())
+    }
+}
+
+/// Ratio `n/d` as a fraction, 0.0 when `d == 0` (avoids a divide-by-zero on an empty suite).
+fn ratio(n: usize, d: usize) -> f64 {
+    if d == 0 { 0.0 } else { n as f64 / d as f64 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +474,95 @@ mod tests {
         assert_eq!(second["admitted"], false);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ----- the eval scorecard -----
+
+    fn hold_plan() -> PlanOutput {
+        PlanOutput {
+            trajectory: vec![TrajectoryPoint {
+                pose: Pose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 0.0,
+                time_from_start_s: 0.0,
+            }],
+            kind: ProposalKind::SafeStop,
+        }
+    }
+
+    /// A representative little suite: two go_to (accept + clamp), one overtake refused, one
+    /// hold (safe_stop, accepted). Drives every bucket of the scorer.
+    fn suite() -> Vec<MickDecisionRecord> {
+        let m = motion_plan();
+        let h = hold_plan();
+        vec![
+            MickDecisionRecord::new(0, 0, &MickIntent::GoTo { x_m: 20.0, y_m: 0.0 }, &m, TrajectoryVerdict::Accept),
+            MickDecisionRecord::new(1, 100, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &m, TrajectoryVerdict::Clamp),
+            MickDecisionRecord::new(2, 200, &MickIntent::Overtake, &m, TrajectoryVerdict::MRCFallback),
+            MickDecisionRecord::new(3, 300, &MickIntent::Hold, &h, TrajectoryVerdict::Accept),
+        ]
+    }
+
+    #[test]
+    fn summary_aggregates_records_into_rates_and_per_intent_breakdown() {
+        let s = MickEvalSummary::from_records(&suite());
+        assert_eq!(s.total, 4);
+        assert_eq!((s.accepted, s.clamped, s.mrc_fallback, s.pending), (2, 1, 1, 0));
+        assert_eq!(s.admitted(), 3);
+        assert_eq!(s.refused(), 1);
+        assert_eq!((s.motion, s.safe_stop), (3, 1));
+        assert!((s.acceptance_rate() - 0.75).abs() < 1e-9, "3/4 admitted");
+        assert!((s.refusal_rate() - 0.25).abs() < 1e-9);
+        assert!((s.hold_rate() - 0.25).abs() < 1e-9);
+        assert!((s.clamp_rate() - 0.25).abs() < 1e-9);
+
+        // Per-intent: go_to fully admitted (2/2); overtake fully refused (0/1).
+        assert_eq!(s.by_intent["go_to"], IntentStats { count: 2, admitted: 2, refused: 0 });
+        assert_eq!(s.by_intent["overtake"], IntentStats { count: 1, admitted: 0, refused: 1 });
+        assert!((s.by_intent["overtake"].acceptance_rate() - 0.0).abs() < 1e-9);
+        // Motion progress accumulates only the moving plans' lengths (4 m each), holds add 0.
+        assert!((s.sum_path_len_m - 12.0).abs() < 1e-9, "3 motion plans × 4 m, got {}", s.sum_path_len_m);
+    }
+
+    #[test]
+    fn reading_a_jsonl_log_yields_the_same_summary_as_the_in_memory_records() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("kirra_mick_eval_score_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let records = suite();
+        {
+            let mut log = MickEvalLog::open(path.to_str().unwrap()).unwrap();
+            for r in &records {
+                log.append(r).unwrap();
+            }
+        }
+        let file = std::fs::File::open(&path).unwrap();
+        let from_log = MickEvalSummary::read_jsonl(std::io::BufReader::new(file)).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // Round-trips: scoring the written log equals scoring the records directly.
+        assert_eq!(from_log, MickEvalSummary::from_records(&records));
+        // And the Display report carries the headline numbers.
+        let report = from_log.to_string();
+        assert!(report.contains("4 decisions") && report.contains("75.0%"), "report: {report}");
+    }
+
+    #[test]
+    fn an_empty_suite_scores_zero_without_dividing_by_zero() {
+        let s = MickEvalSummary::default();
+        assert_eq!(s.total, 0);
+        assert_eq!(s.acceptance_rate(), 0.0);
+        assert_eq!(s.refusal_rate(), 0.0);
+        assert_eq!(s.mean_max_speed_mps(), 0.0);
+        assert!(s.by_intent.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_verdict_token_counts_as_refused_fail_closed() {
+        // A hand-rolled log row with a verdict the scorer does not recognize → refused bucket.
+        let line = r#"{"seq":0,"t_wall_ms":0,"intent_kind":"go_to","proposal_kind":"motion","points":2,"path_len_m":1.0,"max_speed_mps":2.0,"verdict":"weird","admitted":false}"#;
+        let s = MickEvalSummary::read_jsonl(std::io::Cursor::new(line)).unwrap();
+        assert_eq!(s.total, 1);
+        assert_eq!(s.refused(), 1, "unknown verdict → refused (fail-closed)");
+        assert_eq!(s.pending, 1);
     }
 }

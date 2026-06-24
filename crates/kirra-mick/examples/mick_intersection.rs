@@ -32,7 +32,7 @@
 use kirra_planner::{
     EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl,
     LaneCorridor, LaneEdge, LaneGraph, LineType, LlmBrain, MickDecisionRecord, MickDriver,
-    MickEvalLog, PlanInput, PlanOutput, Pose, SignalState,
+    MickEvalLog, MickEvalSummary, PlanInput, PlanOutput, Pose, SignalState,
 };
 use kirra_mick::OllamaClient;
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
@@ -160,6 +160,9 @@ fn main() {
     if eval.is_some() {
         println!("   (mick-eval capture ON → KIRRA_MICK_EVAL_PATH or kirra_mick_eval.jsonl)");
     }
+    // Accumulate every decision in memory so the run prints its own eval scorecard at the end
+    // (independent of the optional JSONL sink). `mick_eval` scores the same records offline.
+    let mut records: Vec<MickDecisionRecord> = Vec::new();
 
     println!("   t(s)   ego.x  ego.y     v   light   intent (System-2)        cedes   kirra");
     for tick in 1..=TICKS {
@@ -176,8 +179,12 @@ fn main() {
             let plan = driver.drive_tick(&w, &mut occy, now_ms);
             last_v = verdict(&plan, &route, &objs);
             cedes = derived_cedes(&w); // the cede set the right-of-way derived (observability)
-            if let (Some(log), Some(intent)) = (eval.as_mut(), driver.current_intent()) {
-                let _ = log.append(&MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, last_v));
+            if let Some(intent) = driver.current_intent() {
+                let rec = MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, last_v);
+                if let Some(log) = eval.as_mut() {
+                    let _ = log.append(&rec);
+                }
+                records.push(rec);
             }
             if matches!(last_v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp) {
                 tracker.promote(plan, now_ms);
@@ -205,6 +212,9 @@ fn main() {
         "final ego = ({:.1}, {:.1}) — held at the line on red, then tracked the turn through the arc on green; right-of-way asserted; KIRRA bounded every tracked pose.",
         ego.pose.x_m, ego.pose.y_m
     );
+
+    // The eval scorecard for this run — the brain's choices measured against the checker.
+    println!("\n{}", MickEvalSummary::from_records(&records));
 }
 
 /// The cede set the junction's right-of-way grants the ego at its current pose — what
