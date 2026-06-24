@@ -536,6 +536,41 @@ impl LaneGraph {
         })
     }
 
+    /// Materialize a **route** (a longitudinal lane-id sequence from
+    /// [`route`](Self::route)) into one continuous drivable [`LaneCorridor`] that
+    /// FOLLOWS the route through any turns — the longitudinal counterpart to
+    /// [`corridor_over`](Self::corridor_over) (which spans laterally-adjacent lanes for
+    /// a road *cross-section*). Each route lane's centerline is offset to its own
+    /// ±`half_width_m`, and the per-lane left/right boundary polylines are concatenated
+    /// end-to-end, so the corridor **curves through a junction** exactly as the route
+    /// lanes do. This is the handle the planner follows and KIRRA re-reads for an
+    /// intersection turn (a route `[ego_lane → junction_lane → exit_lane]`).
+    ///
+    /// Seam dedup: where one lane's offset boundary ends at the next lane's start (a
+    /// shared junction node), the duplicated vertex is dropped so the polyline carries
+    /// no zero-length segment. Returns `None` if `route` is empty, any id is unknown, or
+    /// the result degenerates to fewer than two vertices a side (fail-closed).
+    ///
+    /// **Geometry assumption (stated, not hidden):** the route lanes are expected to
+    /// connect end-to-end (lane *i*'s centerline terminus ≈ lane *i+1*'s start), as a
+    /// Lanelet2 successor chain does, and a junction *turn* lane carries a smooth **arc**
+    /// centerline so the offset stays kink-free — a hard L-corner would spike the
+    /// implied steering rate, which KIRRA would then (correctly) clamp/refuse. The
+    /// materializer trusts the map's geometry: it concatenates, it does not re-fit
+    /// corners. Typed lane boundaries along a route (for a mid-turn lane change) are a
+    /// tracked follow-up; a turn follows the route centerline and needs only the corridor.
+    #[must_use]
+    pub fn route_corridor(&self, route: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+        let lanes = self.resolve(route)?;
+        let mut left: Vec<Point> = Vec::new();
+        let mut right: Vec<Point> = Vec::new();
+        for lane in lanes {
+            concat_dedup(&mut left, &offset_polyline(&lane.centerline, lane.half_width_m));
+            concat_dedup(&mut right, &offset_polyline(&lane.centerline, -lane.half_width_m));
+        }
+        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor { left, right, confidence, age_ms })
+    }
+
     /// Derive the typed lane boundaries across a span of lanes, expressed as
     /// lateral offsets **relative to `ego_lane`'s centerline** (the frame Occy's
     /// `lane_boundaries` input uses). Boundaries shared between adjacent lanes are
@@ -652,6 +687,17 @@ fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
     let x0 = a.iter().chain(b).map(|p| p.x_m).fold(f64::INFINITY, f64::min);
     let x1 = a.iter().chain(b).map(|p| p.x_m).fold(f64::NEG_INFINITY, f64::max);
     (x0.is_finite() && x1.is_finite() && x1 > x0).then_some((x0, x1))
+}
+
+/// Append `pts` onto `acc`, dropping `pts`'s first vertex if it coincides (within a
+/// tolerance) with `acc`'s last — so concatenating consecutive route-lane boundary
+/// polylines at a shared junction node leaves no zero-length segment.
+fn concat_dedup(acc: &mut Vec<Point>, pts: &[Point]) {
+    let start = match (acc.last(), pts.first()) {
+        (Some(last), Some(first)) if (last.x_m - first.x_m).hypot(last.y_m - first.y_m) <= 1e-6 => 1,
+        _ => 0,
+    };
+    acc.extend_from_slice(&pts[start..]);
 }
 
 /// Offset a centerline polyline laterally by `signed_offset` (>0 = +y/left side)
@@ -969,6 +1015,93 @@ mod tests {
             .with_lane(Lane::straight(3, 0.0, 60.0, 90.0, 1.75, LineType::Solid, LineType::Solid));
         assert_eq!(g.route(1, 3), None);
         assert_eq!(g.route(1, 2), Some(vec![1, 2]));
+    }
+
+    // ----- Route corridor (longitudinal stitch through a junction) ---------
+
+    /// A quarter-circle arc (n+1 points) from `start_angle` sweeping +π/2 about
+    /// `(cx, cy)` at radius `r` — a smooth left-turn centerline.
+    fn quarter_arc(cx: f64, cy: f64, r: f64, start_angle: f64, n: usize) -> Vec<Point> {
+        (0..=n)
+            .map(|i| {
+                let t = start_angle + std::f64::consts::FRAC_PI_2 * (i as f64 / n as f64);
+                Point { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn route_corridor_concats_a_straight_succession_deduping_the_seam() {
+        // Two straight lanes end-to-end: 1 (x 0..20) → 2 (x 20..40), both at y=0.
+        let g = LaneGraph::new()
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid)
+                    .with_edge(LaneEdge::Successor { to: 2 }),
+            )
+            .with_lane(Lane::straight(2, 0.0, 20.0, 40.0, 2.0, LineType::Solid, LineType::Solid));
+        assert_eq!(g.route(1, 2), Some(vec![1, 2]));
+
+        let c = g.route_corridor(&[1, 2], 0.95, 10).expect("stitch");
+        // Seam at x=20 deduped → 3 vertices a side, spanning x 0..40 at ±2.
+        assert_eq!(c.left_boundary().len(), 3, "shared seam vertex deduped: {:?}", c.left_boundary());
+        assert_eq!(c.right_boundary().len(), 3);
+        assert!(c.left_boundary().iter().all(|p| (p.y_m - 2.0).abs() < 1e-9));
+        assert!(c.right_boundary().iter().all(|p| (p.y_m + 2.0).abs() < 1e-9));
+        assert!((c.left_boundary().last().unwrap().x_m - 40.0).abs() < 1e-9, "spans to x=40");
+    }
+
+    #[test]
+    fn route_corridor_curves_through_a_left_turn() {
+        // Ego straight (0,0)→(20,0); a quarter-arc junction lane curving LEFT from
+        // (20,0) up to (30,10); a vertical exit lane (30,10)→(30,30). The stitched
+        // corridor must FOLLOW the turn — its boundaries swing from heading-east to
+        // heading-north (the exit), not stay flat.
+        let arc = quarter_arc(20.0, 10.0, 10.0, -std::f64::consts::FRAC_PI_2, 8); // (20,0)→(30,10)
+        let junction = Lane {
+            id: 2,
+            centerline: arc,
+            half_width_m: 2.0,
+            left_line: LineType::Solid,
+            right_line: LineType::Solid,
+            heading_rad: std::f64::consts::FRAC_PI_4, // mean of the turn; not load-bearing here
+            edges: vec![LaneEdge::Successor { to: 3 }],
+        };
+        let exit = Lane {
+            id: 3,
+            centerline: vec![Point { x_m: 30.0, y_m: 10.0 }, Point { x_m: 30.0, y_m: 30.0 }],
+            half_width_m: 2.0,
+            left_line: LineType::Solid,
+            right_line: LineType::Solid,
+            heading_rad: std::f64::consts::FRAC_PI_2, // north
+            edges: Vec::new(),
+        };
+        let g = LaneGraph::new()
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid)
+                    .with_edge(LaneEdge::Successor { to: 2 }),
+            )
+            .with_lane(junction)
+            .with_lane(exit);
+
+        let route = g.route(1, 3).expect("route through the junction");
+        assert_eq!(route, vec![1, 2, 3]);
+        let c = g.route_corridor(&route, 0.95, 10).expect("stitch the turn");
+
+        // The corridor starts flat (east, y≈0) and ends pointed north (x≈30, y≈30) —
+        // i.e. it genuinely turned, not stayed on the entry heading.
+        let last_l = *c.left_boundary().last().unwrap();
+        assert!(last_l.y_m > 25.0, "corridor reaches up the exit lane, got y={}", last_l.y_m);
+        assert!((last_l.x_m - 30.0).abs() < 3.0, "and is laterally at the exit (x≈30±half), got x={}", last_l.x_m);
+        // Sanity: the entry is still near the origin heading east.
+        assert!(c.right_boundary()[0].x_m.abs() < 1e-6, "entry starts at x≈0");
+    }
+
+    #[test]
+    fn route_corridor_fails_closed_on_unknown_or_empty() {
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid));
+        assert!(g.route_corridor(&[], 0.95, 10).is_none(), "empty route → None");
+        assert!(g.route_corridor(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
     }
 
     // ----- Right-of-way: cede vs non-yield, consistent from one source -----
