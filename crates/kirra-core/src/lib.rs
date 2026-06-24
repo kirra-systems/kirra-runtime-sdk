@@ -41,6 +41,13 @@ pub mod containment;
 /// This sub-stage is the module only — it does not yet touch containment / posture / parko.
 pub mod frame_integrity;
 
+/// The platform-kinematics abstraction (Stage S-PK1) — one platform-parameterized
+/// governor surface (`PlatformKinematics` / `PlatformVerdict` / `AckermannPlatform`)
+/// so containment / RSS / decel-to-stop extend to non-Ackermann platforms. The
+/// Ackermann impl is a verbatim adapter over the frozen `validate_vehicle_command`;
+/// PROPOSED design of record in `docs/safety/STAGE_S-PK1_PLATFORM_KINEMATICS.md`.
+pub mod platform_kinematics;
+
 /// The shared non-finite governor-input guard (`all_finite`, the #410 convergence point).
 /// A dependency-free predicate every governor entry calls. Relocated here verbatim
 /// (de-monolith Stage 5); re-exported by `kirra_verifier::governor_guard` so the

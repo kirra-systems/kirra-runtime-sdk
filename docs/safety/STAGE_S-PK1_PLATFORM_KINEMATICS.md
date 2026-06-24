@@ -148,10 +148,13 @@ smuggled in as "just a different polygon."
 
 ## 8. Sequencing (smallest reviewable move first, S-FI discipline)
 
-- **S-PK1a** — the `PlatformKinematics` trait + the **Ackermann impl as a verbatim
-  adapter** over the frozen `validate_vehicle_command` / `VehicleKinematicsContract`.
-  Zero behaviour change; **proven by the existing 42 talisman tests** re-run through
-  the adapter. No other code touched.
+- **S-PK1a** — ✅ the `PlatformKinematics` trait + `PlatformVerdict` bound + the
+  **Ackermann impl as a verbatim adapter** over the frozen `validate_vehicle_command`
+  / `VehicleKinematicsContract` (`crates/kirra-core/src/platform_kinematics.rs`).
+  Zero behaviour change — the adapter's `evaluate` *literally calls*
+  `validate_vehicle_command`, and an equivalence test asserts
+  `AckermannPlatform.evaluate(cmd) == validate_vehicle_command(cmd, contract)` over
+  a command battery; the existing talisman tests are unchanged. No other code touched.
 - **S-PK1b** — the **differential-drive sibling** impl under the trait, lifting
   parko's `angular_bound` channel into the unified shape (parko's angular tests are
   the regression proof). Resolve the verdict-unification question (§4) here, with
@@ -172,13 +175,65 @@ smuggled in as "just a different polygon."
 - It does **not** add 3D containment (Tier B) or manipulator safety (Tier C, cut).
 - It does **not** claim ENFORCED coverage for any new platform until S-PK1e.
 
-## 10. Open questions for review
+## 10. Design decisions (RESOLVED — owner, 2026-06-24)
 
-1. **Verdict unification (§4):** associated-type (B) first, or generalized
-   angular-channel verdict (A) up front? (Recommend B→evaluate A.)
-2. **Trait surface:** does `PlatformKinematics` expose `footprint()` + an
-   `evaluate(command, state) -> Verdict`, or separate envelope-accessor methods the
-   existing checkers read? (First reviewable artifact in S-PK1a.)
-3. **Scalar kernel:** fold `KirraKernelGovernor` in as a degenerate
-   single-channel `PlatformKinematics`, or leave it as a distinct generic? (Lean:
-   fold it, so there is genuinely *one* abstraction.)
+The three questions are one question seen from three angles — *how much of each
+platform's shape leaks into the shared surface* — and all resolve the same way:
+**keep the shared surface minimal and behavioral; per-platform shape stays in the
+impl.**
+
+**D1 — Verdict: associated type, NOT generalized-angular.**
+`trait PlatformKinematics { type Verdict: PlatformVerdict; … }`, with
+`Ackermann::Verdict = EnforceAction` **untouched** (the frozen talisman / audit
+reason strings / QNX `deny_code_num` demand byte-identity). A generalized
+angular verdict is a trap — it is the *second* platform's shape (linear+angular)
+masquerading as the abstraction; it already fails omni (`vx, vy, ω`) and aerial
+(6-DOF). The shared bound is tiny, so audit / posture / consumer-safe-stop act on
+any verdict uniformly without knowing its actuation shape:
+
+```rust
+/// Uniform safety view over any platform's per-command verdict.
+pub trait PlatformVerdict {
+    /// True iff the command was admitted (possibly clamped) — NOT a breach.
+    fn is_admitted(&self) -> bool;
+    /// Byte-stable audit/deny token when the verdict denies, else None.
+    fn deny_reason(&self) -> Option<&'static str>;
+}
+```
+
+**D2 — Trait surface: `evaluate` + `footprint()` + the few cross-check primitives.**
+Exactly the union of what the three existing sibling checks consume — no more:
+- `evaluate(&Command, &State) -> Verdict` — the per-command kinematic verdict.
+- `footprint() -> VehicleFootprint` — for SG2 containment.
+- the small kinematic *limits* the decel-to-stop gate / RSS reason about:
+  `max_speed_mps()`, `max_brake_mps2()`, `stop_epsilon_mps()`.
+
+NOT evaluate-only (that starves RSS and the decel gate, which are separate sibling
+checks today — keep them separate; give them accessors). NOT the full accessor bag:
+**mechanism stays private** (`wheelbase_m`, steering geometry, ICR live inside the
+impl's `evaluate`). The moment `wheelbase_m` is on the trait, a checker can read it
+and Ackermann has leaked into the abstraction. The trait exposes safety
+*primitives*; it hides kinematic *mechanism*.
+
+**D3 — Scalar `KirraKernelGovernor`: the composable PRIMITIVE, not a platform.**
+Folding it in is a category error: a scalar channel has **no footprint and no
+spatial containment**, so `footprint()` would return a meaningless degenerate
+value the containment check must special-case — exactly the silent-degenerate a
+safety surface must not have. It is a different *level*: `PlatformKinematics` is "a
+robot the governor bounds spatially"; the scalar kernel is "clamp one scalar with a
+rate limit" — a primitive the platform impls **compose** (a diff-drive's `evaluate`
+scalar-clamps per channel), and the lean ASIL-D / C-FFI surface (#404) keeps using
+it directly. One abstraction *for platforms*; one primitive *platforms are built
+from*. Cleaner layering than collapsing two different things under a trait with a
+meaningless footprint.
+
+### How they compose
+
+- **Ackermann** = verbatim adapter: `Verdict = EnforceAction`,
+  `evaluate = validate_vehicle_command`, `footprint = VehicleFootprint::from`.
+  Zero behaviour change — provable by the existing talisman tests (S-PK1a).
+- **DiffDrive** = sibling impl: its own `(linear, angular)` verdict, composing the
+  scalar clamp/rate-limit primitive per channel + the converge-to-zero rule (#407)
+  it already has in parko (S-PK1b).
+- **Scalar kernel** = unchanged primitive, used by the impls and the FFI; never a
+  platform.
