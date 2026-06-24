@@ -222,6 +222,22 @@ pub fn plan_for_intent(
     intent: &MickIntent,
     world: &PlanInput,
 ) -> PlanOutput {
+    // Junction wiring: when a lane graph is supplied and the integrator did NOT hand a cede
+    // list, derive `cedes_to_ego_ids` from the map's right-of-way (`junction_context`), so
+    // the ego asserts map-granted priority over yielding-lane agents instead of waiting for
+    // the integrator to supply the list. Fail-safe — no graph / ego off-map → empty → the
+    // ego yields to everyone; an explicit list is never overridden; KIRRA still backstops
+    // every crossing agent. (`must_yield_to` needs no wiring here: the planner already
+    // yields to every non-cede agent; that set is the parko-boundary input.)
+    let derived_cedes: Vec<u64>;
+    let enriched: PlanInput;
+    let world: &PlanInput = if world.lane_graph.is_some() && world.cedes_to_ego_ids.is_empty() {
+        derived_cedes = derive_cedes_to_ego(world);
+        enriched = PlanInput { cedes_to_ego_ids: &derived_cedes, ..world.clone() };
+        &enriched
+    } else {
+        world
+    };
     match *intent {
         MickIntent::Hold => PlanOutput::safe_stop(world.ego.pose),
         MickIntent::GoTo { x_m, y_m } => {
@@ -292,6 +308,21 @@ pub fn plan_for_intent(
 /// is what a turn is judged on).
 const ROUTE_CORRIDOR_CONFIDENCE: f32 = 0.95;
 const ROUTE_CORRIDOR_AGE_MS: u64 = 0;
+
+/// Derive the `cedes_to_ego` set from the lane graph's right-of-way for the ego at its
+/// current pose — the agents the map says yield to the ego (so the planner asserts priority
+/// over them rather than waiting). Empty if there is no graph or the ego is off the mapped
+/// road (fail-safe → yield to all). Uses [`LaneGraph::junction_context`], the same source
+/// Parko's non-yielding set is derived from, so the two cannot disagree.
+fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
+    match world.lane_graph {
+        Some(graph) => {
+            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            graph.junction_context(ego_pt, world.objects).cedes_to_ego
+        }
+        None => Vec::new(),
+    }
+}
 
 /// Pick the ego lane's successor that turns `direction` (successor-by-heading): the matching
 /// successor whose heading change from the ego lane is smallest in magnitude, ties by id for
@@ -1046,6 +1077,68 @@ mod tests {
         // No graph → empty (the brain is offered no turns, and a TurnAt would HOLD anyway).
         let no_graph = WorldContext::from_plan_input(&world(&corr, &[], &[]));
         assert!(no_graph.available_turns.is_empty());
+    }
+
+    // ----- junction right-of-way wired into cedes_to_ego_ids -----
+
+    /// A planner that records the `cedes_to_ego_ids` it was grounded with.
+    struct CedeRecorder {
+        cedes: Vec<u64>,
+    }
+    impl Planner for CedeRecorder {
+        fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
+            self.cedes = input.cedes_to_ego_ids.to_vec();
+            PlanOutput::safe_stop(input.ego.pose)
+        }
+    }
+
+    /// Lane 1 (ego, y=0) has priority over lane 2 (y=10); an object sits in lane 2.
+    fn priority_graph() -> crate::LaneGraph {
+        crate::LaneGraph::new()
+            .with_lane(crate::Lane::straight(1, 0.0, 0.0, 30.0, 2.0, crate::LineType::Solid, crate::LineType::Solid))
+            .with_lane(crate::Lane::straight(2, 10.0, 0.0, 30.0, 2.0, crate::LineType::Solid, crate::LineType::Solid))
+            .with_right_of_way(1, 2)
+    }
+
+    fn obj_in_lane2() -> PerceivedObject {
+        PerceivedObject { id: 7, pos: Point { x_m: 15.0, y_m: 10.0 }, velocity_mps: 3.0, heading_rad: 0.0, vel: Point { x_m: 3.0, y_m: 0.0 } }
+    }
+
+    #[test]
+    fn junction_right_of_way_is_wired_into_cedes_to_ego_ids() {
+        let g = priority_graph();
+        let objs = [obj_in_lane2()];
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // Ego in lane 1; no integrator cede list → derive from the map.
+        let w = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+
+        let mut rec = CedeRecorder { cedes: Vec::new() };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
+        assert_eq!(rec.cedes, vec![7], "the yielding-lane agent is derived into cedes_to_ego_ids");
+    }
+
+    #[test]
+    fn an_explicit_cede_list_is_never_overridden_by_the_map() {
+        let g = priority_graph();
+        let objs = [obj_in_lane2()];
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let explicit = [99_u64];
+        let w = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), cedes_to_ego_ids: &explicit, ..world(&corr, &objs, &[]) };
+
+        let mut rec = CedeRecorder { cedes: Vec::new() };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
+        assert_eq!(rec.cedes, vec![99], "an integrator-supplied cede list stands (not overridden)");
+    }
+
+    #[test]
+    fn no_graph_derives_no_cedes_and_yields_to_all() {
+        let objs = [obj_in_lane2()];
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = PlanInput { map: &corr, objects: &objs, lane_graph: None, ..world(&corr, &objs, &[]) };
+
+        let mut rec = CedeRecorder { cedes: vec![1] };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
+        assert!(rec.cedes.is_empty(), "no graph → empty cede list (fail-safe: yield to all)");
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----
