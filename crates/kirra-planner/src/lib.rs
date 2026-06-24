@@ -60,7 +60,10 @@ pub mod lanelet2;
 pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
 
 pub mod mick;
-pub use mick::{plan_for_intent, MickIntent};
+pub use mick::{
+    mick_drive_once, plan_for_intent, MickBrain, MickError, MickIntent, ObjectView, ScriptedBrain,
+    WorldContext, MICK_MAX_OBJECTS,
+};
 
 pub mod learned;
 pub use learned::{LearnedPlanner, Teacher};
