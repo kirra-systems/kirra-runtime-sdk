@@ -11,12 +11,12 @@
 //! The scene: the ego approaches a junction whose lane carries a TRAFFIC LIGHT and a LEFT
 //! turn branch, with a crossing lane the ego has right-of-way over. The light starts RED —
 //! the ego decelerates to the stop line and HOLDS no matter what Gemma asks — then turns
-//! GREEN, and the ego tracks the route corridor left through the junction toward the goal
-//! across it. Nothing the model says can make the car run the red, cross into the crosser,
-//! or over-cut the turn: Occy grounds the intent against the map-derived controls and KIRRA
-//! bounds the result. (The model emits `turn_at` / `go_to`; the goal sits across the
-//! junction, so a goal-seeking intent tracks the turn. A bare `turn_at` is a single-shot
-//! approach maneuver — see the deterministic `intersection_closed_loop` test.)
+//! GREEN, and the ego tracks the turn left through the junction toward the goal across it.
+//! Nothing the model says can make the car run the red, cross into the crosser, or over-cut
+//! the turn: Occy grounds the intent against the map-derived controls and KIRRA bounds the
+//! result. (Whether the model emits `turn_at` or `go_to`, the turn drives to completion —
+//! route-progress continues the committed arc, the fast-loop tracker carries it through, and
+//! curved-lane `contains` keeps the ego located on the arc; see `intersection_closed_loop`.)
 //!
 //! Dual-rate, like `mick_chauffeur`: the FAST loop conforms at 10 Hz; the SLOW System-2 path
 //! only re-asks Gemma for a new intent every ~500 ms, so you watch a maneuver persist between

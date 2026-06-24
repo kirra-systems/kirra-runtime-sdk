@@ -1,25 +1,25 @@
-//! Deterministic proof for the `mick_intersection` demo: a scripted goal-seeking brain drives a
-//! signalized left-turn junction closed-loop and the ego **completes the turn**, under a proper
-//! dual-rate loop. The TRAFFIC LIGHT (#531) HOLDs the ego at the stop line while RED (it never
-//! crosses); on GREEN the ego tracks the route corridor THROUGH the arc into the exit; the
-//! [`FastLoopTracker`] follows the admitted trajectory by elapsed time, so the ego **accelerates
-//! from the red-light standstill and holds the curve** instead of creeping off the line (the toy
-//! 0.1 s-sample conformance could do neither); the map's right-of-way (#528) derives the crossing
-//! vehicle into the cede set; and the fast loop only ever conforms to a KIRRA-admitted trajectory.
+//! Deterministic proof for the `mick_intersection` demo: a scripted **`TurnAt::Left`** brain
+//! drives a signalized left-turn junction closed-loop and the ego **completes the turn**, end to
+//! end, under a proper dual-rate loop — the whole junction stack composed. The TRAFFIC LIGHT
+//! (#531) HOLDs the ego at the stop line while RED (it never crosses); on GREEN the **route-
+//! progress** grounding continues the committed arc, the [`FastLoopTracker`] follows the admitted
+//! trajectory by elapsed time (so the ego **accelerates from the red-light standstill and holds
+//! the curve** — the toy 0.1 s-sample conformance could do neither), and the **curved-lane
+//! `contains`** fix lets per-tick `lane_at` resolve on the arc (it used to return None at the
+//! approach→arc seam and HOLD there); the map's right-of-way (#528) derives the crossing vehicle
+//! into the cede set; and the fast loop only ever conforms to a KIRRA-admitted trajectory.
 //!
 //! Dual-rate: the slow loop (System-2 → Occy → KIRRA) re-plans/validates every `REPLAN_MS` (and
 //! when the committed trajectory is exhausted) — promoting only ADMITTED plans; the fast loop
-//! tracks that trajectory each 100 ms tick. The brain heads for the goal across the junction
-//! (`GoTo`), which tracks the full route corridor without per-tick lane re-resolution. A bare
-//! `TurnAt` drives the same turn (route-progress, #533) but cannot yet complete it in THIS loop:
-//! `Lane::contains` uses a `mean_y` bounding box that excludes a curved lane's own ends, so
-//! `lane_at` returns None at the approach→arc seam and the per-tick re-resolution HOLDs there —
-//! a curved-lane containment fix is the remaining follow-up.
+//! tracks that trajectory each 100 ms tick. Three pieces had to land together for a model-chosen
+//! `TurnAt` to drive the whole turn: route-progress (continue the arc), the fast-loop tracker
+//! (accelerate from the stop / hold the curve), and curved-lane containment (locate the ego on
+//! the arc). The example shows the same loop with a *live* model; this pins it with no Ollama.
 
 use kirra_planner::{
     EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl,
     LaneCorridor, LaneEdge, LaneGraph, LineType, MickDriver, MickIntent, PlanInput, Pose,
-    ScriptedBrain, SignalState, TrajectoryVerdict,
+    ScriptedBrain, SignalState, TrajectoryVerdict, TurnDirection,
 };
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
@@ -115,10 +115,11 @@ fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {
     let objs = [PerceivedObject { id: 7, pos: Point { x_m: 33.0, y_m: -10.0 }, velocity_mps: 0.0, heading_rad: std::f64::consts::FRAC_PI_2, vel: Point { x_m: 0.0, y_m: 0.0 } }];
     let goal = Pose { x_m: APPROACH_END + TURN_RADIUS, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
 
-    // The model heads for the goal across the junction (a left turn). It tracks the full route
-    // corridor (map) through the arc — so the fast-loop tracker carries the turn to completion,
-    // accelerating from the red-light stop, without per-tick lane re-resolution.
-    let mut driver = MickDriver::new(ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 42.0, y_m: 28.0 }; 60]));
+    // The model asks to TURN LEFT. The red light HOLDs it at the line; on green the route-
+    // progress grounding continues the committed arc, the fast-loop tracker drives it through,
+    // and (with curved-lane `contains` fixed) per-tick `lane_at` resolves on the arc so the turn
+    // completes — a fully model-chosen TurnAt, end to end.
+    let mut driver = MickDriver::new(ScriptedBrain::new(vec![MickIntent::TurnAt { direction: TurnDirection::Left }; 60]));
     let mut occy = GeometricPlanner::default();
     let mut tracker = FastLoopTracker::new();
 

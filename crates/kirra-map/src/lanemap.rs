@@ -185,16 +185,21 @@ impl Lane {
         wrap_pi(self.heading_rad - other.heading_rad).abs() > std::f64::consts::FRAC_PI_2
     }
 
-    /// Is world point `p` inside this lane's footprint (within the longitudinal
-    /// extent and `±half_width_m` of the centerline)? Straight-lane test.
+    /// Is world point `p` inside this lane's footprint — within `±half_width_m` of the
+    /// centerline **polyline**? Measured as the perpendicular distance to the nearest
+    /// centerline segment (projection clamped to each segment), so it is correct for a CURVED
+    /// lane as well as a straight one. (The previous `mean_y` bounding box silently excluded a
+    /// turning lane's own ends — an arc from y=0 up to y=12 has `mean_y≈6`, so its box `[3,9]`
+    /// missed the arc near the junction seam; that is what made `lane_at` return `None` mid-turn.)
     #[must_use]
     pub fn contains(&self, p: Point) -> bool {
         if self.centerline.len() < 2 {
             return false;
         }
-        let x0 = self.centerline.iter().map(|q| q.x_m).fold(f64::INFINITY, f64::min);
-        let x1 = self.centerline.iter().map(|q| q.x_m).fold(f64::NEG_INFINITY, f64::max);
-        p.x_m >= x0 && p.x_m <= x1 && (p.y_m - self.mean_y()).abs() <= self.half_width_m
+        let half_sq = self.half_width_m * self.half_width_m;
+        self.centerline
+            .windows(2)
+            .any(|w| point_segment_dist_sq(p, w[0], w[1]) <= half_sq)
     }
 
     /// Longitudinal successors of this lane.
@@ -747,6 +752,23 @@ fn mean_y_of(pts: &[Point]) -> f64 {
     pts.iter().map(|p| p.y_m).sum::<f64>() / pts.len() as f64
 }
 
+/// Squared distance from point `p` to segment `a→b` (projection clamped to the segment), the
+/// kernel of the curved-lane [`Lane::contains`] test. Squared to avoid a `sqrt` per segment.
+fn point_segment_dist_sq(p: Point, a: Point, b: Point) -> f64 {
+    let (abx, aby) = (b.x_m - a.x_m, b.y_m - a.y_m);
+    let len_sq = abx * abx + aby * aby;
+    // Clamp the projection parameter to [0, 1] so a point off either end measures to the
+    // nearest endpoint (degenerate zero-length segment → distance to `a`).
+    let t = if len_sq <= f64::EPSILON {
+        0.0
+    } else {
+        (((p.x_m - a.x_m) * abx + (p.y_m - a.y_m) * aby) / len_sq).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.x_m + t * abx, a.y_m + t * aby);
+    let (dx, dy) = (p.x_m - cx, p.y_m - cy);
+    dx * dx + dy * dy
+}
+
 /// Longitudinal `[x_min, x_max]` spanned by two boundary polylines, or `None` if
 /// degenerate (non-finite or zero length).
 fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
@@ -1195,6 +1217,39 @@ mod tests {
 
         assert!(g.route_drivable(&[], 0.95, 10).is_none(), "empty → None");
         assert!(g.route_drivable(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
+    }
+
+    #[test]
+    fn contains_follows_a_curved_centerline_not_a_mean_y_box() {
+        use std::f64::consts::FRAC_PI_2;
+        // A quarter-arc lane from (30,0) curving up to (42,12), half-width 3.0. Its mean_y≈6,
+        // so the old |y−mean_y|≤half box was [3,9] — it missed the arc's own ends.
+        let arc: Vec<Point> = (0..=12)
+            .map(|i| {
+                let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 12.0);
+                Point { x_m: 30.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
+            })
+            .collect();
+        let lane = Lane {
+            id: 1,
+            centerline: arc,
+            half_width_m: 3.0,
+            left_line: LineType::Solid,
+            right_line: LineType::Solid,
+            heading_rad: FRAC_PI_2,
+            edges: Vec::new(),
+            control: None,
+        };
+
+        // Points ON the arc near its low end (y≈0) and high end (y≈12) — the box [3,9] excluded
+        // these, which is exactly what stranded `lane_at` at the approach→arc seam.
+        assert!(lane.contains(Point { x_m: 30.1, y_m: 0.0 }), "the arc's low (junction-seam) end is inside");
+        assert!(lane.contains(Point { x_m: 41.9, y_m: 12.0 }), "the arc's high (exit) end is inside");
+        // A point at a mid-arc station, just inside the half-width perpendicular to the curve.
+        assert!(lane.contains(Point { x_m: 35.0, y_m: 1.6 }), "a mid-arc point within half-width is inside");
+        // The box [3,9] would have FALSELY included a point at the chord interior far off the arc.
+        assert!(!lane.contains(Point { x_m: 33.0, y_m: 6.0 }), "a point off the actual curve is outside");
+        assert!(!lane.contains(Point { x_m: 35.0, y_m: 6.0 }), "well off the curve laterally → outside");
     }
 
     // ----- Right-of-way: cede vs non-yield, consistent from one source -----
