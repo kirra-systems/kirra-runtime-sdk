@@ -13,8 +13,9 @@
 //! handed to KIRRA so its containment + RSS see the whole road.
 
 use kirra_planner::{
-    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneCorridor, LaneEdge, LaneGraph,
-    LineType, PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
+    plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneCorridor, LaneEdge,
+    LaneGraph, LineType, MickIntent, PerceivedObject, PlanInput, Planner, Pose, ProposalKind,
+    TrajectoryVerdict,
 };
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
@@ -96,6 +97,7 @@ fn plan_and_check(
         drivable: with_drivable.then_some(drivable),
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -230,6 +232,90 @@ fn a_same_direction_vehicle_at_the_same_spot_does_not_block_the_pass() {
     );
 }
 
+/// Build the overtake world as a `PlanInput` (with `request_overtake` left false, so the
+/// caller's intent is what turns it on) for the Mick end-to-end tests below.
+#[allow(clippy::too_many_arguments)]
+fn overtake_world<'a>(
+    map: &'a dyn CorridorSource,
+    drivable: &'a dyn CorridorSource,
+    objects: &'a [PerceivedObject],
+    boundaries: &'a [kirra_planner::LaneBoundary],
+) -> PlanInput<'a> {
+    PlanInput {
+        ego: EgoState {
+            pose: Pose { x_m: 6.0, y_m: -2.5, heading_rad: 0.0 },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal { target: Pose { x_m: 60.0, y_m: -2.5, heading_rad: 0.0 } },
+        map,
+        objects,
+        controls: &[],
+        lane_boundaries: boundaries,
+        motion: &[],
+        predicted_paths: &[],
+        cedes_to_ego_ids: &[],
+        lane_change_to_m: None,
+        no_overtake_ids: &[],
+        drivable: Some(drivable),
+        posture: FleetPosture::Nominal,
+        target_speed_mps: None,
+        request_overtake: false, // the MickIntent::Overtake grounding flips this on
+    }
+}
+
+/// **The full Mick path.** A `MickIntent::Overtake` — the LLM chauffeur's discretionary
+/// "pass the slow lead" — is grounded by Occy (`plan_for_intent`) into the cross-centerline
+/// maneuver, and KIRRA admits it on a clear oncoming lane. Proves the intent, not just the
+/// planner's auto-route-around, drives the pass end to end.
+#[test]
+fn mick_overtake_intent_grounds_to_a_pass_and_kirra_admits() {
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+    let cars = [stopped_car(24.0)];
+    let w = overtake_world(&map, &drivable, &cars, &boundaries);
+
+    let mut occy = GeometricPlanner::default();
+    let plan = plan_for_intent(&mut occy, &MickIntent::Overtake, &w);
+
+    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
+    assert!(max_y > 0.0, "Mick's Overtake intent crosses into the oncoming half, got max_y {max_y}");
+
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory, &drivable, &cars, &VehicleConfig::default_urban(), None,
+        FleetPosture::Nominal,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a clear oncoming lane → KIRRA admits Mick's pass, got {verdict:?}"
+    );
+}
+
+/// **The payoff, via the Mick path.** Same `MickIntent::Overtake`, but now an oncoming
+/// vehicle is closing in the pass corridor. Mick still asks to pass (it never reasons about
+/// oncoming traffic); KIRRA's head-on RSS refuses. The doer proposes, the checker bounds.
+#[test]
+fn mick_overtake_into_oncoming_traffic_is_refused_by_kirra() {
+    let g = road(LineType::Unmarked);
+    let (map, drivable) = (ego_corridor(&g), full_road(&g));
+    let boundaries = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+    let cars = [stopped_car(24.0), oncoming_car(38.0, 12.0)];
+    let w = overtake_world(&map, &drivable, &cars, &boundaries);
+
+    let mut occy = GeometricPlanner::default();
+    let plan = plan_for_intent(&mut occy, &MickIntent::Overtake, &w);
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory, &drivable, &cars, &VehicleConfig::default_urban(), None,
+        FleetPosture::Nominal,
+    );
+    assert_eq!(
+        verdict, TrajectoryVerdict::MRCFallback,
+        "oncoming traffic too close → KIRRA refuses Mick's pass, got {verdict:?}"
+    );
+}
+
 #[test]
 fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
     // Identical to `occy_proposes_an_overtake...` (which DOES pass the same object),
@@ -263,6 +349,7 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         drivable: Some(&drivable),
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

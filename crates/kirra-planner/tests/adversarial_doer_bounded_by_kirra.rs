@@ -98,6 +98,7 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         drivable: None,
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     }
 }
 

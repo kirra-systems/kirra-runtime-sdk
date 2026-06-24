@@ -80,6 +80,7 @@ fn lane_change_across_broken_divider_admits() {
         drivable: None,
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -129,6 +130,7 @@ fn lane_change_across_solid_divider_is_refused() {
         drivable: None,
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

@@ -38,6 +38,11 @@ pub enum MickIntent {
     /// caps it again, so "go faster" never exceeds the safe envelope. A non-finite request
     /// fails closed (the caller HOLDs).
     Cruise { target_speed_mps: f64 },
+    /// Pass the slow / stopped lead ahead — a discretionary overtake using the drivable
+    /// area, then return. Honored only if the world supplies a drivable area, the pass fits
+    /// it, and the lane line is crossable; otherwise Occy stays in lane. KIRRA bounds the
+    /// pass (head-on RSS), so an overtake into oncoming traffic is refused regardless.
+    Overtake,
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -53,6 +58,8 @@ enum IntentJson {
     Hold,
     #[serde(rename = "cruise")]
     Cruise { target_speed_mps: f64 },
+    #[serde(rename = "overtake")]
+    Overtake,
 }
 
 impl MickIntent {
@@ -76,6 +83,7 @@ impl MickIntent {
             IntentJson::LaneChange { target_offset_m } => MickIntent::LaneChange { target_offset_m },
             IntentJson::Hold => MickIntent::Hold,
             IntentJson::Cruise { target_speed_mps } => MickIntent::Cruise { target_speed_mps },
+            IntentJson::Overtake => MickIntent::Overtake,
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -89,6 +97,7 @@ impl MickIntent {
             MickIntent::LaneChange { target_offset_m } => target_offset_m.is_finite(),
             MickIntent::Hold => true,
             MickIntent::Cruise { target_speed_mps } => target_speed_mps.is_finite(),
+            MickIntent::Overtake => true,
         }
     }
 }
@@ -175,6 +184,12 @@ pub fn plan_for_intent(
                 target_speed_mps: Some(target_speed_mps.max(0.0)),
                 ..world.clone()
             })
+        }
+        MickIntent::Overtake => {
+            // Request the discretionary pass; Occy honors it only if a drivable area is
+            // present and the pass fits + the lane line is crossable (else it stays in lane),
+            // and KIRRA bounds it (head-on RSS). Nothing unsafe flows from the request itself.
+            planner.plan(&PlanInput { request_overtake: true, ..world.clone() })
         }
     }
 }
@@ -479,6 +494,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -753,6 +769,36 @@ mod tests {
         );
         // 1e400 overflows to Inf → finiteness gate rejects it (fail-closed).
         assert!(MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":1e400}"#).is_err());
+    }
+
+    // ----- the Overtake intent (discretionary pass) -----
+
+    #[test]
+    fn overtake_intent_grounds_to_request_overtake() {
+        // A recording planner captures the flag the intent set on the PlanInput.
+        struct Recorder { req: bool }
+        impl Planner for Recorder {
+            fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
+                self.req = input.request_overtake;
+                PlanOutput::safe_stop(input.ego.pose)
+            }
+        }
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+
+        let mut rec = Recorder { req: false };
+        let _ = plan_for_intent(&mut rec, &MickIntent::Overtake, &w);
+        assert!(rec.req, "Overtake grounds to request_overtake = true");
+
+        // A non-overtake maneuver leaves it false (start true to prove it is cleared).
+        let mut rec2 = Recorder { req: true };
+        let _ = plan_for_intent(&mut rec2, &MickIntent::Cruise { target_speed_mps: 5.0 }, &w);
+        assert!(!rec2.req, "Cruise leaves request_overtake = false");
+    }
+
+    #[test]
+    fn overtake_llm_json_parses() {
+        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"overtake"}"#).unwrap(), MickIntent::Overtake);
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----
