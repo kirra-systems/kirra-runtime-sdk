@@ -434,15 +434,13 @@ pub async fn run_adapter(
                 // Multi-modal predictive RSS: prediction does not yet supply per-object
                 // modes here → None (no-op); the snapshot RSS remains the bound.
                 None,
-                // Frame/localization integrity (S-FI1): no localization-quality
-                // input is wired at this node yet → assert AOU-LOCALIZATION-001
-                // (Trusted → primary 0.40 m containment margin), mirroring the
-                // visibility/predicted-modes pre-wiring state above. Wiring a real
-                // localization-quality source (resolve_frame_trust over an
-                // integrator FrameIntegrity report) is the integrator contract;
-                // until then a sustained localization fault still escalates fleet
-                // posture → LockedOut (S-FI1d), which this loop short-circuits to MRC.
-                kirra_core::frame_integrity::FrameTrust::Trusted,
+                // Frame/localization integrity (S-FI1): the LIVE frame trust resolved from the
+                // integrator's per-tick `update_frame_integrity` report. With no source wired
+                // this returns `Trusted` — the AOU-LOCALIZATION-001 seam (byte-for-byte the
+                // prior behaviour); once a source reports, the gate is live (a poor / non-finite
+                // ε derates the 0.40 m → 0.75 m margin or refuses, a silent source fails closed),
+                // and a sustained fault also escalates fleet posture → LockedOut (S-FI1d).
+                slow_state.snapshot_frame_trust(now_wall),
             );
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

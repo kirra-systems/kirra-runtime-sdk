@@ -23,6 +23,9 @@ use std::sync::{Arc, RwLock};
 use kirra_core::FleetPosture;
 
 use crate::config::VehicleConfig;
+use kirra_core::frame_integrity::{
+    resolve_frame_trust, FrameIntegrity, FrameIntegrityCfg, FrameTrust,
+};
 use kirra_core::posture_tracker::PostureTracker;
 
 // The lean trajectory/perception data types now live in the `kirra-core` crate
@@ -243,6 +246,18 @@ pub struct AdaptorState {
     /// is sticky-toward-safe. The SSE subscriber task in the binary
     /// drives `update_posture` whenever a posture event arrives.
     pub posture_tracker: Arc<RwLock<PostureTracker>>,
+
+    /// Latest integrator-reported **frame integrity** (S-FI1 live source). `None` from boot
+    /// AND until the first `update_frame_integrity` — which the slow loop reads as the
+    /// AOU-LOCALIZATION-001 seam (`FrameTrust::Trusted`), i.e. the integrator asserts the
+    /// frame is correct externally (backward-compatible with the pre-wiring always-Trusted).
+    /// Once a source reports, the gate is LIVE: a poor / non-finite ε derates the containment
+    /// margin (Trusted→Degraded) or refuses (Untrusted), and a source that goes SILENT past
+    /// `max_age_ms` fails closed to `Untrusted`. See [`AdaptorState::snapshot_frame_trust`].
+    pub latest_frame_integrity: Arc<RwLock<Option<FrameIntegrity>>>,
+    /// Wall-clock-ms of the last `update_frame_integrity` (0 = a source has never reported →
+    /// AoU seam). Used to fail closed when a once-live source goes silent.
+    pub last_frame_integrity_ms: Arc<AtomicU64>,
 }
 
 #[inline]
@@ -267,6 +282,8 @@ impl AdaptorState {
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::nominal_default_no_source())),
+            latest_frame_integrity: Arc::new(RwLock::new(None)),
+            last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -285,6 +302,8 @@ impl AdaptorState {
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::nominal_default_no_source())),
+            latest_frame_integrity: Arc::new(RwLock::new(None)),
+            last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -306,6 +325,8 @@ impl AdaptorState {
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::with_source())),
+            latest_frame_integrity: Arc::new(RwLock::new(None)),
+            last_frame_integrity_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -360,6 +381,43 @@ impl AdaptorState {
     /// available" and fall back conservatively.
     pub fn snapshot_odom(&self) -> Option<EgoOdom> {
         self.latest_odom.read().ok().and_then(|g| *g)
+    }
+
+    /// Feed the integrator's per-tick **frame-integrity** report (S-FI1 live source) — the
+    /// integrator contract this gate was built for. Stamps arrival so a source that later goes
+    /// silent fails closed. The integrator's localization / pose-quality stack calls this each
+    /// tick it has an estimate; NOT calling it keeps the AOU-LOCALIZATION-001 seam (Trusted).
+    pub fn update_frame_integrity(&self, report: FrameIntegrity, now_ms: u64) {
+        if let Ok(mut guard) = self.latest_frame_integrity.write() {
+            *guard = Some(report);
+            // Never store 0 once a source has reported (0 means "never reported" → AoU seam).
+            self.last_frame_integrity_ms.store(now_ms.max(1), Ordering::Relaxed);
+        } else {
+            tracing::error!("latest_frame_integrity RwLock POISONED — frame-integrity report dropped");
+        }
+    }
+
+    /// Resolve the live [`FrameTrust`] the S-FI1 containment gate should use at `now_ms`:
+    ///   - a source has NEVER reported (`last == 0`) → `Trusted`: the AOU-LOCALIZATION-001 seam
+    ///     (the integrator asserts the frame externally) — byte-for-byte the pre-wiring default;
+    ///   - a once-live source has gone SILENT (`now − last > max_age_ms`) → `Untrusted`,
+    ///     fail-closed (an absent pose-quality signal is NOT "the pose is fine" — the #238 trap);
+    ///   - else resolve the latest report through [`resolve_frame_trust`] (which itself fails
+    ///     closed on a non-finite ε, a report-internal stale `age_ms`, or `ε > fallback`).
+    #[must_use]
+    pub fn snapshot_frame_trust(&self, now_ms: u64) -> FrameTrust {
+        let cfg = FrameIntegrityCfg::default();
+        let last = self.last_frame_integrity_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            return FrameTrust::Trusted; // no source wired → AoU seam (backward-compatible)
+        }
+        if now_ms.saturating_sub(last) > cfg.max_age_ms {
+            return FrameTrust::Untrusted; // a once-live source went silent → fail closed
+        }
+        match self.latest_frame_integrity.read().ok().and_then(|g| *g) {
+            Some(report) => resolve_frame_trust(&report, &cfg),
+            None => FrameTrust::Untrusted, // last>0 but no report → fail closed
+        }
     }
 
     /// Subscription staleness check (SG9). Returns true if ANY of the
@@ -679,5 +737,51 @@ mod tests {
             FleetPosture::Nominal,
             "URL-unset no-source default must remain Nominal (M1 path unchanged)"
         );
+    }
+
+    // ----- S-FI1 live frame-integrity source -----
+
+    fn reported(lateral_error_95_m: f64, age_ms: u64) -> FrameIntegrity {
+        FrameIntegrity::Reported {
+            localization: kirra_core::frame_integrity::LocalizationChannel {
+                lateral_error_95_m,
+                age_ms,
+            },
+        }
+    }
+
+    #[test]
+    fn frame_trust_defaults_to_trusted_when_no_source_reports() {
+        // AOU-LOCALIZATION-001 seam: a node with no localization-quality source wired keeps the
+        // prior always-Trusted behaviour (the integrator asserts the frame correct externally).
+        let state = AdaptorState::new();
+        assert_eq!(state.snapshot_frame_trust(1000), FrameTrust::Trusted);
+    }
+
+    #[test]
+    fn a_live_source_drives_the_frame_trust_gate() {
+        let state = AdaptorState::new();
+        // Good, fresh report (ε ≤ 0.10 m) → Trusted (primary 0.40 m containment margin).
+        state.update_frame_integrity(reported(0.05, 0), 1000);
+        assert_eq!(state.snapshot_frame_trust(1000), FrameTrust::Trusted, "good ε → Trusted");
+        // Borderline (0.10 < ε ≤ 0.30) → Degraded (fallback 0.75 m margin).
+        state.update_frame_integrity(reported(0.20, 0), 2000);
+        assert_eq!(state.snapshot_frame_trust(2000), FrameTrust::Degraded, "borderline ε → Degraded");
+        // ε beyond the fallback bound → Untrusted (containment refuses).
+        state.update_frame_integrity(reported(0.50, 0), 3000);
+        assert_eq!(state.snapshot_frame_trust(3000), FrameTrust::Untrusted, "ε > fallback → Untrusted");
+        // Non-finite ε → Untrusted (an unverifiable pose is no pose).
+        state.update_frame_integrity(reported(f64::NAN, 0), 4000);
+        assert_eq!(state.snapshot_frame_trust(4000), FrameTrust::Untrusted, "non-finite ε → Untrusted");
+    }
+
+    #[test]
+    fn a_once_live_source_going_silent_fails_closed() {
+        // Once a source has reported, its SILENCE is a fault: past max_age_ms (500) the gate is
+        // Untrusted, not frozen at the last-good value — an absent signal is not "the pose is fine".
+        let state = AdaptorState::new();
+        state.update_frame_integrity(reported(0.05, 0), 1000);
+        assert_eq!(state.snapshot_frame_trust(1400), FrameTrust::Trusted, "still fresh at +400 ms");
+        assert_eq!(state.snapshot_frame_trust(1600), FrameTrust::Untrusted, "silent past 500 ms → fail closed");
     }
 }
