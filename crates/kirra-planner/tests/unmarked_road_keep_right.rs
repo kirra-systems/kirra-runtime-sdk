@@ -42,6 +42,7 @@ fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
         no_overtake_ids: &[],
         drivable: None,
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

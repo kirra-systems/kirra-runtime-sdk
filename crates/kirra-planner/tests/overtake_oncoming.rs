@@ -95,6 +95,7 @@ fn plan_and_check(
         no_overtake_ids: &[],
         drivable: with_drivable.then_some(drivable),
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -261,6 +262,7 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         no_overtake_ids: &[1], // the bus
         drivable: Some(&drivable),
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

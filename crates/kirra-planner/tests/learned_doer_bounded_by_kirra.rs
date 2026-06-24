@@ -44,6 +44,7 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         no_overtake_ids: &[],
         drivable: None,
         posture: FleetPosture::Nominal,
+        target_speed_mps: None,
     }
 }
 
