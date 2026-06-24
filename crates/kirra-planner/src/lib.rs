@@ -82,6 +82,11 @@ pub use mick_llm::{build_prompt, intent_schema, LlmBrain, MockModel, ModelClient
 pub mod learned;
 pub use learned::{LearnedPlanner, Teacher};
 
+/// Fast-loop trajectory tracker — the System-1 conformance side of the dual-rate loop, which
+/// follows one admitted trajectory by elapsed time across many fast ticks.
+pub mod fast_loop;
+pub use fast_loop::{FastLoopTracker, TrackedCommand};
+
 /// What set the binding travel limit `s_limit` — selects the speed/brake policy:
 /// `Lead` matches & follows (rolling gap, no brake-to-zero); `ObjectStop`,
 /// `Behavioral` and `Yield` decelerate to a hard stop; `Goal` cruises to the goal.
