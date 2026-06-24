@@ -65,6 +65,17 @@ pub const RSS_LONGITUDINAL_CONFLICT_M: f64 = 8.0;
 /// danger conjunction while each remains a fail-closed layer.)
 pub const RSS_LONGITUDINAL_OVERLAP_M: f64 = 2.5;
 
+/// Object/ego lateral-velocity magnitude (m/s) above which a same-lane object is treated as
+/// **cutting in** (a genuine side-collision risk) rather than a straight-running lead or a
+/// member of a stationary queue. The lateral (side) RSS is the CONJUNCTION partner of the
+/// longitudinal check: a side collision needs the pair ABREAST (longitudinally unsafe) OR
+/// closing laterally. Below this threshold a *longitudinally-safe* object triggers no lateral
+/// veto — admitting a safe same-lane stop (a stopped queue / a stopped lead the ego halts
+/// behind) that the reaction-time swerve term in `lateral_safe_distance` otherwise rejected
+/// (the §4 over-rejection) — while any real lateral closing is still caught. Small, so only
+/// genuine lateral stillness is admitted; the gate fails closed on a non-finite separation first.
+pub const RSS_LATERAL_MOTION_EPS_MPS: f64 = 0.1;
+
 #[inline]
 fn finite_positive(x: f64) -> bool {
     x.is_finite() && x > 0.0

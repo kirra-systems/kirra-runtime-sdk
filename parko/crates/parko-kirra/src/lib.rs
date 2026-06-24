@@ -51,7 +51,8 @@ use kirra_core::FleetPosture;
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
-    opposite_direction_safe_distance, RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
+    opposite_direction_safe_distance, RSS_LATERAL_MOTION_EPS_MPS, RSS_LONGITUDINAL_CONFLICT_M,
+    RSS_LONGITUDINAL_OVERLAP_M,
 };
 use kirra_core::frame_integrity::{resolve_frame_trust, FrameIntegrity, FrameIntegrityCfg, FrameTrust};
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
@@ -263,13 +264,30 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
         // Lateral defence-in-depth bounds safety only when the object is also
         // longitudinally CLOSE — a lead well ahead / oncoming traffic safely
         // passing in the next lane is longitudinally distant, so its lateral gap
-        // does not bound safety (it over-rejected before — §4).
+        // does not bound safety (it over-rejected before — §4). And WITHIN that
+        // proximity it bounds safety only when a side collision is actually possible:
+        // the pair ABREAST (longitudinally unsafe) OR closing laterally (a cut-in —
+        // either actor has lateral velocity). A longitudinally-SAFE, laterally-
+        // STATIONARY object — a stopped queue member, or a stopped lead the ego halts
+        // behind — is neither, so it is admitted instead of spuriously vetoed by the
+        // reaction-time swerve term in `lateral_safe_distance` (the §4 over-rejection of
+        // a safe same-lane stop). This strictly NARROWS the lateral veto (an added
+        // precondition), so it can only admit longitudinally-safe + laterally-still pairs
+        // — never a state with lateral motion or abreast danger. Mirrors the kirra-core
+        // checker's RSS-conjunction fix.
         let lat_safe = if !a.actual_lateral_separation_m.is_finite() {
             false
         } else if a.actual_longitudinal_gap_m > RSS_LONGITUDINAL_CONFLICT_M {
             true
         } else {
-            a.actual_lateral_separation_m >= required_lat
+            let lon_unsafe = a.actual_longitudinal_gap_m < required_long;
+            let lateral_cut_in = a.obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS
+                || a.ego_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
+            if lon_unsafe || lateral_cut_in {
+                a.actual_lateral_separation_m >= required_lat
+            } else {
+                true // longitudinally-safe + laterally-stationary → no side collision possible
+            }
         };
         let pair_safe = lon_safe && lat_safe;
         if !pair_safe {
@@ -1742,6 +1760,41 @@ mod scene_rss_tests {
     fn all_safe_scene_is_safe() {
         let scene = AgentScene::Agents(vec![safe_agent(), safe_agent(), safe_agent()]);
         assert!(compute_scene_rss(&scene, &params()).safe);
+    }
+
+    #[test]
+    fn rss_conjunction_admits_a_safe_stationary_queue() {
+        // The §4 RSS-conjunction fix (mirroring the kirra-core checker): a stopped ego a safe
+        // longitudinal distance behind a stopped object — within the 8 m proximity band,
+        // dead-center — is now SAFE. The lateral side-RSS no longer vetoes a longitudinally-safe,
+        // laterally-stationary pair via the reaction-time swerve term.
+        let queue = RssAgent {
+            ego_vel: 0.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 4.0, // safe for two stopped vehicles, within 8 m
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 0.0, // dead center
+            oncoming: false,
+        };
+        assert!(
+            compute_scene_rss(&AgentScene::Agents(vec![queue]), &params()).safe,
+            "a stopped queue (longitudinally safe, laterally still) must be admitted"
+        );
+
+        // The veto only NARROWS for genuine stillness — the same close, dead-center pair is
+        // STILL unsafe if it is closing laterally (a cut-in) ...
+        let cut_in = RssAgent { ego_lat_vel: 2.0, obj_lat_vel: 2.0, ..queue };
+        assert!(
+            !compute_scene_rss(&AgentScene::Agents(vec![cut_in]), &params()).safe,
+            "the same close dead-center pair CLOSING laterally is still vetoed"
+        );
+        // ... or longitudinally unsafe (abreast).
+        let abreast = RssAgent { actual_longitudinal_gap_m: 0.2, ..queue };
+        assert!(
+            !compute_scene_rss(&AgentScene::Agents(vec![abreast]), &params()).safe,
+            "a longitudinally-unsafe (abreast) pair is still vetoed"
+        );
     }
 
     #[test]
