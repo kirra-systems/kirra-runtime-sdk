@@ -100,7 +100,7 @@ fn plan_and_check(
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(
@@ -266,7 +266,7 @@ fn overtake_world<'a>(
         request_overtake: false, // the MickIntent::Overtake grounding flips this on
         request_pull_over: false,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 /// **The full Mick path.** A `MickIntent::Overtake` — the LLM chauffeur's discretionary
@@ -356,7 +356,7 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
 

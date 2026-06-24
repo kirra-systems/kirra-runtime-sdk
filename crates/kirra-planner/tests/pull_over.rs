@@ -85,7 +85,7 @@ fn world<'a>(
         request_overtake: false,
         request_pull_over,
         lane_graph: None,
-    }
+        signal_states: &[],    }
 }
 
 fn verdict(plan: &kirra_planner::PlanOutput, map: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {

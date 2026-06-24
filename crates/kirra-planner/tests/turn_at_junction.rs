@@ -100,7 +100,7 @@ fn plan_turn(r: f64, half: f64) -> (kirra_planner::PlanOutput, TrajectoryVerdict
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-    };
+        signal_states: &[],    };
     let mut occy = GeometricPlanner::default();
     let plan = occy.plan(&input);
     let verdict = validate_trajectory_slow(

@@ -64,17 +64,21 @@ pub enum LaneEdge {
     RightNeighbor { to: u64 },
 }
 
-/// A regulatory control the ego faces at the **end** of a lane — the static sign at the
-/// junction approach, the stop line being the lane's terminus. (A Lanelet2 `traffic_sign` /
-/// `right_of_way` regulatory element.) Dynamic signals — a traffic light's red/green state —
-/// are deliberately NOT modeled here: they need a live perception / V2X state source, a
-/// tracked follow-up. Maps to a [`crate::behavior::TrafficControl`] at the loop boundary.
+/// A regulatory control the ego faces at the **end** of a lane — at the junction approach,
+/// the stop line being the lane's terminus (a Lanelet2 `traffic_sign` / `traffic_light`
+/// regulatory element). The static signs (`Stop` / `Yield`) carry all they need; a
+/// `TrafficLight` carries only its **presence** — the live red/green/amber state is dynamic
+/// (perception / V2X) and supplied at the loop boundary, defaulting fail-closed to *red*
+/// (stop) when unknown. Mapped to a behavioral-layer traffic control at that boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneControl {
     /// STOP sign (MUTCD R1-1): full stop at the line, then proceed.
     Stop,
     /// YIELD / give-way (R1-2): slow, prepared to stop.
     Yield,
+    /// Traffic LIGHT at the lane's stop line. Presence only — the live signal state is
+    /// supplied separately each tick (unknown → red / stop, fail-closed).
+    TrafficLight,
 }
 
 /// One lane: a centerline polyline, a typed boundary on each side, and its

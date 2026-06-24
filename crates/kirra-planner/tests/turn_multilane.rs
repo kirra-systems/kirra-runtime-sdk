@@ -95,7 +95,7 @@ fn ego_world<'a>(g: &'a LaneGraph, map: &'a dyn CorridorSource, objects: &'a [Pe
         request_overtake: false,
         request_pull_over: false,
         lane_graph: Some(g),
-    }
+        signal_states: &[],    }
 }
 
 /// Records the drivable presence + boundary lines a grounding handed the planner.
