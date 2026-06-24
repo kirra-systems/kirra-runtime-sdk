@@ -32,6 +32,7 @@
 //     → `DenyCode::DrivableSpaceDeparture` (SG4 untraversable-default pattern).
 //   - Zero heap allocation; all loops bounded; scalar f64 math; no recursion.
 
+use crate::frame_integrity::{containment_margin_m, FrameTrust};
 use crate::kinematics_contract::{DenyCode, EnforceAction, VehicleKinematicsContract};
 
 /// Maximum number of poses in a trajectory the Governor will inspect per call.
@@ -169,33 +170,45 @@ impl From<&VehicleKinematicsContract> for VehicleFootprint {
 // The check
 // ---------------------------------------------------------------------------
 
-// SAFETY: SG2 | REQ: drivable-space-containment | TEST: containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token
-/// SG2 drivable-space containment check.
+// SAFETY: SG2 | REQ: drivable-space-containment,frame-integrity-gate | TEST: containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token,checked_untrusted_refuses_before_geometry,checked_degraded_margin_is_stricter_than_trusted,checked_trusted_matches_shim
+/// SG2 drivable-space containment check, **frame-integrity-gated** (Stage S-FI1).
 ///
-/// For each pose in `trajectory`, computes the 4 vehicle footprint corners
-/// in world frame and asserts every corner lies inside the `corridor`
-/// polygon with at least `CONTAINMENT_LATERAL_MARGIN_M` margin. Any
-/// failure → `EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)`
-/// → caller commits the standing MRC.
+/// Resolves the lateral margin from the [`FrameTrust`] verdict
+/// ([`containment_margin_m`]): `Trusted` → 0.40 m primary, `Degraded` → 0.75 m
+/// fallback, `Untrusted` → refuse. The frame gate runs **FIRST**: an `Untrusted`
+/// frame means the corridor cannot be trusted to be correctly placed relative to
+/// the ego, so we refuse to validate geometry at all and return
+/// `DenyBreach(DenyCode::FrameIntegrityUntrusted)` (→ caller commits the MRC,
+/// the frame-trust-minimal maneuver). This is the one fault class the governor
+/// structurally cannot otherwise catch, because localization is the governor's
+/// own coordinate-frame input (AOU-LOCALIZATION-001, `ASSUMPTIONS_OF_USE.md`).
 ///
-/// Conservative behavior: an absent / stale / low-confidence / degenerate
-/// corridor (`!corridor.is_healthy()`) is treated as a containment failure,
-/// NOT as "skip the check." See OCCY_FAULT_MODEL.md §3 sensor-availability
-/// rule and OCCY_INDEPENDENT_DETECTOR.md SG4 untraversable-default pattern.
+/// For a trusted/degraded frame, each pose's 4 footprint corners must lie inside
+/// the `corridor` polygon by at least the selected margin; any failure (incl. an
+/// absent / stale / low-confidence / degenerate corridor — conservative per
+/// OCCY_FAULT_MODEL.md §3) → `DenyBreach(DenyCode::DrivableSpaceDeparture)`.
+/// Note a *larger* margin is *stricter*, so `Degraded` rejects strictly more
+/// than `Trusted` — graduation tightens safety under worse localization.
 ///
-/// Bounded properties (per `wcet_gate` framing):
-///   - `trajectory.len() ≤ MAX_TRAJECTORY_HORIZON` (else conservative reject).
-///   - Per-pose work is `O(left.len() + right.len())`; total work is
-///     `O(trajectory.len() × (left.len() + right.len()) × 4)`. With the
-///     `MAX_*` caps that's `≤ 50 × 256 × 4 = 51 200` polygon-edge tests
-///     per call.
-///   - No heap allocation; no recursion; scalar f64 only.
+/// Bounded properties (per `wcet_gate` framing): the frame gate adds O(1) work
+/// (a `match`); the geometry loop is unchanged — `trajectory.len() ≤
+/// MAX_TRAJECTORY_HORIZON`, per-pose `O(left.len() + right.len())`, total
+/// `≤ 50 × 256 × 4 = 51 200` polygon-edge tests; no heap, no recursion, scalar
+/// f64 only.
 #[must_use]
-pub fn validate_trajectory_containment(
+pub fn validate_trajectory_containment_checked(
     trajectory: &[Pose],
     corridor: &Corridor,
     footprint: &VehicleFootprint,
+    frame_trust: FrameTrust,
 ) -> EnforceAction {
+    // Frame-integrity gate FIRST (S-FI1): refuse to validate geometry in an
+    // untrusted frame. `None` margin ⇒ Untrusted ⇒ fail closed.
+    let margin = match containment_margin_m(frame_trust) {
+        Some(m) => m,
+        None => return EnforceAction::DenyBreach(DenyCode::FrameIntegrityUntrusted),
+    };
+
     // Conservative gates: any of these failing → containment failure (NOT
     // skip-the-check). Aligns with OCCY_FAULT_MODEL §3.
     if !corridor.is_healthy() {
@@ -209,7 +222,7 @@ pub fn validate_trajectory_containment(
         return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
     }
 
-    let margin_sq = CONTAINMENT_LATERAL_MARGIN_M * CONTAINMENT_LATERAL_MARGIN_M;
+    let margin_sq = margin * margin;
 
     for pose in trajectory.iter() {
         if !pose_is_finite(pose) {
@@ -224,6 +237,26 @@ pub fn validate_trajectory_containment(
     }
 
     EnforceAction::Allow
+}
+
+/// Frame-trust-ASSERTING shim (Stage S-FI1b). Delegates to
+/// [`validate_trajectory_containment_checked`] with [`FrameTrust::Trusted`] —
+/// i.e. it ASSUMES the integrator's localization holds AOU-LOCALIZATION-001
+/// (≤ 0.10 m 95th-pct lateral error → primary 0.40 m margin), the legacy
+/// behavior before the frame-integrity gate existed.
+///
+/// This is the 3-arg entry the four enforcement points (gateway / fabric /
+/// ros2-adapter / parko-kirra) still call. The S-FI1e migration repoints them to
+/// the checked entry — sourcing a real [`FrameIntegrity`] per tick — and removes
+/// this shim. Until then this carries AOU-LOCALIZATION-001 inline. Do NOT call
+/// from new code; call the checked entry with a resolved frame trust.
+#[must_use]
+pub fn validate_trajectory_containment(
+    trajectory: &[Pose],
+    corridor: &Corridor,
+    footprint: &VehicleFootprint,
+) -> EnforceAction {
+    validate_trajectory_containment_checked(trajectory, corridor, footprint, FrameTrust::Trusted)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +474,70 @@ mod tests {
         let traj = vec![pose(20.0, 0.0, 0.0), pose(30.0, 0.0, 0.0)];
         let action = validate_trajectory_containment(&traj, &corridor, &sedan());
         assert_eq!(action, EnforceAction::Allow, "centered pose must Allow");
+    }
+
+    // --- Stage S-FI1b: frame-integrity gate ---------------------------------
+
+    #[test]
+    fn checked_untrusted_refuses_before_geometry() {
+        use crate::frame_integrity::FrameTrust;
+        // A pose that WOULD Allow under a trusted frame (centered, wide corridor)
+        // must still be refused when the frame is Untrusted — the gate runs before
+        // any geometry is considered.
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![pose(50.0, 0.0, 0.0)];
+        let action = validate_trajectory_containment_checked(
+            &traj,
+            &corridor,
+            &sedan(),
+            FrameTrust::Untrusted,
+        );
+        assert_eq!(
+            action,
+            EnforceAction::DenyBreach(DenyCode::FrameIntegrityUntrusted),
+            "untrusted frame must refuse with FrameIntegrityUntrusted, even for a safe pose"
+        );
+    }
+
+    #[test]
+    fn checked_degraded_margin_is_stricter_than_trusted() {
+        use crate::frame_integrity::FrameTrust;
+        // sedan half-width 0.925 m; corridor half-width 1.425 m → lateral
+        // clearance 0.50 m, which is ≥ 0.40 (primary) but < 0.75 (fallback).
+        // Pose at x = 50 sits far from the end-caps so only the lateral edges bind.
+        let (left, right) = straight_corridor(1.425, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![pose(50.0, 0.0, 0.0)];
+        assert_eq!(
+            validate_trajectory_containment_checked(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+            "0.50 m clearance passes the 0.40 m primary margin (Trusted)"
+        );
+        assert_eq!(
+            validate_trajectory_containment_checked(
+                &traj,
+                &corridor,
+                &sedan(),
+                FrameTrust::Degraded
+            ),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "0.50 m clearance fails the stricter 0.75 m fallback margin (Degraded)"
+        );
+    }
+
+    #[test]
+    fn checked_trusted_matches_shim() {
+        use crate::frame_integrity::FrameTrust;
+        // The 3-arg trust-asserting shim must be byte-identical to checked(Trusted).
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![pose(50.0, 0.0, 0.0)];
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &sedan()),
+            validate_trajectory_containment_checked(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            "the 3-arg shim must equal checked(Trusted)"
+        );
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub struct Verdict {
     pub reason_code: u32,
 }
 
-/// Stable numeric reason code: `0` = no breach (Accept / Clamp); `1..=10` map
+/// Stable numeric reason code: `0` = no breach (Accept / Clamp); `1..=11` map
 /// 1:1 to `DenyCode`. Kept as an explicit match so adding a `DenyCode` variant
 /// upstream forces a compile error here (no silent gap).
 fn reason_code(action: &EnforceAction) -> u32 {
@@ -76,6 +76,7 @@ fn deny_code_num(code: DenyCode) -> u32 {
         DenyCode::DrivableSpaceDeparture => 8,
         DenyCode::DegradedReinitiationDenied => 9,
         DenyCode::DegradedSpeedIncreaseDenied => 10,
+        DenyCode::FrameIntegrityUntrusted => 11,
     }
 }
 

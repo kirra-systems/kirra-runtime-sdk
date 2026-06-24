@@ -180,14 +180,23 @@ New `DenyCode` variant (`kinematics_contract.rs:221`; existing variants/strings 
 FrameIntegrityUntrusted,        // reason(): "FRAME_INTEGRITY_UNTRUSTED"
 ```
 
-Signature gains **one parameter** (`frame_trust`); the margin becomes a local instead of a const:
+**As-built note (S-FI1b):** to keep the four call sites compiling *untouched*
+(the "held before call sites" constraint), the gated logic went into a **new**
+4-arg entry `validate_trajectory_containment_checked(.., frame_trust)`, and the
+existing `validate_trajectory_containment(traj, corridor, footprint)` was demoted
+to a **trust-asserting shim** that delegates with `FrameTrust::Trusted`. This is
+behaviourally identical to "signature gains one param + `_assuming_trusted` shim"
+but inverts which name is the shim, so existing callers need zero edits now.
+S-FI1e flips callers to `_checked` (with a resolved trust), then collapses the
+names (the gated entry becomes `validate_trajectory_containment`, shim removed).
 
 ```rust
-pub fn validate_trajectory_containment(
+#[must_use]
+pub fn validate_trajectory_containment_checked(
     trajectory: &[Pose],
     corridor: &Corridor,
     footprint: &VehicleFootprint,
-    frame_trust: FrameTrust,        // NEW
+    frame_trust: FrameTrust,        // NEW gated entry
 ) -> EnforceAction {
     let margin = match containment_margin_m(frame_trust) {
         Some(m) => m,
@@ -196,6 +205,14 @@ pub fn validate_trajectory_containment(
     // ... existing corridor.is_healthy() / horizon / footprint_is_finite gates UNCHANGED ...
     let margin_sq = margin * margin;            // was: CONTAINMENT_LATERAL_MARGIN_M²
     // ... existing per-pose corner loop UNCHANGED ...
+}
+
+/// Trust-asserting shim (carries AOU-LOCALIZATION-001 inline until S-FI1e).
+#[must_use]
+pub fn validate_trajectory_containment(
+    trajectory: &[Pose], corridor: &Corridor, footprint: &VehicleFootprint,
+) -> EnforceAction {
+    validate_trajectory_containment_checked(trajectory, corridor, footprint, FrameTrust::Trusted)
 }
 ```
 
@@ -285,7 +302,12 @@ Each must source a `FrameIntegrity` for the tick and pass `resolve_frame_trust(.
 3. **ros2-adapter** `validate_trajectory_slow` — integrity from the ROS2 localization-quality topic.
 4. **parko-kirra** `KirraGovernor::apply_mrc_profile` — already has `LocalizationIntegrity`; re-point to the unified type.
 
-A temporary `validate_trajectory_containment_assuming_trusted(...)` shim (delegates with `FrameTrust::Trusted`, `#[doc(hidden)]`, deny-listed in CI) may be used to keep tests/benches compiling during the call-site migration, removed at stage close. No production path keeps it.
+**As-built (S-FI1b):** the shim role is filled by the existing
+`validate_trajectory_containment` (3-arg) delegating with `FrameTrust::Trusted`
+(see §4), so all four call sites compile **unchanged** at S-FI1b. S-FI1e sources a
+real `FrameIntegrity` at each point, switches the call to `_checked`, then
+collapses the names and removes the shim. No production path keeps the shim past
+stage close.
 
 ---
 
@@ -315,8 +337,8 @@ A temporary `validate_trajectory_containment_assuming_trusted(...)` shim (delega
 
 ## 11. Sequencing
 
-S-FI1a: `frame_integrity` module + types + resolver + tests (kirra-core, no call-site change; shim in place).
-S-FI1b: containment signature + `DenyCode` + tests.
+S-FI1a: ✅ DONE — `frame_integrity` module + types + resolver + tests (kirra-core, no call-site change).
+S-FI1b: ✅ DONE — gated `validate_trajectory_containment_checked` + trust-asserting shim; `DenyCode::FrameIntegrityUntrusted` (appended last); forced matches discharged (`reason()` + display test, governor-service `deny_code_num` → 11, wire-client `ClientDenyCode` mirror + drift test); 3 new containment tests (untrusted-refuses, degraded-stricter-than-trusted, shim==checked). Workspace compiles (default features); call sites untouched.
 S-FI1c: parko re-point.
 S-FI1d: posture wiring + hysteresis escalation.
 S-FI1e: four call sites + integrator-contract surfacing; remove shim.
