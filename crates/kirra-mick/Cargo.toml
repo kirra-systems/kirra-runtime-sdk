@@ -1,0 +1,31 @@
+# crates/kirra-mick/Cargo.toml
+#
+# kirra-mick — the live LLM transport for Mick's brain. Holds the one piece that needs
+# the network: `OllamaClient`, a `kirra_planner::ModelClient` that drives a LOCAL model
+# (Gemma by default) served by Ollama over HTTP. Kept OUT of the lean `kirra-planner` on
+# purpose (the de-monolith ethos): the planner's prompt/parse logic stays dependency-free
+# and model-agnostic; only this crate pulls `reqwest`.
+[package]
+name = "kirra-mick"
+version = "0.1.0"
+edition = "2021"
+description = "Live LLM transport for Mick — an Ollama-backed ModelClient (local Gemma) behind the kirra-planner MickBrain seam."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The MickBrain seam: ModelClient / ModelError / LlmBrain / WorldContext live here.
+kirra-planner = { path = "../kirra-planner" }
+# Blocking HTTP (matches the sync ModelClient port). rustls so there is no system OpenSSL
+# dependency — same pin/features as the rest of the workspace.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The live chauffeur example drives Occy + the #131 KIRRA checker against real Gemma.
+# default-features = false → no ROS/tokio; we only need validate_trajectory_slow +
+# VehicleConfig + the mock corridor.
+kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+kirra-core = { path = "../kirra-core" }

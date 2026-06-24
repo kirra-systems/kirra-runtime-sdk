@@ -2008,6 +2008,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-mick"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-planner",
+ "kirra-ros2-adapter",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-planner"
 version = "0.1.0"
 dependencies = [
