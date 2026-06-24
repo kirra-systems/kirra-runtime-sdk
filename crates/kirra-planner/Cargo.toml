@@ -49,3 +49,5 @@ serde_json = "1"
 # (validate_trajectory_slow) + VehicleConfig directly.
 kirra-taj = { path = "../kirra-taj" }
 kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+# Property-based tests of the planner's global invariants (tests/cruise_proptest.rs).
+proptest = "1"

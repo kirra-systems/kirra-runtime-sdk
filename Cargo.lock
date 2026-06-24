@@ -2028,6 +2028,7 @@ dependencies = [
  "kirra-map",
  "kirra-ros2-adapter",
  "kirra-taj",
+ "proptest",
  "serde",
  "serde_json",
 ]
