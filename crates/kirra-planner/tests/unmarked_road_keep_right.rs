@@ -45,6 +45,7 @@ fn drive(map: &dyn CorridorSource) -> (f64, TrajectoryVerdict) {
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);

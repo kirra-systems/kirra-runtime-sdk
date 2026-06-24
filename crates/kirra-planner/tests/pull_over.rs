@@ -84,6 +84,7 @@ fn world<'a>(
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over,
+        lane_graph: None,
     }
 }
 

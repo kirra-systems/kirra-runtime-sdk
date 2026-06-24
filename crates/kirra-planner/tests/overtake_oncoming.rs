@@ -99,6 +99,7 @@ fn plan_and_check(
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -264,6 +265,7 @@ fn overtake_world<'a>(
         target_speed_mps: None,
         request_overtake: false, // the MickIntent::Overtake grounding flips this on
         request_pull_over: false,
+        lane_graph: None,
     }
 }
 
@@ -353,6 +355,7 @@ fn a_stopped_school_bus_is_never_overtaken_and_the_ego_holds_behind_it() {
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
+        lane_graph: None,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
