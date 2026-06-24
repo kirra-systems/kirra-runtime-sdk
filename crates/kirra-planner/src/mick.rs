@@ -16,7 +16,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{FleetPosture, Goal, LaneGraph, PlanInput, PlanOutput, Planner, Pose, MAX_ROUTE_LANES};
+use crate::behavior::TrafficControl;
+use crate::{
+    FleetPosture, Goal, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
+    MAX_ROUTE_LANES,
+};
 use kirra_core::corridor::Point as MapPoint;
 
 /// Which way a [`MickIntent::TurnAt`] heads at the next junction, relative to the ego
@@ -222,18 +226,31 @@ pub fn plan_for_intent(
     intent: &MickIntent,
     world: &PlanInput,
 ) -> PlanOutput {
-    // Junction wiring: when a lane graph is supplied and the integrator did NOT hand a cede
-    // list, derive `cedes_to_ego_ids` from the map's right-of-way (`junction_context`), so
-    // the ego asserts map-granted priority over yielding-lane agents instead of waiting for
-    // the integrator to supply the list. Fail-safe — no graph / ego off-map → empty → the
-    // ego yields to everyone; an explicit list is never overridden; KIRRA still backstops
-    // every crossing agent. (`must_yield_to` needs no wiring here: the planner already
-    // yields to every non-cede agent; that set is the parko-boundary input.)
-    let derived_cedes: Vec<u64>;
+    // Junction wiring: when a lane graph is supplied and the integrator did NOT hand the
+    // corresponding list, derive it from the map — `cedes_to_ego_ids` from the right-of-way
+    // (`junction_context`, so the ego asserts map-granted priority over yielding-lane agents)
+    // and `controls` from the approach lane's STOP / YIELD sign (`derive_controls`, so the
+    // ego stops/slows at the junction). Fail-safe — no graph / ego off-map → empty (yield to
+    // all, no extra stop); an integrator-supplied list is never overridden; KIRRA still
+    // backstops every agent and bounds the motion. (`must_yield_to` needs no wiring: the
+    // planner already yields to every non-cede agent; that set is the parko-boundary input.)
+    let derived_cedes: Vec<u64> = if world.lane_graph.is_some() && world.cedes_to_ego_ids.is_empty() {
+        derive_cedes_to_ego(world)
+    } else {
+        Vec::new()
+    };
+    let derived_controls: Vec<TrafficControl> = if world.lane_graph.is_some() && world.controls.is_empty() {
+        derive_controls(world)
+    } else {
+        Vec::new()
+    };
     let enriched: PlanInput;
-    let world: &PlanInput = if world.lane_graph.is_some() && world.cedes_to_ego_ids.is_empty() {
-        derived_cedes = derive_cedes_to_ego(world);
-        enriched = PlanInput { cedes_to_ego_ids: &derived_cedes, ..world.clone() };
+    let world: &PlanInput = if !derived_cedes.is_empty() || !derived_controls.is_empty() {
+        enriched = PlanInput {
+            cedes_to_ego_ids: if derived_cedes.is_empty() { world.cedes_to_ego_ids } else { &derived_cedes },
+            controls: if derived_controls.is_empty() { world.controls } else { &derived_controls },
+            ..world.clone()
+        };
         &enriched
     } else {
         world
@@ -322,6 +339,47 @@ fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
         }
         None => Vec::new(),
     }
+}
+
+/// Speed (m/s) below which the ego counts as having stopped for a STOP-sign full stop.
+const STOP_SATISFIED_SPEED_MPS: f64 = 0.3;
+/// Distance (m) before the stop line within which a near-stopped ego is `satisfied`.
+const STOP_SATISFIED_DIST_M: f64 = 2.0;
+
+/// Derive the regulatory [`TrafficControl`]s the ego currently faces from the lane graph:
+/// the STOP / YIELD sign at the end of the ego's lane (its junction approach), mapped to the
+/// behavioral-layer control. Empty if there is no graph, the ego is off the mapped road, or
+/// its lane carries no control (fail-safe → nothing beyond what objects/posture impose).
+///
+/// STOP is **stateless stop-and-go**: `satisfied` once the ego is essentially stopped just
+/// before the line (`< STOP_SATISFIED_SPEED_MPS` within `STOP_SATISFIED_DIST_M`), so it
+/// proceeds. This approximates the legal full-stop dwell without loop memory — in the closed
+/// loop the ego decelerates to the line then creeps across; a precisely-latched full-stop
+/// dwell is a tracked follow-up. KIRRA bounds the actual motion regardless. YIELD is exact
+/// (a speed cap at the line).
+fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
+    let Some(graph) = world.lane_graph else {
+        return Vec::new();
+    };
+    let ego = world.ego.pose;
+    let Some(lane_id) = graph.lane_at(MapPoint { x_m: ego.x_m, y_m: ego.y_m }) else {
+        return Vec::new();
+    };
+    let Some(control) = graph.lane(lane_id).and_then(|l| l.control.map(|c| (c, l.stop_line_x()))) else {
+        return Vec::new();
+    };
+    let (control, line_x) = control;
+    let tc = match control {
+        LaneControl::Yield => TrafficControl::YieldSign { line_x_m: line_x },
+        LaneControl::Stop => {
+            let dist = line_x - ego.x_m;
+            let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
+                && dist > 0.0
+                && dist < STOP_SATISFIED_DIST_M;
+            TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
+        }
+    };
+    vec![tc]
 }
 
 /// Pick the ego lane's successor that turns `direction` (successor-by-heading): the matching
@@ -1139,6 +1197,96 @@ mod tests {
         let mut rec = CedeRecorder { cedes: vec![1] };
         let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
         assert!(rec.cedes.is_empty(), "no graph → empty cede list (fail-safe: yield to all)");
+    }
+
+    // ----- junction STOP / YIELD signs wired into the loop -----
+
+    /// A planner that records the `controls` it was grounded with.
+    struct ControlRecorder {
+        controls: Vec<TrafficControl>,
+    }
+    impl Planner for ControlRecorder {
+        fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
+            self.controls = input.controls.to_vec();
+            PlanOutput::safe_stop(input.ego.pose)
+        }
+    }
+
+    /// A single approach lane (0,0)→(18,0) carrying control `c` at its terminus (x=18).
+    fn lane_with_control(c: LaneControl) -> crate::LaneGraph {
+        crate::LaneGraph::new().with_lane(
+            crate::Lane::straight(1, 0.0, 0.0, 18.0, 2.0, crate::LineType::Solid, crate::LineType::Solid)
+                .with_control(c),
+        )
+    }
+
+    fn derived_controls_for<'a>(g: &'a crate::LaneGraph, ego: EgoState, corr: &'a MockCorridorSource) -> Vec<TrafficControl> {
+        let w = PlanInput { ego, map: corr, lane_graph: Some(g), ..world(corr, &[], &[]) };
+        let mut rec = ControlRecorder { controls: Vec::new() };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+        rec.controls
+    }
+
+    fn ego_at(x: f64, v: f64) -> EgoState {
+        EgoState { pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: v, yaw_rate_rads: 0.0, stamp_ms: 0 }
+    }
+
+    #[test]
+    fn a_stop_sign_derives_an_unsatisfied_stop_while_approaching() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // Approaching at speed, well before the line → not satisfied (stop imposed).
+        let controls = derived_controls_for(&lane_with_control(LaneControl::Stop), ego_at(5.0, 2.0), &corr);
+        assert_eq!(controls, vec![TrafficControl::StopSign { stop_line_x_m: 18.0, satisfied: false }]);
+    }
+
+    #[test]
+    fn a_stop_sign_is_satisfied_once_stopped_at_the_line() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // Essentially stopped just before the line → satisfied (proceed) — the stateless go.
+        let controls = derived_controls_for(&lane_with_control(LaneControl::Stop), ego_at(17.0, 0.0), &corr);
+        assert_eq!(controls, vec![TrafficControl::StopSign { stop_line_x_m: 18.0, satisfied: true }]);
+    }
+
+    #[test]
+    fn a_yield_sign_derives_a_yield_control() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let controls = derived_controls_for(&lane_with_control(LaneControl::Yield), ego_at(5.0, 2.0), &corr);
+        assert_eq!(controls, vec![TrafficControl::YieldSign { line_x_m: 18.0 }]);
+    }
+
+    #[test]
+    fn no_control_derives_nothing_and_explicit_controls_stand() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // A lane with no control → nothing derived.
+        let plain = crate::LaneGraph::new()
+            .with_lane(crate::Lane::straight(1, 0.0, 0.0, 18.0, 2.0, crate::LineType::Solid, crate::LineType::Solid));
+        assert!(derived_controls_for(&plain, ego_at(5.0, 2.0), &corr).is_empty());
+
+        // An explicit integrator control list is never overridden by the map.
+        let g = lane_with_control(LaneControl::Stop);
+        let explicit = [TrafficControl::YieldSign { line_x_m: 9.0 }];
+        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), controls: &explicit, ..world(&corr, &[], &[]) };
+        let mut rec = ControlRecorder { controls: Vec::new() };
+        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+        assert_eq!(rec.controls, vec![TrafficControl::YieldSign { line_x_m: 9.0 }], "explicit controls stand");
+    }
+
+    #[test]
+    fn the_planner_stops_at_a_map_derived_stop_line() {
+        // End to end: the derived StopSign makes Occy decelerate to a stop at the line (x=18)
+        // and not pass it — the junction stop is real, not just recorded.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let g = lane_with_control(LaneControl::Stop);
+        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+
+        let max_x = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
+        assert!(max_x <= 18.5, "the plan holds at/before the stop line x=18, got max_x {max_x}");
+        assert!(
+            plan.trajectory.last().unwrap().velocity_mps < 0.5,
+            "and comes to a stop at the line (final v {})",
+            plan.trajectory.last().unwrap().velocity_mps
+        );
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----
