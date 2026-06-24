@@ -259,6 +259,27 @@ pub struct AppState {
     pub supervisor_tripped: Arc<AtomicBool>,
     /// Recovery streak for clearing an active RSS violation.
     pub rss_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
+    /// S-FI1d — true while frame/localization integrity is below full `Trusted`
+    /// (a `Degraded` *or* `Untrusted` verdict). Read by the posture engine to
+    /// escalate Nominal → Degraded, exactly like `rss_active_violation`. Set
+    /// IMMEDIATELY on the first sub-trusted tick (fail-closed-immediately, no
+    /// grace period); cleared by an `AV_RECOVERY_STREAK_THRESHOLD`-long run of
+    /// `Trusted` ticks (auto-recovery). Defaults false. (AOU-LOCALIZATION-001.)
+    pub frame_degraded_active: Arc<AtomicBool>,
+    /// S-FI1d — true once frame integrity has been `Untrusted` for a SUSTAINED
+    /// run (an inverted streak): a transient localization loss is the
+    /// frame-trust-minimal Degraded MRC (decel-to-stop, auto-recovering), but a
+    /// sustained / repeated fault is a genuine failure (sensor death, possible
+    /// GNSS spoofing) and escalates to `LockedOut`. STICKY like
+    /// `supervisor_tripped` — recovery is an explicit human/HA reset, matching
+    /// LockedOut semantics. Defaults false.
+    pub frame_lockout_active: Arc<AtomicBool>,
+    /// Recovery streak for clearing `frame_degraded_active` (consecutive
+    /// `Trusted` ticks within the recovery window).
+    pub frame_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
+    /// Inverted streak counting consecutive `Untrusted` ticks toward the
+    /// `frame_lockout_active` escalation (sustained-fault detection).
+    pub frame_untrusted_streak: Arc<Mutex<RssRecoveryStreak>>,
     /// #104 — the currently-open post-incident forensic sequence (correlation id
     /// + ordinal), or `None` when no incident is open. Volatile; the durable
     /// forensic record lives in the signed audit chain.
@@ -298,6 +319,10 @@ impl AppState {
             flood_condition_active: Arc::new(AtomicBool::new(false)),
             supervisor_tripped: Arc::new(AtomicBool::new(false)),
             rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            frame_degraded_active: Arc::new(AtomicBool::new(false)),
+            frame_lockout_active: Arc::new(AtomicBool::new(false)),
+            frame_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
             command_source_write_failures: Arc::new(AtomicU64::new(0)),
