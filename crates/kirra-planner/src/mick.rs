@@ -442,14 +442,48 @@ fn turn_target(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Op
     best.map(|(id, _)| id)
 }
 
+/// The net heading change along a lane's centerline (first segment → last segment), wrapped
+/// to `(−π, π]`: ~0 for a straight lane, ±π/2 for a quarter-arc. Lets `turn_route` recognize
+/// that the ego is already ON a turning lane (mid-arc) without any per-tick route state.
+fn lane_net_heading_change(lane: &Lane) -> f64 {
+    let c = &lane.centerline;
+    if c.len() < 3 {
+        return 0.0; // a 2-point (straight) lane has no measurable curvature
+    }
+    let seg = |a: &MapPoint, b: &MapPoint| (b.y_m - a.y_m).atan2(b.x_m - a.x_m);
+    let start = seg(&c[0], &c[1]);
+    let end = seg(&c[c.len() - 2], &c[c.len() - 1]);
+    wrap_pi(end - start)
+}
+
 /// The route through a `direction` turn: the ego lane, the chosen turn branch, then the
 /// branch's forward successors (deterministic lowest-id, cycle-guarded, bounded by
 /// `MAX_ROUTE_LANES`) so the route corridor spans the approach, the turn, and the exit.
-/// `None` if no successor turns that way.
+///
+/// **Route-progress (the turn completes in a re-planning loop):** if no successor turns
+/// `direction` from the ego lane BUT the ego lane is itself a `direction`-curving lane — i.e.
+/// the ego has already entered the arc — the route *continues* along that committed arc to the
+/// exit rather than HOLDing. A re-issued `TurnAt` therefore drives the whole turn, not just the
+/// approach. A *straight* lane with no matching branch still returns `None` (fail-closed: it
+/// cannot turn that way here), because a straight lane has ~0 net heading change.
 fn turn_route(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Option<Vec<u64>> {
-    let branch = turn_target(graph, ego_lane, direction)?;
-    let mut route = vec![ego_lane, branch];
-    let mut cur = branch;
+    let mut route = match turn_target(graph, ego_lane, direction) {
+        Some(branch) => vec![ego_lane, branch],
+        None => {
+            // Continue ONLY a genuine LEFT/RIGHT arc the ego is already on — its centerline
+            // bends that way (`matches` requires ≥45°, so this is a real curve). `Straight` has
+            // no committed arc to continue, and a straight lane's ~0 net heading change would
+            // otherwise spuriously match it, so a `Straight` with no straight branch still HOLDs
+            // (fail-closed), as does any direction on a straight (non-arc) lane.
+            let lane = graph.lane(ego_lane)?;
+            if direction != TurnDirection::Straight && direction.matches(lane_net_heading_change(lane)) {
+                vec![ego_lane] // mid-turn continuation; extended forward below
+            } else {
+                return None;
+            }
+        }
+    };
+    let mut cur = *route.last().expect("route seeded with at least the ego lane");
     while route.len() < MAX_ROUTE_LANES {
         match graph.lane(cur).and_then(|l| l.successors().min()) {
             Some(next) if !route.contains(&next) => {
@@ -459,7 +493,9 @@ fn turn_route(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Opt
             _ => break,
         }
     }
-    Some(route)
+    // The continuation case must actually advance (have a successor); a dead-end mid-arc lane
+    // with no onward route is just HOLD, same as the no-branch approach case.
+    (route.len() >= 2).then_some(route)
 }
 
 /// Wrap an angle to `(−π, π]` (the heading-difference frame `TurnDirection::matches` reads).
@@ -1175,6 +1211,78 @@ mod tests {
         // No graph → empty (the brain is offered no turns, and a TurnAt would HOLD anyway).
         let no_graph = WorldContext::from_plan_input(&world(&corr, &[], &[]));
         assert!(no_graph.available_turns.is_empty());
+    }
+
+    /// A left-turn junction: approach lane 1 (east) → arc lane 2 (curving east→north) →
+    /// straight exit lane 5 (north). Lanes are 3 m half-width so the turning footprint stays
+    /// contained (cf. the #526 turn test).
+    fn left_turn_junction() -> crate::LaneGraph {
+        use std::f64::consts::FRAC_PI_2;
+        let arc: Vec<MapPoint> = (0..=12)
+            .map(|i| {
+                let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 12.0);
+                MapPoint { x_m: 30.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
+            })
+            .collect();
+        crate::LaneGraph::new()
+            .with_lane(
+                crate::Lane::straight(1, 0.0, 0.0, 30.0, 3.0, crate::LineType::Solid, crate::LineType::Solid)
+                    .with_edge(crate::LaneEdge::Successor { to: 2 }),
+            )
+            .with_lane(crate::Lane {
+                id: 2,
+                centerline: arc,
+                half_width_m: 3.0,
+                left_line: crate::LineType::Solid,
+                right_line: crate::LineType::Solid,
+                heading_rad: FRAC_PI_2,
+                edges: vec![crate::LaneEdge::Successor { to: 5 }],
+                control: None,
+            })
+            .with_lane(
+                crate::Lane::straight(5, 0.0, 42.0, 62.0, 3.0, crate::LineType::Solid, crate::LineType::Solid)
+                    .with_heading(FRAC_PI_2),
+            )
+    }
+
+    #[test]
+    fn turn_route_resolves_the_approach_then_continues_the_committed_arc() {
+        let g = left_turn_junction();
+        // From the APPROACH lane the branch resolves and the route spans approach→arc→exit.
+        assert_eq!(turn_route(&g, 1, TurnDirection::Left), Some(vec![1, 2, 5]), "approach routes through the branch");
+        // ROUTE-PROGRESS: from the ARC lane (the ego mid-turn) a re-issued left turn CONTINUES
+        // the committed arc to the exit instead of HOLDing — the fix that lets the turn finish.
+        assert_eq!(turn_route(&g, 2, TurnDirection::Left), Some(vec![2, 5]), "mid-arc continues to the exit");
+        // From the straight EXIT lane there is no left branch and no curvature → None (the turn
+        // is done; a still-asserted TurnAt HOLDs, fail-closed).
+        assert_eq!(turn_route(&g, 5, TurnDirection::Left), None, "the straight exit does not continue a left turn");
+        // Fail-closed preserved: a straight approach with no branch that way is still None.
+        assert_eq!(turn_route(&g, 1, TurnDirection::Right), None, "no right branch from the approach → None (cannot turn that way here)");
+    }
+
+    #[test]
+    fn turn_at_grounds_a_continuing_turn_when_the_ego_is_already_on_the_arc() {
+        // The route-progress payoff at the grounding level: with the ego MID-ARC, a re-issued
+        // TurnAt Left grounds a CONTINUING turn (a Motion plan that climbs the arc toward the
+        // exit) rather than the safe-stop HOLD the old single-shot resolution produced once the
+        // ego had left the approach lane.
+        let g = left_turn_junction();
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // On the arc (lane 2) partway up — heading between east and north, as on the curve.
+        let ego = EgoState {
+            pose: Pose { x_m: 35.0, y_m: 1.6, heading_rad: 0.6 },
+            linear_x_mps: 3.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        };
+        let goal = Pose { x_m: 42.0, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
+        let w = PlanInput { ego, goal: Goal { target: goal }, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+
+        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: TurnDirection::Left }, &w);
+
+        assert_eq!(plan.kind, crate::ProposalKind::Motion, "mid-arc TurnAt continues the turn, not a HOLD");
+        let max_y = plan.trajectory.iter().map(|p| p.pose.y_m).fold(f64::MIN, f64::max);
+        assert!(max_y > 5.0, "the continued turn climbs the arc toward the exit (y≈12), got max_y {max_y}");
     }
 
     // ----- junction right-of-way wired into cedes_to_ego_ids -----

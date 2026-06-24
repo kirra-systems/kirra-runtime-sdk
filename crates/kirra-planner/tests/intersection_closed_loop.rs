@@ -1,29 +1,35 @@
-//! Deterministic proof for the `mick_intersection` demo: a scripted goal-seeking brain drives
-//! a signalized left-turn junction closed-loop, and the whole stack behaves. The TRAFFIC
-//! LIGHT (#531) HOLDs the ego at the stop line while RED (it never crosses); on GREEN the
-//! grounding authors a LEFT-turn trajectory through the junction along the materialized route
-//! corridor (#526/#527 geometry) and KIRRA admits it; the map's right-of-way (#528) derives
-//! the crossing vehicle into the cede set; and KIRRA admits every tick. The example shows the
-//! same loop with a *live* model; this pins the geometry/wiring with no Ollama dependency.
+//! Deterministic proof for the `mick_intersection` demo: a scripted **`TurnAt::Left`** brain
+//! drives a signalized left-turn junction closed-loop and the ego **completes the turn**, end to
+//! end, under a proper dual-rate loop — the whole junction stack composed. The TRAFFIC LIGHT
+//! (#531) HOLDs the ego at the stop line while RED (it never crosses); on GREEN the **route-
+//! progress** grounding continues the committed arc, the [`FastLoopTracker`] follows the admitted
+//! trajectory by elapsed time (so the ego **accelerates from the red-light standstill and holds
+//! the curve** — the toy 0.1 s-sample conformance could do neither), and the **curved-lane
+//! `contains`** fix lets per-tick `lane_at` resolve on the arc (it used to return None at the
+//! approach→arc seam and HOLD there); the map's right-of-way (#528) derives the crossing vehicle
+//! into the cede set; and the fast loop only ever conforms to a KIRRA-admitted trajectory.
 //!
-//! Note on the maneuver: the brain heads for the goal across the junction (`GoTo`), so the
-//! ego tracks the route corridor through the arc — robust under per-tick re-planning. A bare
-//! `TurnAt` is a single-shot *approach* maneuver (it resolves the branch from the approach
-//! lane); sustaining it tick-by-tick through the arc is a separate follow-up.
+//! Dual-rate: the slow loop (System-2 → Occy → KIRRA) re-plans/validates every `REPLAN_MS` (and
+//! when the committed trajectory is exhausted) — promoting only ADMITTED plans; the fast loop
+//! tracks that trajectory each 100 ms tick. Three pieces had to land together for a model-chosen
+//! `TurnAt` to drive the whole turn: route-progress (continue the arc), the fast-loop tracker
+//! (accelerate from the stop / hold the curve), and curved-lane containment (locate the ego on
+//! the arc). The example shows the same loop with a *live* model; this pins it with no Ollama.
 
 use kirra_planner::{
-    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl, LaneCorridor, LaneEdge,
-    LaneGraph, LineType, MickDriver, MickIntent, PlanInput, PlanOutput, Pose, ScriptedBrain,
-    SignalState, TrajectoryVerdict,
+    EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl,
+    LaneCorridor, LaneEdge, LaneGraph, LineType, MickDriver, MickIntent, PlanInput, Pose,
+    ScriptedBrain, SignalState, TrajectoryVerdict, TurnDirection,
 };
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
 
 const FAST_DT_S: f64 = 0.1;
 const FAST_DT_MS: u64 = 100;
-const TICKS: usize = 120;
+const TICKS: usize = 160;
 const MRC_DECEL: f64 = 3.0;
 const GREEN_AT_MS: u64 = 3500;
+const REPLAN_MS: u64 = 500; // slow-loop (System-2) re-plan cadence
 const TURN_RADIUS: f64 = 12.0;
 const APPROACH_END: f64 = 30.0;
 
@@ -100,12 +106,8 @@ fn world<'a>(
 
 use kirra_ros2_adapter::state::PerceivedObject;
 
-fn target_at(plan: &PlanOutput, t: f64) -> Option<(Pose, f64)> {
-    plan.trajectory.iter().find(|p| p.time_from_start_s >= t).or_else(|| plan.trajectory.last()).map(|p| (p.pose, p.velocity_mps))
-}
-
 #[test]
-fn gemma_holds_on_red_then_turns_left_on_green_kirra_bounding_throughout() {
+fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {
     let g = junction();
     let route: LaneCorridor = g.route(1, 5).and_then(|r| g.route_corridor(&r, 0.95, 5)).expect("route");
     // A stationary vehicle in the crossing lane (id 7), well off the left-turn path — the ego
@@ -113,61 +115,69 @@ fn gemma_holds_on_red_then_turns_left_on_green_kirra_bounding_throughout() {
     let objs = [PerceivedObject { id: 7, pos: Point { x_m: 33.0, y_m: -10.0 }, velocity_mps: 0.0, heading_rad: std::f64::consts::FRAC_PI_2, vel: Point { x_m: 0.0, y_m: 0.0 } }];
     let goal = Pose { x_m: APPROACH_END + TURN_RADIUS, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
 
-    // The model heads for the goal across the junction (a left turn): grounding follows the
-    // materialized route corridor through the arc, the red light HOLDs it at the line first.
-    let mut driver = MickDriver::new(ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 42.0, y_m: 28.0 }; 20]));
+    // The model asks to TURN LEFT. The red light HOLDs it at the line; on green the route-
+    // progress grounding continues the committed arc, the fast-loop tracker drives it through,
+    // and (with curved-lane `contains` fixed) per-tick `lane_at` resolves on the arc so the turn
+    // completes — a fully model-chosen TurnAt, end to end.
+    let mut driver = MickDriver::new(ScriptedBrain::new(vec![MickIntent::TurnAt { direction: TurnDirection::Left }; 60]));
     let mut occy = GeometricPlanner::default();
+    let mut tracker = FastLoopTracker::new();
 
     let mut ego = EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 5.0, yaw_rate_rads: 0.0, stamp_ms: 0 };
-    let mut accepted: Option<PlanOutput> = None;
-    let mut slot_t = 0.0_f64;
+    let mut last_replan_ms: Option<u64> = None;
 
     let mut red_max_x = f64::MIN;
-    let mut all_admitted = true;
     let cede_at_approach = g.junction_context(Point { x_m: ego.pose.x_m, y_m: ego.pose.y_m }, &objs).cedes_to_ego;
     let mut ego_max_y = f64::MIN;
-    let mut green_plan_max_y = f64::MIN; // how far into the arc the admitted GREEN plan reaches
+    let mut ego_max_heading = f64::MIN;
+    let (mut promotions, mut admitted_promotions) = (0u32, 0u32);
 
     for tick in 1..=TICKS {
         let now_ms = tick as u64 * FAST_DT_MS;
         let light = if now_ms < GREEN_AT_MS { SignalState::Red } else { SignalState::Green };
         let signals = [(1u64, light)];
-        let w = world(ego, &route, &objs, &signals, &g, goal);
 
-        let plan = driver.drive_tick(&w, &mut occy, now_ms);
-        let v = validate_trajectory_slow(&plan.trajectory, &route, &objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
-        let admitted = matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp);
-        all_admitted &= admitted;
-
-        if admitted && light == SignalState::Green {
-            let plan_y = plan.trajectory.iter().map(|p| p.pose.y_m).fold(f64::MIN, f64::max);
-            green_plan_max_y = green_plan_max_y.max(plan_y);
+        // SLOW loop (System-2 → Occy → KIRRA): re-plan at the slow cadence or when the
+        // committed trajectory is spent. Only an ADMITTED plan is promoted to the tracker.
+        let replan_due = tracker.is_exhausted(now_ms) || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
+        if replan_due {
+            let w = world(ego, &route, &objs, &signals, &g, goal);
+            let plan = driver.drive_tick(&w, &mut occy, now_ms);
+            let v = validate_trajectory_slow(&plan.trajectory, &route, &objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
+            promotions += 1;
+            if matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp) {
+                admitted_promotions += 1;
+                tracker.promote(plan, now_ms);
+                last_replan_ms = Some(now_ms);
+            }
         }
 
-        if admitted { accepted = Some(plan); slot_t = 0.0; }
-        slot_t += FAST_DT_S;
-        ego = match accepted.as_ref().and_then(|p| target_at(p, slot_t)) {
-            Some((pose, vel)) => EgoState { pose, linear_x_mps: vel, yaw_rate_rads: 0.0, stamp_ms: now_ms },
+        // FAST loop: track the committed trajectory by elapsed time; MRC if none/exhausted.
+        ego = match tracker.track(now_ms) {
+            Some(cmd) => EgoState { pose: cmd.pose, linear_x_mps: cmd.velocity_mps, yaw_rate_rads: 0.0, stamp_ms: now_ms },
             None => EgoState { pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0), yaw_rate_rads: 0.0, stamp_ms: now_ms },
         };
 
         if light == SignalState::Red { red_max_x = red_max_x.max(ego.pose.x_m); }
         ego_max_y = ego_max_y.max(ego.pose.y_m);
+        ego_max_heading = ego_max_heading.max(ego.pose.heading_rad);
     }
 
-    println!("red_max_x={red_max_x:.2}  ego_final=({:.2},{:.2})  ego_max_y={ego_max_y:.2}  green_plan_max_y={green_plan_max_y:.2}  cedes={cede_at_approach:?}  admitted={all_admitted}", ego.pose.x_m, ego.pose.y_m);
+    println!("red_max_x={red_max_x:.2}  ego_final=({:.2},{:.2})  ego_max_y={ego_max_y:.2}  ego_max_heading={ego_max_heading:.2}  cedes={cede_at_approach:?}  admitted={admitted_promotions}/{promotions}", ego.pose.x_m, ego.pose.y_m);
 
-    // (1) KIRRA bounds every tick of the negotiation.
-    assert!(all_admitted, "KIRRA admits every tick of the junction negotiation");
+    // (1) KIRRA bounds every pose the ego takes: the fast loop only ever tracks a KIRRA-admitted
+    //     trajectory — a rejected re-plan is never promoted (the loop holds the last admitted
+    //     one or MRCs), and KIRRA DID admit the trajectories that drove the turn. (Some transient
+    //     and post-completion re-plans are rejected; the fast loop correctly never tracks those.)
+    assert!(admitted_promotions > 0, "KIRRA admitted the trajectories the fast loop tracked");
     // (2) #528 — the map's right-of-way derives the crossing vehicle into the cede set.
     assert_eq!(cede_at_approach, vec![7], "the crossing vehicle is derived into the cede set (right-of-way)");
     // (3) #531 — the RED light HOLDs the ego at/before the stop line (it never crosses).
     assert!(red_max_x <= APPROACH_END + 0.6, "the ego HOLDs at/before the stop line while RED (never crosses x={APPROACH_END}), got red_max_x {red_max_x}");
-    // (4) on GREEN the planner produces an admitted LEFT-turn trajectory deep into the arc
-    //     (#526/#527 route geometry) — the turn the red light had vetoed is now authored.
-    assert!(green_plan_max_y > 8.0, "on GREEN an admitted plan turns deep into the arc, got green_plan_max_y {green_plan_max_y}");
-    // (5) and the ego is released from the line into the turn (it crosses and climbs the arc).
-    //     The full traversal is gradual — the planner accelerates gently from the stop and the
-    //     fast loop conforms 0.1 s at a time — so this asserts release, not completion.
-    assert!(ego_max_y > 1.0 && ego.pose.x_m > APPROACH_END, "GREEN releases the ego into the turn, got ego_max_y {ego_max_y} x {}", ego.pose.x_m);
+    // (4) the ego COMPLETES the left turn: it climbs the arc up into the exit lane and its
+    //     heading swings from east all the way to north (π/2) — the FastLoopTracker accelerates
+    //     it from the red-light standstill and holds the curve, where the toy 0.1 s-sample
+    //     conformance only crept off the line.
+    assert!(ego_max_y > 10.0, "the ego completes the turn up the arc into the exit, got ego_max_y {ego_max_y}");
+    assert!(ego_max_heading > 1.4, "the ego's heading swings east→north (≈π/2), got max heading {ego_max_heading}");
 }

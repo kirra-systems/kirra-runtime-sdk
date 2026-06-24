@@ -11,12 +11,12 @@
 //! The scene: the ego approaches a junction whose lane carries a TRAFFIC LIGHT and a LEFT
 //! turn branch, with a crossing lane the ego has right-of-way over. The light starts RED —
 //! the ego decelerates to the stop line and HOLDS no matter what Gemma asks — then turns
-//! GREEN, and the ego tracks the route corridor left through the junction toward the goal
-//! across it. Nothing the model says can make the car run the red, cross into the crosser,
-//! or over-cut the turn: Occy grounds the intent against the map-derived controls and KIRRA
-//! bounds the result. (The model emits `turn_at` / `go_to`; the goal sits across the
-//! junction, so a goal-seeking intent tracks the turn. A bare `turn_at` is a single-shot
-//! approach maneuver — see the deterministic `intersection_closed_loop` test.)
+//! GREEN, and the ego tracks the turn left through the junction toward the goal across it.
+//! Nothing the model says can make the car run the red, cross into the crosser, or over-cut
+//! the turn: Occy grounds the intent against the map-derived controls and KIRRA bounds the
+//! result. (Whether the model emits `turn_at` or `go_to`, the turn drives to completion —
+//! route-progress continues the committed arc, the fast-loop tracker carries it through, and
+//! curved-lane `contains` keeps the ego located on the arc; see `intersection_closed_loop`.)
 //!
 //! Dual-rate, like `mick_chauffeur`: the FAST loop conforms at 10 Hz; the SLOW System-2 path
 //! only re-asks Gemma for a new intent every ~500 ms, so you watch a maneuver persist between
@@ -30,9 +30,9 @@
 //! never make the car unsafe; this binary only shows the loop.
 
 use kirra_planner::{
-    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl, LaneCorridor, LaneEdge,
-    LaneGraph, LineType, LlmBrain, MickDecisionRecord, MickDriver, MickEvalLog, PlanInput,
-    PlanOutput, Pose, SignalState,
+    EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl,
+    LaneCorridor, LaneEdge, LaneGraph, LineType, LlmBrain, MickDecisionRecord, MickDriver,
+    MickEvalLog, PlanInput, PlanOutput, Pose, SignalState,
 };
 use kirra_mick::OllamaClient;
 use kirra_ros2_adapter::corridor::{CorridorSource, Point};
@@ -44,6 +44,7 @@ const FAST_DT_MS: u64 = 100;
 const TICKS: usize = 80; // 8 s — approach, hold on red, then track the turn on green
 const MRC_DECEL: f64 = 3.0;
 const GREEN_AT_MS: u64 = 3500; // the light flips RED → GREEN at 3.5 s (after the ego has held)
+const REPLAN_MS: u64 = 500; // slow-loop (System-2) re-plan cadence; the fast loop tracks between
 const TURN_RADIUS: f64 = 12.0; // gentle enough for the turn corridor to admit (cf. #526)
 const APPROACH_END: f64 = 30.0; // ego lane runs (0,0)→(30,0); the stop line is here
 
@@ -129,15 +130,6 @@ fn verdict(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject
     validate_trajectory_slow(&plan.trajectory, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
 }
 
-/// The (pose, velocity) at time `t` along a plan — the fast-loop conformance target.
-fn target_at(plan: &PlanOutput, t: f64) -> Option<(Pose, f64)> {
-    plan.trajectory
-        .iter()
-        .find(|p| p.time_from_start_s >= t)
-        .or_else(|| plan.trajectory.last())
-        .map(|p| (p.pose, p.velocity_mps))
-}
-
 fn main() {
     let client = OllamaClient::new();
     let url = std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
@@ -157,8 +149,12 @@ fn main() {
     let goal = Pose { x_m: APPROACH_END + TURN_RADIUS, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
 
     let mut ego = EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 5.0, yaw_rate_rads: 0.0, stamp_ms: 0 };
-    let mut accepted: Option<PlanOutput> = None;
-    let mut slot_t = 0.0_f64;
+    // Dual-rate: the slow loop (System-2 → Occy → KIRRA) re-plans/validates every REPLAN_MS and
+    // promotes only ADMITTED trajectories; the fast loop tracks the committed one each tick.
+    let mut tracker = FastLoopTracker::new();
+    let mut last_replan_ms: Option<u64> = None;
+    let mut last_v = TrajectoryVerdict::MRCFallback;
+    let mut cedes: Vec<u64> = Vec::new();
 
     let mut eval = MickEvalLog::from_env();
     if eval.is_some() {
@@ -171,26 +167,27 @@ fn main() {
         // The live signal feed: RED until GREEN_AT_MS, then GREEN. Keyed by the governed lane.
         let light = if now_ms < GREEN_AT_MS { SignalState::Red } else { SignalState::Green };
         let signals = [(1u64, light)];
-        let w = world(ego, &route, &objs, &signals, &g, goal);
 
-        let plan = driver.drive_tick(&w, &mut occy, now_ms);
-        let v = verdict(&plan, &route, &objs);
-        let admitted = matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp);
-
-        // The cede set the grounding derived from the map's right-of-way (observability).
-        let cedes = derived_cedes(&w);
-
-        if let (Some(log), Some(intent)) = (eval.as_mut(), driver.current_intent()) {
-            let _ = log.append(&MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, v));
+        // SLOW loop: re-ask the brain / re-ground / re-validate at the slow cadence or when the
+        // committed trajectory is spent. Promote only what KIRRA admits.
+        let replan_due = tracker.is_exhausted(now_ms) || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
+        if replan_due {
+            let w = world(ego, &route, &objs, &signals, &g, goal);
+            let plan = driver.drive_tick(&w, &mut occy, now_ms);
+            last_v = verdict(&plan, &route, &objs);
+            cedes = derived_cedes(&w); // the cede set the right-of-way derived (observability)
+            if let (Some(log), Some(intent)) = (eval.as_mut(), driver.current_intent()) {
+                let _ = log.append(&MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, last_v));
+            }
+            if matches!(last_v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp) {
+                tracker.promote(plan, now_ms);
+                last_replan_ms = Some(now_ms);
+            }
         }
 
-        if admitted {
-            accepted = Some(plan);
-            slot_t = 0.0;
-        }
-        slot_t += FAST_DT_S;
-        ego = match accepted.as_ref().and_then(|p| target_at(p, slot_t)) {
-            Some((pose, vel)) => EgoState { pose, linear_x_mps: vel, yaw_rate_rads: 0.0, stamp_ms: now_ms },
+        // FAST loop: track the committed trajectory by elapsed time; MRC if none/exhausted.
+        ego = match tracker.track(now_ms) {
+            Some(cmd) => EgoState { pose: cmd.pose, linear_x_mps: cmd.velocity_mps, yaw_rate_rads: 0.0, stamp_ms: now_ms },
             None => EgoState {
                 pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
                 yaw_rate_rads: 0.0, stamp_ms: now_ms,
@@ -200,12 +197,12 @@ fn main() {
         let intent = driver.current_intent();
         let light_s = if light == SignalState::Red { "RED " } else { "GREEN" };
         println!(
-            "{:>6.1}  {:>6.2} {:>6.2}  {:>5.2}   {light_s}   {:<22?}  {:>5?}   {v:?}",
+            "{:>6.1}  {:>6.2} {:>6.2}  {:>5.2}   {light_s}   {:<22?}  {:>5?}   {last_v:?}",
             now_ms as f64 / 1000.0, ego.pose.x_m, ego.pose.y_m, ego.linear_x_mps, intent, cedes,
         );
     }
     println!(
-        "final ego = ({:.1}, {:.1}) — held at the line on red, then turned left on green; right-of-way asserted; KIRRA bounded every tick.",
+        "final ego = ({:.1}, {:.1}) — held at the line on red, then tracked the turn through the arc on green; right-of-way asserted; KIRRA bounded every tracked pose.",
         ego.pose.x_m, ego.pose.y_m
     );
 }
