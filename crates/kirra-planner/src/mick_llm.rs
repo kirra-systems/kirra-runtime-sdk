@@ -43,6 +43,7 @@ Respond with ONLY one JSON object (no prose, no code fence), in one of these for
   {{\"intent\":\"go_to\",\"x_m\":<number>,\"y_m\":<number>}}   head toward a point (ego frame)\n\
   {{\"intent\":\"lane_change\",\"target_offset_m\":<number>}}  shift laterally (+left, -right)\n\
   {{\"intent\":\"overtake\"}}                                   pass the slow/stopped lead ahead\n\
+  {{\"intent\":\"pull_over\"}}                                  get to the road edge and stop\n\
   {{\"intent\":\"hold\"}}                                       stop and hold\n\
 \n\
 Drive smoothly and comfortably; ease off near objects and when posture is DEGRADED. You \
@@ -57,6 +58,8 @@ Examples (situation → intent):\n\
 {{\"intent\":\"lane_change\",\"target_offset_m\":3.5}}\n\
 - a stopped car blocking your lane, the goal is past it, room to pass → \
 {{\"intent\":\"overtake\"}}\n\
+- an emergency vehicle (ambulance/police/fire) approaching → \
+{{\"intent\":\"pull_over\"}}\n\
 - the goal is off to one side and reachable → {{\"intent\":\"go_to\",\"x_m\":20,\"y_m\":-4}}\n\
 \n\
 Situation:\n{situation}\n\
@@ -134,7 +137,7 @@ mod tests {
     fn prompt_carries_the_schema_and_the_situation() {
         let p = build_prompt(&sample_ctx());
         // The typed-intent contract the model must follow.
-        for tag in ["cruise", "go_to", "lane_change", "overtake", "hold"] {
+        for tag in ["cruise", "go_to", "lane_change", "overtake", "pull_over", "hold"] {
             assert!(p.contains(tag), "prompt must list the {tag} intent");
         }
         // The ego-relative situation is embedded (serialized WorldContext).

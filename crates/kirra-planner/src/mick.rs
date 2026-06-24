@@ -43,6 +43,12 @@ pub enum MickIntent {
     /// it, and the lane line is crossable; otherwise Occy stays in lane. KIRRA bounds the
     /// pass (head-on RSS), so an overtake into oncoming traffic is refused regardless.
     Overtake,
+    /// Get to the road edge and stop — e.g. to let an emergency vehicle (ambulance,
+    /// police, fire) pass, or a commanded curb stop. Occy shifts as far right as
+    /// containment admits (onto a drivable shoulder if present, else the lane edge) and
+    /// decelerates to a controlled stop. Honored only if the rightward move is lawful and
+    /// fits; a nearer hazard still stops the ego first, and KIRRA bounds the parked pose.
+    PullOver,
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -60,6 +66,8 @@ enum IntentJson {
     Cruise { target_speed_mps: f64 },
     #[serde(rename = "overtake")]
     Overtake,
+    #[serde(rename = "pull_over")]
+    PullOver,
 }
 
 impl MickIntent {
@@ -84,6 +92,7 @@ impl MickIntent {
             IntentJson::Hold => MickIntent::Hold,
             IntentJson::Cruise { target_speed_mps } => MickIntent::Cruise { target_speed_mps },
             IntentJson::Overtake => MickIntent::Overtake,
+            IntentJson::PullOver => MickIntent::PullOver,
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -98,6 +107,7 @@ impl MickIntent {
             MickIntent::Hold => true,
             MickIntent::Cruise { target_speed_mps } => target_speed_mps.is_finite(),
             MickIntent::Overtake => true,
+            MickIntent::PullOver => true,
         }
     }
 }
@@ -190,6 +200,12 @@ pub fn plan_for_intent(
             // present and the pass fits + the lane line is crossable (else it stays in lane),
             // and KIRRA bounds it (head-on RSS). Nothing unsafe flows from the request itself.
             planner.plan(&PlanInput { request_overtake: true, ..world.clone() })
+        }
+        MickIntent::PullOver => {
+            // Request the edge-park-and-stop; Occy honors it only if the rightward move is
+            // lawful and fits the corridor (else it stays in lane), a nearer hazard still
+            // stops the ego first, and KIRRA bounds the parked pose. Safe by construction.
+            planner.plan(&PlanInput { request_pull_over: true, ..world.clone() })
         }
     }
 }
@@ -495,6 +511,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -799,6 +816,36 @@ mod tests {
     #[test]
     fn overtake_llm_json_parses() {
         assert_eq!(MickIntent::from_llm_json(r#"{"intent":"overtake"}"#).unwrap(), MickIntent::Overtake);
+    }
+
+    // ----- the PullOver intent (edge-park and stop) -----
+
+    #[test]
+    fn pull_over_intent_grounds_to_request_pull_over() {
+        // A recording planner captures the flag the intent set on the PlanInput.
+        struct Recorder { req: bool }
+        impl Planner for Recorder {
+            fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
+                self.req = input.request_pull_over;
+                PlanOutput::safe_stop(input.ego.pose)
+            }
+        }
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+
+        let mut rec = Recorder { req: false };
+        let _ = plan_for_intent(&mut rec, &MickIntent::PullOver, &w);
+        assert!(rec.req, "PullOver grounds to request_pull_over = true");
+
+        // A non-pull-over maneuver leaves it false (start true to prove it is cleared).
+        let mut rec2 = Recorder { req: true };
+        let _ = plan_for_intent(&mut rec2, &MickIntent::Cruise { target_speed_mps: 5.0 }, &w);
+        assert!(!rec2.req, "Cruise leaves request_pull_over = false");
+    }
+
+    #[test]
+    fn pull_over_llm_json_parses() {
+        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"pull_over"}"#).unwrap(), MickIntent::PullOver);
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----

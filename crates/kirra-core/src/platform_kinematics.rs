@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn ackermann_evaluate_is_verbatim_validate_vehicle_command() {
         let c = contract();
-        let platform = AckermannPlatform::new(c.clone());
+        let platform = AckermannPlatform::new(c);
         let battery = [
             cmd(5.0, 5.0, 0.1, 0.0, 0.0),        // clean → Allow
             cmd(1000.0, 5.0, 0.1, 0.0, 0.0),     // over speed → Clamp/Deny
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn ackermann_footprint_matches_contract_projection() {
         let c = contract();
-        let platform = AckermannPlatform::new(c.clone());
+        let platform = AckermannPlatform::new(c);
         let direct = VehicleFootprint::from(&c);
         let viatrait = platform.footprint();
         assert_eq!(direct.width_m, viatrait.width_m);
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn ackermann_accessors_mirror_contract() {
         let c = contract();
-        let platform = AckermannPlatform::new(c.clone());
+        let platform = AckermannPlatform::new(c);
         assert_eq!(platform.max_speed_mps(), c.max_speed_mps);
         assert_eq!(platform.max_brake_mps2(), c.max_brake_mps2);
         assert_eq!(platform.stop_epsilon_mps(), STOP_EPSILON_MPS);
