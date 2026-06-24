@@ -45,6 +45,7 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
         request_overtake: false,
+        request_pull_over: false,
     }
 }
 

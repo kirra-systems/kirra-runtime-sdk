@@ -86,6 +86,8 @@ enum LimitKind {
     Behavioral,
     /// Predicted-conflict yield: a crossing object will enter the lane ahead.
     Yield,
+    /// Commanded pull-over: decel to a controlled stop at the road edge.
+    PullOver,
 }
 
 /// Ego world-state the planner consumes.
@@ -235,6 +237,16 @@ pub struct PlanInput<'a> {
     /// to overtake into oncoming traffic is refused downstream regardless. `false` =
     /// byte-for-byte prior behavior (overtake fires only when within-lane can't clear it).
     pub request_overtake: bool,
+    /// **Requested pull-over** — Mick's "get to the road edge and stop" knob (e.g. to
+    /// yield to an emergency vehicle, or a commanded curb stop). When `true` the planner
+    /// shifts as far **right** as containment admits — onto the `drivable` shoulder if one
+    /// is supplied, else to the reference corridor's right edge — and decelerates to a
+    /// controlled stop there (`compute_pull_over_bump` + a `PullOver` stop limit). Honored
+    /// only if the lane line permits the rightward move and the shifted footprint fits the
+    /// corridor; otherwise the ego stays in lane. A nearer object/behavioral stop still
+    /// binds first (never drives past a hazard to finish parking), and KIRRA independently
+    /// bounds the maneuver. `false` = byte-for-byte prior behavior.
+    pub request_pull_over: bool,
 }
 
 /// Intent label on a proposal.
@@ -444,6 +456,24 @@ pub struct GeometricPlannerConfig {
     /// (containment still backstops). A straight guide is unaffected. Bounded for
     /// WCET: the vertex count grows by ≤ 2× per iteration, so keep this small.
     pub path_smoothing_iterations: usize,
+    /// Longitudinal distance (m) past the end of the pull-over lateral ramp at which
+    /// the commanded pull-over comes to its controlled stop — room to settle at the
+    /// edge before halting. A nearer object/behavioral stop still binds first (the
+    /// ego never drives past a hazard to finish parking). The decel itself is the
+    /// speed profile's job; this only places the stop station.
+    pub pull_over_stop_margin_m: f64,
+    /// Lateral clearance (m) the pull-over keeps between the footprint CENTER and the
+    /// right boundary at the parked pose. Larger than the static footprint half-width
+    /// on purpose: while the long vehicle ramps right it angles up to
+    /// `atan(lateral_ramp_slope)` and its nose swings toward the edge, so this clearance
+    /// covers that transient excursion (~2 m for an urban car at the default slope) and
+    /// keeps the *angled* footprint inside the corridor — which the planner's straight
+    /// hold-station fit check alone would miss. Consequence: a road must be wider than
+    /// this clearance plus the footprint for a pull-over to fit (a narrow lane can't
+    /// admit a full edge-park, mirroring the narrow-road overtake bound); a real shoulder
+    /// supplied via `drivable` gives the room. A tighter curb-hug would need a slow final
+    /// straightening pass the single-ramp maneuver does not author (future work).
+    pub pull_over_edge_clearance_m: f64,
     /// Comfort lateral-acceleration limit (m/s²) for curvature-aware speed. The
     /// target speed is capped to `sqrt(comfort_lateral_accel / κ)` for the path's
     /// upcoming curvature κ, so the ego SLOWS for curves (looking ahead far enough
@@ -484,6 +514,8 @@ impl Default for GeometricPlannerConfig {
             yield_temporal_margin_s: 1.0,
             max_jerk_mps3: 2.5,
             path_smoothing_iterations: 2,
+            pull_over_stop_margin_m: 2.0,
+            pull_over_edge_clearance_m: 2.2,
             comfort_lateral_accel_mps2: 2.0,
         }
     }
@@ -712,6 +744,56 @@ impl GeometricPlanner {
             }
         }
         // Ramp in, then hold to the end of the horizon (hold_end → effectively ∞).
+        Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
+    }
+
+    /// Commanded **pull-over**: a SUSTAINED rightward shift that brings the footprint
+    /// center to `pull_over_edge_clearance_m` inside the right boundary (the clearance
+    /// covers the angled-ramp nose excursion — see the field doc), held to the end of
+    /// the horizon; the longitudinal stop is authored separately by the caller.
+    /// `left`/`right` are the boundaries the move is fitted against (the `drivable`
+    /// shoulder if supplied, else the reference corridor), so a pull-over reaches a real
+    /// shoulder when there is one and otherwise pulls to the right of the lane.
+    ///
+    /// Returns `None` (→ stay in lane) if the lane line forbids the rightward move, the
+    /// corridor is degenerate (no room right of center), or the shifted footprint will
+    /// not fit. Like every maneuver here it only PROPOSES — KIRRA bounds the result.
+    fn compute_pull_over_bump(
+        &self,
+        left: &[Point],
+        right: &[Point],
+        lane_boundaries: &[LaneBoundary],
+        s_ego: f64,
+    ) -> Option<LateralBump> {
+        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m;
+        // Target path: bring the footprint center to `pull_over_edge_clearance_m` inside
+        // the right boundary. That clearance is deliberately larger than the static
+        // footprint half-width: while the (long) vehicle ramps over it angles up to
+        // ~atan(lateral_ramp_slope) and its nose swings toward the edge — the clearance
+        // covers that transient excursion so the angled footprint still fits (a tighter
+        // curb-hug would need a slow final straightening pass; see the field doc). Read
+        // at the ego station (exact for a straight edge). Negative target = rightward.
+        let rb0 = boundary_y_at(right, s_ego);
+        let cl0 = 0.5 * (boundary_y_at(left, s_ego) + rb0);
+        let target = (rb0 + self.cfg.pull_over_edge_clearance_m) - cl0;
+        if target >= -1e-3 {
+            return None; // clearance ≥ half-corridor (no room right of center) → stay put
+        }
+        // Lane-line rule: pulling right (e.g. onto a shoulder) must be permitted — a
+        // solid right edge / barrier line forbids it. The legal constraint is Occy's.
+        if !behavior::lateral_move_permitted(lane_boundaries, 0.0, target) {
+            return None;
+        }
+        // Corridor fit across the held region past the ramp (footprint stays inside).
+        let ramp_len = (1.5 * target.abs() / self.cfg.lateral_ramp_slope.max(1e-3)).max(1.0);
+        for k in 0..=4 {
+            let x = s_ego + ramp_len + k as f64 * 2.0;
+            let cl = 0.5 * (boundary_y_at(left, x) + boundary_y_at(right, x));
+            let path_y = cl + target;
+            if path_y + fh > boundary_y_at(left, x) || path_y - fh < boundary_y_at(right, x) {
+                return None;
+            }
+        }
         Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
     }
 
@@ -986,7 +1068,18 @@ impl Planner for GeometricPlanner {
         // object can be routed around within the corridor, compute the avoidance
         // bump. Both are smooth lateral offsets applied per-sample below; NONE →
         // stay centered (objects handled by stop-short).
-        let bump = match input.lane_change_to_m {
+        // A commanded PULL-OVER takes precedence over every other lateral maneuver:
+        // shift as far right as containment admits (onto the drivable shoulder if one
+        // was supplied, else the reference corridor's edge) and — below — stop there.
+        let bump = if input.request_pull_over {
+            let (edge_left, edge_right) = match input.drivable {
+                Some(d) => (d.left_boundary(), d.right_boundary()),
+                None => (input.map.left_boundary(), input.map.right_boundary()),
+            };
+            self.compute_pull_over_bump(edge_left, edge_right, input.lane_boundaries, s_ego)
+                .unwrap_or(LateralBump::NONE)
+        } else {
+            match input.lane_change_to_m {
             Some(target) => self
                 .compute_lane_change_bump(
                     target,
@@ -1031,6 +1124,7 @@ impl Planner for GeometricPlanner {
                     }
                     _ => within,
                 }
+            }
             }
         };
 
@@ -1106,6 +1200,18 @@ impl Planner for GeometricPlanner {
             }
         }
 
+        // Commanded pull-over: once the rightward shift fired, author a controlled stop
+        // at the road edge — a little past the ramp. A nearer hazard/behavioral stop
+        // still binds first (the `< s_limit` guard), so the ego never drives past a
+        // hazard to finish parking. KIRRA bounds the parked pose independently.
+        if input.request_pull_over && bump.y_off != 0.0 {
+            let s_stop = s_ego + bump.ramp_len + self.cfg.pull_over_stop_margin_m;
+            if s_stop < s_limit {
+                s_limit = s_stop;
+                limit_kind = LimitKind::PullOver;
+            }
+        }
+
         // Target speed by the binding limit, then clamped by any behavioral speed
         // cap (regulatory / advisory / yield).
         let mut target = if bump.y_off != 0.0 {
@@ -1114,7 +1220,7 @@ impl Planner for GeometricPlanner {
             match limit_kind {
                 LimitKind::Lead => target.min(lead_match.unwrap_or(target)),
                 LimitKind::ObjectStop => target.min(self.cfg.object_approach_speed_mps),
-                LimitKind::Goal | LimitKind::Behavioral | LimitKind::Yield => target,
+                LimitKind::Goal | LimitKind::Behavioral | LimitKind::Yield | LimitKind::PullOver => target,
             }
         };
         if let Some(cap) = behavioral.speed_cap_mps {
@@ -1532,6 +1638,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -1607,6 +1714,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -1754,6 +1862,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -2125,6 +2234,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -2374,6 +2484,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -2486,6 +2597,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
@@ -2885,6 +2997,7 @@ mod tests {
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
             request_overtake: false,
+            request_pull_over: false,
         }
     }
 
