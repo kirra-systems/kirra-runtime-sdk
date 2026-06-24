@@ -60,6 +60,17 @@ const OCCLUSION_SPEED_TOL_MPS: f64 = 0.1;
 /// covers it.
 const RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
 
+/// Object lateral-velocity magnitude (m/s) above which a same-lane object is treated as
+/// **cutting in** (a genuine side-collision risk) rather than a straight-running lead or a
+/// member of a stationary queue. The lateral (side) RSS check is the CONJUNCTION partner of
+/// the longitudinal check: a side collision needs the pair ABREAST (longitudinally unsafe) OR
+/// closing laterally. Below this threshold a *longitudinally-safe* object triggers no lateral
+/// MRC — admitting a safe same-lane stop (a stopped queue / a stopped lead the ego halts
+/// behind) that the reaction-time swerve term in `lateral_safe_distance` otherwise rejected
+/// (`COMPETITIVE_PLANNER_ANALYSIS §4`'s over-rejection) — while any real lateral closing is
+/// still caught. Small, so only genuine lateral stillness is admitted; fail-closed elsewhere.
+const RSS_LATERAL_MOTION_EPS_MPS: f64 = 0.1;
+
 /// One predicted future position of an object at a time, in the world frame. A
 /// sequence of these forms one predicted **mode** (hypothesis); the inter-sample
 /// motion supplies the predicted velocity (no separate speed field to keep stale).
@@ -312,59 +323,61 @@ pub fn validate_trajectory_slow_capped(
                 continue;
             }
 
-            // Longitudinal RSS (rear-end / head-on) — GATED ON LATERAL OVERLAP: a
-            // longitudinal collision is only possible when the footprints laterally
-            // overlap (the object is in the ego's path). Applying it to an object
-            // the ego is laterally CLEAR of — a vehicle being passed, or oncoming
-            // traffic safely in the next lane — over-rejected (§4): it was why a car
-            // centered in the ego lane could not be overtaken. Direction matters: an
-            // ONCOMING vehicle (heading opposes the ego, velocity projects backward
-            // onto the ego's forward axis) is a HEAD-ON closure, not a same-direction
-            // lead — routing it through the same-direction primitive would discard
-            // the closing sign and UNDER-estimate the gap (#408 Obs 3); the
-            // opposite-direction bound (sum of both stopping distances) applies.
-            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M {
-                let obj_lon_v =
-                    obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).cos();
-                let lon_required = if obj_lon_v < 0.0 {
-                    // Closing magnitudes; symmetric brake_min (both in their lanes).
-                    opposite_direction_safe_distance(
-                        traj_point.velocity_mps,
-                        obj_lon_v.abs(),
-                        RSS_REACTION_TIME_S,
-                        config.max_accel_mps2,
-                        config.max_decel_mps2,
-                        config.max_decel_mps2,
-                    )
-                } else {
-                    longitudinal_safe_distance(
-                        traj_point.velocity_mps,
-                        obj.velocity_mps,
-                        RSS_REACTION_TIME_S,
-                        config.max_accel_mps2,
-                        config.max_decel_mps2,
-                        config.max_decel_mps2,
-                    )
-                };
-                if dx_ego < lon_required {
-                    return TrajectoryVerdict::MRCFallback;
-                }
+            // RSS over the horizon, per object, as the CONJUNCTION of the two axes (IEEE 2846
+            // §5; Shalev-Shwartz et al.): a collision needs the vehicles unsafe longitudinally
+            // AND laterally at once. Compute the longitudinal safe distance once (direction
+            // matters: an ONCOMING vehicle — velocity projects backward onto the ego's forward
+            // axis — is a HEAD-ON closure needing the opposite-direction bound, the sum of both
+            // stopping distances; a same-direction lead uses the rear-end bound, #408 Obs 3).
+            let obj_lon_v =
+                obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).cos();
+            let lon_required = if obj_lon_v < 0.0 {
+                // Closing magnitudes; symmetric brake_min (both in their lanes).
+                opposite_direction_safe_distance(
+                    traj_point.velocity_mps,
+                    obj_lon_v.abs(),
+                    RSS_REACTION_TIME_S,
+                    config.max_accel_mps2,
+                    config.max_decel_mps2,
+                    config.max_decel_mps2,
+                )
+            } else {
+                longitudinal_safe_distance(
+                    traj_point.velocity_mps,
+                    obj.velocity_mps,
+                    RSS_REACTION_TIME_S,
+                    config.max_accel_mps2,
+                    config.max_decel_mps2,
+                    config.max_decel_mps2,
+                )
+            };
+            let lon_unsafe = dx_ego < lon_required;
+
+            // Longitudinal RSS (rear-end / head-on) — GATED ON LATERAL OVERLAP: a longitudinal
+            // collision is only possible when the footprints laterally overlap (the object is in
+            // the ego's path). Applying it to an object the ego is laterally CLEAR of — a vehicle
+            // being passed, or oncoming traffic safely in the next lane — over-rejected (§4): it
+            // was why a car centered in the ego lane could not be overtaken.
+            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M && lon_unsafe {
+                return TrajectoryVerdict::MRCFallback;
             }
 
-            // Lateral RSS — required side gap. Defence-in-depth against an object
-            // cutting in beside the ego (the longitudinal check above is the
-            // dominant risk). RSS-GATED ON LONGITUDINAL PROXIMITY: a lateral
-            // shortfall is only dangerous when the object is also longitudinally
-            // close (within `RSS_LONGITUDINAL_CONFLICT_M`) — two vehicles cannot
-            // collide laterally unless they are alongside or imminently so. Without
-            // this gate the check over-rejected a lead well ahead, or oncoming
-            // traffic safely passing in the next lane (COMPETITIVE_PLANNER_ANALYSIS
-            // §4): both are longitudinally distant, so a lateral shortfall there is
-            // not a collision risk. (Object lateral velocity is the component along
-            // the pose normal — Phase 2A assumes 0 if perception lacks per-axis vel.)
-            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M {
-                let obj_lat_vel =
-                    obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).sin();
+            // Lateral RSS — required side gap. A side collision needs the footprints ABREAST
+            // (longitudinally unsafe — `lon_unsafe`) OR the object CLOSING LATERALLY (a cut-in:
+            // its velocity has a lateral component). A longitudinally-SAFE, laterally-STATIONARY
+            // object — a stopped queue member, or a stopped lead the ego halts behind — is
+            // neither, so it is admitted instead of spuriously MRC'd by the reaction-time swerve
+            // term in `lateral_safe_distance` (the §4 over-rejection of a safe same-lane stop).
+            // This strictly NARROWS the lateral check (an added precondition), so it can only
+            // admit longitudinally-safe + laterally-still objects — never a state with lateral
+            // motion or abreast danger. RSS-GATED ON LONGITUDINAL PROXIMITY as before. (Object
+            // lateral velocity = the component along the pose normal — Phase 2A assumes 0 if
+            // perception lacks per-axis vel; the ego's own lateral motion is carried by the
+            // trajectory poses, so containment + the abreast term cover an ego swerve.)
+            let obj_lat_vel =
+                obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).sin();
+            let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
+            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M && (lon_unsafe || lateral_cut_in) {
                 let ego_lat_vel = 0.0; // straight-following assumption per §3
                 let lat_required = lateral_safe_distance(
                     ego_lat_vel,
