@@ -1969,6 +1969,7 @@ name = "kirra-core"
 version = "0.1.0"
 dependencies = [
  "kirra-capture-schema",
+ "proptest",
  "serde",
  "serde_json",
  "tokio",
