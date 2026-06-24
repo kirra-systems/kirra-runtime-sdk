@@ -83,6 +83,7 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         drivable: None,
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     }
 }
 

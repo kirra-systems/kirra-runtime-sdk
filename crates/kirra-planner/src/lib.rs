@@ -226,6 +226,15 @@ pub struct PlanInput<'a> {
     /// `Degraded` it only lowers an already non-increasing target, preserving the
     /// decel-only invariant. `None` = use the posture ceiling (byte-for-byte prior behavior).
     pub target_speed_mps: Option<f64>,
+    /// **Requested overtake** — Mick's "pass the slow/stopped lead ahead" knob. When `true`
+    /// AND a `drivable` area is supplied, the planner attempts the cross-centerline pass
+    /// (`compute_overtake_bump`) *discretionarily* — not only when a within-lane route-around
+    /// fails. The pass still must fit the drivable area, cross a crossable lane line, and
+    /// clear the checker's lateral band; if it can't, the planner falls back to the
+    /// within-lane behavior. KIRRA independently bounds the pass (head-on RSS), so a request
+    /// to overtake into oncoming traffic is refused downstream regardless. `false` =
+    /// byte-for-byte prior behavior (overtake fires only when within-lane can't clear it).
+    pub request_overtake: bool,
 }
 
 /// Intent label on a proposal.
@@ -1002,15 +1011,24 @@ impl Planner for GeometricPlanner {
                     s_ego,
                 );
                 match input.drivable {
-                    Some(drivable) if within.y_off == 0.0 => self.compute_overtake_bump(
-                        &guide,
-                        drivable.left_boundary(),
-                        drivable.right_boundary(),
-                        input.objects,
-                        input.lane_boundaries,
-                        input.no_overtake_ids,
-                        s_ego,
-                    ),
+                    // Fire the cross-centerline overtake when the doer REQUESTS it (Mick's
+                    // `Overtake` intent) OR when the within-lane route-around couldn't clear
+                    // the object on its own. `compute_overtake_bump` enforces the drivable
+                    // fit, the crossable lane line, and the lateral-clearance band, returning
+                    // NONE otherwise — in which case we keep the within-lane bump. KIRRA
+                    // still bounds the pass (head-on RSS) downstream.
+                    Some(drivable) if input.request_overtake || within.y_off == 0.0 => {
+                        let pass = self.compute_overtake_bump(
+                            &guide,
+                            drivable.left_boundary(),
+                            drivable.right_boundary(),
+                            input.objects,
+                            input.lane_boundaries,
+                            input.no_overtake_ids,
+                            s_ego,
+                        );
+                        if pass.y_off != 0.0 { pass } else { within }
+                    }
                     _ => within,
                 }
             }
@@ -1513,6 +1531,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -1587,6 +1606,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -1733,6 +1753,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -2103,6 +2124,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -2351,6 +2373,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -2462,6 +2485,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 
@@ -2860,6 +2884,7 @@ mod tests {
             drivable: None,
             posture: FleetPosture::Nominal,
             target_speed_mps: None,
+            request_overtake: false,
         }
     }
 

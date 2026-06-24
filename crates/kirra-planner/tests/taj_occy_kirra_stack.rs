@@ -100,6 +100,7 @@ fn run_stack(
         drivable: None,
         posture: posture.clone(),
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
@@ -196,6 +197,7 @@ fn route_around_in_corridor_object_admits() {
         drivable: None,
         posture: FleetPosture::Nominal,
         target_speed_mps: None,
+        request_overtake: false,
     };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
