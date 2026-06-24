@@ -1,12 +1,15 @@
 //! **Mick chauffeur — the CLOSED LOOP.** The other Mick tests judge one proposal; this
-//! one runs the loop over time: each tick the brain proposes an intent, Occy grounds it,
-//! KIRRA judges it, and the ego state ADVANCES — admitted → conform to the plan, rejected
-//! → the fast loop's MRC (decelerate, hold). Repeat. The safety claim is then a property
-//! of the whole *run*, not a single verdict:
+//! one runs the loop over time, modeling the REAL fast/slow loop: each tick the brain
+//! proposes an intent, Occy grounds it, KIRRA judges it, and — on an admitting verdict —
+//! the slow loop PROMOTES the trajectory into the `accepted` slot; the fast loop then
+//! continuously CONFORMS the ego to that slot. A momentary reject is NOT a slam-stop: the
+//! slot simply isn't updated and the fast loop keeps tracking the last accepted plan to
+//! its KIRRA-admitted stop. MRC fires only when there is NO accepted slot at all. The
+//! safety claim is a property of the whole *run*, not a single verdict:
 //!
 //!   1. a good chauffeur cruises and makes progress on a clear road;
-//!   2. facing a hazard, the chauffeur is grounded to stop SHORT and KIRRA admits it —
-//!      the ego creeps up and holds, never reaching the obstacle;
+//!   2. facing a hazard, Occy stops short and KIRRA admits it — the ego noses up to ~4 m
+//!      behind the obstacle (the closest RSS admits) and holds, never reaching it;
 //!   3. THE PAYOFF — a persistently RECKLESS doer (a stand-in for a misaligned learned
 //!      brain) tries to drive through the hazard *every tick*; KIRRA rejects it *every
 //!      tick*, the ego MRCs, and across the entire run the ego never reaches the obstacle.
@@ -90,26 +93,10 @@ fn kirra_admits(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedO
     )
 }
 
-/// Advance the ego one tick. Admitted → conform to the accepted trajectory (the pose ~one
-/// tick in). Rejected → the fast loop's MRC: shed speed toward 0 and hold position.
-fn advance(ego: EgoState, plan: &PlanOutput, admitted: bool, t_ms: u64) -> EgoState {
-    if !admitted {
-        return EgoState {
-            pose: ego.pose,
-            linear_x_mps: (ego.linear_x_mps - MRC_DECEL * TICK_DT).max(0.0),
-            yaw_rate_rads: 0.0,
-            stamp_ms: t_ms,
-        };
-    }
-    let tp = plan
-        .trajectory
-        .iter()
-        .find(|p| p.time_from_start_s >= TICK_DT)
-        .or_else(|| plan.trajectory.last());
-    match tp {
-        Some(p) => EgoState { pose: p.pose, linear_x_mps: p.velocity_mps, yaw_rate_rads: 0.0, stamp_ms: t_ms },
-        None => ego,
-    }
+/// The pose+velocity at time `t` along a plan (the fast-loop conformance target): the
+/// first point at/after `t`, else the final point (a held stop).
+fn pose_at(plan: &PlanOutput, t: f64) -> Option<&TrajectoryPoint> {
+    plan.trajectory.iter().find(|p| p.time_from_start_s >= t).or_else(|| plan.trajectory.last())
 }
 
 /// Run the closed loop for `ticks` and return `(ego trace, was-every-tick-admitted)`.
@@ -131,12 +118,36 @@ fn drive(
     };
     let mut trace = vec![ego];
     let mut all_admitted = true;
+    // Model the REAL fast/slow loop: the slow loop only promotes a trajectory into the
+    // `accepted` slot on an admitting verdict; the fast loop continuously CONFORMS to that
+    // slot (tracking time `slot_t` along it). A momentary reject does NOT discard the slot
+    // and does NOT slam the ego to a stop — it simply isn't promoted, and the fast loop
+    // keeps tracking the last accepted plan toward its (KIRRA-admitted) stop. MRC happens
+    // only when there is no accepted slot at all (e.g. a reckless doer rejected every tick).
+    let mut accepted: Option<PlanOutput> = None;
+    let mut slot_t = 0.0_f64;
     for tick in 1..=ticks {
         let w = world(ego, map, objects);
         let plan = mick_drive_once(brain, &w, planner);
         let admitted = kirra_admits(&plan, map, objects);
         all_admitted &= admitted;
-        ego = advance(ego, &plan, admitted, tick as u64 * (TICK_DT * 1000.0) as u64);
+        if admitted {
+            accepted = Some(plan); // slow loop promotes the fresh trajectory
+            slot_t = 0.0;
+        }
+        slot_t += TICK_DT;
+        ego = match accepted.as_ref().and_then(|p| pose_at(p, slot_t)) {
+            // Fast loop conforms to the accepted slot, advancing along it.
+            Some(tp) => EgoState {
+                pose: tp.pose, linear_x_mps: tp.velocity_mps, yaw_rate_rads: 0.0,
+                stamp_ms: tick as u64 * (TICK_DT * 1000.0) as u64,
+            },
+            // No accepted slot ever → MRC: shed speed and hold.
+            None => EgoState {
+                pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * TICK_DT).max(0.0),
+                yaw_rate_rads: 0.0, stamp_ms: tick as u64 * (TICK_DT * 1000.0) as u64,
+            },
+        };
         trace.push(ego);
     }
     (trace, all_admitted)
@@ -168,10 +179,14 @@ fn chauffeur_holds_short_of_a_hazard_across_the_whole_run() {
     // whether by Occy grounding the plan to stop short OR by KIRRA MRC-ing it as the ego
     // closes in (defense in depth). Either way the chauffeur is held safe.
     assert!(reached < HAZARD_X, "the ego must never reach the hazard, reached {reached}");
-    // And it is a real approach, not a refusal to move — it drives forward from the x=5
-    // start toward the hazard before holding (the planner keeps a conservative stop-short
-    // gap, so it settles a few metres in rather than nosing right up to the obstacle).
-    assert!(reached > 7.0, "the chauffeur drives up toward the hazard, reached {reached}");
+    // And it NOSES UP to the obstacle — the rear axle reaches ~16-17 m, i.e. the front
+    // bumper (~4 m ahead, rear-axle convention) holds ~4 m behind the object at x=25, the
+    // closest KIRRA's RSS admits. With the fast/slow-loop conformance this is a smooth
+    // approach-and-hold, not the chattering ~9 m stall the prior crude MRC-on-reject model
+    // produced. The residual ~4 m gap is the footprint length + the RSS following distance,
+    // not planner timidity (shrinking it further would require an RSS-tapered approach
+    // profile in the planner, never loosening the checker).
+    assert!(reached > 14.0, "the chauffeur noses up close to the hazard, reached {reached}");
 }
 
 #[test]
