@@ -37,6 +37,18 @@ impl<S: SafetyGovernor> SafetyGovernor for ComparatorAsGovernor<S> {
     }
 }
 
+impl<S: SafetyGovernor> ComparatorAsGovernor<S> {
+    /// The fleet posture the wrapped comparator's divergence state recommends (see
+    /// [`GovernorComparator::recommended_posture`]). The node reads this after a tick and
+    /// drives the posture engine with it — the seam that turns governor disagreement into a
+    /// live safety posture (`Degraded`, then `LockedOut` when persistent), not just an audit
+    /// line. Escalation-only at the node: `posture = max(posture, governor.recommended_posture())`.
+    #[must_use]
+    pub fn recommended_posture(&self) -> SafetyPosture {
+        self.0.recommended_posture()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

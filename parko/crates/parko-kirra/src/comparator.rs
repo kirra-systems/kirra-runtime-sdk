@@ -124,6 +124,11 @@ pub struct DivergenceEvent {
     pub reconciled_ang: f64,
     /// `true` iff this tick crossed into LockedOut hard stop.
     pub escalated_to_lockout: bool,
+    /// The fleet posture this divergence recommends — `"degraded"` on a divergent tick,
+    /// `"locked_out"` once the escalation fires. The audit form of
+    /// [`GovernorComparator::recommended_posture`], so the posture signal and its
+    /// justification are one record.
+    pub recommended_posture: &'static str,
 }
 
 /// Sink for ComparatorDivergence events. Implement this and inject via
@@ -175,7 +180,8 @@ impl DivergenceEventSink for InMemoryDivergenceSink {
             "[CERT-006] ComparatorDivergence: \
              lin(p={p_lin} s={s_lin} d={d_lin} rec={rec_lin}) \
              ang(p={p_ang} s={s_ang} d={d_ang} rec={rec_ang}) \
-             acc={acc} speed={speed:?} lockout={lockout}",
+             acc={acc} speed={speed:?} lockout={lockout} posture={posture}",
+            posture = event.recommended_posture,
             p_lin = event.primary_lin,
             s_lin = event.shadow_lin,
             d_lin = event.delta_lin,
@@ -198,10 +204,25 @@ impl DivergenceEventSink for InMemoryDivergenceSink {
 // Comparator state (single mutex, multi-step decision is atomic as a unit)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 struct DivState {
     accumulator: u32,
     first_divergence: Option<Instant>,
+    /// Posture the divergence state recommends to the fleet — derived from the
+    /// accumulator each tick (see [`GovernorComparator::recommended_posture`]). A
+    /// disagreement between the independent governors is a fault SIGNATURE, not just an
+    /// audit line: it drives the system to `Degraded` (and `LockedOut` once persistent),
+    /// with hysteresis (it stays `Degraded` while the accumulator drains).
+    recommended_posture: SafetyPosture,
+}
+
+impl Default for DivState {
+    fn default() -> Self {
+        Self {
+            accumulator: 0,
+            first_divergence: None,
+            recommended_posture: SafetyPosture::Nominal,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +413,14 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             if state.accumulator == 0 {
                 state.first_divergence = None;
             }
+            // Posture recovers only once the accumulator has fully drained (hysteresis): a
+            // single agreeing tick after a burst of divergence does NOT immediately clear the
+            // Degraded recommendation.
+            state.recommended_posture = if state.accumulator == 0 {
+                SafetyPosture::Nominal
+            } else {
+                SafetyPosture::Degraded
+            };
             return primary_out;
         }
 
@@ -444,6 +473,15 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
                 }
             };
 
+            // The divergence drives the fleet posture, mirroring the reconciled action: a hard
+            // escalation → LockedOut; any other divergent tick → Degraded. The integrator reads
+            // `recommended_posture()` and feeds it to the fleet posture engine.
+            state.recommended_posture = if may_lockout {
+                SafetyPosture::LockedOut
+            } else {
+                SafetyPosture::Degraded
+            };
+
             (state.accumulator, may_lockout)
         };
 
@@ -481,9 +519,26 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             reconciled_lin: if may_lockout { 0.0 } else { reconciled_lin },
             reconciled_ang: if may_lockout { 0.0 } else { reconciled_ang },
             escalated_to_lockout: may_lockout,
+            recommended_posture: if may_lockout { "locked_out" } else { "degraded" },
         });
 
         action
+    }
+
+    /// The fleet posture the comparator's divergence state currently recommends — the wiring
+    /// that turns governor disagreement from an audit line into a live safety signal. The
+    /// integrator reads this after [`evaluate`](Self::evaluate) and drives the fleet posture
+    /// engine with it (e.g. `posture = max(posture, comparator.recommended_posture())`).
+    ///
+    /// - `Nominal` while the governors agree and the divergence accumulator is drained;
+    /// - `Degraded` on any divergence, held with hysteresis until the accumulator fully drains;
+    /// - `LockedOut` once the divergence is persistent enough to escalate.
+    #[must_use]
+    pub fn recommended_posture(&self) -> SafetyPosture {
+        self.state
+            .lock()
+            .map(|s| s.recommended_posture)
+            .unwrap_or(SafetyPosture::LockedOut) // poisoned mutex → fail closed
     }
 
 }
@@ -612,6 +667,62 @@ mod tests {
             v.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
             "Reconciled linear magnitude must be at or below MRC ceiling. Got {v}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Divergence → posture: governor disagreement drives the fleet posture
+    // (not just an audit line). The integrator reads `recommended_posture()`.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn agreement_recommends_nominal_posture() {
+        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "a fresh comparator is Nominal");
+        let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(3.0)), 0.05, SafetyPosture::Nominal);
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "agreement keeps the fleet Nominal");
+    }
+
+    #[test]
+    fn a_single_divergence_recommends_degraded() {
+        let (primary, shadow) = diverging_pair();
+        let comparator = GovernorComparator::new(primary, shadow);
+        // One divergent tick (the safe governor ramps off the stop, the unsafe one denies):
+        // accumulator 2, below the lockout level → Degraded, not LockedOut.
+        let out = comparator.evaluate(&cmd(3.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "a single divergence clamps, not denies");
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Degraded, "divergence drives the fleet to Degraded");
+    }
+
+    #[test]
+    fn persistent_divergence_recommends_lockout() {
+        let (primary, shadow) = diverging_pair();
+        let comparator = GovernorComparator::new(primary, shadow);
+        // Repeated divergence at a SAFE (~0) speed: the accumulator becomes persistent and the
+        // posture escalates to LockedOut, mirroring the command-level lockout.
+        for _ in 0..6 {
+            let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        }
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::LockedOut, "persistent divergence → LockedOut");
+    }
+
+    #[test]
+    fn posture_recovers_to_nominal_only_after_the_accumulator_drains() {
+        let (primary, shadow) = diverging_pair();
+        let comparator = GovernorComparator::new(primary, shadow);
+        // Two divergent ticks off the stop (accumulator 4, below the lockout level) → Degraded.
+        for _ in 0..2 {
+            let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        }
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Degraded);
+        // The governors AGREE on a full-stop command (both emit 0). One agreeing tick decays the
+        // accumulator but the posture stays Degraded (HYSTERESIS — no instant flip on one tick).
+        let _ = comparator.evaluate(&cmd(0.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Degraded, "stays Degraded mid-drain");
+        // Enough agreeing ticks drain it fully → back to Nominal.
+        for _ in 0..5 {
+            let _ = comparator.evaluate(&cmd(0.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        }
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal, "fully drained → Nominal");
     }
 
     /// KEY SAFETY PROPERTY: persistent divergence while the vehicle is
