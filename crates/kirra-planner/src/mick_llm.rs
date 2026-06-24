@@ -49,6 +49,13 @@ set only the high-level intent — a separate safety governor enforces collision
 traffic law, and the speed envelope, so you cannot cause a crash. Focus on driving well. \
 Coordinates are ego-relative: +ahead is forward, +left is to your left.\n\
 \n\
+Examples (situation → intent):\n\
+- open road, no objects, goal far ahead → {{\"intent\":\"cruise\",\"target_speed_mps\":10}}\n\
+- a stopped object close ahead in your path → {{\"intent\":\"hold\"}}\n\
+- a slow object ahead, the goal is past it, a lane change to the left is allowed → \
+{{\"intent\":\"lane_change\",\"target_offset_m\":3.5}}\n\
+- the goal is off to one side and reachable → {{\"intent\":\"go_to\",\"x_m\":20,\"y_m\":-4}}\n\
+\n\
 Situation:\n{situation}\n\
 \n\
 Intent:"
@@ -129,6 +136,8 @@ mod tests {
         }
         // The ego-relative situation is embedded (serialized WorldContext).
         assert!(p.contains("ego_speed_mps") && p.contains("posture"), "prompt must embed the situation");
+        // Few-shot worked examples are present (small models lean on them heavily).
+        assert!(p.contains("Examples"), "prompt must carry few-shot examples");
     }
 
     #[test]

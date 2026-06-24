@@ -82,6 +82,12 @@ struct GenerateRequest<'a> {
     model: &'a str,
     prompt: &'a str,
     stream: bool,
+    /// Constrained decoding: `"json"` forces Ollama to emit a syntactically valid JSON
+    /// object (grammar-constrained), so Gemma can't wrap the intent in prose or a code
+    /// fence. `from_llm_json` still validates the typed schema + finiteness on top, so a
+    /// well-formed-but-wrong object (unknown tag, NaN) still fails closed — this only
+    /// removes the *framing* failure mode that otherwise forces a needless HOLD.
+    format: &'static str,
 }
 
 /// The relevant slice of the `/api/generate` response.
@@ -93,7 +99,7 @@ struct GenerateResponse {
 impl ModelClient for OllamaClient {
     fn complete(&self, prompt: &str) -> Result<String, ModelError> {
         let url = format!("{}/api/generate", self.base_url);
-        let body = GenerateRequest { model: &self.model, prompt, stream: false };
+        let body = GenerateRequest { model: &self.model, prompt, stream: false, format: "json" };
 
         // Every failure maps to a stable ModelError → LlmBrain fails closed → HOLD.
         let resp = self
