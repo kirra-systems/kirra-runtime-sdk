@@ -70,6 +70,11 @@ pub use mick::{
 /// seam). Pure + testable with a `MockModel`; a concrete `ModelClient` (local Gemma via
 /// Ollama, etc.) plugs in behind a feature/crate.
 pub mod mick_llm;
+
+/// Mick decision capture — the eval side-channel logging intent → grounding → verdict to
+/// JSONL for offline scoring of the brain against the checker. Observability only.
+pub mod mick_capture;
+pub use mick_capture::{MickDecisionRecord, MickEvalLog};
 pub use mick_llm::{build_prompt, intent_schema, LlmBrain, MockModel, ModelClient, ModelError};
 
 pub mod learned;

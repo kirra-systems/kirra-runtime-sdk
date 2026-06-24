@@ -17,7 +17,8 @@
 use kirra_core::FleetPosture;
 use kirra_mick::OllamaClient;
 use kirra_planner::{
-    EgoState, GeometricPlanner, Goal, LlmBrain, MickDriver, PlanInput, PlanOutput, Pose,
+    EgoState, GeometricPlanner, Goal, LlmBrain, MickDecisionRecord, MickDriver, MickEvalLog,
+    PlanInput, PlanOutput, Pose,
 };
 use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
@@ -79,6 +80,13 @@ fn main() {
     let mut accepted: Option<PlanOutput> = None;
     let mut slot_t = 0.0_f64;
 
+    // Optional eval capture (default OFF): set KIRRA_MICK_EVAL_ENABLED=1 to log each
+    // decision (intent → grounding → verdict) as JSONL for offline scoring of the brain.
+    let mut eval = MickEvalLog::from_env();
+    if eval.is_some() {
+        println!("   (mick-eval capture ON → KIRRA_MICK_EVAL_PATH or kirra_mick_eval.jsonl)");
+    }
+
     println!("   t(s)   ego.x      v   intent (System-2)        kirra-verdict");
     for tick in 1..=TICKS {
         let now_ms = tick as u64 * FAST_DT_MS;
@@ -88,6 +96,12 @@ fn main() {
         let plan = driver.drive_tick(&w, &mut occy, now_ms);
         let v = verdict(&plan, &corr, &objs);
         let admitted = matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp);
+
+        // Eval capture (before `plan` is moved into the accepted slot): log the brain's
+        // intent → Occy's grounding → KIRRA's verdict when there is a current intent.
+        if let (Some(log), Some(intent)) = (eval.as_mut(), driver.current_intent()) {
+            let _ = log.append(&MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, v));
+        }
 
         // Fast/slow conformance: promote on admit, otherwise keep tracking the last slot.
         if admitted {
