@@ -263,7 +263,7 @@ pub enum DenyCode {
     /// trusted to be correctly placed relative to the ego. Containment refuses to
     /// validate (it does not reason about geometry in an untrusted frame) and the
     /// actuator falls to the MRC controlled-stop — the frame-trust-minimal
-    /// maneuver. Issued by `containment::validate_trajectory_containment_checked`
+    /// maneuver. Issued by `containment::validate_trajectory_containment`
     /// when the [`crate::frame_integrity::FrameTrust`] verdict is `Untrusted`.
     /// (Stage S-FI1 — behind AOU-LOCALIZATION-001.)
     ///

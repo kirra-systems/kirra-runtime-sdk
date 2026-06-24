@@ -372,6 +372,7 @@ mod ci_gate_tests {
             MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
         };
         use crate::gateway::kinematics_contract::VehicleKinematicsContract;
+        use kirra_core::frame_integrity::FrameTrust;
 
         let n = MAX_CORRIDOR_VERTICES;
         let half_w = 6.0;
@@ -409,6 +410,8 @@ mod ci_gate_tests {
                 std::hint::black_box(&traj),
                 std::hint::black_box(&corridor),
                 std::hint::black_box(&footprint),
+                // WCET measures the Nominal hot path: Trusted → primary 0.40 m margin.
+                std::hint::black_box(FrameTrust::Trusted),
             ));
         });
         let max_us = max_ns / 1000;

@@ -1,94 +1,31 @@
 // parko-core/src/localization.rs
 //
-// SG2 / SG5 — localization-integrity gate over the map-anchored checks (#123,
-// runtime half).
+// SG4 / SG5 — the bool-driven map-anchored scene gates.
 //
-// The G2 ASSUMPTION-OF-USE (OCCY_SAFETY_GOALS.md, ~line 102, ref
-// KIRRA-OCCY-SG2-MARGIN-001) is that the integrator's localization holds a 95th-
-// percentile lateral error of ≤ 0.10 m. EVERY map-anchored trust in this crate —
-// the SG5 commit-zone gate (a mapped rail crossing / box junction), the SG4
-// `MapKnownSafe` water earn-back — is only as sound as that pose. This module is
-// the RUNTIME COMPLEMENT to that static AoU: when the integrator's localization-
-// integrity reporting says the assumption does NOT currently hold (error over
-// bound, stale, or simply unreported), every MAP-DERIVED trust degrades fail-
-// closed.
+// The localization-integrity TYPE and its trust resolver were unified into
+// kirra-core (`kirra_core::frame_integrity`: FrameIntegrity / FrameTrust /
+// resolve_frame_trust) in Stage S-FI1c, so a SINGLE canonical frame-trust
+// verdict drives both the SG2 containment margin (graduated) and these discrete
+// map-anchored vetoes (strict — Trusted only). parko-core stays kirra-core-free:
+// it keeps only the bool-driven gates below; parko-kirra resolves the verdict
+// (strict view) and passes the bool in. See
+// docs/safety/STAGE_S-FI1_FRAME_INTEGRITY_GATE.md.
 //
-// The formal AoU REGISTER clause is a separate docs PR; this file is the
-// executable gate only (doc-comments excepted).
-//
-// SOURCING NOTE: deriving [`LocalizationIntegrity::Reported`] from the
-// integrator's signals (NDT/ICP match scores, pose covariance, RTK fix status)
-// is integrator/ingestion territory and is DEFERRED — exactly like the agent
-// set, water, occlusion, and commit-zone scenes are supplied check INPUTS.
+// EVERY map-anchored trust here — the SG5 commit-zone gate (a mapped rail
+// crossing / box junction), the SG4 `MapKnownSafe` water earn-back — is only as
+// sound as the ego pose; under an untrusted pose every MAP-DERIVED trust
+// degrades fail-closed. The G2 AoU (≤ 0.10 m 95th-pct lateral) is
+// AOU-LOCALIZATION-001.
 
 use crate::commit_zone::CommitZoneScene;
 use crate::water::{TraversalEvidence, WaterScene};
 
-/// What the integrator's localization-integrity channel reports this tick.
-/// Mirrors the established ABSENT-vs-KNOWN discipline (cf. `WaterScene`,
-/// `CommitZoneScene`, `OcclusionScene`): an ABSENT report is NOT a healthy pose.
-#[derive(Debug, Clone, Copy)]
-pub enum LocalizationIntegrity {
-    /// No integrity report this tick → NOT trusted. DISTINCT from a healthy
-    /// report (the #238 absent-vs-known trap): a missing pose-quality signal is
-    /// not "the pose is fine".
-    Unknown,
-    /// The integrator reported a pose-quality estimate.
-    Reported {
-        /// 95th-percentile lateral position error (m). Compared against the G2
-        /// AoU bound. Non-finite → NOT trusted.
-        lateral_error_95_m: f64,
-        /// Age (ms) of this integrity snapshot vs now. Above `max_age_ms` →
-        /// stale → NOT trusted.
-        age_ms: u64,
-    },
-}
-
-/// Config for the localization-integrity gate.
-#[derive(Debug, Clone, Copy)]
-pub struct LocalizationCfg {
-    /// The G2 AoU bound: maximum 95th-pct lateral error (m) for the pose to be
-    /// trusted for MAP-ANCHORED reasoning. Default `0.10` m — the value the
-    /// OCCY_SAFETY_GOALS.md G2 assumption-of-use is written against
-    /// (KIRRA-OCCY-SG2-MARGIN-001). NOT a free placeholder: this couples to the
-    /// documented safety-goal margin.
-    pub max_lateral_error_95_m: f64,
-    /// Maximum acceptable staleness (ms) of an integrity report. VALIDATION-
-    /// PENDING conservative default — tie to the per-cycle FTTI on integration.
-    pub max_age_ms: u64,
-}
-
-impl Default for LocalizationCfg {
-    fn default() -> Self {
-        Self {
-            max_lateral_error_95_m: 0.10, // G2 AoU bound — KIRRA-OCCY-SG2-MARGIN-001
-            max_age_ms: 500,              // VALIDATION-PENDING conservative default
-        }
-    }
-}
-
-/// SG2/SG5 — is the integrator's localization currently trustworthy for MAP-
-/// ANCHORED reasoning? Mirrors `CommitZoneMap::is_healthy`'s conservative,
-/// finite-checked semantics.
-///
-/// * `Unknown` → `false` (absent ≠ healthy).
-/// * `Reported` → `true` IFF `lateral_error_95_m` is FINITE **and** ≤ the bound
-///   **and** `age_ms` ≤ `max_age_ms`. A non-finite error fails closed (an
-///   unverifiable pose is NO pose).
-// SAFETY: SG2 SG5 | REQ: localization-integrity-gate | TEST: test_loc_bound_boundary,test_loc_just_over_bound_not_trusted,test_loc_stale_not_trusted,test_loc_nonfinite_not_trusted,test_loc_unknown_not_trusted,test_loc_healthy_trusted
-pub fn localization_trusted(integrity: &LocalizationIntegrity, cfg: &LocalizationCfg) -> bool {
-    match *integrity {
-        LocalizationIntegrity::Unknown => false,
-        LocalizationIntegrity::Reported {
-            lateral_error_95_m,
-            age_ms,
-        } => {
-            lateral_error_95_m.is_finite()
-                && lateral_error_95_m <= cfg.max_lateral_error_95_m
-                && age_ms <= cfg.max_age_ms
-        }
-    }
-}
+// LocalizationIntegrity / LocalizationCfg / localization_trusted were relocated
+// to kirra-core `frame_integrity` (FrameIntegrity / FrameIntegrityCfg /
+// FrameTrust / resolve_frame_trust) in Stage S-FI1c — the single canonical
+// frame-trust verdict. parko-kirra resolves it (strict `Trusted`-only view) and
+// passes the resulting `bool` into the gates below. The boundary coverage that
+// `test_loc_*` provided is now in kirra-core's `frame_integrity` tests.
 
 /// SG5 coupling — degrade the commit-zone scene under an UNTRUSTED pose.
 ///
@@ -142,75 +79,9 @@ mod tests {
     use crate::commit_zone::{CommitZoneMap, CommitZoneScene};
     use crate::water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};
 
-    fn cfg() -> LocalizationCfg {
-        LocalizationCfg::default() // bound 0.10 m, max_age 500 ms
-    }
-    fn reported(err: f64, age_ms: u64) -> LocalizationIntegrity {
-        LocalizationIntegrity::Reported {
-            lateral_error_95_m: err,
-            age_ms,
-        }
-    }
-
-    // ───────────────────────── localization_trusted ────────────────────────
-
-    /// Boundary: exactly at the 0.10 m bound (and fresh) → trusted (inclusive).
-    #[test]
-    fn test_loc_bound_boundary() {
-        assert!(
-            localization_trusted(&reported(0.10, 50), &cfg()),
-            "error exactly at the bound must be trusted (inclusive)"
-        );
-    }
-
-    /// Just over the bound → NOT trusted.
-    #[test]
-    fn test_loc_just_over_bound_not_trusted() {
-        assert!(
-            !localization_trusted(&reported(0.10 + 1e-9, 50), &cfg()),
-            "error just over the bound must not be trusted"
-        );
-    }
-
-    /// A stale report (age over max) → NOT trusted, even with a good error.
-    #[test]
-    fn test_loc_stale_not_trusted() {
-        assert!(
-            !localization_trusted(&reported(0.01, 1_000), &cfg()),
-            "a stale integrity report must not be trusted"
-        );
-    }
-
-    /// A non-finite error → NOT trusted (an unverifiable pose is no pose).
-    #[test]
-    fn test_loc_nonfinite_not_trusted() {
-        for bad in [f64::NAN, f64::INFINITY] {
-            assert!(
-                !localization_trusted(&reported(bad, 50), &cfg()),
-                "non-finite error must not be trusted ({bad})"
-            );
-        }
-    }
-
-    /// Unknown (no report) is NOT trusted, and is DISTINCT from a healthy report.
-    #[test]
-    fn test_loc_unknown_not_trusted() {
-        assert!(
-            !localization_trusted(&LocalizationIntegrity::Unknown, &cfg()),
-            "an absent integrity report must not be trusted (absent != healthy)"
-        );
-        assert_ne!(
-            localization_trusted(&LocalizationIntegrity::Unknown, &cfg()),
-            localization_trusted(&reported(0.05, 50), &cfg()),
-            "Unknown and a healthy report must differ"
-        );
-    }
-
-    /// A fresh, in-bound report → trusted.
-    #[test]
-    fn test_loc_healthy_trusted() {
-        assert!(localization_trusted(&reported(0.05, 50), &cfg()));
-    }
+    // The localization_trusted boundary tests (test_loc_*) moved with the
+    // resolver to kirra-core `frame_integrity`. The strict `Trusted`-only view
+    // parko applies is exercised end-to-end by the parko-kirra wrapper tests.
 
     // ─────────────────────── gate_commit_zone_scene ────────────────────────
 

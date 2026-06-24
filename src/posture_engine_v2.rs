@@ -33,6 +33,9 @@ pub enum LockoutReason {
     WatchdogTimeout,
     /// An operator or administrative action explicitly locked out the fleet.
     ManualLockout,
+    /// S-FI1d — frame/localization integrity was `Untrusted` for a sustained
+    /// run (sensor failure / possible GNSS spoofing). Sticky human-reset lockout.
+    FrameIntegrityUntrusted,
 }
 
 impl fmt::Display for LockoutReason {
@@ -45,6 +48,7 @@ impl fmt::Display for LockoutReason {
             Self::PostureEngineFailure  => "POSTURE_ENGINE_FAILURE",
             Self::WatchdogTimeout       => "WATCHDOG_TIMEOUT",
             Self::ManualLockout         => "MANUAL_LOCKOUT",
+            Self::FrameIntegrityUntrusted => "FRAME_INTEGRITY_UNTRUSTED",
         };
         write!(f, "{code}")
     }
@@ -158,6 +162,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use crate::verifier::AppState;
 use parko_core::RssState;
+use kirra_core::frame_integrity::FrameTrust;
 use crate::recovery_hysteresis::{AV_RECOVERY_STREAK_THRESHOLD, AV_RECOVERY_WINDOW_MS};
 
 /// Trigger reason sent to the posture engine worker.
@@ -174,6 +179,10 @@ pub enum PostureRecalcTrigger {
     /// An RSS safe-distance evaluation result (violation or recovery tick).
     /// safe==false activates the violation flag; safe==true advances recovery streak.
     RssViolation(RssState),
+    /// S-FI1d — a frame/localization-integrity verdict for this tick.
+    /// `Degraded`/`Untrusted` activate the frame-degraded flag (→ Degraded);
+    /// sustained `Untrusted` escalates to LockedOut; `Trusted` advances recovery.
+    FrameIntegrityChanged { trust: FrameTrust },
     /// Periodic liveness refresh — recompute and re-stamp the cache so it
     /// never idles past POSTURE_CACHE_TTL_MS. Not tied to any state change.
     /// A no-change recompute produces no transition (no broadcast) but DOES
@@ -196,6 +205,8 @@ impl fmt::Display for PostureRecalcTrigger {
             Self::RssViolation(rss) =>
                 write!(f, "RssViolation(safe={}, lon={:.2}, lat={:.2})",
                     rss.safe, rss.longitudinal_margin, rss.lateral_margin),
+            Self::FrameIntegrityChanged { trust } =>
+                write!(f, "FrameIntegrityChanged({trust:?})"),
             Self::PeriodicRefresh =>
                 write!(f, "PeriodicRefresh"),
         }
@@ -254,6 +265,103 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
                     required = AV_RECOVERY_STREAK_THRESHOLD,
                     "RSS recovery streak advancing"
                 );
+            }
+        }
+    }
+}
+
+/// Applies a frame/localization-integrity verdict to `AppState` (S-FI1d).
+///
+/// Posture mapping (confirmed; see `docs/safety/STAGE_S-FI1_FRAME_INTEGRITY_GATE.md`):
+///   - `Trusted`   → advance the recovery streak; clear `frame_degraded_active`
+///     once `AV_RECOVERY_STREAK_THRESHOLD` consecutive trusted ticks land within
+///     `AV_RECOVERY_WINDOW_MS`. Resets the untrusted-escalation streak.
+///   - `Degraded`  → set `frame_degraded_active` IMMEDIATELY (→ Degraded). NOT a
+///     sustained-fault signal, so the untrusted streak resets.
+///   - `Untrusted` → set `frame_degraded_active` IMMEDIATELY (→ Degraded MRC, the
+///     frame-trust-minimal maneuver); advance the inverted untrusted streak and,
+///     on reaching the threshold within the window, set the STICKY
+///     `frame_lockout_active` (→ LockedOut, human reset).
+///
+/// Fail-closed-immediately: the drop to Degraded happens on the FIRST sub-trusted
+/// tick — hysteresis governs only the Degraded→LockedOut escalation and the
+/// recovery earn-back, never a grace period on the initial response.
+// SAFETY: SG2 | REQ: frame-integrity-escalates-posture | TEST: test_frame_degraded_escalates_immediately,test_frame_untrusted_sustained_locks_out,test_frame_trusted_recovery_clears_degraded,test_frame_lockout_is_sticky
+pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_ms: u64) {
+    match trust {
+        FrameTrust::Trusted => {
+            // Recovery: only meaningful while a frame degradation is active.
+            if app.frame_degraded_active.load(Ordering::SeqCst) {
+                if let Ok(mut streak) = app.frame_recovery_streak.lock() {
+                    if streak.start_ms > 0
+                        && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
+                    {
+                        streak.count = 0;
+                        streak.start_ms = 0;
+                    }
+                    if streak.start_ms == 0 {
+                        streak.start_ms = now_ms;
+                    }
+                    streak.count += 1;
+                    if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
+                        app.frame_degraded_active.store(false, Ordering::SeqCst);
+                        streak.count = 0;
+                        streak.start_ms = 0;
+                        tracing::info!(
+                            threshold = AV_RECOVERY_STREAK_THRESHOLD,
+                            "Frame-integrity recovery confirmed — frame degradation cleared"
+                        );
+                    }
+                }
+            }
+            // A trusted tick breaks any sustained-untrusted run.
+            if let Ok(mut s) = app.frame_untrusted_streak.lock() {
+                s.count = 0;
+                s.start_ms = 0;
+            }
+            // NOTE: `frame_lockout_active` is sticky (human reset) and is NOT
+            // cleared here — matching LockedOut semantics.
+        }
+        FrameTrust::Degraded => {
+            // Immediate Degraded; reset both streaks (not a recovery, not a
+            // sustained-untrusted tick).
+            app.frame_degraded_active.store(true, Ordering::SeqCst);
+            if let Ok(mut s) = app.frame_recovery_streak.lock() {
+                s.count = 0;
+                s.start_ms = 0;
+            }
+            if let Ok(mut s) = app.frame_untrusted_streak.lock() {
+                s.count = 0;
+                s.start_ms = 0;
+            }
+        }
+        FrameTrust::Untrusted => {
+            // Immediate Degraded MRC; a trusted recovery must restart from scratch.
+            app.frame_degraded_active.store(true, Ordering::SeqCst);
+            if let Ok(mut s) = app.frame_recovery_streak.lock() {
+                s.count = 0;
+                s.start_ms = 0;
+            }
+            // Inverted streak toward the sticky LockedOut escalation.
+            if let Ok(mut streak) = app.frame_untrusted_streak.lock() {
+                if streak.start_ms > 0
+                    && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
+                {
+                    streak.count = 0;
+                    streak.start_ms = 0;
+                }
+                if streak.start_ms == 0 {
+                    streak.start_ms = now_ms;
+                }
+                streak.count += 1;
+                if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
+                    app.frame_lockout_active.store(true, Ordering::SeqCst);
+                    tracing::error!(
+                        reason = %LockoutReason::FrameIntegrityUntrusted,
+                        streak = streak.count,
+                        "Sustained Untrusted frame integrity — escalating fleet to LockedOut (human reset)"
+                    );
+                }
             }
         }
     }
@@ -324,8 +432,14 @@ pub fn start_posture_engine_worker(
 
                     let now = now_ms_engine();
                     for trigger in &batch {
-                        if let PostureRecalcTrigger::RssViolation(ref rss) = *trigger {
-                            apply_rss_state(&app, rss, now);
+                        match *trigger {
+                            PostureRecalcTrigger::RssViolation(ref rss) => {
+                                apply_rss_state(&app, rss, now);
+                            }
+                            PostureRecalcTrigger::FrameIntegrityChanged { trust } => {
+                                apply_frame_integrity_state(&app, trust, now);
+                            }
+                            _ => {}
                         }
                     }
 
@@ -364,6 +478,78 @@ mod posture_engine_v2_tests {
         assert_eq!(LockoutReason::PostureEngineFailure.to_string(), "POSTURE_ENGINE_FAILURE");
         assert_eq!(LockoutReason::WatchdogTimeout.to_string(),      "WATCHDOG_TIMEOUT");
         assert_eq!(LockoutReason::ManualLockout.to_string(),        "MANUAL_LOCKOUT");
+        assert_eq!(LockoutReason::FrameIntegrityUntrusted.to_string(), "FRAME_INTEGRITY_UNTRUSTED");
+    }
+
+    // --- S-FI1d: frame-integrity posture coupling ---------------------------
+
+    fn frame_app() -> Arc<AppState> {
+        use crate::verifier::VerifierOperationMode;
+        use crate::verifier_store::VerifierStore;
+        let store = VerifierStore::new(":memory:").unwrap();
+        Arc::new(AppState::new(store, VerifierOperationMode::Active))
+    }
+
+    #[test]
+    fn test_frame_degraded_escalates_immediately() {
+        let app = frame_app();
+        // A SINGLE Degraded tick sets the flag — no grace period.
+        apply_frame_integrity_state(&app, FrameTrust::Degraded, 1_000);
+        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        assert!(!app.frame_lockout_active.load(Ordering::SeqCst),
+            "Degraded must not by itself lock out");
+    }
+
+    #[test]
+    fn test_frame_untrusted_escalates_immediately_then_locks_out_when_sustained() {
+        let app = frame_app();
+        // First Untrusted tick → immediate Degraded, not yet LockedOut.
+        apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000);
+        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        assert!(!app.frame_lockout_active.load(Ordering::SeqCst),
+            "a single Untrusted tick is the transient decel-to-stop MRC, not LockedOut");
+        // Sustained Untrusted within the window → sticky LockedOut.
+        for i in 1..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
+        }
+        assert!(app.frame_lockout_active.load(Ordering::SeqCst),
+            "sustained Untrusted ({AV_RECOVERY_STREAK_THRESHOLD} ticks) must escalate to LockedOut");
+    }
+
+    #[test]
+    fn test_frame_trusted_recovery_clears_degraded() {
+        let app = frame_app();
+        apply_frame_integrity_state(&app, FrameTrust::Degraded, 1_000);
+        assert!(app.frame_degraded_active.load(Ordering::SeqCst));
+        // A full streak of Trusted ticks within the window clears the degradation.
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_frame_integrity_state(&app, FrameTrust::Trusted, 1_010 + i as u64 * 10);
+        }
+        assert!(!app.frame_degraded_active.load(Ordering::SeqCst),
+            "a full Trusted recovery streak must clear frame_degraded_active");
+    }
+
+    #[test]
+    fn test_frame_lockout_is_sticky_across_trusted() {
+        let app = frame_app();
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
+        }
+        assert!(app.frame_lockout_active.load(Ordering::SeqCst), "precondition: locked out");
+        // Trusted recovery does NOT clear a sustained-fault lockout (human reset only).
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD * 2 {
+            apply_frame_integrity_state(&app, FrameTrust::Trusted, 2_000 + i as u64 * 10);
+        }
+        assert!(app.frame_lockout_active.load(Ordering::SeqCst),
+            "frame_lockout_active must be sticky — only a human/HA reset clears it");
+    }
+
+    #[test]
+    fn test_frame_integrity_trigger_display() {
+        let t = PostureRecalcTrigger::FrameIntegrityChanged { trust: FrameTrust::Untrusted };
+        let s = t.to_string();
+        assert!(s.contains("FrameIntegrityChanged"));
+        assert!(s.contains("Untrusted"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use kirra_ros2_adapter::{
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
     validation::validate_trajectory_slow,
 };
+use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::FleetPosture;
 
 /// Build a straight n-pose trajectory along +X at uniform velocity.
@@ -516,7 +517,7 @@ fn occlusion_rejects_a_trajectory_that_outruns_assured_clear_distance() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0), None,
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0), None, FrameTrust::Trusted,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "10 m/s into 5 m of visibility outruns the assured clear distance; got {verdict:?}");
@@ -532,10 +533,33 @@ fn occlusion_bound_is_gated_off_when_no_visibility_is_supplied() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None,
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, FrameTrust::Trusted,
     );
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "with no visibility input the occlusion bound is a no-op; got {verdict:?}");
+}
+
+#[test]
+fn untrusted_frame_mrcs_an_otherwise_clean_trajectory() {
+    // S-FI1e: the frame-integrity gate is LIVE through the adapter. A trajectory
+    // that is accepted under a Trusted frame must MRC under an Untrusted frame —
+    // the containment check refuses to validate geometry in an untrusted frame.
+    let trajectory = straight_trajectory(20, 5.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects: Vec<PerceivedObject> = Vec::new();
+    let cfg = VehicleConfig::default_urban();
+
+    let trusted = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, FrameTrust::Trusted,
+    );
+    assert_ne!(trusted, TrajectoryVerdict::MRCFallback,
+        "a clean trajectory under a Trusted frame must not MRC; got {trusted:?}");
+
+    let untrusted = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, FrameTrust::Untrusted,
+    );
+    assert_eq!(untrusted, TrajectoryVerdict::MRCFallback,
+        "the SAME clean trajectory must MRC under an Untrusted frame; got {untrusted:?}");
 }
 
 #[test]
@@ -548,7 +572,7 @@ fn occlusion_admits_a_decel_to_stop_within_visibility() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0), None,
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0), None, FrameTrust::Trusted,
     );
     assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a decel-to-stop within the assured clear distance is admissible; got {verdict:?}");
@@ -588,7 +612,7 @@ fn predictive_rss_does_not_regress_a_lane_keeping_neighbor() {
     let modes = [PredictedMode { object_id: 1, samples: &samples }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes),
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
     );
     assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a neighbor predicted to keep its lane must not be rejected; got {verdict:?}");
@@ -615,7 +639,7 @@ fn predictive_rss_catches_a_predicted_cut_in() {
     let modes = [PredictedMode { object_id: 1, samples: &samples }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes),
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
@@ -630,7 +654,7 @@ fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, None,
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, None, FrameTrust::Trusted,
     );
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "with no predicted modes the predictive pass is a no-op; got {verdict:?}");

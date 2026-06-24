@@ -91,8 +91,14 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // both flags clear and the DAG is Nominal, posture returns to Nominal via
     // this same path (no separate recovery logic).
     // SAFETY: SG4 | REQ: flood-posture-coupling | TEST: test_flood_active_nominal_escalates_to_degraded,test_flood_active_locked_out_stays_locked_out,test_flood_active_degraded_stays_degraded,test_flood_and_rss_compose,test_flood_clears_auto_recovers_to_nominal,test_flood_default_false_is_inert
+    // S-FI1d frame-integrity coupling: a sub-trusted frame (Degraded OR transient
+    // Untrusted) escalates Nominal → Degraded exactly like RSS/flood — the
+    // decel-to-stop MRC is the frame-trust-minimal maneuver. Composes with the
+    // others (any → Degraded); auto-recovers when the flag clears.
+    // SAFETY: SG2 | REQ: frame-integrity-posture-coupling | TEST: test_frame_degraded_active_escalates_nominal,test_frame_degraded_active_locked_out_stays_locked_out,test_frame_and_rss_compose,test_frame_degraded_clears_auto_recovers_to_nominal
     let escalate = (app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
-        || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst))
+        || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst)
+        || app.frame_degraded_active.load(std::sync::atomic::Ordering::SeqCst))
         && dag_posture == FleetPosture::Nominal;
     // C2 supervisor escalation has ABSOLUTE priority over the DAG and the
     // operational (rss/flood) escalation: if a critical background safety loop is
@@ -101,7 +107,12 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // the forced LockedOut STICKS across every subsequent recalc (a recovered DAG
     // can never silently downgrade it). Recovery is a human/HA reset, matching
     // LockedOut semantics. SAFETY: SG9 fail-closed on safety-loop death (review C2).
-    let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst) {
+    // A sustained frame-integrity fault (`frame_lockout_active`) shares the
+    // absolute LockedOut priority with `supervisor_tripped`: both are sticky
+    // human-reset conditions that override the DAG and the operational escalation.
+    let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst)
+        || app.frame_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
+    {
         FleetPosture::LockedOut
     } else if escalate {
         FleetPosture::Degraded
@@ -618,6 +629,57 @@ mod posture_engine_tests {
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
             "flood does not alter an already-Degraded DAG posture");
+    }
+
+    // --- S-FI1d: frame-integrity posture coupling --------------------------
+
+    #[test]
+    fn test_frame_degraded_active_escalates_nominal() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.frame_degraded_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "frame_degraded_active + DAG Nominal must escalate to Degraded");
+    }
+
+    /// frame_lockout_active shares the absolute LockedOut priority with the
+    /// supervisor trip: it forces LockedOut over an otherwise-healthy DAG.
+    #[test]
+    fn test_frame_degraded_active_locked_out_stays_locked_out() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.frame_lockout_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
+            "frame_lockout_active must force LockedOut over a healthy DAG");
+    }
+
+    /// frame and RSS compose: either active (with Nominal DAG) → Degraded.
+    #[test]
+    fn test_frame_and_rss_compose() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.frame_degraded_active.store(true, Ordering::SeqCst);
+        app.rss_active_violation.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "frame OR rss escalates Nominal → Degraded");
+    }
+
+    /// Clearing the frame-degraded flag auto-recovers to Nominal via the same path.
+    #[test]
+    fn test_frame_degraded_clears_auto_recovers_to_nominal() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.frame_degraded_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
+
+        app.frame_degraded_active.store(false, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
+            "clearing frame_degraded_active returns posture to Nominal (auto-recovery)");
     }
 
     /// flood and RSS compose: either active (with Nominal DAG) → Degraded.

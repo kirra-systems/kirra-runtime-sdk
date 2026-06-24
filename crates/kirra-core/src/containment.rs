@@ -170,7 +170,7 @@ impl From<&VehicleKinematicsContract> for VehicleFootprint {
 // The check
 // ---------------------------------------------------------------------------
 
-// SAFETY: SG2 | REQ: drivable-space-containment,frame-integrity-gate | TEST: containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token,checked_untrusted_refuses_before_geometry,checked_degraded_margin_is_stricter_than_trusted,checked_trusted_matches_shim
+// SAFETY: SG2 | REQ: drivable-space-containment,frame-integrity-gate | TEST: containment_allows_pose_centered_in_straight_corridor,containment_rejects_pose_outside_left,containment_rejects_pose_outside_right,containment_rejects_oncoming_excursion,containment_rejects_footprint_corner_clip,containment_rejects_when_corridor_unhealthy_low_confidence,containment_rejects_when_corridor_unhealthy_stale,containment_rejects_when_trajectory_exceeds_horizon,containment_allows_lane_change_within_wide_corridor,deny_code_drivable_space_departure_renders_stable_token,untrusted_refuses_before_geometry,degraded_margin_is_stricter_than_trusted
 /// SG2 drivable-space containment check, **frame-integrity-gated** (Stage S-FI1).
 ///
 /// Resolves the lateral margin from the [`FrameTrust`] verdict
@@ -196,7 +196,7 @@ impl From<&VehicleKinematicsContract> for VehicleFootprint {
 /// `≤ 50 × 256 × 4 = 51 200` polygon-edge tests; no heap, no recursion, scalar
 /// f64 only.
 #[must_use]
-pub fn validate_trajectory_containment_checked(
+pub fn validate_trajectory_containment(
     trajectory: &[Pose],
     corridor: &Corridor,
     footprint: &VehicleFootprint,
@@ -237,26 +237,6 @@ pub fn validate_trajectory_containment_checked(
     }
 
     EnforceAction::Allow
-}
-
-/// Frame-trust-ASSERTING shim (Stage S-FI1b). Delegates to
-/// [`validate_trajectory_containment_checked`] with [`FrameTrust::Trusted`] —
-/// i.e. it ASSUMES the integrator's localization holds AOU-LOCALIZATION-001
-/// (≤ 0.10 m 95th-pct lateral error → primary 0.40 m margin), the legacy
-/// behavior before the frame-integrity gate existed.
-///
-/// This is the 3-arg entry the four enforcement points (gateway / fabric /
-/// ros2-adapter / parko-kirra) still call. The S-FI1e migration repoints them to
-/// the checked entry — sourcing a real [`FrameIntegrity`] per tick — and removes
-/// this shim. Until then this carries AOU-LOCALIZATION-001 inline. Do NOT call
-/// from new code; call the checked entry with a resolved frame trust.
-#[must_use]
-pub fn validate_trajectory_containment(
-    trajectory: &[Pose],
-    corridor: &Corridor,
-    footprint: &VehicleFootprint,
-) -> EnforceAction {
-    validate_trajectory_containment_checked(trajectory, corridor, footprint, FrameTrust::Trusted)
 }
 
 // ---------------------------------------------------------------------------
@@ -472,22 +452,21 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(20.0, 0.0, 0.0), pose(30.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(action, EnforceAction::Allow, "centered pose must Allow");
     }
 
     // --- Stage S-FI1b: frame-integrity gate ---------------------------------
 
     #[test]
-    fn checked_untrusted_refuses_before_geometry() {
-        use crate::frame_integrity::FrameTrust;
+    fn untrusted_refuses_before_geometry() {
         // A pose that WOULD Allow under a trusted frame (centered, wide corridor)
         // must still be refused when the frame is Untrusted — the gate runs before
         // any geometry is considered.
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(50.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment_checked(
+        let action = validate_trajectory_containment(
             &traj,
             &corridor,
             &sedan(),
@@ -501,8 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_degraded_margin_is_stricter_than_trusted() {
-        use crate::frame_integrity::FrameTrust;
+    fn degraded_margin_is_stricter_than_trusted() {
         // sedan half-width 0.925 m; corridor half-width 1.425 m → lateral
         // clearance 0.50 m, which is ≥ 0.40 (primary) but < 0.75 (fallback).
         // Pose at x = 50 sits far from the end-caps so only the lateral edges bind.
@@ -510,33 +488,14 @@ mod tests {
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(50.0, 0.0, 0.0)];
         assert_eq!(
-            validate_trajectory_containment_checked(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted),
             EnforceAction::Allow,
             "0.50 m clearance passes the 0.40 m primary margin (Trusted)"
         );
         assert_eq!(
-            validate_trajectory_containment_checked(
-                &traj,
-                &corridor,
-                &sedan(),
-                FrameTrust::Degraded
-            ),
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Degraded),
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
             "0.50 m clearance fails the stricter 0.75 m fallback margin (Degraded)"
-        );
-    }
-
-    #[test]
-    fn checked_trusted_matches_shim() {
-        use crate::frame_integrity::FrameTrust;
-        // The 3-arg trust-asserting shim must be byte-identical to checked(Trusted).
-        let (left, right) = straight_corridor(3.0, 100.0);
-        let corridor = healthy_corridor(&left, &right);
-        let traj = vec![pose(50.0, 0.0, 0.0)];
-        assert_eq!(
-            validate_trajectory_containment(&traj, &corridor, &sedan()),
-            validate_trajectory_containment_checked(&traj, &corridor, &sedan(), FrameTrust::Trusted),
-            "the 3-arg shim must equal checked(Trusted)"
         );
     }
 
@@ -547,7 +506,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 2.5, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -560,7 +519,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, -2.5, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -573,7 +532,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 0.0, std::f64::consts::FRAC_PI_2)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -591,7 +550,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 2.0, 0.1)]; // ~5.7° yaw left
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -605,7 +564,7 @@ mod tests {
         let mut corridor = healthy_corridor(&left, &right);
         corridor.confidence = 0.1; // below min_confidence
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -619,7 +578,7 @@ mod tests {
         let mut corridor = healthy_corridor(&left, &right);
         corridor.age_ms = 10_000; // > max_age_ms
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -638,7 +597,7 @@ mod tests {
             max_age_ms: 500,
         };
         let traj = vec![pose(0.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -654,7 +613,7 @@ mod tests {
         let traj: Vec<Pose> = (0..(MAX_TRAJECTORY_HORIZON + 1))
             .map(|i| pose(i as f64, 0.0, 0.0))
             .collect();
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -667,7 +626,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj: Vec<Pose> = vec![];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -679,7 +638,7 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(f64::NAN, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -701,7 +660,7 @@ mod tests {
                 pose(x, y, 0.0)
             })
             .collect();
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::Allow,
@@ -745,7 +704,7 @@ mod tests {
             min_confidence: 0.5, max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -769,7 +728,7 @@ mod tests {
             min_confidence: 0.5, max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -793,7 +752,7 @@ mod tests {
             min_confidence: 0.5, max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -815,7 +774,7 @@ mod tests {
             min_confidence: 0.5, max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan());
+        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -833,7 +792,7 @@ mod tests {
         let mut bad = sedan();
         bad.width_m = f64::NAN;
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &bad);
+        let action = validate_trajectory_containment(&traj, &corridor, &bad, FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),

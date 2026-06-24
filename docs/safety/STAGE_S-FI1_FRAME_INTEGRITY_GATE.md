@@ -237,6 +237,28 @@ pub fn localization_trusted(integrity: &FrameIntegrity, cfg: &FrameIntegrityCfg)
 
 parko's existing `test_loc_*` tests become adapter tests over the unified resolver (same boundary cases; `Degraded` band now asserts `localization_trusted == false`, which is the existing 0.10 m semantics preserved). `gate_commit_zone_scene` / `gate_water_scene` and their tests are **unchanged**.
 
+**As-built (S-FI1c) — unified at the parko-kirra boundary, NOT via parko-core re-export.**
+Discovery: `parko-core` deliberately has **no** `kirra-core` dependency (the manifest
+keeps the ML inference pipeline independent of the safety-kernel build); only
+`parko-kirra` depends on `kirra-core`, and the localization type is used
+*exclusively* there. So rather than couple `parko-core` → `kirra-core` (the literal
+re-export plan above), the unification was done at the consumer:
+- `parko-core/src/localization.rs`: **removed** `LocalizationIntegrity` /
+  `LocalizationCfg` / `localization_trusted` (+ their `test_loc_*`); **kept** only
+  the bool-driven `gate_commit_zone_scene` / `gate_water_scene` (+ `test_gate_*`).
+  `parko-core` stays `kirra-core`-free.
+- `parko-kirra` wrappers (`evaluate_scene_with_commit_zone_localized`,
+  `evaluate_scene_with_water_localized`) now take `&FrameIntegrity` /
+  `&FrameIntegrityCfg` and compute the **strict** view inline:
+  `matches!(resolve_frame_trust(loc, cfg), FrameTrust::Trusted)` → the bool the
+  gates already consume. Behaviour is identical to the old 0.10 m gate (ε in the
+  0.10–0.30 Degraded band reads as untrusted for these discrete map-anchored
+  vetoes), so no parko behaviour change; the `test_loc_*` boundary coverage now
+  lives in kirra-core's `frame_integrity` tests, and the strict-view path is
+  exercised end-to-end by the parko-kirra wrapper tests.
+- Net: one canonical type/resolver (kirra-core), no drift, `parko-core`
+  independence preserved. (Owner-approved deviation, 2026-06-24.)
+
 ---
 
 ## 6. Posture wiring (`src/posture_engine_v2.rs`)
@@ -293,21 +315,36 @@ the safety argument of record.
 
 ---
 
-## 7. Call sites — the four enforcement points
+## 7. Call sites
 
-Each must source a `FrameIntegrity` for the tick and pass `resolve_frame_trust(...)` into containment. **Sourcing the integrity report at each point is where the integrator contract surfaces** and is the bulk of the integration work:
+**Correction to the original plan (verified in code):** SG2 `validate_trajectory_containment`
+has exactly **ONE production call site** — the ros2-adapter slow loop
+(`crates/kirra-ros2-adapter/src/validation.rs`, per the module's SG2-WIRING note)
+— plus the WCET bench harness. The "four enforcement points" in CLAUDE.md refer to
+the *decel-to-stop gate* (`enforce_degraded_decel_to_stop`), a **different**
+function; fabric / parko-kirra / the HTTP gateway do **not** call containment.
+(parko-kirra's frame-integrity input is the discrete-veto path, handled in S-FI1c.)
 
-1. **gateway** `enforce_actuator_safety_envelope` — frame-integrity from the perception input contract alongside the corridor.
-2. **fabric** `AssetGovernor::evaluate_command` — per-asset integrity in the command envelope.
-3. **ros2-adapter** `validate_trajectory_slow` — integrity from the ROS2 localization-quality topic.
-4. **parko-kirra** `KirraGovernor::apply_mrc_profile` — already has `LocalizationIntegrity`; re-point to the unified type.
-
-**As-built (S-FI1b):** the shim role is filled by the existing
-`validate_trajectory_containment` (3-arg) delegating with `FrameTrust::Trusted`
-(see §4), so all four call sites compile **unchanged** at S-FI1b. S-FI1e sources a
-real `FrameIntegrity` at each point, switches the call to `_checked`, then
-collapses the names and removes the shim. No production path keeps the shim past
-stage close.
+**As-built (S-FI1e):**
+- Shim **collapsed**: the 3-arg `validate_trajectory_containment` is gone; the
+  4-arg gated entry now *is* `validate_trajectory_containment`. Internal tests
+  migrated; the shim-equivalence test was removed.
+- `validate_trajectory_slow_capped` gains a `frame_trust: FrameTrust` param,
+  passed into containment. The widely-used convenience wrapper
+  `validate_trajectory_slow` keeps its signature and passes `FrameTrust::Trusted`
+  — so its ~50 doer-side callers (planner / taj / mick tests, examples) are
+  untouched.
+- **Production node** (`node.rs` slow loop) passes a resolved `FrameTrust`.
+  No localization-quality input is wired at the node yet, so it asserts
+  `FrameTrust::Trusted` (= AOU-LOCALIZATION-001, primary 0.40 m) with an explicit
+  integrator-contract comment — mirroring the existing pre-wiring `None`s for
+  `visibility_range_m` / `predicted_modes`. **Sourcing a real localization-quality
+  signal here (construct `FrameIntegrity` → `resolve_frame_trust`) is the
+  integrator contract and is the remaining open item.** A sustained localization
+  fault still escalates fleet posture → LockedOut (S-FI1d), which the slow loop
+  short-circuits to MRC, so the node is not unprotected in the interim.
+- The gate is **live end-to-end**: an adapter integration test proves the SAME
+  clean trajectory is Accepted under `Trusted` and MRC'd under `Untrusted`.
 
 ---
 
@@ -339,7 +376,9 @@ stage close.
 
 S-FI1a: ✅ DONE — `frame_integrity` module + types + resolver + tests (kirra-core, no call-site change).
 S-FI1b: ✅ DONE — gated `validate_trajectory_containment_checked` + trust-asserting shim; `DenyCode::FrameIntegrityUntrusted` (appended last); forced matches discharged (`reason()` + display test, governor-service `deny_code_num` → 11, wire-client `ClientDenyCode` mirror + drift test); 3 new containment tests (untrusted-refuses, degraded-stricter-than-trusted, shim==checked). Workspace compiles (default features); call sites untouched.
-S-FI1c: parko re-point.
+S-FI1c: ✅ DONE — unified at the parko-kirra boundary (parko-core stays kirra-core-free; type+resolver removed from parko-core, wrappers take `&FrameIntegrity` with a strict `Trusted`-only view). parko-core 198 + parko-kirra 148 tests pass; parko clippy + root workspace check clean.
+S-FI1d: ✅ DONE — fleet posture reacts to frame integrity (AppState frame flags + streaks; posture_engine escalation; `apply_frame_integrity_state` with immediate-Degraded + sticky hysteretic LockedOut; `FrameIntegrityChanged` trigger; `LockoutReason::FrameIntegrityUntrusted`). 47 posture tests pass.
+S-FI1e: ✅ DONE — shim collapsed (4-arg `validate_trajectory_containment` is canonical); `frame_trust` threaded through `validate_trajectory_slow_capped` and the production node (Trusted = AOU-LOCALIZATION-001 seam until a real source is wired); convenience wrapper + ~50 doer callers untouched. Live-gate adapter test passes. **Open item:** wire a real node-side localization-quality source (integrator contract). **Remaining:** S-FI1f (RTM/AoU updates + ADR-0016) before any ENFORCED claim.
 S-FI1d: posture wiring + hysteresis escalation.
 S-FI1e: four call sites + integrator-contract surfacing; remove shim.
 S-FI1f: safety-case/AoU updates; ADR-0016 to Accepted.

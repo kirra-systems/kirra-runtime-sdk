@@ -23,6 +23,7 @@ use kirra_core::containment::{
 use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
 };
+use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance, longitudinal_safe_distance, opposite_direction_safe_distance,
@@ -121,6 +122,10 @@ pub fn validate_trajectory_slow(
     // (KIRRA-OCCY-PMON-003 slice-1).
     validate_trajectory_slow_capped(
         trajectory, corridor, objects, config, latest_odom, posture, None, None, None,
+        // Convenience/doer-side wrapper: assert AOU-LOCALIZATION-001 (Trusted →
+        // primary 0.40 m containment margin). The production slow loop passes a
+        // resolved FrameTrust; see `validate_trajectory_slow_capped`.
+        FrameTrust::Trusted,
     )
 }
 
@@ -158,6 +163,7 @@ pub fn validate_trajectory_slow_capped(
     effective_perception_cap: Option<f64>,
     visibility_range_m: Option<f64>,
     predicted_modes: Option<&[PredictedMode<'_>]>,
+    frame_trust: FrameTrust,
 ) -> TrajectoryVerdict {
     // ----- Posture short-circuit (M1) ----------------------------------
     //
@@ -198,7 +204,7 @@ pub fn validate_trajectory_slow_capped(
     let poses: Vec<KernelPose> = trajectory.iter().map(|p| adapter_to_kernel_pose(&p.pose)).collect();
 
     let containment_verdict = containment::validate_trajectory_containment(
-        &poses, &kernel_corridor, &footprint,
+        &poses, &kernel_corridor, &footprint, frame_trust,
     );
     if !matches!(containment_verdict, EnforceAction::Allow) {
         return TrajectoryVerdict::MRCFallback;
