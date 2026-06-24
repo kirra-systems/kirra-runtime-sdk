@@ -154,7 +154,12 @@ where
     //     `GovernorComparator`) before stamping `active_command`.
     let tick_result = {
         let mut guard = loop_mutex.lock().await;
-        guard.tick(frame, posture).await
+        // Close the divergence→posture loop: a governor that recommends a stricter posture (the
+        // redundancy comparator escalating to Degraded / LockedOut on persistent disagreement)
+        // ESCALATES the effective posture this tick. Escalation-only — it can make the posture
+        // stricter than the source's verdict, never relax it. `Nominal` for a plain governor.
+        let effective_posture = posture.escalate(guard.recommended_posture());
+        guard.tick(frame, effective_posture).await
     };
 
     match tick_result {
@@ -229,6 +234,44 @@ mod tick_pipeline_tests {
         (Arc::new(Mutex::new(infer)), rx)
     }
 
+    /// Build an InferenceLoop with an arbitrary governor (for the divergence→posture test).
+    fn build_loop_with<G: parko_core::safety::SafetyGovernor + 'static>(
+        governor: G,
+        linear_out: f32,
+        angular_out: f32,
+    ) -> Arc<Mutex<InferenceLoop<MockBackend>>> {
+        let mut outputs: HashMap<String, Vec<f32>> = HashMap::new();
+        outputs.insert("cmd_vel_linear".to_string(), vec![linear_out]);
+        outputs.insert("cmd_vel_angular".to_string(), vec![angular_out]);
+        let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
+        let model = backend.load_model("test.onnx").expect("mock model loads");
+        let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
+        let infer = InferenceLoop::new(backend, model, tx).with_governor(governor).with_tick_period(0.05);
+        Arc::new(Mutex::new(infer))
+    }
+
+    /// A governor that always recommends a fixed posture and stops the command only at LockedOut
+    /// (the relevant slice of a real governor's behaviour for the loop-closing test).
+    struct RecommendsPosture(parko_core::safety::SafetyPosture);
+    impl parko_core::safety::SafetyGovernor for RecommendsPosture {
+        fn evaluate(
+            &self,
+            _proposed: &ControlCommand,
+            _previous: Option<&ControlCommand>,
+            _delta_time_s: f64,
+            posture: SafetyPosture,
+        ) -> parko_core::safety::EnforcementAction {
+            if posture == SafetyPosture::LockedOut {
+                parko_core::safety::EnforcementAction::Deny { reason: "locked out".into() }
+            } else {
+                parko_core::safety::EnforcementAction::Allow
+            }
+        }
+        fn recommended_posture(&self) -> SafetyPosture {
+            self.0
+        }
+    }
+
     fn make_frame(frame_id: u64, age_ms: u64) -> SensorFrame {
         let now = current_time_ms();
         SensorFrame {
@@ -267,6 +310,33 @@ mod tick_pipeline_tests {
             outcome.twist.linear_x_mps);
         assert!((outcome.twist.angular_z_rads - 0.2).abs() < 1e-4,
             "expected angular ~0.2, got {}", outcome.twist.angular_z_rads);
+    }
+
+    // ---- divergence→posture: the governor's recommendation escalates the tick ----
+
+    #[tokio::test(start_paused = true)]
+    async fn governor_recommendation_escalates_the_effective_posture() {
+        // The CLOSED loop: a governor recommending LockedOut escalates the EFFECTIVE posture even
+        // though the source posture is Nominal — so the LockedOut clamp fires and the tick
+        // publishes a STOPPED twist. (Without the loop, evaluate(Nominal) would Allow the
+        // 0.1 m/s command through.) This is the integrator step the #537 seam was built for.
+        let infer = build_loop_with(RecommendsPosture(SafetyPosture::LockedOut), 0.1, 0.2);
+        let outcome = run_pipeline_tick(&default_config(), infer, make_frame(1, 0), SafetyPosture::Nominal).await;
+        assert!(
+            outcome.twist.linear_x_mps.abs() < 1e-6,
+            "a LockedOut RECOMMENDATION escalated the Nominal source → stopped twist, got linear {}",
+            outcome.twist.linear_x_mps
+        );
+
+        // Control: a Nominal recommendation does NOT escalate — the command passes (the loop only
+        // ESCALATES the posture, it never fabricates a stop).
+        let infer2 = build_loop_with(RecommendsPosture(SafetyPosture::Nominal), 0.1, 0.2);
+        let outcome2 = run_pipeline_tick(&default_config(), infer2, make_frame(2, 0), SafetyPosture::Nominal).await;
+        assert!(
+            outcome2.twist.linear_x_mps.abs() > 1e-6,
+            "a Nominal recommendation leaves the command alone, got linear {}",
+            outcome2.twist.linear_x_mps
+        );
     }
 
     /// First-tick acceleration clamp invariant — also useful: the

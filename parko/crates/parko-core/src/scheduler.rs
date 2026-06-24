@@ -106,6 +106,18 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         self
     }
 
+    /// The posture the attached governor RECOMMENDS from its internal state (e.g. a redundancy
+    /// comparator escalating to `Degraded` / `LockedOut` on persistent divergence); `Nominal`
+    /// when no governor is attached. The tick driver reads this each cycle and escalates the
+    /// effective posture with it — closing the divergence→posture loop so a governor
+    /// disagreement actually drives the fleet posture, not just this tick's clamp.
+    #[must_use]
+    pub fn recommended_posture(&self) -> SafetyPosture {
+        self.governor
+            .as_ref()
+            .map_or(SafetyPosture::Nominal, |g| g.recommended_posture())
+    }
+
     /// Set the tick period (used for time-delta calculations passed to
     /// the safety governor). Defaults to 0.05 (20Hz).
     pub fn with_tick_period(mut self, tick_period_s: f64) -> Self {
