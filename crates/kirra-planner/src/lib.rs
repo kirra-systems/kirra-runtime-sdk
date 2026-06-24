@@ -61,8 +61,9 @@ pub use lanelet2::{parse_lanelet2_osm, Lanelet2ParseError};
 
 pub mod mick;
 pub use mick::{
-    mick_drive_once, plan_for_intent, MickBrain, MickError, MickIntent, ObjectView, ScriptedBrain,
-    WorldContext, MICK_MAX_OBJECTS,
+    mick_drive_once, plan_for_intent, MickBrain, MickDriver, MickError, MickIntent, ObjectView,
+    ScriptedBrain, WorldContext, DEFAULT_DECIDE_INTERVAL_MS, DEFAULT_INTENT_STALENESS_MS,
+    MICK_MAX_OBJECTS,
 };
 
 /// Mick's model-agnostic LLM brain (prompt render + reply parse behind the `MickBrain`
