@@ -82,12 +82,15 @@ struct GenerateRequest<'a> {
     model: &'a str,
     prompt: &'a str,
     stream: bool,
-    /// Constrained decoding: `"json"` forces Ollama to emit a syntactically valid JSON
-    /// object (grammar-constrained), so Gemma can't wrap the intent in prose or a code
-    /// fence. `from_llm_json` still validates the typed schema + finiteness on top, so a
-    /// well-formed-but-wrong object (unknown tag, NaN) still fails closed — this only
-    /// removes the *framing* failure mode that otherwise forces a needless HOLD.
-    format: &'static str,
+    /// Schema-constrained decoding: Ollama grammar-constrains the output to this JSON
+    /// **schema** (`kirra_planner::intent_schema`), so Gemma can ONLY emit a JSON object
+    /// whose `intent` is a known tag — no prose, no code fence, no hallucinated tag. This
+    /// is strictly tighter than the previous `"json"` (any-JSON) form. `from_llm_json`
+    /// still validates the per-variant fields + finiteness on top (a schema cannot express
+    /// finiteness, and the binding safety decision must stay in our fail-closed parse, not
+    /// the model's decoder), so a schema-valid-but-wrong reply (e.g. `target_speed_mps` =
+    /// `Inf`) still fails closed → HOLD.
+    format: serde_json::Value,
 }
 
 /// The relevant slice of the `/api/generate` response.
@@ -99,7 +102,12 @@ struct GenerateResponse {
 impl ModelClient for OllamaClient {
     fn complete(&self, prompt: &str) -> Result<String, ModelError> {
         let url = format!("{}/api/generate", self.base_url);
-        let body = GenerateRequest { model: &self.model, prompt, stream: false, format: "json" };
+        let body = GenerateRequest {
+            model: &self.model,
+            prompt,
+            stream: false,
+            format: kirra_planner::intent_schema(),
+        };
 
         // Every failure maps to a stable ModelError → LlmBrain fails closed → HOLD.
         let resp = self
@@ -152,6 +160,26 @@ mod tests {
     fn config_defaults_and_overrides() {
         let c = OllamaClient::with("http://example:1234", "llama3.2:3b");
         assert_eq!(c.model(), "llama3.2:3b");
+    }
+
+    /// The request sends the intent schema as Ollama's `format` (an OBJECT, not the string
+    /// `"json"`), so decoding is schema-constrained. CI-safe — no network; just serializes
+    /// the body and inspects the wire shape.
+    #[test]
+    fn request_body_carries_the_intent_schema_as_format() {
+        let body = GenerateRequest {
+            model: "gemma3:4b",
+            prompt: "hi",
+            stream: false,
+            format: kirra_planner::intent_schema(),
+        };
+        let wire: serde_json::Value = serde_json::to_value(&body).expect("body serializes");
+        assert_eq!(wire["format"]["type"], "object", "format is a schema object, not \"json\"");
+        let tags = wire["format"]["properties"]["intent"]["enum"].as_array().expect("intent enum present");
+        assert!(
+            tags.iter().any(|t| t == "pull_over") && tags.iter().any(|t| t == "go_to"),
+            "the constrained tag set is carried on the wire"
+        );
     }
 
     /// Live round-trip — requires `ollama pull gemma3:4b` and a running server. Ignored in
