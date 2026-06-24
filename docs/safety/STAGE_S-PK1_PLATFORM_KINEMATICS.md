@@ -155,10 +155,31 @@ smuggled in as "just a different polygon."
   `validate_vehicle_command`, and an equivalence test asserts
   `AckermannPlatform.evaluate(cmd) == validate_vehicle_command(cmd, contract)` over
   a command battery; the existing talisman tests are unchanged. No other code touched.
-- **S-PK1b** — the **differential-drive sibling** impl under the trait, lifting
-  parko's `angular_bound` channel into the unified shape (parko's angular tests are
-  the regression proof). Resolve the verdict-unification question (§4) here, with
-  the diff-drive verdict concrete.
+- **S-PK1b** — ✅ the **differential-drive sibling** (`parko-kirra/src/platform.rs`):
+  `DiffDrivePlatform<G: SafetyGovernor>` wraps parko's existing diff-drive
+  `SafetyGovernor::evaluate` (verbatim), with `Command = ControlCommand`,
+  `State = DiffDriveState{previous, dt, posture}`, `Verdict = DiffDriveVerdict`.
+  D1 confirmed against a genuinely different verdict (`EnforcementAction`'s
+  explicit linear/angular clamps). **Three things the second platform surfaced:**
+  (i) **`deny_reason` generalized `&'static str` → `&str`** in the kirra-core trait
+  — parko's `Deny{reason: String}` is a runtime string, not a static token (the
+  `&'static` was an Ackermann-ism); (ii) **orphan rule** → `DiffDriveVerdict`
+  newtype over `EnforcementAction` (also keeps parko-core kirra-core-free per
+  S-FI1c); (iii) **`&State` earns its keep** — diff-drive needs previous/dt/posture
+  (Ackermann's is `()`). parko-core 198 + parko-kirra 153 tests pass; kirra-core +
+  parko clippy + workspace clean.
+
+  **Two findings flagged for review (open):**
+  - **Footprint shape.** `VehicleFootprint` is rear-axle/bicycle-shaped; diff-drive
+    uses the geometric-center convention (`wheelbase_m = 0`, symmetric overhangs)
+    via `DiffDrivePlatform::centered_footprint`. Works, but whether the shared
+    footprint type should be genericized (drive-agnostic) is a candidate S-PK1c
+    decision.
+  - **`evaluate` scope asymmetry.** Ackermann's `evaluate` is pure kinematics
+    (`validate_vehicle_command`); diff-drive's wraps `SafetyGovernor::evaluate`,
+    which in parko folds in the pushed RSS verdict — wider scope. Reflects parko's
+    existing architecture (no separate public pure-kinematic entry); separating it
+    is out of S-PK1b scope.
 - **S-PK1c** — wire **containment + RSS** to consume `PlatformKinematics` (footprint
   + envelope from the trait); confirm the 2D checker is drive-agnostic. Free-space
   boundary-polygon generalization only if/when #1 needs it (§6).

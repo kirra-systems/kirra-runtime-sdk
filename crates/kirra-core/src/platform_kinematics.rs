@@ -43,10 +43,12 @@ use crate::kinematics_contract::{
 pub trait PlatformVerdict {
     /// True iff the command was admitted (possibly clamped) — i.e. NOT a breach.
     fn is_admitted(&self) -> bool;
-    /// The byte-stable audit/deny reason token when the verdict denies, else
-    /// `None`. (For Ackermann this is `DenyCode::reason()`, preserving the
-    /// existing audit-chain strings.)
-    fn deny_reason(&self) -> Option<&'static str>;
+    /// The audit/deny reason token when the verdict denies, else `None`.
+    /// Borrowed from the verdict (`&self` lifetime), so platforms with a
+    /// `&'static` token (Ackermann's `DenyCode::reason()`) and platforms with a
+    /// runtime reason string (e.g. parko's `EnforcementAction::Deny { reason }`)
+    /// both fit — surfaced by the differential-drive sibling (S-PK1b).
+    fn deny_reason(&self) -> Option<&str>;
 }
 
 /// The frozen Ackermann verdict ([`EnforceAction`]) is admitted unless it is a
@@ -55,7 +57,7 @@ impl PlatformVerdict for EnforceAction {
     fn is_admitted(&self) -> bool {
         !matches!(self, EnforceAction::DenyBreach(_))
     }
-    fn deny_reason(&self) -> Option<&'static str> {
+    fn deny_reason(&self) -> Option<&str> {
         match self {
             EnforceAction::DenyBreach(code) => Some(code.reason()),
             _ => None,
