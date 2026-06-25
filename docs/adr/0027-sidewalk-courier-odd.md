@@ -103,6 +103,13 @@ way to a pedestrian and resume; wait at a curb for a car and cross) by `cargo ru
 checker-admitted. The full sidewalk intent set (`FollowPath`/`Yield`/`CrossWhenClear`/`CreepThrough`/
 `Hold`) is now in place.
 
+**The LLM authors them too** — a sidewalk-courier brain persona (`build_courier_prompt` /
+`courier_intent_schema` / `LlmBrain::courier` / `OllamaClient::courier`) prompts a pedestrian-space
+persona offered ONLY the sidewalk intents (no road maneuvers) and grammar-constrains a local model
+(Gemma via Ollama on the Orin) to them. The model can never make the robot unsafe: its intent is
+grounded by Occy and bounded by KIRRA. Demonstrated by `cargo run -p kirra-mick --example
+mick_sidewalk_brain` (a deterministic `MockModel` stands in for Gemma, so it runs anywhere).
+
 ### 4. Class mapping (one selector, two loops, cited copies)
 
 The Courier profile already spans the stack; the per-class numbers are **cited copies** across the

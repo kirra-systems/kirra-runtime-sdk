@@ -42,11 +42,12 @@ pub struct OllamaClient {
     base_url: String,
     model: String,
     http: reqwest::blocking::Client,
+    persona: kirra_planner::Persona,
 }
 
 impl OllamaClient {
     /// Construct from the environment: `KIRRA_OLLAMA_URL` (default [`DEFAULT_OLLAMA_URL`])
-    /// and `KIRRA_MICK_MODEL` (default [`DEFAULT_MODEL`]).
+    /// and `KIRRA_MICK_MODEL` (default [`DEFAULT_MODEL`]). Chauffeur persona.
     #[must_use]
     pub fn new() -> Self {
         let base_url = std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
@@ -54,14 +55,29 @@ impl OllamaClient {
         Self::with(base_url, model)
     }
 
-    /// Construct with an explicit base URL + model id.
+    /// Construct with an explicit base URL + model id. Chauffeur persona.
     #[must_use]
     pub fn with(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         let http = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new());
-        Self { base_url: base_url.into(), model: model.into(), http }
+        Self { base_url: base_url.into(), model: model.into(), http, persona: kirra_planner::Persona::Chauffeur }
+    }
+
+    /// Set the persona — its constrained-decode schema gates the model's output tags (so a
+    /// sidewalk courier is grammar-constrained to the sidewalk intents). Pair with
+    /// `LlmBrain::courier(...)`, which selects the matching prompt.
+    #[must_use]
+    pub fn with_persona(mut self, persona: kirra_planner::Persona) -> Self {
+        self.persona = persona;
+        self
+    }
+
+    /// A sidewalk-courier Ollama client (constrained to sidewalk intents), from the environment.
+    #[must_use]
+    pub fn courier() -> Self {
+        Self::new().with_persona(kirra_planner::Persona::SidewalkCourier)
     }
 
     /// The configured model id.
@@ -107,7 +123,7 @@ impl ModelClient for OllamaClient {
             model: &self.model,
             prompt,
             stream: false,
-            format: kirra_planner::intent_schema(),
+            format: self.persona.schema(),
         };
 
         // Every failure maps to a stable ModelError → LlmBrain fails closed → HOLD.

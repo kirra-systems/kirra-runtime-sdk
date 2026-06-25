@@ -78,7 +78,10 @@ pub mod mick_llm;
 /// JSONL for offline scoring of the brain against the checker. Observability only.
 pub mod mick_capture;
 pub use mick_capture::{IntentStats, MickDecisionRecord, MickEvalLog, MickEvalSummary};
-pub use mick_llm::{build_prompt, intent_schema, LlmBrain, MockModel, ModelClient, ModelError};
+pub use mick_llm::{
+    build_courier_prompt, build_prompt, courier_intent_schema, intent_schema, LlmBrain, MockModel,
+    ModelClient, ModelError, Persona,
+};
 
 pub mod learned;
 pub use learned::{LearnedManeuverPlanner, LearnedPlanner, Teacher};
