@@ -37,6 +37,12 @@
 use kirra_core::corridor::{CorridorSource, Point};
 use kirra_core::trajectory::PerceivedObject;
 
+mod semantic_eval;
+pub use semantic_eval::{
+    score_frame, ClassRecall, FrameOutcome, SemanticEvalFrame, SemanticEvalSummary,
+    DEFAULT_CLIP_TOL_M,
+};
+
 /// Minimal range-scan input — a `sensor_msgs/LaserScan` subset.
 ///
 /// Angles are measured from the ego **+X** axis (forward); **+Y** is left.
@@ -235,6 +241,38 @@ fn truncate_boundary(boundary: &[Point], x_clip: f64) -> Vec<Point> {
     out
 }
 
+/// The **binding hazard** — the nearest non-drivable detection whose lateral span
+/// overlaps the corridor at its near edge, i.e. the one that actually ends the
+/// drivable space. `None` when nothing clips the corridor (every detection is
+/// drivable, or lies laterally clear of it). This is the single decision the
+/// Phase-B fusion turns on; [`clip_corridor_to_hazards`] truncates at exactly this
+/// detection's `near_x_m`, and the eval harness ([`SemanticEvalSummary`]) compares
+/// the binding hazard under ground-truth vs detected labels to score the ML path.
+#[must_use]
+pub fn binding_hazard<'a>(
+    corridor: &TajCorridor,
+    detections: &'a [SemanticDetection],
+) -> Option<&'a SemanticDetection> {
+    detections
+        .iter()
+        .filter(|d| !d.class.is_drivable())
+        // Does the hazard's lateral span overlap the corridor at its near edge?
+        .filter(|d| {
+            let left = boundary_y_at(&corridor.left, d.near_x_m);
+            let right = boundary_y_at(&corridor.right, d.near_x_m);
+            d.lateral_max_m > right && d.lateral_min_m < left
+        })
+        .min_by(|a, b| a.near_x_m.total_cmp(&b.near_x_m))
+}
+
+/// The forward distance at which `detections` end the drivable corridor — the
+/// [`binding_hazard`]'s `near_x_m`, or `None` if nothing clips it. The fusion's
+/// decision distilled to a scalar.
+#[must_use]
+pub fn hazard_clip_x(corridor: &TajCorridor, detections: &[SemanticDetection]) -> Option<f64> {
+    binding_hazard(corridor, detections).map(|d| d.near_x_m)
+}
+
 /// **Phase-B fusion** — clip the drivable corridor at the nearest non-drivable
 /// semantic hazard that laterally overlaps it. The corridor's drivable space ends
 /// at the hazard's edge, so KIRRA's containment rejects any trajectory that would
@@ -245,21 +283,9 @@ pub fn clip_corridor_to_hazards(
     corridor: &TajCorridor,
     detections: &[SemanticDetection],
 ) -> TajCorridor {
-    let mut x_clip = f64::INFINITY;
-    for d in detections {
-        if d.class.is_drivable() {
-            continue;
-        }
-        // Does the hazard's lateral span overlap the corridor at its near edge?
-        let left = boundary_y_at(&corridor.left, d.near_x_m);
-        let right = boundary_y_at(&corridor.right, d.near_x_m);
-        if d.lateral_max_m > right && d.lateral_min_m < left {
-            x_clip = x_clip.min(d.near_x_m);
-        }
-    }
-    if !x_clip.is_finite() {
+    let Some(x_clip) = hazard_clip_x(corridor, detections) else {
         return corridor.clone();
-    }
+    };
     TajCorridor {
         left: truncate_boundary(&corridor.left, x_clip),
         right: truncate_boundary(&corridor.right, x_clip),
