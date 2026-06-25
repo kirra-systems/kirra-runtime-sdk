@@ -111,6 +111,16 @@ fn a_dynamic_crosser_mid_turn_is_yielded_by_the_doer_and_bounded_by_kirra() {
     assert!(terminal_v(&yielded) < 0.5, "the yield is a decel-to-stop, terminal v {}", terminal_v(&yielded));
     assert!(max_y(&yielded) < max_y(&clear) - 4.0, "the doer yields well short of the clear-turn reach");
 
+    // Doer-checker AGREEMENT (the predictive-yield-gap refinement): the doer's yield leaves the
+    // checker's longitudinal-conflict distance before the crossing, so the stopped ego sits
+    // outside the window where the lateral RSS against the cutting-in crosser binds → KIRRA
+    // ADMITS the smooth yield instead of fail-closing to a safe-stop MRC.
+    assert!(
+        admitted(verdict(&yielded.trajectory, &map, &objs)),
+        "KIRRA admits the doer's predictive-yield mid-turn (smooth yield, not fail-closed MRC), got {:?}",
+        verdict(&yielded.trajectory, &map, &objs)
+    );
+
     // KIRRA independently bounds the dynamic obstacle mid-turn: the clear-turn trajectory, driven
     // INTO the crosser, is refused (the laterally cutting-in crosser breaches RSS on the arc).
     assert_eq!(
