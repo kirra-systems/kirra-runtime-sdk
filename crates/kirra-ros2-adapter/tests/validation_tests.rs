@@ -681,7 +681,7 @@ fn produced_cv_mode_catches_a_cut_in_the_snapshot_rss_misses() {
         "snapshot RSS alone sees the object as out-of-lane → admits; got {snapshot_only:?}");
 
     // With the PRODUCED CV mode, the predicted cut-in is caught → refused.
-    let owned = predicted_modes_from_objects(&[obj], &[], 3.0, 0.5);
+    let owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.5);
     let modes: Vec<_> = owned.iter().map(|m| m.as_mode()).collect();
     let with_modes = validate_trajectory_slow_capped(
         &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
@@ -702,7 +702,7 @@ fn produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff() {
     let obj = perceived(1, 9.0, -4.5, 3.0, 0.0); // parallel +x near the right lane
 
     // CV-only (no yaw): the object stays in its lane → admitted.
-    let cv_owned = predicted_modes_from_objects(&[obj], &[], 3.0, 0.5);
+    let cv_owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.5);
     let cv_modes: Vec<_> = cv_owned.iter().map(|m| m.as_mode()).collect();
     let cv = validate_trajectory_slow_capped(
         &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&cv_modes), FrameTrust::Trusted,
@@ -711,7 +711,7 @@ fn produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff() {
         "CV alone: a lane-parallel object is admitted; got {cv:?}");
 
     // CV + CTRV (yaw rate turning it into the ego lane): the turn-in hypothesis refuses.
-    let mm_owned = predicted_modes_from_objects(&[obj], &[(1, 0.9)], 3.0, 0.5);
+    let mm_owned = predicted_modes_from_objects(&[obj], &[(1, 0.9)], &[], 3.0, 0.5);
     assert_eq!(mm_owned.len(), 2, "the turning object yields BOTH a CV and a CTRV mode");
     let mm_modes: Vec<_> = mm_owned.iter().map(|m| m.as_mode()).collect();
     let mm = validate_trajectory_slow_capped(
@@ -719,6 +719,41 @@ fn produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff() {
     );
     assert_eq!(mm, TrajectoryVerdict::MRCFallback,
         "the produced CTRV turn-in mode catches what CV missed; got {mm:?}");
+}
+
+#[test]
+fn produced_lane_follow_mode_catches_a_curving_in_object_that_cv_misses() {
+    // An object laterally CLEAR (y=-5) moving PARALLEL (+x) — CV keeps it in its lane → admit. But
+    // its map lane-follow PATH bends into the ego lane and ends there ahead. The lane-follow mode
+    // traces the bend → the curving-in object is refused. Same idea as the CTRV payoff, sourced
+    // from the lane map instead of a yaw estimate.
+    let trajectory = straight_trajectory(30, 6.0, 0.1); // ego 6 m/s straight at y=0, x: 5 → ~22
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let obj = perceived(1, 16.0, -5.0, 2.5, 0.0); // moving +x in the right lane (CV stays clear)
+    let path = [
+        Point { x_m: 16.0, y_m: -5.0 }, Point { x_m: 17.0, y_m: -2.5 },
+        Point { x_m: 18.0, y_m: 0.0 }, Point { x_m: 18.0, y_m: 0.01 },
+    ];
+
+    // CV-only: the object holds y=-5 → admitted.
+    let cv_owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.3);
+    let cv_modes: Vec<_> = cv_owned.iter().map(|m| m.as_mode()).collect();
+    let cv = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&cv_modes), FrameTrust::Trusted,
+    );
+    assert!(matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "CV alone: a lane-parallel object is admitted; got {cv:?}");
+
+    // CV + lane-follow: the bend-in hypothesis brings it into the ego path → refuse.
+    let lf_owned = predicted_modes_from_objects(&[obj], &[], &[(1, &path[..])], 3.0, 0.3);
+    assert_eq!(lf_owned.len(), 2, "the object yields BOTH a CV and a lane-follow mode");
+    let lf_modes: Vec<_> = lf_owned.iter().map(|m| m.as_mode()).collect();
+    let lf = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&lf_modes), FrameTrust::Trusted,
+    );
+    assert_eq!(lf, TrajectoryVerdict::MRCFallback,
+        "the produced lane-follow mode catches the curving-in object CV missed; got {lf:?}");
 }
 
 #[test]
