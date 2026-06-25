@@ -218,6 +218,19 @@ pub async fn run_adapter(
         "~/input/objects",
         r2r::QosProfile::default(),
     )?;
+    // Redundant (channel-B) objects subscription — a SECOND, INDEPENDENT PredictedObjects topic
+    // (e.g. a camera-only world model vs the primary radar+lidar) feeding the True-Redundancy
+    // cross-check (gap #2b). Registered ONLY when the divergence monitor is enabled, so a
+    // deployment without redundancy adds no subscription. Remap `~/input/objects_secondary` to
+    // the redundant detector's topic in the launch file.
+    let obj_b_stream = if perception_redundancy_enabled() {
+        Some(node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
+            "~/input/objects_secondary",
+            r2r::QosProfile::default(),
+        )?)
+    } else {
+        None
+    };
     let _map_sub = node.subscribe_untyped(
         "~/input/map",
         "autoware_map_msgs/msg/LaneletMapBin",
@@ -333,6 +346,30 @@ pub async fn run_adapter(
         }
         tracing::error!("objects subscription stream closed — staleness will fire fleet-wide");
     });
+
+    // Redundant (channel-B) objects drain — only spawned when the monitor is enabled and the
+    // subscription was registered above. Each message updates the secondary snapshot AND stamps
+    // its freshness (one call); the slow loop cross-checks it against the primary channel. If
+    // this stream closes (the redundant detector dies), channel B goes stale → the divergence
+    // monitor fails closed (redundancy lost), the intended fail-safe.
+    if let Some(obj_b_stream) = obj_b_stream {
+        let obj_state_b = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut s = obj_b_stream;
+            while let Some(msg) = s.next().await {
+                let now = now_ms_wall();
+                tracing::info!(
+                    target: "kirra::ingress",
+                    topic = "objects_secondary",
+                    stamp_ms = now,
+                    "subscription_callback"
+                );
+                let parsed = crate::parsing::parse_predicted_objects(&msg);
+                obj_state_b.update_objects_secondary(parsed, now);
+            }
+            tracing::error!("redundant objects subscription stream closed — divergence monitor will fail closed");
+        });
+    }
 
     let odom_state = Arc::clone(&state);
     tokio::spawn(async move {
