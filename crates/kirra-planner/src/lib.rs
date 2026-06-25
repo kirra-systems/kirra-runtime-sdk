@@ -80,7 +80,7 @@ pub use mick_capture::{IntentStats, MickDecisionRecord, MickEvalLog, MickEvalSum
 pub use mick_llm::{build_prompt, intent_schema, LlmBrain, MockModel, ModelClient, ModelError};
 
 pub mod learned;
-pub use learned::{LearnedPlanner, Teacher};
+pub use learned::{LearnedManeuverPlanner, LearnedPlanner, Teacher};
 
 /// Fast-loop trajectory tracker — the System-1 conformance side of the dual-rate loop, which
 /// follows one admitted trajectory by elapsed time across many fast ticks.
