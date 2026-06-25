@@ -205,6 +205,89 @@ pub fn interactive_proceed(conflicts: &[InteractiveConflict], critical_gap_s: f6
     conflicts.iter().all(|c| agent_time_to_conflict(c, reaccel) > critical_gap_s)
 }
 
+// ===========================================================================
+// Sidewalk-courier behavior primitives (ADR-0027): yield to pedestrians, and
+// cross a road at a crosswalk only when clear. The sidewalk ODD's defining
+// behaviors — give way to people, creep, wait at the curb — not road maneuvers.
+// ===========================================================================
+
+/// Lateral half-width (m) of the courier's "personal-space" band around its path: a VRU within
+/// this of the path centerline is treated as in the way and triggers a yield. Wider than the
+/// footprint on purpose — give people room.
+pub const DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M: f64 = 0.8;
+
+/// Standoff (m): the courier comes to rest this far BEFORE the VRU it yields to, never
+/// bumper-to-toe.
+pub const DEFAULT_VRU_YIELD_STANDOFF_M: f64 = 1.0;
+
+/// One perceived pedestrian / VRU relative to the ego path: longitudinal distance ahead and
+/// lateral offset from the path centerline (both m, ego frame; `ahead_m > 0` = in front).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VruApproach {
+    pub ahead_m: f64,
+    pub lateral_offset_m: f64,
+}
+
+/// **Yield to a pedestrian (give way).** The sidewalk courier's defining behavior: slow so it can
+/// stop a `standoff_m` before the nearest VRU in its personal-space band, and HOLD at zero while
+/// one is within the standoff — resuming when clear. Returns the speed cap (m/s), or `None` when
+/// no VRU is in the band (no yield needed). The cap reuses the assured-clear-distance bound over
+/// the gap to the standoff, so a VRU within the standoff → `Some(0.0)` (stop and give way).
+///
+/// Derate-only / fail-closed: it can only LOWER the speed; it composes with the other speed caps
+/// (take the lowest). A non-finite / behind / out-of-band VRU is excluded (not a conflict); KIRRA's
+/// containment + impact-energy bound independently backstop a misjudged yield.
+// SAFETY: SG1 | REQ: sidewalk-yield-to-vru-speed-cap | TEST: no_vru_in_band_means_no_yield_cap,a_vru_ahead_caps_speed_to_stop_before_the_standoff,a_vru_within_the_standoff_stops_the_courier,an_out_of_band_vru_does_not_trigger_a_yield,the_nearest_in_band_vru_binds_the_yield_cap
+#[must_use]
+pub fn yield_to_vru_speed_cap(
+    vrus: &[VruApproach],
+    band_half_width_m: f64,
+    standoff_m: f64,
+    brake_decel_mps2: f64,
+) -> Option<f64> {
+    let nearest = vrus
+        .iter()
+        .filter(|v| v.ahead_m > 0.0 && v.lateral_offset_m.abs() <= band_half_width_m)
+        .map(|v| v.ahead_m)
+        .fold(f64::INFINITY, f64::min);
+    nearest
+        .is_finite()
+        .then(|| assured_clear_distance_speed_cap((nearest - standoff_m).max(0.0), brake_decel_mps2))
+}
+
+/// Safety margin (s) added to a crosswalk crossing's clear time before the courier commits.
+pub const DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S: f64 = 2.0;
+
+/// The critical gap (s) a slow courier needs to cross a road of width `crossing_width_m` at
+/// `creep_speed_mps`: its own clear time (`width / speed`) plus a margin. A pedestrian-pace robot
+/// needs a LARGER gap than a car — this makes that explicit instead of borrowing the car's ~4 s
+/// turn gap. Fail-safe: a non-positive creep speed clamps to a tiny value → a huge gap → HOLD.
+#[must_use]
+pub fn crosswalk_critical_gap_s(crossing_width_m: f64, creep_speed_mps: f64, margin_s: f64) -> f64 {
+    crossing_width_m.max(0.0) / creep_speed_mps.max(1e-3) + margin_s.max(0.0)
+}
+
+/// **Cross a road at a crosswalk only when clear.** The gate: the courier steps off only if EVERY
+/// conflicting road agent's worst-case time to the crossing exceeds the courier's own clear time
+/// ([`crosswalk_critical_gap_s`]) — the Stackelberg [`interactive_proceed`] model, so a slow /
+/// yielding car is modelled re-accelerating, never trusted to stay slow. Otherwise HOLD at the
+/// curb. Fail-closed (a NaN time ⇒ HOLD); KIRRA's crossing RSS backstops a misjudged step-off.
+// SAFETY: SG5 | REQ: sidewalk-crosswalk-gap-acceptance | TEST: an_empty_crossing_is_clear,an_ample_gap_lets_the_courier_cross,a_tight_gap_holds_at_the_curb,a_wider_road_needs_a_bigger_gap,a_slow_but_close_car_is_not_trusted_at_the_crosswalk
+#[must_use]
+pub fn cross_when_clear(
+    conflicts: &[InteractiveConflict],
+    crossing_width_m: f64,
+    creep_speed_mps: f64,
+    margin_s: f64,
+    reaccel: f64,
+) -> bool {
+    interactive_proceed(
+        conflicts,
+        crosswalk_critical_gap_s(crossing_width_m, creep_speed_mps, margin_s),
+        reaccel,
+    )
+}
+
 /// Tunables for the behavioral layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BehaviorConfig {
@@ -592,5 +675,80 @@ mod tests {
     #[test]
     fn a_nonfinite_conflict_fails_closed() {
         assert!(!interactive_proceed(&[conflict(f64::NAN, 4.0)], GAP, A));
+    }
+
+    // --- sidewalk-courier primitives (ADR-0027) -----------------------------
+
+    const BAND: f64 = DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M; // 0.8
+    const STANDOFF: f64 = DEFAULT_VRU_YIELD_STANDOFF_M;    // 1.0
+    const DECEL: f64 = 1.0;
+
+    fn vru(ahead_m: f64, lateral_offset_m: f64) -> VruApproach {
+        VruApproach { ahead_m, lateral_offset_m }
+    }
+
+    #[test]
+    fn no_vru_in_band_means_no_yield_cap() {
+        assert_eq!(yield_to_vru_speed_cap(&[], BAND, STANDOFF, DECEL), None);
+    }
+
+    #[test]
+    fn a_vru_ahead_caps_speed_to_stop_before_the_standoff() {
+        // A pedestrian 4 m ahead, in band → a positive cap (= ACD over 4 - 1 = 3 m), below cruise.
+        let cap = yield_to_vru_speed_cap(&[vru(4.0, 0.0)], BAND, STANDOFF, DECEL).unwrap();
+        assert!(cap > 0.0 && cap < 3.0, "expected a finite creep cap, got {cap}");
+    }
+
+    #[test]
+    fn a_vru_within_the_standoff_stops_the_courier() {
+        // A pedestrian inside the standoff → stop and give way (cap 0).
+        assert_eq!(yield_to_vru_speed_cap(&[vru(0.6, 0.0)], BAND, STANDOFF, DECEL), Some(0.0));
+    }
+
+    #[test]
+    fn an_out_of_band_vru_does_not_trigger_a_yield() {
+        // A pedestrian off to the side (beyond the personal-space band) → no yield cap.
+        assert_eq!(yield_to_vru_speed_cap(&[vru(3.0, 1.5)], BAND, STANDOFF, DECEL), None);
+        // Behind the courier → not a conflict.
+        assert_eq!(yield_to_vru_speed_cap(&[vru(-2.0, 0.0)], BAND, STANDOFF, DECEL), None);
+    }
+
+    #[test]
+    fn the_nearest_in_band_vru_binds_the_yield_cap() {
+        let far = yield_to_vru_speed_cap(&[vru(6.0, 0.0)], BAND, STANDOFF, DECEL).unwrap();
+        let near = yield_to_vru_speed_cap(&[vru(6.0, 0.0), vru(2.0, 0.3)], BAND, STANDOFF, DECEL).unwrap();
+        assert!(near < far, "the nearer pedestrian must bind the lower cap ({near} < {far})");
+    }
+
+    #[test]
+    fn an_empty_crossing_is_clear() {
+        assert!(cross_when_clear(&[], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
+    }
+
+    #[test]
+    fn an_ample_gap_lets_the_courier_cross() {
+        // A car far away (40 m at 4 m/s = 10 s) vs a 6 m road at 1 m/s (gap ≈ 8 s) → cross.
+        assert!(cross_when_clear(&[conflict(40.0, 4.0)], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
+    }
+
+    #[test]
+    fn a_tight_gap_holds_at_the_curb() {
+        // A car 12 m at 4 m/s = 3 s vs the ~8 s the courier needs → HOLD.
+        assert!(!cross_when_clear(&[conflict(12.0, 4.0)], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
+    }
+
+    #[test]
+    fn a_wider_road_needs_a_bigger_gap() {
+        // Same car gap (a committed agent ~6.25 s away): clears a narrow road, holds for a wide one.
+        let cars = [conflict(25.0, 4.0)];
+        assert!(cross_when_clear(&cars, 2.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));   // 2 m → ~4 s needed
+        assert!(!cross_when_clear(&cars, 8.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));  // 8 m → ~10 s needed
+    }
+
+    #[test]
+    fn a_slow_but_close_car_is_not_trusted_at_the_crosswalk() {
+        // A car crawling at 0.5 m/s just 8 m away reads as 16 s by d/v, but the interaction model
+        // worst-cases its re-acceleration → it is NOT trusted; the courier holds.
+        assert!(!cross_when_clear(&[conflict(8.0, 0.5)], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
     }
 }

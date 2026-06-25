@@ -83,9 +83,17 @@ Sidewalk intents replace road maneuvers. Mick authors, Occy grounds, KIRRA bound
 | `Hold` | stop and wait (blocked path, out-of-ODD, operator) | MRC hold |
 
 What is **NOT** in the courier doer: lane-change, overtake, merge, asserting into junction
-right-of-way. A courier does not negotiate for position; it yields and creeps. (`Yield` /
-`CrossWhenClear` are the doer-side follow-up that ADR-0014's Mick seam already accommodates; this
-ADR pins the set, the wiring is tracked separately.)
+right-of-way. A courier does not negotiate for position; it yields and creeps.
+
+**`Yield` and `CrossWhenClear` are now implemented** (`crates/kirra-planner/src/behavior.rs`:
+`yield_to_vru_speed_cap`, `cross_when_clear`/`crosswalk_critical_gap_s`; grounded in
+`plan_for_intent`; authored over the Mick LLM JSON seam as `MickIntent::{Yield, CrossWhenClear}`).
+`Yield` creeps to a stop a standoff before the nearest pedestrian in the courier's path band and
+HOLDs while one is in the way; `CrossWhenClear` steps off only when every conflicting road agent's
+worst-case re-acceleration still can't reach the crossing before the slow courier clears it (the
+Stackelberg `interactive_proceed` model), else HOLDs at the curb. `FollowPath` ≈ `GoTo`/`Cruise` at
+creep; `Hold` already exists. `creep-through-crowd` (a soft nudge through dense pedestrians) remains
+a follow-up.
 
 ### 4. Class mapping (one selector, two loops, cited copies)
 
