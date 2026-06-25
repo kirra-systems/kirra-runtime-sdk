@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::behavior::{SignalState, TrafficControl};
 use crate::{
     FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
-    MAX_ROUTE_LANES,
+    PredictedPath, MAX_ROUTE_LANES,
 };
 use kirra_core::corridor::{CorridorSource, Point as MapPoint};
 
@@ -263,11 +263,26 @@ pub fn plan_for_intent(
     } else {
         Vec::new()
     };
+    // Map-intention predicted paths: when a lane graph is supplied and the integrator did NOT hand
+    // per-object predicted paths, derive the lane-follow hypothesis for each moving object from the
+    // map (`LaneGraph::lane_follow_path`). The planner's predictive yield worst-cases over modes, so
+    // this both CATCHES a vehicle that will follow a curving lane into the ego's path (a kinematic
+    // CV/CTRV rollout cannot know the road bends) and SUPPRESSES a spurious yield to one keeping its
+    // own diverging lane. `derived_paths_pts` owns the point vectors; `derived_paths` borrows them —
+    // both live to the end of the function so the enriched world can reference them.
+    let derived_paths_pts: Vec<(u64, Vec<MapPoint>)> = if world.lane_graph.is_some() && world.predicted_paths.is_empty() {
+        derive_predicted_paths(world)
+    } else {
+        Vec::new()
+    };
+    let derived_paths: Vec<PredictedPath> =
+        derived_paths_pts.iter().map(|(id, pts)| PredictedPath { id: *id, points: pts }).collect();
     let enriched: PlanInput;
-    let world: &PlanInput = if !derived_cedes.is_empty() || !derived_controls.is_empty() {
+    let world: &PlanInput = if !derived_cedes.is_empty() || !derived_controls.is_empty() || !derived_paths.is_empty() {
         enriched = PlanInput {
             cedes_to_ego_ids: if derived_cedes.is_empty() { world.cedes_to_ego_ids } else { &derived_cedes },
             controls: if derived_controls.is_empty() { world.controls } else { &derived_controls },
+            predicted_paths: if derived_paths.is_empty() { world.predicted_paths } else { &derived_paths },
             ..world.clone()
         };
         &enriched
@@ -440,6 +455,41 @@ fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
         }
         None => Vec::new(),
     }
+}
+
+/// Horizon (s) over which a map-intention predicted path is materialized — a generous fixed
+/// value (the predictive-yield walker clamps a path shorter than `speed × horizon`). Matches the
+/// planner's default `prediction_horizon_s`; `plan_for_intent` is planner-generic so it cannot
+/// read the planner's config.
+const MICK_PREDICT_HORIZON_S: f64 = 3.0;
+/// Object speed (m/s) below which no lane-follow path is derived — a near-stationary object is
+/// handled by stop-short, not predictive yield (which also gates on a crossing-speed threshold).
+const MICK_PREDICT_MIN_SPEED_MPS: f64 = 0.5;
+/// Extra path length (m) beyond `speed × horizon`, so the materialized path comfortably covers
+/// the yield walker's reach even as the object accelerates.
+const MICK_PREDICT_LENGTH_MARGIN_M: f64 = 5.0;
+
+/// Derive the map-intention predicted path for each MOVING object on the mapped road — the
+/// lane-follow hypothesis (`LaneGraph::lane_follow_path`) the planner's predictive yield consumes
+/// alongside its kinematic CV/CTRV rollout. Empty if there is no graph; an object off the mapped
+/// road or below [`MICK_PREDICT_MIN_SPEED_MPS`] is skipped (its kinematic rollout still applies).
+/// Returns owned `(id, points)`; the caller borrows them into `PredictedPath`s.
+fn derive_predicted_paths(world: &PlanInput<'_>) -> Vec<(u64, Vec<MapPoint>)> {
+    let Some(graph) = world.lane_graph else {
+        return Vec::new();
+    };
+    world
+        .objects
+        .iter()
+        .filter_map(|o| {
+            let speed = o.vel.x_m.hypot(o.vel.y_m);
+            if speed < MICK_PREDICT_MIN_SPEED_MPS {
+                return None;
+            }
+            let length = speed * MICK_PREDICT_HORIZON_S + MICK_PREDICT_LENGTH_MARGIN_M;
+            graph.lane_follow_path(o.pos, length).map(|pts| (o.id, pts))
+        })
+        .collect()
 }
 
 /// Speed (m/s) below which the ego counts as having stopped for a STOP-sign full stop.
@@ -1504,6 +1554,77 @@ mod tests {
         // (Routing to the decoy's own lane is reachable; pick a point off every lane instead —
         // covered above. Here assert a non-finite destination also HOLDs at grounding.)
         assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: f64::NAN, y_m: 0.0 }, &w)), "non-finite destination → HOLD");
+    }
+
+    // ----- map-intention predicted paths (lane-follow mode) -----
+
+    #[test]
+    fn a_lane_following_object_merging_in_is_yielded_to_where_cv_misses() {
+        // A merging lane: straight east at y=4 (x 12..25) then merges down into the ego lane y=0
+        // (x 25..60). An object at (20,4) moving EAST — a constant-velocity predictor keeps it at
+        // y=4, clear of the ego. Its lane-follow path traces the merge INTO the ego's path, so
+        // with the map supplied the predictive yield fires; without it (CV-only) the ego does not
+        // yield. This is the planner-side map-intention mode made live by `derive_predicted_paths`.
+        let g = crate::LaneGraph::new().with_lane(crate::Lane {
+            id: 1,
+            centerline: vec![
+                MapPoint { x_m: 12.0, y_m: 4.0 }, MapPoint { x_m: 25.0, y_m: 4.0 },
+                MapPoint { x_m: 35.0, y_m: 0.0 }, MapPoint { x_m: 60.0, y_m: 0.0 },
+            ],
+            half_width_m: 2.5,
+            left_line: crate::LineType::Solid,
+            right_line: crate::LineType::Solid,
+            heading_rad: 0.0,
+            edges: Vec::new(),
+            control: None,
+        });
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let obj = PerceivedObject { id: 1, pos: Point { x_m: 20.0, y_m: 4.0 }, velocity_mps: 5.0, heading_rad: 0.0, vel: Point { x_m: 5.0, y_m: 0.0 } };
+        let objs = [obj];
+        let intent = MickIntent::GoTo { x_m: 80.0, y_m: 0.0 };
+        let reach = |out: &PlanOutput| out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+
+        // CV-only (no lane graph): the object holds y=4, never enters the ego band → no yield.
+        let w_cv = PlanInput { map: &corr, objects: &objs, ..world(&corr, &objs, &[]) };
+        let cv = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_cv);
+        assert!(reach(&cv) > 30.0, "CV: a lane-parallel object → no yield, near-natural reach, got {}", reach(&cv));
+
+        // With the map: the lane-follow mode predicts the merge into the ego path → yields short.
+        let w_map = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+        let mapped = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_map);
+        assert!(reach(&mapped) < 28.0, "map-intention: the merging object is yielded to (short of the merge), got {}", reach(&mapped));
+        assert!(reach(&mapped) < reach(&cv) - 5.0, "the lane-follow mode yields meaningfully shorter than CV");
+    }
+
+    #[test]
+    fn a_lane_keeping_object_in_its_own_lane_is_not_spuriously_yielded_to() {
+        // The suppression direction: an object in a DIVERGING lane (peels away to +y) moving with
+        // a slight inward velocity component. A naive predictor might extrapolate it into the ego
+        // lane, but its lane-follow path shows it LEAVES → no spurious yield (the ego drives on).
+        let g = crate::LaneGraph::new().with_lane(crate::Lane {
+            id: 1,
+            centerline: vec![
+                MapPoint { x_m: 12.0, y_m: 3.0 }, MapPoint { x_m: 25.0, y_m: 4.0 },
+                MapPoint { x_m: 40.0, y_m: 10.0 }, MapPoint { x_m: 60.0, y_m: 18.0 },
+            ],
+            half_width_m: 2.5,
+            left_line: crate::LineType::Solid,
+            right_line: crate::LineType::Solid,
+            heading_rad: 0.0,
+            edges: Vec::new(),
+            control: None,
+        });
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        // Velocity slightly toward the ego lane (vy<0) — CV would creep it inward — but the lane
+        // diverges, so the lane-follow mode keeps it clear.
+        let obj = PerceivedObject { id: 1, pos: Point { x_m: 20.0, y_m: 3.6 }, velocity_mps: 5.0, heading_rad: 0.0, vel: Point { x_m: 5.0, y_m: -0.4 } };
+        let objs = [obj];
+        let intent = MickIntent::GoTo { x_m: 80.0, y_m: 0.0 };
+        let reach = |out: &PlanOutput| out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+
+        let w_map = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+        let mapped = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_map);
+        assert!(reach(&mapped) > 30.0, "lane-follow shows the object diverging → no spurious yield (near-natural reach), got {}", reach(&mapped));
     }
 
     // ----- junction right-of-way wired into cedes_to_ego_ids -----

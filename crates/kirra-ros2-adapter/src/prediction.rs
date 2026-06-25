@@ -84,10 +84,53 @@ fn ctrv_samples(obj: &PerceivedObject, yaw_rate_rad_s: f64, horizon_s: f64, dt_s
     out
 }
 
+/// Object speed (m/s) below which no lane-follow mode is emitted — a (near-)stationary object's
+/// lane-follow mode degenerates to its CV mode.
+const LANE_FOLLOW_MIN_SPEED_MPS: f64 = 0.1;
+
+/// Position after travelling `dist_m` along a polyline (clamped to its end). The arc-length
+/// walker the lane-follow rollout samples — mirrors the planner's `point_on_path`.
+fn point_on_polyline(poly: &[Point], dist_m: f64) -> Point {
+    match poly.first() {
+        None => Point { x_m: 0.0, y_m: 0.0 },
+        Some(first) if dist_m <= 0.0 || poly.len() == 1 => *first,
+        Some(_) => {
+            let mut acc = 0.0;
+            for w in poly.windows(2) {
+                let seg = (w[1].x_m - w[0].x_m).hypot(w[1].y_m - w[0].y_m);
+                if acc + seg >= dist_m {
+                    let f = if seg > 1e-9 { (dist_m - acc) / seg } else { 0.0 };
+                    return Point {
+                        x_m: w[0].x_m + f * (w[1].x_m - w[0].x_m),
+                        y_m: w[0].y_m + f * (w[1].y_m - w[0].y_m),
+                    };
+                }
+                acc += seg;
+            }
+            *poly.last().unwrap()
+        }
+    }
+}
+
+/// Roll an object along a geometric **lane-follow** `path` at `speed_mps` — the map-intention
+/// hypothesis: position after travelling `speed*t` along the path. A vehicle on a CURVING lane
+/// traces the curve (which CV/CTRV cannot), and one on a diverging lane stays clear.
+fn lane_follow_samples(path: &[Point], speed_mps: f64, horizon_s: f64, dt_s: f64) -> Vec<PredictedSample> {
+    let n = step_count(horizon_s, dt_s);
+    (0..=n)
+        .map(|i| {
+            let t = i as f64 * dt_s;
+            PredictedSample { pos: point_on_polyline(path, speed_mps * t), time_from_start_s: t }
+        })
+        .collect()
+}
+
 /// Produce the multi-modal predicted-mode set for `objects` over `[0, horizon_s]` sampled at
-/// `dt_s`: a CV mode per object, plus a CTRV mode for any object whose turn rate (looked up in
-/// `yaw_rates` as `(object_id, yaw_rate_rad_s)`) exceeds [`CTRV_YAW_EPS_RAD_S`]. Pass `yaw_rates`
-/// empty for CV-only (the kinematic bound from snapshot velocity, with no tracker turn estimate).
+/// `dt_s`. Per object: a **CV** mode (always); a **CTRV** mode for any object whose turn rate
+/// (looked up in `yaw_rates` as `(object_id, yaw_rate_rad_s)`) exceeds [`CTRV_YAW_EPS_RAD_S`]; and
+/// a **lane-follow** mode for any moving object with a geometric path in `lane_paths` (the
+/// map-intention hypothesis — `(object_id, &[Point])`, supplied from the lane map). Pass either
+/// extra slice empty to omit that mode; CV alone is the kinematic snapshot bound.
 ///
 /// Returns owned modes; borrow them as `&[PredictedMode]` via [`OwnedPredictedMode::as_mode`] for
 /// `validate_trajectory_slow_capped`. A non-positive `dt_s` is floored to a small step.
@@ -95,6 +138,7 @@ fn ctrv_samples(obj: &PerceivedObject, yaw_rate_rad_s: f64, horizon_s: f64, dt_s
 pub fn predicted_modes_from_objects(
     objects: &[PerceivedObject],
     yaw_rates: &[(u64, f64)],
+    lane_paths: &[(u64, &[Point])],
     horizon_s: f64,
     dt_s: f64,
 ) -> Vec<OwnedPredictedMode> {
@@ -105,6 +149,11 @@ pub fn predicted_modes_from_objects(
         if let Some(&(_, yaw)) = yaw_rates.iter().find(|(id, _)| *id == obj.id) {
             if yaw.abs() > CTRV_YAW_EPS_RAD_S {
                 modes.push(OwnedPredictedMode { object_id: obj.id, samples: ctrv_samples(obj, yaw, horizon_s, dt) });
+            }
+        }
+        if let Some(&(_, path)) = lane_paths.iter().find(|(id, _)| *id == obj.id) {
+            if path.len() >= 2 && obj.velocity_mps > LANE_FOLLOW_MIN_SPEED_MPS {
+                modes.push(OwnedPredictedMode { object_id: obj.id, samples: lane_follow_samples(path, obj.velocity_mps, horizon_s, dt) });
             }
         }
     }
@@ -126,7 +175,10 @@ pub fn slow_loop_modes(
     dt_s: f64,
 ) -> Vec<OwnedPredictedMode> {
     let yaw: &[(u64, f64)] = if yaw_fresh { yaw_rates } else { &[] };
-    predicted_modes_from_objects(objects, yaw, horizon_s, dt_s)
+    // No lane map in the slow loop yet (the adapter holds a CorridorSource, not a lane graph), so
+    // no map-intention lane-follow modes here — CV/CTRV only. An integrator/map-side caller adds
+    // them by calling `predicted_modes_from_objects` with the per-object lane paths.
+    predicted_modes_from_objects(objects, yaw, &[], horizon_s, dt_s)
 }
 
 #[cfg(test)]
@@ -146,7 +198,7 @@ mod tests {
     #[test]
     fn cv_mode_rolls_position_forward_on_velocity() {
         let o = obj(1, 10.0, 0.0, 2.0, -1.0);
-        let modes = predicted_modes_from_objects(&[o], &[], 2.0, 1.0);
+        let modes = predicted_modes_from_objects(&[o], &[], &[], 2.0, 1.0);
         assert_eq!(modes.len(), 1, "no yaw rate → CV mode only");
         let s = &modes[0].samples;
         // t=0 at the snapshot, t=1 advanced by (2,-1), t=2 by (4,-2).
@@ -158,7 +210,7 @@ mod tests {
     #[test]
     fn a_turn_rate_adds_a_distinct_ctrv_mode() {
         let o = obj(1, 10.0, 0.0, 3.0, 0.0); // moving +x
-        let modes = predicted_modes_from_objects(&[o], &[(1, 0.4)], 2.0, 0.5);
+        let modes = predicted_modes_from_objects(&[o], &[(1, 0.4)], &[], 2.0, 0.5);
         assert_eq!(modes.len(), 2, "CV + CTRV for a turning object");
         // The CTRV mode curves (gains lateral y) where CV stays on the axis.
         let cv = &modes[0].samples;
@@ -170,7 +222,7 @@ mod tests {
     #[test]
     fn a_negligible_turn_rate_adds_no_redundant_mode() {
         let o = obj(1, 10.0, 0.0, 3.0, 0.0);
-        let modes = predicted_modes_from_objects(&[o], &[(1, 0.005)], 2.0, 0.5);
+        let modes = predicted_modes_from_objects(&[o], &[(1, 0.005)], &[], 2.0, 0.5);
         assert_eq!(modes.len(), 1, "sub-epsilon yaw → no duplicate CTRV mode");
     }
 
@@ -191,11 +243,34 @@ mod tests {
 
     #[test]
     fn each_object_gets_its_own_modes() {
-        let modes = predicted_modes_from_objects(&[obj(1, 0.0, 0.0, 1.0, 0.0), obj(2, 5.0, 0.0, 1.0, 0.0)], &[(2, 0.3)], 1.0, 0.5);
+        let modes = predicted_modes_from_objects(&[obj(1, 0.0, 0.0, 1.0, 0.0), obj(2, 5.0, 0.0, 1.0, 0.0)], &[(2, 0.3)], &[], 1.0, 0.5);
         // obj1 CV only, obj2 CV+CTRV → 3 modes, ids preserved.
         assert_eq!(modes.len(), 3);
         assert_eq!(modes[0].object_id, 1);
         assert_eq!(modes[1].object_id, 2);
         assert_eq!(modes[2].object_id, 2);
+    }
+
+    #[test]
+    fn a_lane_path_adds_a_distinct_lane_follow_mode_that_traces_the_curve() {
+        // An object moving +x with a lane path that BENDS to +y. The lane-follow mode traces the
+        // bend (gains +y) where the CV mode stays on the axis — a distinct hypothesis.
+        let o = obj(1, 0.0, 0.0, 4.0, 0.0); // 4 m/s east
+        let path = [
+            Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 8.0, y_m: 4.0 }, Point { x_m: 8.0, y_m: 12.0 },
+        ];
+        let modes = predicted_modes_from_objects(&[o], &[], &[(1, &path[..])], 2.0, 0.5);
+        assert_eq!(modes.len(), 2, "CV + lane-follow (no yaw → no CTRV)");
+        assert!(modes[0].samples.last().unwrap().pos.y_m.abs() < 1e-9, "CV stays on the x-axis");
+        assert!(modes[1].samples.last().unwrap().pos.y_m > 1.0, "lane-follow traces the bend into +y, got {}", modes[1].samples.last().unwrap().pos.y_m);
+    }
+
+    #[test]
+    fn a_stationary_object_gets_no_lane_follow_mode() {
+        let o = obj(1, 0.0, 0.0, 0.0, 0.0); // not moving
+        let path = [Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 10.0, y_m: 0.0 }];
+        let modes = predicted_modes_from_objects(&[o], &[], &[(1, &path[..])], 2.0, 0.5);
+        assert_eq!(modes.len(), 1, "a stationary object's lane-follow degenerates to CV → omitted");
     }
 }

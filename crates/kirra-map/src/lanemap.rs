@@ -578,6 +578,60 @@ impl LaneGraph {
         self.route(from, to)
     }
 
+    /// The geometric path an object at `start` would trace if it **FOLLOWS its lane** (and the
+    /// lowest-id successor chain at each junction) for `length_m` of travel — the **map-intention**
+    /// prediction hypothesis. The path begins at the projection of `start` onto the lane
+    /// centerline and extends forward along the road. `None` if `start` is off the mapped road.
+    ///
+    /// This is the third predicted mode (alongside the kinematic CV / CTRV rollouts): an object on
+    /// a CURVING lane traces the curve — which a constant-velocity / constant-turn-rate predictor
+    /// cannot know — so a vehicle that will follow a bend INTO the ego's path is caught; and one
+    /// keeping its own (diverging) lane stays in it, suppressing a spurious cut-in yield. The
+    /// planner's predictive yield worst-cases over the modes; KIRRA still backstops.
+    ///
+    /// Bounded: walks at most [`MAX_ROUTE_LANES`] lanes of successor chain, then truncates once the
+    /// accumulated forward length reaches `length_m`. Returns `None` if the result degenerates to
+    /// fewer than two vertices.
+    #[must_use]
+    pub fn lane_follow_path(&self, start: Point, length_m: f64) -> Option<Vec<Point>> {
+        let lane_id = self.lane_at(start)?;
+        let chain = self.forward_centerline(lane_id);
+        if chain.len() < 2 {
+            return None;
+        }
+        let (seg, proj) = project_onto_polyline(&chain, start);
+        let mut out = vec![proj];
+        let mut acc = 0.0;
+        let mut prev = proj;
+        for p in chain.iter().skip(seg + 1) {
+            acc += (p.x_m - prev.x_m).hypot(p.y_m - prev.y_m);
+            out.push(*p);
+            prev = *p;
+            if acc >= length_m.max(0.0) {
+                break;
+            }
+        }
+        (out.len() >= 2).then_some(out)
+    }
+
+    /// The centerline of `lane_id` concatenated with the lowest-id successor chain (seam-deduped),
+    /// bounded by [`MAX_ROUTE_LANES`] and cycle-guarded — the forward road geometry a lane-following
+    /// object would trace through junctions.
+    fn forward_centerline(&self, lane_id: u64) -> Vec<Point> {
+        let mut chain: Vec<Point> = Vec::new();
+        let mut visited: BTreeSet<u64> = BTreeSet::new();
+        let mut cur = lane_id;
+        while visited.insert(cur) && visited.len() <= MAX_ROUTE_LANES {
+            let Some(lane) = self.lanes.get(&cur) else { break };
+            concat_dedup(&mut chain, &lane.centerline);
+            match lane.successors().min() {
+                Some(n) if !visited.contains(&n) => cur = n,
+                _ => break,
+            }
+        }
+        chain
+    }
+
     /// Number of lanes in the graph.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -786,18 +840,37 @@ fn mean_y_of(pts: &[Point]) -> f64 {
 /// Squared distance from point `p` to segment `a→b` (projection clamped to the segment), the
 /// kernel of the curved-lane [`Lane::contains`] test. Squared to avoid a `sqrt` per segment.
 fn point_segment_dist_sq(p: Point, a: Point, b: Point) -> f64 {
+    let (_, d2) = project_point_segment(p, a, b);
+    d2
+}
+
+/// The clamped projection of `p` onto segment `a→b`, plus its squared distance. The projection
+/// parameter is clamped to `[0, 1]` so a point off either end maps to the nearest endpoint
+/// (degenerate zero-length segment → `a`).
+fn project_point_segment(p: Point, a: Point, b: Point) -> (Point, f64) {
     let (abx, aby) = (b.x_m - a.x_m, b.y_m - a.y_m);
     let len_sq = abx * abx + aby * aby;
-    // Clamp the projection parameter to [0, 1] so a point off either end measures to the
-    // nearest endpoint (degenerate zero-length segment → distance to `a`).
     let t = if len_sq <= f64::EPSILON {
         0.0
     } else {
         (((p.x_m - a.x_m) * abx + (p.y_m - a.y_m) * aby) / len_sq).clamp(0.0, 1.0)
     };
-    let (cx, cy) = (a.x_m + t * abx, a.y_m + t * aby);
-    let (dx, dy) = (p.x_m - cx, p.y_m - cy);
-    dx * dx + dy * dy
+    let proj = Point { x_m: a.x_m + t * abx, y_m: a.y_m + t * aby };
+    let (dx, dy) = (p.x_m - proj.x_m, p.y_m - proj.y_m);
+    (proj, dx * dx + dy * dy)
+}
+
+/// Project `p` onto the polyline, returning the index of the nearest segment and the clamped
+/// projected point on it. `poly` must have ≥ 2 vertices.
+fn project_onto_polyline(poly: &[Point], p: Point) -> (usize, Point) {
+    let mut best = (0usize, poly[0], f64::INFINITY);
+    for i in 0..poly.len().saturating_sub(1) {
+        let (proj, d2) = project_point_segment(p, poly[i], poly[i + 1]);
+        if d2 < best.2 {
+            best = (i, proj, d2);
+        }
+    }
+    (best.0, best.1)
 }
 
 /// Longitudinal `[x_min, x_max]` spanned by two boundary polylines, or `None` if
@@ -1105,6 +1178,44 @@ mod tests {
         // 1→3 via the left chain (two successors, cost 2) beats any route that dips
         // into the right lane and back (≥ two lane changes, cost ≥ 6).
         assert_eq!(routing_grid().route(1, 3), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn lane_follow_path_traces_a_straight_lane_forward_from_the_object() {
+        // A straight east lane; an object at (10, 0.3) (slightly off-center, in-lane). The
+        // follow-path starts at its projection (~(10,0)) and extends east, staying on y≈0.
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 60.0, 2.0, LineType::Solid, LineType::Solid));
+        let path = g.lane_follow_path(Point { x_m: 10.0, y_m: 0.3 }, 20.0).expect("on the lane");
+        assert!(path.len() >= 2);
+        assert!((path[0].x_m - 10.0).abs() < 1e-6 && path[0].y_m.abs() < 1e-6, "starts at the projection ~ (10,0), got {:?}", path[0]);
+        assert!(path.last().unwrap().x_m >= 30.0 - 1e-6, "extends ~20 m forward, got {:?}", path.last());
+        assert!(path.iter().all(|p| p.y_m.abs() < 1e-6), "stays on the straight centerline");
+    }
+
+    #[test]
+    fn lane_follow_path_traces_a_curving_lane_through_its_bend() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+        // A lane that runs east then curves LEFT (north) via a quarter arc: straight (0,0)→(20,0)
+        // [lane 1] → arc (20,0)→(32,12) [lane 2]. An object on lane 1 following its lane traces
+        // the bend — its path gains +y (a kinematic CV predictor would stay on y=0).
+        let arc: Vec<Point> = (0..=8).map(|i| {
+            let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 8.0);
+            Point { x_m: 20.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
+        }).collect();
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 2 }))
+            .with_lane(Lane { id: 2, centerline: arc, half_width_m: 2.0, left_line: LineType::Solid, right_line: LineType::Solid, heading_rad: FRAC_PI_4, edges: Vec::new(), control: None });
+        let path = g.lane_follow_path(Point { x_m: 8.0, y_m: 0.0 }, 40.0).expect("on lane 1");
+        let max_y = path.iter().map(|p| p.y_m).fold(f64::MIN, f64::max);
+        assert!(max_y > 5.0, "the follow-path traces the bend into +y (a CV predictor would not), max_y {max_y}");
+    }
+
+    #[test]
+    fn lane_follow_path_is_none_off_the_mapped_road() {
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 60.0, 2.0, LineType::Solid, LineType::Solid));
+        assert!(g.lane_follow_path(Point { x_m: 10.0, y_m: 50.0 }, 20.0).is_none(), "off-road → None");
     }
 
     #[test]
