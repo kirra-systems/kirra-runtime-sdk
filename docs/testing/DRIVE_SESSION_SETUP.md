@@ -82,5 +82,36 @@ Each JSONL row carries the proposal, the enforced result, and the per-axis Δ. U
 - make the doer propose checker-admissible commands more often (geometric tuning, or
   as training data for the learned doer).
 
-For the heavier supervised-learning path, map each row to a `CaptureRecord`
-(`kirra-capture-schema`) and run it through `kirra-collector` to build the Parquet dataset.
+## 4. Build the supervised-learning dataset (wired)
+
+`governor_drive_session.py` already emits the two files `kirra-collector` joins —
+alongside `drive_session.jsonl` it writes `drive_session.capture.jsonl` (one
+`kirra-capture-schema::CaptureRecord` per tick: `ALLOW` / `CLAMP_LINEAR` /
+`CLAMP_STEERING` / `DENY`, with the clamped value in `safe_value`) and
+`drive_session.bag.json` (the matching `BusMessage` array — the doer-side stamp
+each record joins against). Feed them straight into the collector:
+
+```bash
+cargo run -p kirra-collector -- \
+  --capture drive_session.capture.jsonl \
+  --bag-json drive_session.bag.json \
+  --out dataset/ --window-ms 100
+```
+
+A 120-tick headless run produces a partitioned Parquet dataset + manifest:
+
+```
+reconciliation:
+  records_in            = 120 (gateway 120, trajectory 0; 0 duplicate(s) dropped)
+  interventions / passes= 28 / 92
+  joined / orphans      = 120 / 0 (orphan_rate 0.000)
+dataset/
+  manifest.json
+  doer_version=occy-drive-demo/source=COMMAND_GATEWAY/part-000.parquet
+```
+
+Each Parquet row carries the governor's correction joined to the doer's proposal
++ version — the supervised target for tuning the **doer** to propose
+checker-admissible commands. The collector depends on `kirra-capture-schema`
+**only** (never the verifier), so it is mechanically incapable of reaching the
+verdict path.

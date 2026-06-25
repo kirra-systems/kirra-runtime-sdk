@@ -11,6 +11,19 @@ governor bounds BOTH axes; this harness only proposes and records.
   KIRRA_VERIFIER_URL=http://localhost:8090 KIRRA_ADMIN_TOKEN=test-token \
     python3 scripts/governor_drive_session.py [ticks] [out.jsonl]
 
+Besides the human-readable divergence log (`out.jsonl`), it ALSO emits the two
+files `kirra-collector` joins into a supervised dataset:
+  - `<out>.capture.jsonl` — one `kirra_capture_schema::CaptureRecord` per tick
+    (the governor's correction: ALLOW / CLAMP_LINEAR / CLAMP_STEERING / DENY).
+  - `<out>.bag.json`       — the matching bus recording (a JSON array of
+    `BusMessage`, the doer-side proposal stamp the record joins against).
+Feed them straight into the collector:
+  cargo run -p kirra-collector -- \
+    --capture <out>.capture.jsonl --bag-json <out>.bag.json \
+    --out dataset/ --window-ms 100
+The capture crate (`kirra-capture-schema`) is the ONLY shared dependency — the
+collector never links the verifier, so it cannot reach the verdict path.
+
 To graduate to CARLA: replace `KinematicEgo` reads/writes with CARLA actor
 state + `apply_control`, and replace `Doer.propose` with your planner / ROS 2
 bridge. The governor call and the capture stay identical.
@@ -75,18 +88,54 @@ class Doer:
         }
 
 
+def capture_record(tick, t_wall_ms, proposed, action, enf_v, enf_steer, resp):
+    """Map one governor decision onto the `kirra_capture_schema::CaptureRecord`
+    wire shape (SCREAMING_SNAKE outcome; `safe_value` carries the clamped value)."""
+    if action == "ClampLinear":
+        outcome, safe_value, deny_code = "CLAMP_LINEAR", enf_v, None
+    elif action == "ClampSteering":
+        outcome, safe_value, deny_code = "CLAMP_STEERING", enf_steer, None
+    elif action == "DenyBreach":
+        outcome, safe_value, deny_code = "DENY", None, resp.get("deny_code") or resp.get("reason")
+    else:  # "Allow"
+        outcome, safe_value, deny_code = "ALLOW", None, None
+    return {
+        "decision_seq": tick,
+        "t_mono_ns": t_wall_ms * 1_000_000,
+        "t_wall_ms": t_wall_ms,
+        "source": "COMMAND_GATEWAY",
+        "proposed": {
+            "linear_velocity_mps": proposed["linear_velocity_mps"],
+            "current_velocity_mps": proposed["current_velocity_mps"],
+            "steering_angle_deg": proposed["steering_angle_deg"],
+            "current_steering_angle_deg": proposed["current_steering_angle_deg"],
+            "delta_time_s": proposed["delta_time_s"],
+        },
+        "outcome": outcome,
+        "deny_code": deny_code,
+        "safe_value": safe_value,
+        "mrc": bool(resp.get("mrc", False)),
+        "posture": "NOMINAL",
+        "derate_enabled": False,
+    }
+
+
 def main():
     url = os.environ.get("KIRRA_VERIFIER_URL", "http://localhost:8090")
     token = os.environ.get("KIRRA_ADMIN_TOKEN", "test-token")
     ticks = int(sys.argv[1]) if len(sys.argv) > 1 else 120
     out_path = sys.argv[2] if len(sys.argv) > 2 else "drive_session.jsonl"
+    base = out_path[:-6] if out_path.endswith(".jsonl") else out_path
+    capture_path, bag_path = base + ".capture.jsonl", base + ".bag.json"
     dt = 0.05  # 20 Hz
+    doer_version = "occy-drive-demo"
 
     gov, ego, doer = Governor(url, token), KinematicEgo(), Doer()
     interventions = 0
     sum_dv = sum_dsteer = max_dv = 0.0
+    bus = []  # the matching bus recording (one BusMessage per emitted record)
 
-    with open(out_path, "w") as sink:
+    with open(out_path, "w") as sink, open(capture_path, "w") as cap:
         for tick in range(ticks):
             proposed = doer.propose(tick, ego, dt)
             try:
@@ -118,14 +167,34 @@ def main():
                 "divergence": {"dv": round(dv, 3), "dsteer": round(dsteer, 3)},
             }) + "\n")
 
+            # The supervised-dataset pair: the CaptureRecord (what KIRRA corrected)
+            # + the BusMessage it joins against (the doer-side proposal, same stamp).
+            t_wall_ms = tick * int(dt * 1000)
+            cap.write(json.dumps(capture_record(tick, t_wall_ms, proposed, action, enf_v, enf_steer, resp)) + "\n")
+            bus.append({
+                "t_wall_ms": t_wall_ms,
+                "doer_version": doer_version,
+                "asset_id": "ego",
+                "trajectory_id": tick,
+                "objects_ms": t_wall_ms,
+                "bulk_ref": f"mem://drive#{tick}",
+            })
+
+    with open(bag_path, "w") as bag:
+        json.dump(bus, bag)
+
     n = max(ticks, 1)
     print(f"=== Governor drive-session scorecard ({ticks} ticks @ {1/dt:.0f} Hz) ===")
     print(f"  log:                 {out_path}")
+    print(f"  capture (collector): {capture_path}")
+    print(f"  bus    (collector):  {bag_path}")
     print(f"  intervention rate:   {interventions}/{ticks}  ({100*interventions/n:.1f}%)")
     print(f"  mean |Δv| (clamp):   {sum_dv/n:.3f} m/s   (max {max_dv:.2f})")
     print(f"  mean |Δsteer|:       {sum_dsteer/n:.3f} deg")
     print(f"  ego advanced to x =  {ego.x:.1f} m   (final speed {ego.speed:.1f} m/s)")
     print("  → lower intervention rate / smaller Δ = a better-aligned DOER (tune the doer, not the envelope)")
+    print(f"  → feed the dataset: cargo run -p kirra-collector -- "
+          f"--capture {capture_path} --bag-json {bag_path} --out dataset/ --window-ms 100")
 
 
 if __name__ == "__main__":
