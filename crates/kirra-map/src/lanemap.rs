@@ -752,6 +752,54 @@ impl LaneGraph {
         Some(out)
     }
 
+    /// Like [`boundaries_relative_to`](Self::boundaries_relative_to), but **curve-correct**: the
+    /// lateral offsets are measured in the EGO's Frenet frame at its current station (the
+    /// projection of `ego_pos` onto the ego lane's centerline), not from each lane's GLOBAL
+    /// `mean_y`. On a straight lane the two agree; on a CURVING lane `mean_y` averages the whole
+    /// arc and mis-places a neighbor's boundary relative to where the ego actually is — which can
+    /// mis-gate a lateral maneuver (admit crossing a solid line, or block a legal cross). This
+    /// measures each boundary's signed perpendicular offset from the ego station along the local
+    /// lane normal, so the lane-line crossing rules see the boundary where it really is.
+    ///
+    /// Returns `None` if any id is unknown or the ego centerline is degenerate. The same
+    /// gently-curved / roughly-parallel-lanes assumption as the rest of the lane geometry applies
+    /// (the nearest-point projection approximates the Frenet lateral for parallel lanes).
+    #[must_use]
+    pub fn boundaries_relative_to_at(&self, ego_lane: u64, lane_ids: &[u64], ego_pos: Point) -> Option<Vec<LaneBoundary>> {
+        let ego = self.lanes.get(&ego_lane)?;
+        if ego.centerline.len() < 2 {
+            return None;
+        }
+        // Ego station: the projection of the ego onto its centerline, and the LEFT normal of the
+        // local tangent there (the Frenet lateral axis, +y to the ego's left).
+        let (seg, e) = project_onto_polyline(&ego.centerline, ego_pos);
+        let a = ego.centerline[seg];
+        let b = ego.centerline[seg + 1];
+        let (tx, ty) = (b.x_m - a.x_m, b.y_m - a.y_m);
+        let tlen = tx.hypot(ty).max(1e-9);
+        let (nx, ny) = (-ty / tlen, tx / tlen); // left normal
+
+        let lanes = self.resolve(lane_ids)?;
+        let mut out: Vec<LaneBoundary> = Vec::new();
+        for lane in lanes {
+            for (bd, line) in [
+                (offset_polyline(&lane.centerline, lane.half_width_m), lane.left_line),
+                (offset_polyline(&lane.centerline, -lane.half_width_m), lane.right_line),
+            ] {
+                if bd.len() < 2 {
+                    continue;
+                }
+                let (_, nearest) = project_onto_polyline(&bd, e);
+                // Signed lateral offset of the boundary from the ego station, along the ego normal.
+                let y = (nearest.x_m - e.x_m) * nx + (nearest.y_m - e.y_m) * ny;
+                if !out.iter().any(|x| (x.y_m - y).abs() <= 1e-6) {
+                    out.push(LaneBoundary { y_m: y, line });
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// Synthesize a two-lane **undivided** road from a single wide drivable
     /// `corridor` — the unmarked-road / dirt-road case. On a road with no painted
     /// centerline, perception (`kirra_taj`) reports
@@ -982,6 +1030,63 @@ mod tests {
         assert!(b.iter().any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
         assert!(b.iter().any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
         assert!(b.iter().any(|x| (x.y_m + 5.25).abs() < 1e-9 && x.line == LineType::Solid));
+    }
+
+    #[test]
+    fn boundaries_relative_to_at_matches_mean_y_on_a_straight_road() {
+        // Regression: on STRAIGHT lanes the curve-correct Frenet measurement reduces to the
+        // global mean_y version — same boundary set, so existing behavior is unchanged.
+        let g = two_lane_road();
+        let mut global = g.boundaries_relative_to(1, &[1, 2]).unwrap();
+        let mut local = g.boundaries_relative_to_at(1, &[1, 2], Point { x_m: 50.0, y_m: 0.0 }).unwrap();
+        let key = |b: &LaneBoundary| (b.y_m * 1e6).round() as i64;
+        global.sort_by_key(key);
+        local.sort_by_key(key);
+        assert_eq!(global.len(), local.len());
+        for (a, b) in global.iter().zip(local.iter()) {
+            assert!((a.y_m - b.y_m).abs() < 1e-6 && a.line == b.line, "straight parity: {a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn boundaries_relative_to_at_measures_perpendicular_on_a_curve() {
+        // A quarter-arc ego lane (half-width 2). At a mid-arc station the lane's OWN boundaries
+        // are at ±2 PERPENDICULAR to the curve — which the Frenet measurement recovers, where the
+        // global mean_y (averaging the whole arc) would not place them locally.
+        let arc = quarter_arc(0.0, 12.0, 12.0, -std::f64::consts::FRAC_PI_2, 12);
+        let g = LaneGraph::new().with_lane(Lane {
+            id: 1, centerline: arc, half_width_m: 2.0, left_line: LineType::Solid,
+            right_line: LineType::Broken, heading_rad: std::f64::consts::FRAC_PI_4, edges: Vec::new(), control: None,
+        });
+        // A point on the arc around 45° in: (12 cos(-π/4), 12 + 12 sin(-π/4)) ≈ (8.49, 3.51).
+        let bs = g.boundaries_relative_to_at(1, &[1], Point { x_m: 8.49, y_m: 3.51 }).unwrap();
+        assert_eq!(bs.len(), 2, "the lane's own two boundaries");
+        let left = bs.iter().find(|b| b.line == LineType::Solid).unwrap();
+        let right = bs.iter().find(|b| b.line == LineType::Broken).unwrap();
+        assert!((left.y_m - 2.0).abs() < 0.2, "left boundary ≈ +half_width perpendicular, got {}", left.y_m);
+        assert!((right.y_m + 2.0).abs() < 0.2, "right boundary ≈ -half_width perpendicular, got {}", right.y_m);
+    }
+
+    #[test]
+    fn boundaries_relative_to_at_corrects_a_neighbor_on_a_curve() {
+        // A curved ego lane and a concentric-outer neighbor (its centerline offset +4 along the
+        // normal). The Frenet measurement and the global mean_y version DISAGREE on the curve —
+        // the fix changes (corrects) the neighbor boundary placement that gates a lateral cross.
+        let arc = quarter_arc(0.0, 12.0, 12.0, -std::f64::consts::FRAC_PI_2, 12);
+        let neighbor_cl = offset_polyline(&arc, 4.0);
+        let g = LaneGraph::new()
+            .with_lane(Lane { id: 1, centerline: arc, half_width_m: 1.75, left_line: LineType::Broken, right_line: LineType::Solid, heading_rad: 0.0, edges: Vec::new(), control: None })
+            .with_lane(Lane { id: 2, centerline: neighbor_cl, half_width_m: 1.75, left_line: LineType::Solid, right_line: LineType::Broken, heading_rad: 0.0, edges: Vec::new(), control: None });
+        let ego = Point { x_m: 8.49, y_m: 3.51 };
+        let global = g.boundaries_relative_to(1, &[2]).unwrap();
+        let local = g.boundaries_relative_to_at(1, &[2], ego).unwrap();
+        // The neighbor's near boundary, measured perpendicular at the ego station, sits ~+2.25
+        // (4 − 1.75); the global mean_y average mis-places it. They must differ on the curve.
+        let differs = global.iter().zip(local.iter()).any(|(a, b)| (a.y_m - b.y_m).abs() > 0.5);
+        assert!(differs, "curve-correct ≠ global mean_y for a neighbor: global={global:?} local={local:?}");
+        // And the Frenet near-edge is the locally-correct ~2.25 m.
+        let near = local.iter().map(|b| b.y_m).fold(f64::INFINITY, f64::min);
+        assert!((near - 2.25).abs() < 0.4, "near neighbor edge ≈ 4 − half_width perpendicular, got {near}");
     }
 
     #[test]
