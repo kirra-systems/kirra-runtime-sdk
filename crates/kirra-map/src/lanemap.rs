@@ -319,13 +319,44 @@ pub struct LaneGraph {
     ///
     /// [`cedes_to_ego`]: Self::cedes_to_ego
     priority_over: BTreeMap<u64, BTreeSet<u64>>,
+    /// **Junction occlusion**: `approach lane → assured-clear sight distance (m)` toward the
+    /// junction's cross-traffic conflict. Populated from the map + perception (a building /
+    /// hedge / parked car limits the view at the approach). Drives the occluded-junction
+    /// approach speed cap so the ego CREEPS into a blind junction (RSS Rule 4 applied laterally
+    /// at the junction). A lane absent from this map has an open view (no occlusion cap).
+    occlusion_sight: BTreeMap<u64, f64>,
 }
 
 impl LaneGraph {
     /// An empty graph.
     #[must_use]
     pub fn new() -> Self {
-        Self { lanes: BTreeMap::new(), priority_over: BTreeMap::new() }
+        Self { lanes: BTreeMap::new(), priority_over: BTreeMap::new(), occlusion_sight: BTreeMap::new() }
+    }
+
+    /// Record that approach `lane` has limited cross-traffic visibility — `sight_distance_m` of
+    /// assured-clear sight toward the junction conflict (a blind corner). Drives the occluded-
+    /// approach speed cap. A non-finite / negative distance is ignored (fail-safe: treated as no
+    /// occlusion datum rather than a spurious 0-speed creep).
+    pub fn set_occluded_approach(&mut self, lane: u64, sight_distance_m: f64) {
+        if sight_distance_m.is_finite() && sight_distance_m >= 0.0 {
+            self.occlusion_sight.insert(lane, sight_distance_m);
+        }
+    }
+
+    /// Builder form of [`set_occluded_approach`](Self::set_occluded_approach).
+    #[must_use]
+    pub fn with_occluded_approach(mut self, lane: u64, sight_distance_m: f64) -> Self {
+        self.set_occluded_approach(lane, sight_distance_m);
+        self
+    }
+
+    /// The assured-clear sight distance (m) toward the junction conflict for `lane`, or `None`
+    /// if the approach has an open view (no occlusion datum). The source the occluded-approach
+    /// speed cap is derived from.
+    #[must_use]
+    pub fn sight_distance(&self, lane: u64) -> Option<f64> {
+        self.occlusion_sight.get(&lane).copied()
     }
 
     /// Record that `priority_lane` has right-of-way over `yielding_lane` — traffic in
@@ -1285,6 +1316,20 @@ mod tests {
         let in_l1 = [obj(9, 15.0, 0.0)];
         assert_eq!(g.non_yielding_to_ego(2, &in_l1), vec![9]);
         assert!(g.cedes_to_ego(2, &in_l1).is_empty());
+    }
+
+    #[test]
+    fn occluded_approach_sight_distance_round_trips_and_fails_safe() {
+        let g = LaneGraph::new()
+            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 2.0, LineType::Solid, LineType::Solid))
+            .with_occluded_approach(1, 6.0);
+        assert_eq!(g.sight_distance(1), Some(6.0), "the sight distance round-trips");
+        assert_eq!(g.sight_distance(2), None, "a lane with no datum has an open view");
+
+        // Non-finite / negative distances are ignored (no spurious occlusion datum).
+        let g2 = LaneGraph::new().with_occluded_approach(5, f64::NAN).with_occluded_approach(6, -3.0);
+        assert_eq!(g2.sight_distance(5), None, "NaN sight ignored (fail-safe)");
+        assert_eq!(g2.sight_distance(6), None, "negative sight ignored (fail-safe)");
     }
 
     #[test]

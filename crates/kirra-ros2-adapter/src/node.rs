@@ -46,6 +46,15 @@ use crate::state::{
 use crate::validation::{
     check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
 };
+use crate::prediction::slow_loop_modes;
+use crate::perception_redundancy::{
+    more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap, RedundancyConfig,
+};
+
+/// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
+/// planner's prediction horizon; the checker time-matches each sample to a trajectory pose).
+const SLOW_PRED_HORIZON_S: f64 = 3.0;
+const SLOW_PRED_DT_S: f64 = 0.5;
 // KIRRA-OCCY-PMON-003 slice-1: pure ingest orchestration (safety logic lives
 // in `perception_ingest` + the kernel; this node only forwards to them).
 use crate::perception_ingest::{perception_derate_enabled, publish_perception_tick};
@@ -209,6 +218,19 @@ pub async fn run_adapter(
         "~/input/objects",
         r2r::QosProfile::default(),
     )?;
+    // Redundant (channel-B) objects subscription — a SECOND, INDEPENDENT PredictedObjects topic
+    // (e.g. a camera-only world model vs the primary radar+lidar) feeding the True-Redundancy
+    // cross-check (gap #2b). Registered ONLY when the divergence monitor is enabled, so a
+    // deployment without redundancy adds no subscription. Remap `~/input/objects_secondary` to
+    // the redundant detector's topic in the launch file.
+    let obj_b_stream = if perception_redundancy_enabled() {
+        Some(node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
+            "~/input/objects_secondary",
+            r2r::QosProfile::default(),
+        )?)
+    } else {
+        None
+    };
     let _map_sub = node.subscribe_untyped(
         "~/input/map",
         "autoware_map_msgs/msg/LaneletMapBin",
@@ -325,6 +347,30 @@ pub async fn run_adapter(
         tracing::error!("objects subscription stream closed — staleness will fire fleet-wide");
     });
 
+    // Redundant (channel-B) objects drain — only spawned when the monitor is enabled and the
+    // subscription was registered above. Each message updates the secondary snapshot AND stamps
+    // its freshness (one call); the slow loop cross-checks it against the primary channel. If
+    // this stream closes (the redundant detector dies), channel B goes stale → the divergence
+    // monitor fails closed (redundancy lost), the intended fail-safe.
+    if let Some(obj_b_stream) = obj_b_stream {
+        let obj_state_b = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut s = obj_b_stream;
+            while let Some(msg) = s.next().await {
+                let now = now_ms_wall();
+                tracing::info!(
+                    target: "kirra::ingress",
+                    topic = "objects_secondary",
+                    stamp_ms = now,
+                    "subscription_callback"
+                );
+                let parsed = crate::parsing::parse_predicted_objects(&msg);
+                obj_state_b.update_objects_secondary(parsed, now);
+            }
+            tracing::error!("redundant objects subscription stream closed — divergence monitor will fail closed");
+        });
+    }
+
     let odom_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut s = odom_stream;
@@ -419,6 +465,49 @@ pub async fn run_adapter(
                 now_wall,
             );
 
+            // Perception-divergence assurance monitor (True-Redundancy analog, gap #2b) — now
+            // LIVE: cross-check the primary perception channel against the optional redundant
+            // channel B. A divergence (a phantom/missed object, or a speed mismatch), OR a
+            // configured-but-silent channel B (redundancy LOST), maps to an MRC-floor cap that
+            // composes into the SAME Track-C derate (`apply_perception_cap`) — a controlled stop
+            // with no change to the WCET-critical per-pose checker. Disabled (no channel B
+            // configured) → no-op, byte-identical prior behaviour.
+            let objects_b = slow_state.snapshot_objects_secondary();
+            let objects_b_ms =
+                slow_state.last_objects_b_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let objects_b_fresh = objects_b_ms != 0
+                && now_wall.saturating_sub(objects_b_ms) <= subscription_staleness_timeout_ms();
+            let redundancy_cap = resolve_redundancy_cap(
+                perception_redundancy_enabled(),
+                &objects,
+                &objects_b,
+                objects_b_fresh,
+                RedundancyConfig::default(),
+            );
+            // The more-restrictive of the Track-C derate cap and the divergence cap binds.
+            let effective_perception_cap =
+                more_restrictive_cap(effective_perception_cap, redundancy_cap);
+
+            // Multi-modal predictive RSS (gap #3) — roll the live objects into PredictedMode
+            // hypotheses for the checker's predictive pass. The tracker's per-object yaw estimate
+            // (the SAME CTRV estimate the planner consumes as MotionState) is read from the yaw
+            // channel and, when FRESH, adds a CTRV turn-in mode alongside CV — genuinely
+            // multi-modal. A stale / unconfigured yaw feed degrades to CV-only (the CV mode +
+            // snapshot RSS still bound the object); it is dropped, not trusted, never a fault.
+            let object_yaw_rates = slow_state.snapshot_object_yaw_rates();
+            let object_yaw_ms =
+                slow_state.last_object_yaw_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let object_yaw_fresh = object_yaw_ms != 0
+                && now_wall.saturating_sub(object_yaw_ms) <= subscription_staleness_timeout_ms();
+            let predicted_owned = slow_loop_modes(
+                &objects,
+                &object_yaw_rates,
+                object_yaw_fresh,
+                SLOW_PRED_HORIZON_S,
+                SLOW_PRED_DT_S,
+            );
+            let predicted_modes: Vec<_> = predicted_owned.iter().map(|m| m.as_mode()).collect();
+
             let verdict = validate_trajectory_slow_capped(
                 &traj.points,
                 slow_corridor.as_ref(),
@@ -431,9 +520,11 @@ pub async fn run_adapter(
                 // does not yet supply a visibility range → None (no-op), mirroring
                 // the perception-derate cap's pre-wiring state.
                 None,
-                // Multi-modal predictive RSS: prediction does not yet supply per-object
-                // modes here → None (no-op); the snapshot RSS remains the bound.
-                None,
+                // Multi-modal predictive RSS (gap #3) — LIVE: the CV (and, when the tracker yaw
+                // feed is fresh, CTRV) modes rolled from the live objects above. The checker
+                // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in
+                // breaches even though the snapshot showed the object laterally clear.
+                Some(&predicted_modes),
                 // Frame/localization integrity (S-FI1): the LIVE frame trust resolved from the
                 // integrator's per-tick `update_frame_integrity` report. With no source wired
                 // this returns `Trusted` — the AOU-LOCALIZATION-001 seam (byte-for-byte the

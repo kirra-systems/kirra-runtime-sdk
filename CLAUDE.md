@@ -2,11 +2,12 @@
 
 ## Project Identity
 
-- **Crate**: `kirra-verifier` (lib ident `kirra_verifier`; lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`). Renamed from `kirra-runtime-sdk` once nothing lean depended on it (the GitHub repo remains `kirra-runtime-sdk`).
+- **Workspace**: a Cargo workspace. The ROOT member is the **`kirra-verifier`** crate (the fleet-legitimacy engine + governor service, documented in the bulk of this file). The **doer-checker / planning / perception** side lives under `crates/*` (see **Workspace Crates** below). `parko/` is a **separate** workspace (the ML + diverse-governor side). Most AV/Occy work happens in `crates/kirra-planner`, `kirra-map`, `kirra-taj`, `kirra-ros2-adapter`, and `parko/`.
+- **Root crate**: `kirra-verifier` (lib ident `kirra_verifier`; lib + bin dual-crate, `crate-type = ["rlib", "cdylib"]`). Renamed from `kirra-runtime-sdk` once nothing lean depended on it (the GitHub repo remains `kirra-runtime-sdk`).
 - **Edition**: 2021
 - **Primary binary**: `kirra_verifier_service` (`src/bin/kirra_verifier_service.rs`)
 - **Secondary binary**: `kirra_carla_client` (`src/bin/kirra_carla_client.rs`)
-- **Test suite**: `cargo test`
+- **Test suite**: `cargo test` (root). For a scoped crate use `cargo test -p <crate>`. `parko/` is its own workspace: `cd parko && cargo test`. The `kirra-ros2-adapter` `node.rs` is `#[cfg(feature = "ros2")]` and needs a sourced ROS 2 toolchain (`r2r`) — it is built ONLY by CI's `ros2 adapter build (--features ros2)` job, never by a default build.
 - **Remote**: `kirra-systems/kirra-runtime-sdk`
 - **Repo root in prompts**: use `~/kirra-runtime-sdk` (not `/home/user/...` or `/home/user/aegis`)
 
@@ -157,6 +158,72 @@ src/
 | `trusted_federation_controllers` | Ed25519 public key registry |
 | `federation_report_nonces` | Burned nonces (replay prevention) |
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
+
+---
+
+## Workspace Crates — the doer-checker / planning / perception side
+
+Everything above documents the **`kirra-verifier`** root crate. The AV/Occy stack lives in
+sibling crates. The load-bearing thesis: **a planner (the DOER) PROPOSES a trajectory; KIRRA
+(the CHECKER) BOUNDS it.** The doer is swappable (geometric, learned, LLM-driven) and is never
+trusted for safety; the checker is the invariant.
+
+| Crate | Role |
+|-------|------|
+| `crates/kirra-core` | Lean shared types (no heavy deps): `corridor` (`CorridorSource`, `Point`, `MockCorridorSource`), `trajectory` (`PerceivedObject`, `Pose`, `TrajectoryPoint`, `TrajectoryVerdict`), `containment` (`MAX_TRAJECTORY_HORIZON`), `FleetPosture`, `kinematics_sim`, `capture`, `perception_monitor`, `KirraKernelGovernor`. Almost everything else depends on this, NOT on the heavy adapter. |
+| `crates/kirra-ros2-adapter` | **The #131 Option-B CHECKER + ROS 2 node.** `validation.rs` — `validate_trajectory_slow` / `validate_trajectory_slow_capped`: containment + per-pose kinematics + **RSS** (the §4 conjunction: danger needs BOTH longitudinal AND lateral unsafe) + **occlusion (RSS Rule 4)** + **multi-modal predictive RSS** (`predictive_rss_breach` over `PredictedMode`s). `prediction.rs` — the multi-modal **mode producer** (`predicted_modes_from_objects` / `slow_loop_modes`: CV always, CTRV when a tracker yaw is fresh). `perception_redundancy.rs` — the True-Redundancy `cross_check` + `resolve_redundancy_cap`. `state.rs` — `AdaptorState` (primary + secondary object channels, yaw channel). `node.rs` (**ros2-gated**) — slow/fast dual-rate loops, subscriptions. |
+| `crates/kirra-planner` | **Occy, the geometric DOER + the Mick intent seam.** `GeometricPlanner` / `Planner` trait / `PlanInput` / `PlanOutput`. `mick.rs` — `plan_for_intent` grounds a `MickIntent` (`GoTo` / `LaneChange` / `Cruise` / `Overtake` / `PullOver` / `TurnAt` / **`RouteTo`** multi-junction). `learned.rs` — `LearnedPlanner` (speed-only Hydra-MDP) + **`LearnedManeuverPlanner`** (2-D lateral×speed vocabulary, routes around). `behavior.rs` — `TrafficControl` (signs/signals + **`OccludedApproach`** speed cap). `fast_loop.rs`, `mick_llm.rs`, `mick_capture.rs`. |
+| `crates/kirra-map` | **Lanelet2-lite lane graph** (`kirra_map::lanemap`). `LaneGraph` (`route` Dijkstra, `route_corridor` / `route_drivable` stitch a multi-junction corridor, `route_to_point`, right-of-way / `junction_context`, **occlusion `sight_distance`**), `Lane`, `LaneCorridor`, `LineType` / `lane_lines`. Re-exported by `kirra-planner`. |
+| `crates/kirra-taj` | **Taj, the R2 perception layer (ADR-0015).** Phase-A geometric corridor/objects from lidar; Phase-B semantic fusion (`clip_corridor_to_hazards` / `binding_hazard` / `hazard_clip_x` — water/obstacle hazards tighten the corridor); **`SemanticEvalSummary`** — the safety-weighted perception eval harness (`UnsafeMiss` / `OverConservative` / `Correct`, `hazard_recall`). |
+| `crates/kirra-mick` | Mick examples / eval harness binaries (`mick_intersection`, `mick_eval`). |
+| `crates/kirra-fleet-transport` | Zenoh-backed fleet transport (ADR-0007). |
+| `crates/kirra-governor-service`, `kirra-proposal-bench`, `kirra-wire-client` | Two-box prototype tools (UDP governor + proposal sweep + shared wire mirror; ADR-0001). |
+| `crates/kirra-capture-schema`, `kirra-collector` | Governor-correction capture wire schema + collector (supervised-learning data path). |
+| `parko/` (separate workspace) | **The ML + diverse-governor side.** `parko-core` (`SafetyGovernor` trait, `SafetyPosture` with `escalate()`, RSS, `InferenceLoop` scheduler, `detector`), `parko-kirra` (`KirraGovernor`, `GovernorComparator` — two diverse governors, divergence accumulator → `recommended_posture()`), `parko-ros2` (`run_pipeline_tick` — divergence escalates the effective posture), `parko-onnx`/`parko-openvino`/`parko-tensorrt` (inference backends, hardware/CI-gated). |
+
+### Doer-checker key algorithms (planner / checker side)
+
+**RSS §4 conjunction** (`validate_trajectory_slow`): a collision needs the object unsafe
+LONGITUDINALLY **and** LATERALLY at once. The lateral side-RSS fires only when abreast
+(`lon_unsafe`) OR the object is closing laterally (a cut-in). This admits a safe stationary
+queue / a stopped lead the ego halts behind (was over-rejected by the reaction-time swerve term).
+
+**Multi-modal predictive RSS** (gap #3, LIVE): the snapshot RSS evaluates an object at its
+CURRENT position; the predictive pass rolls each `PredictedMode` forward in TIME and checks the
+time-matched ego pose — catching a cut-in / turn-in the snapshot filtered as laterally clear.
+Worst-case over modes (one dangerous hypothesis refuses). Producer: `predicted_modes_from_objects`
+(CV always; CTRV when the tracker yaw feed is fresh — stale yaw degrades to CV-only, not a fault).
+
+**Perception-divergence monitor** (gap #2b, True-Redundancy, LIVE): `cross_check` requires two
+independent perception channels to AGREE; a divergence (phantom / miss / speed mismatch) OR a
+silent secondary (redundancy lost) → `resolve_redundancy_cap` → `Some(0.0)` MRC-floor cap,
+composed into the Track-C `apply_perception_cap` derate. Env-gated (`KIRRA_PERCEPTION_REDUNDANCY_ENABLED`).
+
+**Occlusion-aware speed bound at junctions** (gap #1): `behavior::OccludedApproach` caps the
+approach speed to the assured-clear-distance speed (RSS Rule 4) for the junction's sight distance,
+so the ego CREEPS into a blind junction. Sight distance carried per approach-lane on `LaneGraph`.
+
+**Multi-junction routing** (`MickIntent::RouteTo`): resolve ego + destination lanes, `route_to_point`
+(Dijkstra picks the turn at each junction), materialize the stitched `route_corridor`, follow it.
+Re-resolved from the ego pose each tick (receding horizon). KIRRA bounds the corridor.
+
+**Learned doer** (`learned.rs`): a fixed trajectory vocabulary scored by a seeded-ES-fit MLP,
+distilled from a `Teacher` (`SafetyAware` vs `ProgressOnly`). `LearnedManeuverPlanner` adds a 2-D
+(lateral offset × speed) vocabulary so the net can ROUTE AROUND — KIRRA admits a band-clearing
+pass that fits the corridor, rejects one that doesn't or a misaligned straight-through.
+
+### Doer-checker invariants (NEVER violate)
+
+- The planner only **PROPOSES**; the checker (`validate_trajectory_slow*`) is the sole safety
+  authority. A planner change must keep its nominal output **checker-admissible**.
+- `PlanOutput::safe_stop` (the always-available MRC proposal) must always exist — a planner with
+  no stop output deadlocks the loop.
+- The RSS §4 **conjunction** (lateral fires only on abreast-OR-cut-in) must not regress to
+  lateral-on-proximity-alone (it over-rejects safe stationary objects).
+- New predictive bounds (occlusion, multi-modal, divergence) are **derate-only / fail-closed**:
+  absent input → no-op (byte-identical Nominal WCET path); a fault → an MRC-floor cap via
+  `apply_perception_cap`, never a relaxation. The WCET-critical per-pose `validate_vehicle_command`
+  path is UNCHANGED.
 
 ---
 
@@ -338,6 +405,12 @@ proptest = "1"  # dev-dependency
 | `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |
 | `KIRRA_FABRIC_ASSET_ID` | No | — | Local fabric asset id fed by the verifier→fabric posture feed (#88). Unset/empty → feed inert (asset keeps its `Degraded` registration seed) |
+
+**`kirra-ros2-adapter` slow-loop env gates** (consumed in `node.rs`, opt-in, default off →
+byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),
+`KIRRA_PERCEPTION_REDUNDANCY_ENABLED` (the True-Redundancy divergence monitor — enables the
+`~/input/objects_secondary` channel-B subscription; enabled-but-silent-B → fail closed),
+`KIRRA_SUBSCRIPTION_STALENESS_MS` (subscription/channel freshness budget).
 
 ---
 

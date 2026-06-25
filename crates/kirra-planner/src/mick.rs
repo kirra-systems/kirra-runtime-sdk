@@ -97,6 +97,21 @@ pub enum MickIntent {
     /// bounds the route corridor exactly as it bounds any corridor (a too-tight turn is
     /// refused).
     TurnAt { direction: TurnDirection },
+    /// Drive to a **world-frame destination across as many junctions as it takes** — the
+    /// multi-junction sibling of [`TurnAt`] (one junction) and [`GoTo`] (geometry, no
+    /// topology). Honored only if a `lane_graph` is supplied, the ego resolves to a lane,
+    /// the destination point resolves to a lane, and a route connects them: grounding plans
+    /// the lane-id route ([`LaneGraph::route_to_point`], Dijkstra — it takes the correct
+    /// turn at *each* junction and changes lane only when the route requires it),
+    /// materializes that whole route's corridor ([`LaneGraph::route_corridor`], which curves
+    /// through every junction on the way), and follows it toward the destination. No graph /
+    /// ego off-map / destination off-map / unreachable → fail-closed HOLD. The planner only
+    /// PROPOSES along the route; KIRRA bounds the materialized corridor exactly as it bounds
+    /// any other (a too-tight turn anywhere on the route is refused). The route is re-planned
+    /// each tick, so it is robust to the ego being nudged between lanes (receding horizon).
+    ///
+    /// [`GoTo`]: MickIntent::GoTo
+    RouteTo { x_m: f64, y_m: f64 },
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -118,6 +133,8 @@ enum IntentJson {
     PullOver,
     #[serde(rename = "turn_at")]
     TurnAt { direction: String },
+    #[serde(rename = "route_to")]
+    RouteTo { x_m: f64, y_m: f64 },
 }
 
 impl MickIntent {
@@ -152,6 +169,7 @@ impl MickIntent {
                 };
                 MickIntent::TurnAt { direction: dir }
             }
+            IntentJson::RouteTo { x_m, y_m } => MickIntent::RouteTo { x_m, y_m },
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -168,6 +186,7 @@ impl MickIntent {
             MickIntent::Overtake => true,
             MickIntent::PullOver => true,
             MickIntent::TurnAt { .. } => true,
+            MickIntent::RouteTo { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
         }
     }
 }
@@ -311,40 +330,95 @@ pub fn plan_for_intent(
             let Some(route) = turn_route(graph, ego_lane, direction) else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            let Some(corridor) = graph.route_corridor(&route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
-            else {
+            // Follow the turn's route corridor; the goal is unchanged (the turn drives toward
+            // whatever the world goal already is). KIRRA bounds it like any corridor.
+            plan_along_route(planner, world, graph, ego_lane, &route, world.goal)
+        }
+        MickIntent::RouteTo { x_m, y_m } => {
+            // Multi-junction routing: resolve ego + destination lanes and plan the lane-id
+            // route between them, FAIL-CLOSED at every step (no graph / ego off-map /
+            // destination off-map / unreachable → HOLD). `route_to_point` (Dijkstra) takes
+            // the correct turn at EACH junction; `plan_along_route` materializes that whole
+            // route's corridor (curving through every junction) and follows it. KIRRA bounds
+            // the corridor exactly as it bounds a single-junction turn.
+            if !x_m.is_finite() || !y_m.is_finite() {
+                return PlanOutput::safe_stop(world.ego.pose);
+            }
+            let Some(graph) = world.lane_graph else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            // Widen the turn: the route's full width (route + lateral neighbors) is the
-            // `drivable` area a route-around / lane-change may borrow WITHIN the turn, and the
-            // typed lines over the ego lane + its neighbors gate that lateral move. Only when
-            // the integrator didn't supply them; `None`/empty → the single-lane turn-follow.
-            let drivable = if world.drivable.is_none() {
-                graph.route_drivable(&route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
-            } else {
-                None
+            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            let Some(ego_lane) = graph.lane_at(ego_pt) else {
+                return PlanOutput::safe_stop(world.ego.pose);
             };
-            let lane = graph.lane(ego_lane);
-            let neighbors: Vec<u64> = std::iter::once(ego_lane)
-                .chain(lane.and_then(Lane::left_neighbor))
-                .chain(lane.and_then(Lane::right_neighbor))
-                .collect();
-            let boundaries = if world.lane_boundaries.is_empty() {
-                graph.boundaries_relative_to(ego_lane, &neighbors)
-            } else {
-                None
+            let Some(route) = graph.route_to_point(ego_lane, MapPoint { x_m, y_m }) else {
+                return PlanOutput::safe_stop(world.ego.pose);
             };
-            planner.plan(&PlanInput {
-                map: &corridor,
-                drivable: drivable
-                    .as_ref()
-                    .map(|d| d as &dyn CorridorSource)
-                    .or(world.drivable),
-                lane_boundaries: boundaries.as_deref().unwrap_or(world.lane_boundaries),
-                ..world.clone()
-            })
+            // Drive toward the destination point (world frame), keeping the world's heading
+            // reference — the same goal override `GoTo` uses, but along the routed corridor.
+            let goal = Goal {
+                target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad },
+            };
+            plan_along_route(planner, world, graph, ego_lane, &route, goal)
         }
     }
+}
+
+/// Materialize a lane-id `route` into its drivable corridor and plan along it toward `goal`.
+/// The shared grounding behind the single-junction [`MickIntent::TurnAt`] and the
+/// multi-junction [`MickIntent::RouteTo`]: both reduce to "follow THIS route's corridor",
+/// differing only in how the route is chosen and whether the goal is overridden.
+///
+/// Materializes three map-derived inputs (each only when the integrator didn't hand-supply
+/// the corresponding field, so an explicit input is never overridden):
+/// * the reference corridor ([`LaneGraph::route_corridor`]) the path follows — `map`;
+/// * the widened drivable area ([`LaneGraph::route_drivable`]) a route-around / lane-change
+///   may borrow within a turn — `drivable`;
+/// * the typed lane boundaries over the ego lane + its lateral neighbors — `lane_boundaries`.
+///
+/// **Fail-closed:** a degenerate route corridor (`route_corridor` → `None`) HOLDs. KIRRA
+/// bounds the materialized corridor regardless — the planner only PROPOSES along it.
+fn plan_along_route(
+    planner: &mut impl Planner,
+    world: &PlanInput,
+    graph: &LaneGraph,
+    ego_lane: u64,
+    route: &[u64],
+    goal: Goal,
+) -> PlanOutput {
+    let Some(corridor) = graph.route_corridor(route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
+    else {
+        return PlanOutput::safe_stop(world.ego.pose);
+    };
+    // Widen the route: its full width (route + lateral neighbors) is the `drivable` area a
+    // route-around / lane-change may borrow WITHIN the route, and the typed lines over the ego
+    // lane + its neighbors gate that lateral move. Only when the integrator didn't supply them;
+    // `None`/empty → the single-lane route-follow.
+    let drivable = if world.drivable.is_none() {
+        graph.route_drivable(route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
+    } else {
+        None
+    };
+    let lane = graph.lane(ego_lane);
+    let neighbors: Vec<u64> = std::iter::once(ego_lane)
+        .chain(lane.and_then(Lane::left_neighbor))
+        .chain(lane.and_then(Lane::right_neighbor))
+        .collect();
+    let boundaries = if world.lane_boundaries.is_empty() {
+        graph.boundaries_relative_to(ego_lane, &neighbors)
+    } else {
+        None
+    };
+    planner.plan(&PlanInput {
+        goal,
+        map: &corridor,
+        drivable: drivable
+            .as_ref()
+            .map(|d| d as &dyn CorridorSource)
+            .or(world.drivable),
+        lane_boundaries: boundaries.as_deref().unwrap_or(world.lane_boundaries),
+        ..world.clone()
+    })
 }
 
 /// Map-server health stamped on a route corridor materialized for a `TurnAt`: fresh and
@@ -395,31 +469,43 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
     let Some(lane_id) = graph.lane_at(MapPoint { x_m: ego.x_m, y_m: ego.y_m }) else {
         return Vec::new();
     };
-    let Some(control) = graph.lane(lane_id).and_then(|l| l.control.map(|c| (c, l.stop_line_x()))) else {
-        return Vec::new();
-    };
-    let (control, line_x) = control;
-    let tc = match control {
-        LaneControl::Yield => TrafficControl::YieldSign { line_x_m: line_x },
-        LaneControl::Stop => {
-            let dist = line_x - ego.x_m;
-            let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
-                && dist > 0.0
-                && dist < STOP_SATISFIED_DIST_M;
-            TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
-        }
-        LaneControl::TrafficLight => {
-            // Live signal state for the governed (ego) lane — fail-closed to RED when the
-            // perception/V2X feed has no entry, so an unknown light HOLDS rather than runs it.
-            let state = world
-                .signal_states
-                .iter()
-                .find(|(id, _)| *id == lane_id)
-                .map_or(SignalState::Red, |(_, s)| *s);
-            TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
-        }
-    };
-    vec![tc]
+    let lane = graph.lane(lane_id);
+    let mut out: Vec<TrafficControl> = Vec::new();
+
+    // Regulatory sign / signal at the lane terminus (its junction approach).
+    if let Some((control, line_x)) = lane.and_then(|l| l.control.map(|c| (c, l.stop_line_x()))) {
+        out.push(match control {
+            LaneControl::Yield => TrafficControl::YieldSign { line_x_m: line_x },
+            LaneControl::Stop => {
+                let dist = line_x - ego.x_m;
+                let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
+                    && dist > 0.0
+                    && dist < STOP_SATISFIED_DIST_M;
+                TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
+            }
+            LaneControl::TrafficLight => {
+                // Live signal state for the governed (ego) lane — fail-closed to RED when the
+                // perception/V2X feed has no entry, so an unknown light HOLDS rather than runs it.
+                let state = world
+                    .signal_states
+                    .iter()
+                    .find(|(id, _)| *id == lane_id)
+                    .map_or(SignalState::Red, |(_, s)| *s);
+                TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
+            }
+        });
+    }
+
+    // Occluded junction approach: if the ego lane has limited cross-traffic visibility, derive
+    // the assured-clear-distance speed cap toward its terminus (the conflict line) so the ego
+    // creeps into the blind junction (RSS Rule 4). Composes with any sign control above (a blind
+    // STOP/YIELD approach gets both the stop/yield line AND the creep cap). A lane with an open
+    // view contributes nothing.
+    if let (Some(sight), Some(conflict_x)) = (graph.sight_distance(lane_id), lane.map(Lane::stop_line_x)) {
+        out.push(TrafficControl::OccludedApproach { conflict_line_x_m: conflict_x, sight_distance_m: sight });
+    }
+
+    out
 }
 
 /// Pick the ego lane's successor that turns `direction` (successor-by-heading): the matching
@@ -1283,6 +1369,141 @@ mod tests {
         assert_eq!(plan.kind, crate::ProposalKind::Motion, "mid-arc TurnAt continues the turn, not a HOLD");
         let max_y = plan.trajectory.iter().map(|p| p.pose.y_m).fold(f64::MIN, f64::max);
         assert!(max_y > 5.0, "the continued turn climbs the arc toward the exit (y≈12), got max_y {max_y}");
+    }
+
+    // ----- the RouteTo intent (multi-junction routing) -----
+
+    /// A planner that records the reference corridor (`map`) it was grounded with — so a test
+    /// can assert that `RouteTo` materialized the WHOLE multi-junction route's corridor (it
+    /// curves up into the final exit lane), not just the ego's current straight lane.
+    struct MapRecorder {
+        left_last: Option<MapPoint>,
+        left_len: usize,
+    }
+    impl Planner for MapRecorder {
+        fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
+            let lb = input.map.left_boundary();
+            self.left_len = lb.len();
+            self.left_last = lb.last().copied();
+            PlanOutput::safe_stop(input.ego.pose)
+        }
+    }
+
+    /// A quarter-circle arc (n+1 points) sweeping `sweep` rad (±π/2) from `start_angle` about
+    /// `(cx, cy)` at radius `r` — a smooth turn centerline (+ = CCW/left, − = CW/right).
+    fn quarter_arc(cx: f64, cy: f64, r: f64, start_angle: f64, sweep: f64, n: usize) -> Vec<MapPoint> {
+        (0..=n)
+            .map(|i| {
+                let t = start_angle + sweep * (i as f64 / n as f64);
+                MapPoint { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+            })
+            .collect()
+    }
+
+    /// A **two-junction** route: straight east (1) → LEFT arc (2) → straight north (3) → RIGHT
+    /// arc (4) → straight east (5). Lane 1 also carries a DECOY right branch (6, a dead-end
+    /// south) so reaching the destination genuinely requires the router to pick the correct
+    /// branch at the first junction. Lanes are 3 m half-width (the turning footprint stays
+    /// contained, cf. the closed-loop turn test); arcs use r = 12.
+    fn two_junction_route() -> crate::LaneGraph {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let r = 12.0;
+        // J1: left arc (CCW), centre (30,12), θ −π/2→0: (30,0)→(42,12), east→north.
+        let arc_left = quarter_arc(30.0, 12.0, r, -FRAC_PI_2, FRAC_PI_2, 12);
+        // J2: right arc (CW), centre (54,40), θ π→π/2: (42,40)→(54,52), north→east.
+        let arc_right = quarter_arc(54.0, 40.0, r, PI, -FRAC_PI_2, 12);
+        let lane = |id, cl: Vec<MapPoint>, heading, succ: &[u64]| crate::Lane {
+            id,
+            centerline: cl,
+            half_width_m: 3.0,
+            left_line: crate::LineType::Solid,
+            right_line: crate::LineType::Solid,
+            heading_rad: heading,
+            edges: succ.iter().map(|&to| crate::LaneEdge::Successor { to }).collect(),
+            control: None,
+        };
+        crate::LaneGraph::new()
+            .with_lane(lane(1, vec![MapPoint { x_m: 0.0, y_m: 0.0 }, MapPoint { x_m: 30.0, y_m: 0.0 }], 0.0, &[2, 6]))
+            .with_lane(lane(2, arc_left, FRAC_PI_4, &[3]))
+            .with_lane(lane(3, vec![MapPoint { x_m: 42.0, y_m: 12.0 }, MapPoint { x_m: 42.0, y_m: 40.0 }], FRAC_PI_2, &[4]))
+            .with_lane(lane(4, arc_right, FRAC_PI_4, &[5]))
+            .with_lane(lane(5, vec![MapPoint { x_m: 54.0, y_m: 52.0 }, MapPoint { x_m: 80.0, y_m: 52.0 }], 0.0, &[]))
+            // Decoy: a right branch off lane 1 heading south, dead-ending (never reaches 5).
+            .with_lane(lane(6, vec![MapPoint { x_m: 30.0, y_m: 0.0 }, MapPoint { x_m: 30.0, y_m: -20.0 }], -FRAC_PI_2, &[]))
+    }
+
+    #[test]
+    fn route_to_llm_json_parses_and_fails_closed_on_nonfinite() {
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"route_to","x_m":72.0,"y_m":52.0}"#).unwrap(),
+            MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }
+        );
+        // A hallucinated non-finite destination must fail closed (caller HOLDs), never flow in.
+        assert!(MickIntent::from_llm_json(r#"{"intent":"route_to","x_m":1e400,"y_m":0.0}"#).is_err());
+        assert!(MickIntent::from_llm_json(r#"{"intent":"route_to","y_m":0.0}"#).is_err(), "missing field fails closed");
+    }
+
+    #[test]
+    fn route_to_grounds_a_multi_junction_route_following_the_stitched_corridor() {
+        // The router must pick the LEFT branch at J1 (over the decoy) to reach the destination
+        // in lane 5, then the route corridor stitches BOTH turns into one materialized handle.
+        let g = two_junction_route();
+        assert_eq!(g.route_to_point(1, Point { x_m: 72.0, y_m: 52.0 }), Some(vec![1, 2, 3, 4, 5]),
+            "routing selects the correct branch at each junction across both turns");
+
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let ego = EgoState {
+            pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 },
+            linear_x_mps: 4.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        };
+        let w = PlanInput { ego, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+
+        // The corridor the planner is grounded with is the WHOLE route's, curving through both
+        // junctions up into the final east-bound exit lane (its far end sits at y≈52, x≈80) —
+        // not the flat world corridor (which would end at y≈0). That is the multi-junction stitch.
+        let mut rec = MapRecorder { left_last: None, left_len: 0 };
+        let _ = plan_for_intent(&mut rec, &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &w);
+        let last = rec.left_last.expect("the route corridor was materialized and grounded");
+        assert!(last.y_m > 45.0, "the stitched corridor climbs through both junctions into lane 5 (y≈52), got y={}", last.y_m);
+        assert!(last.x_m > 60.0, "and reaches east along the final exit lane, got x={}", last.x_m);
+
+        // And a real planner produces a MOTION plan along it (not a fail-closed HOLD).
+        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &w);
+        assert_eq!(plan.kind, crate::ProposalKind::Motion, "RouteTo grounds a motion plan along the route");
+    }
+
+    #[test]
+    fn route_to_fails_closed_when_it_cannot_route() {
+        let g = two_junction_route();
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let on_map = EgoState {
+            pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 },
+            linear_x_mps: 4.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        };
+        let is_hold = |p: &PlanOutput| p.kind == crate::ProposalKind::SafeStop && p.trajectory.iter().all(|t| t.velocity_mps == 0.0);
+
+        // No lane graph → HOLD.
+        let no_graph = PlanInput { ego: on_map, map: &corr, lane_graph: None, ..world(&corr, &[], &[]) };
+        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &no_graph)), "no graph → HOLD");
+
+        // Ego off the mapped road → HOLD.
+        let off = EgoState { pose: Pose { x_m: 16.0, y_m: 99.0, heading_rad: 0.0 }, ..on_map };
+        let ego_off = PlanInput { ego: off, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &ego_off)), "ego off-map → HOLD");
+
+        // Destination off the mapped road → HOLD.
+        let w = PlanInput { ego: on_map, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 999.0 }, &w)), "destination off-map → HOLD");
+
+        // Reachable-only-via-the-decoy is fine, but a genuinely unreachable destination HOLDs:
+        // the decoy lane 6 is a dead-end, so a point beyond it that no route reaches → HOLD.
+        // (Routing to the decoy's own lane is reachable; pick a point off every lane instead —
+        // covered above. Here assert a non-finite destination also HOLDs at grounding.)
+        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: f64::NAN, y_m: 0.0 }, &w)), "non-finite destination → HOLD");
     }
 
     // ----- junction right-of-way wired into cedes_to_ego_ids -----

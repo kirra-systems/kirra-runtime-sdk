@@ -415,6 +415,19 @@ pub struct GeometricPlannerConfig {
     /// Longitudinal gap left between the controlled stop and the nearest in-path
     /// object — the planner stops this far short of it.
     pub object_stop_gap_m: f64,
+    /// Longitudinal gap left before a PREDICTED crossing / cut-in conflict (the
+    /// [`predict_yield_s`](GeometricPlanner::predict_yield_s) stop-line), distinct from the
+    /// static `object_stop_gap_m`. It is larger because a crossing object is still *laterally*
+    /// approaching the yield point: a stop only `object_stop_gap_m` short can leave the ego —
+    /// especially mid-turn, where the curving heading rotates the crosser to the edge of the
+    /// checker's lateral-alignment band — inside the checker's longitudinal-conflict window,
+    /// where its lateral RSS against a cutting-in object binds and MRC-rejects the yield. Set
+    /// to the checker's longitudinal-conflict distance (`RSS_LONGITUDINAL_CONFLICT_M` = 8 m) so
+    /// the stopped ego sits OUTSIDE that window — making a predicted-crossing yield
+    /// checker-ADMISSIBLE (a smooth doer yield) across straight AND curved geometry, instead of
+    /// fail-closing to the checker's safe-stop. On a straight road the outcome is unchanged
+    /// (already admissible); the ego merely yields a few metres earlier.
+    pub predictive_yield_gap_m: f64,
     /// Speed cap while an in-path object limits travel: the planner approaches a
     /// hazard slowly so the RSS following distance stays satisfied the whole way
     /// in (a planner that brakes only geometrically still over-speeds mid-approach
@@ -524,6 +537,7 @@ impl Default for GeometricPlannerConfig {
             goal_tolerance_m: 0.5,
             object_lane_tolerance_m: 2.0,
             object_stop_gap_m: 5.0,
+            predictive_yield_gap_m: 8.0,
             object_approach_speed_mps: 2.0,
             lateral_clearance_target_m: 4.5,
             lateral_offset_max_m: 3.0,
@@ -1206,7 +1220,7 @@ impl Planner for GeometricPlanner {
             if let Some(s_conflict) = self.predict_yield_s(
                 obj, input.motion, input.predicted_paths, &guide, s_ego, cur, target,
             ) {
-                let yield_s = s_conflict - self.cfg.object_stop_gap_m;
+                let yield_s = s_conflict - self.cfg.predictive_yield_gap_m;
                 if yield_s < s_limit {
                     s_limit = yield_s;
                     limit_kind = LimitKind::Yield;

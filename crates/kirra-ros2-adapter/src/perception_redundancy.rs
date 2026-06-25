@@ -80,6 +80,65 @@ impl RedundancyVerdict {
     }
 }
 
+/// Env gate enabling the perception-divergence monitor — a SECOND perception channel is
+/// configured and should be cross-checked. Truthy = `1`/`true`/`yes` (case-insensitive); unset
+/// or anything else = disabled (no redundant channel → the monitor is a no-op).
+pub const PERCEPTION_REDUNDANCY_ENABLED_ENV: &str = "KIRRA_PERCEPTION_REDUNDANCY_ENABLED";
+
+/// Read the redundancy-monitor enable gate from the environment (mirrors
+/// `perception_derate_enabled`). Disabled unless explicitly truthy.
+#[must_use]
+pub fn perception_redundancy_enabled() -> bool {
+    std::env::var(PERCEPTION_REDUNDANCY_ENABLED_ENV)
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve the perception-divergence MRC cap for one slow-loop tick — the orchestration that
+/// makes the [`cross_check`] monitor LIVE and composes its verdict into the same Track-C
+/// perception derate (`apply_perception_cap`), so a divergence reaches the actuator as a
+/// controlled stop without touching the WCET-critical per-pose checker. Four states, mirroring
+/// `resolve_perception_cap`:
+///
+/// 1. **DISABLED** (no redundant channel configured) → `None`. Byte-identical prior behaviour.
+/// 2. enabled, secondary **FRESH** + channels **consistent** → `None` (no cap).
+/// 3. enabled, secondary **FRESH** + channels **diverged** → `Some(0.0)` (fail closed: at least
+///    one channel is wrong and neither can be trusted).
+/// 4. enabled, secondary **STALE / silent** → `Some(0.0)` (the redundant channel dropped out, so
+///    the primary can no longer be cross-checked — redundancy LOST → fail closed, the
+///    True-Redundancy doctrine).
+#[must_use]
+pub fn resolve_redundancy_cap(
+    enabled: bool,
+    primary: &[PerceivedObject],
+    secondary: &[PerceivedObject],
+    secondary_fresh: bool,
+    cfg: RedundancyConfig,
+) -> Option<f64> {
+    if !enabled {
+        return None; // no redundant channel → monitor inert (state 1)
+    }
+    if !secondary_fresh {
+        return Some(0.0); // lost the redundant channel → cannot cross-check → fail closed (state 4)
+    }
+    cross_check(primary, secondary, cfg).to_perception_cap() // states 2 & 3
+}
+
+/// Compose two optional perception caps into the MORE RESTRICTIVE one: `None` = no cap, `Some` =
+/// a speed ceiling, and the lower ceiling wins (an MRC-floor `Some(0.0)` always binds). Lets the
+/// divergence cap fold into the existing Track-C derate cap without either masking the other.
+#[must_use]
+pub fn more_restrictive_cap(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
 /// Cross-check two INDEPENDENT perception channels. Fail-closed: returns the FIRST
 /// divergence found (an unmatched object in either direction, or a speed mismatch on a
 /// matched pair). Matching is nearest-position within `cfg.position_tol_m`.
@@ -217,5 +276,50 @@ mod tests {
             }
             other => panic!("expected a speed mismatch, got {other:?}"),
         }
+    }
+
+    // ----- the live-monitor resolution (4-state machine) -----
+
+    #[test]
+    fn disabled_monitor_is_inert_even_when_channels_diverge() {
+        // State 1: a stark divergence, but the monitor is off → no cap (byte-identical prior).
+        let a = [obj(1, 20.0, 0.0, 0.0)];
+        let b: [PerceivedObject; 0] = [];
+        assert_eq!(resolve_redundancy_cap(false, &a, &b, true, RedundancyConfig::default()), None);
+    }
+
+    #[test]
+    fn enabled_consistent_channels_add_no_cap() {
+        // State 2: enabled, fresh secondary, channels agree → None.
+        let a = [obj(1, 20.0, 0.0, 5.0)];
+        let b = [obj(7, 20.3, 0.1, 5.4)];
+        assert_eq!(resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()), None);
+    }
+
+    #[test]
+    fn enabled_diverged_channels_cap_to_mrc() {
+        // State 3: enabled, fresh, a phantom in A that B misses → MRC-floor cap.
+        let a = [obj(1, 20.0, 0.0, 0.0)];
+        let b: [PerceivedObject; 0] = [];
+        assert_eq!(resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()), Some(0.0));
+    }
+
+    #[test]
+    fn enabled_but_silent_secondary_fails_closed() {
+        // State 4: the redundant channel went stale → redundancy lost → fail closed, EVEN IF the
+        // last secondary snapshot happens to still agree (it is no longer assured-fresh).
+        let a = [obj(1, 20.0, 0.0, 5.0)];
+        let b = [obj(7, 20.3, 0.1, 5.4)];
+        assert_eq!(resolve_redundancy_cap(true, &a, &b, false, RedundancyConfig::default()), Some(0.0));
+    }
+
+    #[test]
+    fn more_restrictive_cap_takes_the_lower_ceiling() {
+        use super::more_restrictive_cap;
+        assert_eq!(more_restrictive_cap(None, None), None);
+        assert_eq!(more_restrictive_cap(Some(3.0), None), Some(3.0));
+        assert_eq!(more_restrictive_cap(None, Some(2.0)), Some(2.0));
+        assert_eq!(more_restrictive_cap(Some(3.0), Some(0.0)), Some(0.0), "an MRC floor binds");
+        assert_eq!(more_restrictive_cap(Some(5.0), Some(2.0)), Some(2.0));
     }
 }

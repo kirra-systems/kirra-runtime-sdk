@@ -95,6 +95,8 @@ impl MickDecisionRecord {
             MickIntent::Overtake => ("overtake", None, None, None, None),
             MickIntent::PullOver => ("pull_over", None, None, None, None),
             MickIntent::TurnAt { .. } => ("turn_at", None, None, None, None),
+            // The routed destination reuses the goal_x_m/goal_y_m record fields.
+            MickIntent::RouteTo { x_m, y_m } => ("route_to", Some(x_m), Some(y_m), None, None),
         };
         let turn_direction = match *intent {
             MickIntent::TurnAt { direction } => Some(direction.as_str()),

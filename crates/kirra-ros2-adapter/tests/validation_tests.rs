@@ -645,6 +645,82 @@ fn predictive_rss_catches_a_predicted_cut_in() {
         "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
 }
 
+// ---- The PRODUCER: derive modes from live objects (gap #3 made live) ----
+//
+// The tests above hand-build modes; these prove `predicted_modes_from_objects` turns LIVE
+// perceived objects into modes the checker then acts on — the bridge that makes the multi-modal
+// pass run against real perception instead of dormant `None`.
+
+use kirra_ros2_adapter::prediction::predicted_modes_from_objects;
+
+fn perceived(id: u64, x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
+    PerceivedObject {
+        id,
+        pos: Point { x_m: x, y_m: y },
+        velocity_mps: vx.hypot(vy),
+        heading_rad: vy.atan2(vx),
+        vel: Point { x_m: vx, y_m: vy },
+    }
+}
+
+#[test]
+fn produced_cv_mode_catches_a_cut_in_the_snapshot_rss_misses() {
+    // An object laterally CLEAR at the snapshot (y=-5, well outside the 4 m alignment band) but
+    // moving +y so its constant-velocity rollout crosses INTO the ego lane just ahead. The
+    // snapshot pass skips it (out of lane now); the PRODUCED CV mode catches the cut-in.
+    let trajectory = straight_trajectory(30, 2.0, 0.1); // ego 2 m/s straight at y=0, x: 5 → ~10.8
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let obj = perceived(1, 10.0, -5.0, 0.0, 2.5); // crosses y=0 at t=2, at x=10 (just ahead)
+
+    // Snapshot-only (object passed, no produced modes): laterally clear now → admitted.
+    let snapshot_only = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, None, FrameTrust::Trusted,
+    );
+    assert!(matches!(snapshot_only, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "snapshot RSS alone sees the object as out-of-lane → admits; got {snapshot_only:?}");
+
+    // With the PRODUCED CV mode, the predicted cut-in is caught → refused.
+    let owned = predicted_modes_from_objects(&[obj], &[], 3.0, 0.5);
+    let modes: Vec<_> = owned.iter().map(|m| m.as_mode()).collect();
+    let with_modes = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
+    );
+    assert_eq!(with_modes, TrajectoryVerdict::MRCFallback,
+        "the produced CV mode catches the cut-in the snapshot missed; got {with_modes:?}");
+}
+
+#[test]
+fn produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff() {
+    // An object PARALLEL to the ego lane (moving +x in the next lane, never crossing on CV) but
+    // TURNING toward the ego lane. CV alone keeps it clear → admit. The PRODUCED CTRV mode (from
+    // the tracker's yaw estimate) curves it INTO the path → refuse. Worst-case over modes: the
+    // single dangerous hypothesis decides — the point of multi-modal prediction.
+    let trajectory = straight_trajectory(30, 2.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let obj = perceived(1, 9.0, -4.5, 3.0, 0.0); // parallel +x near the right lane
+
+    // CV-only (no yaw): the object stays in its lane → admitted.
+    let cv_owned = predicted_modes_from_objects(&[obj], &[], 3.0, 0.5);
+    let cv_modes: Vec<_> = cv_owned.iter().map(|m| m.as_mode()).collect();
+    let cv = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&cv_modes), FrameTrust::Trusted,
+    );
+    assert!(matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "CV alone: a lane-parallel object is admitted; got {cv:?}");
+
+    // CV + CTRV (yaw rate turning it into the ego lane): the turn-in hypothesis refuses.
+    let mm_owned = predicted_modes_from_objects(&[obj], &[(1, 0.9)], 3.0, 0.5);
+    assert_eq!(mm_owned.len(), 2, "the turning object yields BOTH a CV and a CTRV mode");
+    let mm_modes: Vec<_> = mm_owned.iter().map(|m| m.as_mode()).collect();
+    let mm = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&mm_modes), FrameTrust::Trusted,
+    );
+    assert_eq!(mm, TrajectoryVerdict::MRCFallback,
+        "the produced CTRV turn-in mode catches what CV missed; got {mm:?}");
+}
+
 #[test]
 fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
     // Same cut-in geometry, but no predicted modes → the pass is skipped (snapshot
