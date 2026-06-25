@@ -33,3 +33,6 @@ kirra-core = { path = "../kirra-core" }
 # on-Orin stack (Taj → Mick → Occy → KIRRA). Taj is lean (kirra-core only, no ROS), so
 # this keeps the example off the adapter's ros2/tokio tree.
 kirra-taj = { path = "../kirra-taj" }
+# The learning-loop capture wire schema (serde-only, no governor types) for the
+# `sidewalk_capture` example — emits CaptureRecord JSONL that kirra-collector joins to Parquet.
+kirra-capture-schema = { path = "../kirra-capture-schema" }
