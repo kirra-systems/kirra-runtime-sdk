@@ -162,8 +162,14 @@ parameters — both levers, not one.
    changing fast, `dκ/ds` large) demands steering *rate* ∝ `v·dκ/ds`; this caps the
    speed via the bicycle relation `δ = atan(L·κ)` so the doer SLOWS a sharp entry/exit
    instead of being clamped, staying below the checker's steering-rate ceiling
-   (checker-admissible). No-op on a straight / constant-curvature path. **Remaining:**
-   joint path+speed optimization (an MPC-style coupled solve).
+   (checker-admissible). No-op on a straight / constant-curvature path. **Done (joint path+speed,
+   sampling-based — opt-in):** `GeometricPlanner::optimize_guide` (`joint_path_optimize`) samples a
+   bounded vocabulary of ramped lateral-offset candidate lines and keeps the least time-to-goal one
+   (scored through the velocity profile, so a flatter/shorter line's speed AND distance both count);
+   KIRRA bounds the in-corridor result. Honest finding (ADR-0025): Chaikin smoothing already
+   minimizes path curvature, so the constant-offset gain is material mainly on a TIGHT bend.
+   **Remaining:** an apex-varying offset profile + oriented-footprint containment, toward a coupled
+   QP / iLQR solve.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the

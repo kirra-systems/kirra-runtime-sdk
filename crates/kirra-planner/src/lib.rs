@@ -537,6 +537,15 @@ pub struct GeometricPlannerConfig {
     /// Wheelbase (m) for the bicycle-model steering relation `δ = atan(L·κ)` the steering-rate cap
     /// uses. A larger wheelbase implies more steering angle per curvature, so a tighter cap.
     pub wheelbase_m: f64,
+    /// Enable the **joint path+speed** optimizer: a sampling-based spatiotemporal search that, after
+    /// the reference guide is built, tries a bounded vocabulary of ramped lateral-offset candidate
+    /// paths (the "racing / comfort line") within the corridor and keeps the one with the lowest
+    /// **traversal time** (scored through the same velocity profile, so a flatter path's higher
+    /// achievable speed is captured) plus a small deviation penalty. Co-optimizes path SHAPE and
+    /// SPEED instead of fixing the centerline then speeding it. `false` (default) ⇒ the centerline
+    /// guide is used unchanged (byte-identical). KIRRA still bounds containment + kinematics; a
+    /// candidate is bounded to keep the footprint inside the corridor.
+    pub joint_path_optimize: bool,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -575,6 +584,7 @@ impl Default for GeometricPlannerConfig {
             comfort_lateral_accel_mps2: 2.0,
             max_steering_rate_rads: 0.4,
             wheelbase_m: 2.7,
+            joint_path_optimize: false,
         }
     }
 }
@@ -1069,6 +1079,71 @@ impl GeometricPlanner {
         }
         v
     }
+
+    /// **Joint path+speed optimization** (sampling-based; opt-in via `joint_path_optimize`). Given
+    /// the reference `guide` and the drivable corridor, try a bounded vocabulary of ramped
+    /// lateral-offset candidate paths (the "racing / comfort line") and return the one with the
+    /// lowest **traversal time** — scored through [`velocity_profile`](Self::velocity_profile), so a
+    /// flatter path's higher achievable speed is what wins — plus a small deviation penalty. This
+    /// co-optimizes path SHAPE and SPEED jointly instead of fixing the centerline then speeding it.
+    ///
+    /// Determinism + WCET: a fixed `2·JOINT_OFFSET_SAMPLES_PER_SIDE+1` candidate set, each scored by
+    /// one velocity-profile pass. The centerline (offset 0) is always a candidate, so the result is
+    /// never worse than the baseline and is a no-op on a straight road (equal times ⇒ zero-penalty
+    /// centerline wins). Each candidate is bounded so the footprint stays inside the corridor;
+    /// KIRRA still bounds containment + kinematics independently.
+    fn optimize_guide(
+        &self,
+        guide: &[(f64, f64)],
+        map: &dyn CorridorSource,
+        s_ego: f64,
+        goal: (f64, f64),
+        target: f64,
+        decel: f64,
+    ) -> Vec<(f64, f64)> {
+        let (left, right) = (map.left_boundary(), map.right_boundary());
+        let guide_len = polyline_len(guide);
+        // Footprint half-width inflated by a swing slack: while the offset line follows a curve the
+        // vehicle rectangle is ANGLED to the corridor and its corners reach further laterally than
+        // the centered half-width, so a candidate that fits geometrically can still clip KIRRA's
+        // (oriented-footprint) containment. The slack keeps the racing line conservatively inside.
+        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m + JOINT_FOOTPRINT_SWING_SLACK_M;
+        // Largest offset that keeps the (inflated) footprint inside the corridor over the path.
+        let mut max_off = f64::INFINITY;
+        let mut s = s_ego;
+        while s <= guide_len {
+            let (gx, _) = point_at(guide, s);
+            let half = 0.5 * (boundary_y_at(left, gx) - boundary_y_at(right, gx));
+            max_off = max_off.min(half - fh);
+            s += VELOCITY_PROFILE_DS;
+        }
+        if max_off <= 0.1 {
+            return guide.to_vec(); // corridor too tight to deviate — keep the centerline
+        }
+        // `max_off` (above) already bounds every candidate's inflated footprint inside the corridor,
+        // so each offset line stays containment-admissible without a per-candidate boundary scan
+        // (the x-indexed boundary check is unreliable on a tight bend — KIRRA is the real authority).
+        let step = max_off / JOINT_OFFSET_SAMPLES_PER_SIDE as f64;
+        let n = JOINT_OFFSET_SAMPLES_PER_SIDE as i64;
+        let mut best = guide.to_vec(); // the centerline (offset 0) is always a candidate
+        let mut best_cost = f64::INFINITY;
+        for k in -n..=n {
+            let delta = k as f64 * step;
+            let cand = offset_guide(guide, s_ego, delta);
+            // Objective = time to reach the GOAL along this candidate (a flatter AND/OR shorter line
+            // reaches it sooner), so the score is comparable across candidates of different length.
+            let goal_s = project_arc_length(&cand, goal.0, goal.1);
+            let dist = (goal_s - s_ego).max(VELOCITY_PROFILE_DS);
+            let prof = self.velocity_profile(&cand, s_ego, dist, target, decel, true);
+            let time: f64 = prof.iter().map(|v| VELOCITY_PROFILE_DS / v.max(0.1)).sum();
+            let cost = time + JOINT_DEVIATION_WEIGHT_S_PER_M * delta.abs();
+            if cost < best_cost {
+                best_cost = cost;
+                best = cand;
+            }
+        }
+        best
+    }
 }
 
 /// Linear interpolation of a `velocity_profile` (sampled every `VELOCITY_PROFILE_DS`
@@ -1128,6 +1203,17 @@ impl Planner for GeometricPlanner {
         // bounded-curvature path (comfort) instead of a heading jump at each vertex.
         // A straight guide is unchanged; containment still backstops the result.
         let guide = chaikin_smooth(&raw_guide, self.cfg.path_smoothing_iterations);
+
+        // Joint path+speed optimization (opt-in): replace the centerline guide with the time-optimal
+        // ramped-offset candidate within the corridor (a flatter "racing line" that admits more
+        // speed). Off ⇒ the guide is unchanged (byte-identical). KIRRA still bounds the result.
+        let guide = if self.cfg.joint_path_optimize {
+            let s0 = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
+            let goal = (input.goal.target.x_m, input.goal.target.y_m);
+            self.optimize_guide(&guide, input.map, s0, goal, target, self.cfg.max_decel_mps2.max(1e-3))
+        } else {
+            guide
+        };
 
         // Travel window: ego projection → goal projection along the guide.
         let s_ego = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
@@ -1460,6 +1546,51 @@ fn steering_rate_speed_cap(kappa: f64, dkappa_ds: f64, wheelbase_m: f64, max_rat
     let l = wheelbase_m.max(1e-3);
     let ddelta_dkappa = l / (1.0 + (l * kappa).powi(2));
     max_rate_rads / (ddelta_dkappa * dk)
+}
+
+/// Candidates per side the joint optimizer samples (plus the centerline) — `2·N+1` paths total,
+/// keeping the spatiotemporal search WCET-bounded.
+const JOINT_OFFSET_SAMPLES_PER_SIDE: usize = 3;
+/// Deviation penalty (s per metre of |offset|) added to a candidate's traversal time, so the
+/// optimizer prefers the centerline unless an offset buys real time (a flatter corner) — and is a
+/// no-op on a straight road (equal times ⇒ the zero-offset centerline's zero penalty wins).
+const JOINT_DEVIATION_WEIGHT_S_PER_M: f64 = 0.04;
+/// Arc length (m) over which a candidate offset ramps in from the ego, so the path does not jump
+/// laterally at the start (the ego sits on the centerline).
+const JOINT_OFFSET_RAMP_M: f64 = 6.0;
+/// Extra lateral slack (m) the joint optimizer reserves for the vehicle footprint SWINGING out as
+/// the offset line follows a curve at an angle to the corridor — so a kept candidate stays inside
+/// KIRRA's oriented-footprint containment, not just the point-on-centerline bound.
+const JOINT_FOOTPRINT_SWING_SLACK_M: f64 = 1.6;
+
+/// Total arc length of a polyline.
+fn polyline_len(p: &[(f64, f64)]) -> f64 {
+    p.windows(2).map(|w| dist2d(w[0].0, w[0].1, w[1].0, w[1].1)).sum()
+}
+
+/// A copy of `guide` displaced laterally by a RAMPED perpendicular offset: 0 at the ego's
+/// arc-length `s_ego`, ramping linearly to `delta` over [`JOINT_OFFSET_RAMP_M`], then held. The
+/// sign matches the trajectory's lateral convention (`+` is left, toward +y at heading 0). The
+/// joint optimizer scores each such candidate's curvature through the velocity profile.
+fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64) -> Vec<(f64, f64)> {
+    if delta == 0.0 || guide.len() < 2 {
+        return guide.to_vec();
+    }
+    let mut acc = 0.0;
+    let mut out = Vec::with_capacity(guide.len());
+    for i in 0..guide.len() {
+        if i > 0 {
+            acc += dist2d(guide[i - 1].0, guide[i - 1].1, guide[i].0, guide[i].1);
+        }
+        let o = if acc <= s_ego {
+            0.0
+        } else {
+            delta * ((acc - s_ego) / JOINT_OFFSET_RAMP_M).min(1.0)
+        };
+        let h = heading_at(guide, acc);
+        out.push((guide[i].0 - o * h.sin(), guide[i].1 + o * h.cos()));
+    }
+    out
 }
 
 /// Position at arc-length `s` along a `Point` polyline (the predicted-path / lane
@@ -2178,6 +2309,76 @@ mod tests {
                 .fold(0.0_f64, f64::max)
         };
         assert!((peak(0.4) - peak(0.0)).abs() < 1e-9, "no curvature transition ⇒ identical profile");
+    }
+
+    #[test]
+    fn joint_optimizer_finds_a_faster_line_through_a_bend_and_kirra_admits() {
+        // A wide (±9 m) corridor with a sharp bend whose curvature genuinely BINDS the speed (so a
+        // flatter line buys time), with width + the footprint-swing slack to stay admissible. The
+        // guide is the raw centerline: a constant offset only relieves curvature where curvature
+        // actually limits speed (Chaikin pre-smoothing alone already flattens a gentle bend, which
+        // is why the joint gain shows on a tight one — see ADR-0025 honest scope).
+        // Centerline (0,0)→(20,0)→(34,18)→(48,36)→(90,36): a ~52° bend.
+        let corr = KinkedCorridor {
+            left: vec![
+                Point { x_m: 0.0, y_m: 9.0 }, Point { x_m: 20.0, y_m: 9.0 },
+                Point { x_m: 34.0, y_m: 27.0 }, Point { x_m: 48.0, y_m: 45.0 }, Point { x_m: 90.0, y_m: 45.0 },
+            ],
+            right: vec![
+                Point { x_m: 0.0, y_m: -9.0 }, Point { x_m: 20.0, y_m: -9.0 },
+                Point { x_m: 34.0, y_m: 9.0 }, Point { x_m: 48.0, y_m: 27.0 }, Point { x_m: 90.0, y_m: 27.0 },
+            ],
+        };
+        let goal = (82.0, 36.0);
+        let input = PlanInput {
+            ego: EgoState { pose: Pose { x_m: 6.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 6.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
+            goal: Goal { target: Pose { x_m: goal.0, y_m: goal.1, heading_rad: 0.0 } },
+            ..kinked_input(&corr)
+        };
+        let cfg = GeometricPlannerConfig { joint_path_optimize: true, ..Default::default() };
+        let p = GeometricPlanner::new(cfg);
+        let base = centerline_from(corr.left_boundary(), corr.right_boundary());
+        let s_ego = project_arc_length(&base, 6.0, 0.0);
+        let (target, decel) = (8.0, 2.5);
+        let best = p.optimize_guide(&base, &corr, s_ego, goal, target, decel);
+        // Time to the goal along each line (the optimizer's objective).
+        let time_to_goal = |g: &[(f64, f64)]| -> f64 {
+            let gs = project_arc_length(g, goal.0, goal.1);
+            let dist = (gs - s_ego).max(VELOCITY_PROFILE_DS);
+            p.velocity_profile(g, s_ego, dist, target, decel, true)
+                .iter()
+                .map(|v| VELOCITY_PROFILE_DS / v.max(0.1))
+                .sum::<f64>()
+        };
+        let (t_best, t_base) = (time_to_goal(&best), time_to_goal(&base));
+        assert!(t_best < t_base - 0.05, "the optimizer found a faster line to the goal: best={t_best:.2}s, centerline={t_base:.2}s");
+
+        // Safety: the chosen in-corridor line is checker-admissible, driven end to end.
+        let out = GeometricPlanner::new(cfg).plan(&input);
+        assert_eq!(out.kind, ProposalKind::Motion, "the optimized plan drives the bend");
+        let verdict = validate_trajectory_slow(
+            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        );
+        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "KIRRA admits the joint-optimized line, got {verdict:?}");
+    }
+
+    #[test]
+    fn joint_optimizer_is_a_no_op_on_a_straight_road() {
+        // No curvature ⇒ every offset candidate has the same traversal time ⇒ the zero-offset
+        // centerline (zero deviation penalty) wins ⇒ the plan is byte-identical to the optimizer off.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let plan_with = |joint: bool| {
+            let cfg = GeometricPlannerConfig { joint_path_optimize: joint, ..Default::default() };
+            GeometricPlanner::new(cfg).plan(&sample_input(&corr))
+        };
+        let on = plan_with(true);
+        let off = plan_with(false);
+        assert_eq!(on.trajectory.len(), off.trajectory.len(), "same trajectory length");
+        for (a, b) in on.trajectory.iter().zip(&off.trajectory) {
+            assert!((a.pose.y_m - b.pose.y_m).abs() < 1e-9 && (a.velocity_mps - b.velocity_mps).abs() < 1e-9,
+                "straight road: the optimizer keeps the centerline ⇒ identical plan");
+        }
     }
 
     #[test]
