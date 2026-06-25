@@ -469,31 +469,43 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
     let Some(lane_id) = graph.lane_at(MapPoint { x_m: ego.x_m, y_m: ego.y_m }) else {
         return Vec::new();
     };
-    let Some(control) = graph.lane(lane_id).and_then(|l| l.control.map(|c| (c, l.stop_line_x()))) else {
-        return Vec::new();
-    };
-    let (control, line_x) = control;
-    let tc = match control {
-        LaneControl::Yield => TrafficControl::YieldSign { line_x_m: line_x },
-        LaneControl::Stop => {
-            let dist = line_x - ego.x_m;
-            let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
-                && dist > 0.0
-                && dist < STOP_SATISFIED_DIST_M;
-            TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
-        }
-        LaneControl::TrafficLight => {
-            // Live signal state for the governed (ego) lane — fail-closed to RED when the
-            // perception/V2X feed has no entry, so an unknown light HOLDS rather than runs it.
-            let state = world
-                .signal_states
-                .iter()
-                .find(|(id, _)| *id == lane_id)
-                .map_or(SignalState::Red, |(_, s)| *s);
-            TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
-        }
-    };
-    vec![tc]
+    let lane = graph.lane(lane_id);
+    let mut out: Vec<TrafficControl> = Vec::new();
+
+    // Regulatory sign / signal at the lane terminus (its junction approach).
+    if let Some((control, line_x)) = lane.and_then(|l| l.control.map(|c| (c, l.stop_line_x()))) {
+        out.push(match control {
+            LaneControl::Yield => TrafficControl::YieldSign { line_x_m: line_x },
+            LaneControl::Stop => {
+                let dist = line_x - ego.x_m;
+                let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
+                    && dist > 0.0
+                    && dist < STOP_SATISFIED_DIST_M;
+                TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
+            }
+            LaneControl::TrafficLight => {
+                // Live signal state for the governed (ego) lane — fail-closed to RED when the
+                // perception/V2X feed has no entry, so an unknown light HOLDS rather than runs it.
+                let state = world
+                    .signal_states
+                    .iter()
+                    .find(|(id, _)| *id == lane_id)
+                    .map_or(SignalState::Red, |(_, s)| *s);
+                TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
+            }
+        });
+    }
+
+    // Occluded junction approach: if the ego lane has limited cross-traffic visibility, derive
+    // the assured-clear-distance speed cap toward its terminus (the conflict line) so the ego
+    // creeps into the blind junction (RSS Rule 4). Composes with any sign control above (a blind
+    // STOP/YIELD approach gets both the stop/yield line AND the creep cap). A lane with an open
+    // view contributes nothing.
+    if let (Some(sight), Some(conflict_x)) = (graph.sight_distance(lane_id), lane.map(Lane::stop_line_x)) {
+        out.push(TrafficControl::OccludedApproach { conflict_line_x_m: conflict_x, sight_distance_m: sight });
+    }
+
+    out
 }
 
 /// Pick the ego lane's successor that turns `direction` (successor-by-heading): the matching

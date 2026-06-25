@@ -84,6 +84,38 @@ pub enum TrafficControl {
     /// Rail / level crossing (R15-1): stop at the line when `must_stop` (a train
     /// is approaching, the gate is down, or the crossing signal is active).
     RailCrossing { stop_line_x_m: f64, must_stop: bool },
+    /// **Occluded junction approach** — RSS Rule 4 (caution under limited visibility)
+    /// applied LATERALLY at a junction. The ego is approaching the conflict point at
+    /// `conflict_line_x_m` but a building / parked car / hedge blocks its view of cross
+    /// traffic, so it has assured-clear sight of only `sight_distance_m` toward it. Unobserved
+    /// space is treated as possibly occupied by an emerging vehicle, so the approach speed is
+    /// capped to the **assured-clear-distance speed** — the most the ego may carry and still
+    /// brake to a stop within what it can see ([`assured_clear_distance_speed_cap`]). The ego
+    /// therefore CREEPS into a blind junction, fast where the view is open and slow where it is
+    /// not; as it nears the corner and perception reports more sight, the cap relaxes. The cap
+    /// applies only while the conflict is still ahead (once passed, the junction is cleared).
+    /// This is the behavioral/legal "slow for a blind corner" rule; KIRRA's RSS still bounds
+    /// any cross vehicle that actually becomes visible.
+    OccludedApproach { conflict_line_x_m: f64, sight_distance_m: f64 },
+}
+
+/// RSS reaction time (s) for the occlusion speed bound — the conservative SAE-L4 value, matched
+/// to the checker's `RSS_REACTION_TIME_S` so the doer's cap composes with the checker's bound.
+const OCCLUSION_REACTION_TIME_S: f64 = 0.5;
+
+/// RSS Rule 4 — the **assured-clear-distance** speed bound: the maximum speed (m/s) from which
+/// the ego can brake to a stop within `visible_m`, treating unobserved space beyond as
+/// potentially occupied. Includes the reaction distance ([`OCCLUSION_REACTION_TIME_S`]).
+/// Solves `v·t + v²/(2a) = visible` for `v`: `v = sqrt((a·t)² + 2·a·visible) − a·t`, clamped at
+/// 0. Mirrors the checker's `assured_clear_distance_speed_cap` so a doer plan capped here
+/// (with a comfortable decel ≤ the checker's brake decel) is checker-admissible, not just
+/// fail-closed.
+#[must_use]
+pub fn assured_clear_distance_speed_cap(visible_m: f64, brake_decel_mps2: f64) -> f64 {
+    let a = brake_decel_mps2.max(0.0);
+    let d = visible_m.max(0.0);
+    let t = OCCLUSION_REACTION_TIME_S;
+    (((a * t).powi(2) + 2.0 * a * d).sqrt() - a * t).max(0.0)
 }
 
 /// Tunables for the behavioral layer.
@@ -94,11 +126,16 @@ pub struct BehaviorConfig {
     pub amber_comfortable_decel_mps2: f64,
     /// Speed approaching a YIELD / flashing-amber control (slow, ready to stop).
     pub yield_speed_mps: f64,
+    /// Comfortable deceleration used to derive the occluded-junction approach speed cap (the
+    /// assured-clear-distance bound). Kept at/below a vehicle's hard brake so the doer's
+    /// occlusion cap is conservative w.r.t. the checker's RSS Rule 4 — the doer slows enough
+    /// that the resulting plan is checker-admissible.
+    pub occlusion_brake_decel_mps2: f64,
 }
 
 impl Default for BehaviorConfig {
     fn default() -> Self {
-        Self { amber_comfortable_decel_mps2: 3.0, yield_speed_mps: 4.0 }
+        Self { amber_comfortable_decel_mps2: 3.0, yield_speed_mps: 4.0, occlusion_brake_decel_mps2: 3.0 }
     }
 }
 
@@ -187,6 +224,17 @@ pub fn evaluate_controls(
                     out.add_stop(stop_line_x_m);
                 }
             }
+            TrafficControl::OccludedApproach { conflict_line_x_m, sight_distance_m } => {
+                // While the blind junction is still ahead, cap the speed to what the ego can
+                // stop within its assured-clear sight — it creeps in, ready for emergent
+                // cross-traffic. Once the conflict is passed, the junction is cleared (no cap).
+                if ahead(conflict_line_x_m) {
+                    out.add_cap(assured_clear_distance_speed_cap(
+                        sight_distance_m,
+                        cfg.occlusion_brake_decel_mps2,
+                    ));
+                }
+            }
             TrafficControl::SpeedLimit { from_x_m, limit_mps } => {
                 // In effect once we are at/after the sign, OR approaching it (we
                 // must already be at the limit by the time we reach it).
@@ -228,7 +276,7 @@ pub use kirra_map::lane_lines::{lateral_move_permitted, LaneBoundary, LineType};
 mod tests {
     use super::*;
 
-    const CFG: BehaviorConfig = BehaviorConfig { amber_comfortable_decel_mps2: 3.0, yield_speed_mps: 4.0 };
+    const CFG: BehaviorConfig = BehaviorConfig { amber_comfortable_decel_mps2: 3.0, yield_speed_mps: 4.0, occlusion_brake_decel_mps2: 3.0 };
 
     #[test]
     fn red_light_requires_stop_green_does_not() {
@@ -307,6 +355,44 @@ mod tests {
             TrafficControl::StopSign { stop_line_x_m: 12.0, satisfied: false },
         ];
         assert_eq!(evaluate_controls(&controls, 2.0, 6.0, &CFG).stop_x_m, Some(12.0));
+    }
+
+    #[test]
+    fn occluded_approach_caps_speed_to_the_assured_clear_distance() {
+        // 5 m of assured-clear sight toward a conflict 30 m ahead: cap = ACD(5, a=3, t=0.5) =
+        // sqrt(2.25 + 30) − 1.5 ≈ 4.18 m/s. A short-sight blind corner forces a creep.
+        let occ = [TrafficControl::OccludedApproach { conflict_line_x_m: 30.0, sight_distance_m: 5.0 }];
+        let cap = evaluate_controls(&occ, 5.0, 8.0, &CFG).speed_cap_mps.expect("occlusion caps speed");
+        let expect = assured_clear_distance_speed_cap(5.0, 3.0);
+        assert!((cap - expect).abs() < 1e-9, "cap is the ACD speed, got {cap} expect {expect}");
+        assert!(cap < 8.0, "the blind approach is slower than cruise, got {cap}");
+    }
+
+    #[test]
+    fn shorter_sight_caps_lower_more_blind_means_slower() {
+        let near = evaluate_controls(&[TrafficControl::OccludedApproach { conflict_line_x_m: 30.0, sight_distance_m: 3.0 }], 5.0, 8.0, &CFG).speed_cap_mps.unwrap();
+        let far = evaluate_controls(&[TrafficControl::OccludedApproach { conflict_line_x_m: 30.0, sight_distance_m: 12.0 }], 5.0, 8.0, &CFG).speed_cap_mps.unwrap();
+        assert!(near < far, "less sight → lower cap (creep more), got near {near} far {far}");
+        // A wide-open view imposes effectively no creep (the cap exceeds a normal cruise).
+        let open = evaluate_controls(&[TrafficControl::OccludedApproach { conflict_line_x_m: 30.0, sight_distance_m: 80.0 }], 5.0, 8.0, &CFG).speed_cap_mps.unwrap();
+        assert!(open > 12.0, "a clear view does not meaningfully cap, got {open}");
+    }
+
+    #[test]
+    fn occluded_approach_stops_capping_once_the_conflict_is_passed() {
+        // Conflict behind the ego (already through the junction) → no cap.
+        let passed = [TrafficControl::OccludedApproach { conflict_line_x_m: 10.0, sight_distance_m: 4.0 }];
+        assert_eq!(evaluate_controls(&passed, 15.0, 8.0, &CFG).speed_cap_mps, None);
+    }
+
+    #[test]
+    fn occlusion_cap_composes_with_other_speed_caps_taking_the_lowest() {
+        // A 4 m/s yield-like school-zone cap vs the ACD cap; the binding (lower) one wins.
+        let controls = [
+            TrafficControl::OccludedApproach { conflict_line_x_m: 40.0, sight_distance_m: 20.0 }, // ~9 m/s
+            TrafficControl::SchoolZone { from_x_m: 0.0, to_x_m: 50.0, limit_mps: 4.0, active: true },
+        ];
+        assert_eq!(evaluate_controls(&controls, 10.0, 10.0, &CFG).speed_cap_mps, Some(4.0));
     }
 
     // The lane-line crossing-rule tests moved with their types to
