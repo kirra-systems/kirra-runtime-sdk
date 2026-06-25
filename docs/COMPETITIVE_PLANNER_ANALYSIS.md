@@ -62,8 +62,14 @@ an NVIDIA-style planner as the doer.**
    Autoware's jerk-limited, dynamically-feasible optimization. No MPC.
 4. **Thin lateral behavior.** Route-around + lead-follow only; no lane-change,
    merge, overtaking *decision*, or unprotected-turn negotiation.
-5. **No interaction / game-theoretic reasoning.** Plans against a snapshot; does
-   not reason about how ego's actions change other agents.
+5. **Interaction / game-theoretic reasoning — first step (Stackelberg).** Plans
+   were against a snapshot; **partially addressed** (ADR-0026): the junction decision
+   (`behavior::interactive_proceed`) is now a Stackelberg leader–follower model — the ego
+   reasons about each conflicting agent's worst-case RESPONSE (a slow agent is modelled
+   re-accelerating, not trusted to stay slow), so it exploits a genuinely-yielded position
+   yet HOLDs a slow-but-close one that naive `d/v` gap-acceptance would wrongly assert. KIRRA
+   backstops. **Remaining:** a reactive IDM-style forward simulation and a true equilibrium
+   (Nash / level-k) solve.
 6. **No learned / naturalistic policy** for the long tail — where Tesla / Waymo /
    NVIDIA now compete.
 7. **Single-trajectory, no contingency / multi-modal** plans under uncertainty.

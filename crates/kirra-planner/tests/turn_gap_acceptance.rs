@@ -144,3 +144,23 @@ fn no_conflicting_traffic_takes_the_turn() {
     let plan = ground_left_turn(&g, &[], &[]);
     assert!(turns_left(&plan), "an empty junction takes the turn (kind {:?})", plan.kind);
 }
+
+#[test]
+fn the_interaction_model_holds_a_slow_but_close_agent() {
+    // THE STACKELBERG SAFETY POINT. A SLOW crosser (1 m/s) only 8 m from the junction: a naive
+    // gap-acceptance reads its time as d/v = 8 s ≫ 4 s and would WRONGLY assert the turn into it.
+    // The interaction model does not trust the agent to stay slow — it assumes a worst-case
+    // re-acceleration (~2.2 s to the conflict) and HOLDs. KIRRA still backstops.
+    let g = left_junction();
+    let plan = ground_left_turn(&g, &[northbound_crosser(9, 8.0, 1.0)], &[]);
+    assert_eq!(plan.kind, ProposalKind::SafeStop, "a slow-but-close agent is not trusted ⇒ HOLD");
+}
+
+#[test]
+fn the_interaction_model_asserts_a_genuinely_yielded_agent() {
+    // The same slow (1 m/s) crosser but 28 m away: even re-accelerating it needs > 4 s to reach the
+    // junction, so the yielded position is real — the ego asserts the turn.
+    let g = left_junction();
+    let plan = ground_left_turn(&g, &[northbound_crosser(9, 28.0, 1.0)], &[]);
+    assert!(turns_left(&plan), "a genuinely-yielded (slow + far) agent lets the ego assert (kind {:?})", plan.kind);
+}

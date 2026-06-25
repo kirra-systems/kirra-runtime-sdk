@@ -156,6 +156,55 @@ pub fn accept_turn_gap(approaches: &[ConflictApproach], critical_gap_s: f64) -> 
     approaches.iter().all(|a| a.time_to_conflict_s > critical_gap_s)
 }
 
+/// Worst-case longitudinal acceleration (m/s²) the interaction model assumes a conflicting agent
+/// COULD apply if it re-accelerates from a yielded (slow) state — the follower response the ego
+/// (Stackelberg leader) plans against. The ego never assumes the agent stays slow.
+pub const DEFAULT_AGENT_REACCEL_MPS2: f64 = 2.5;
+
+/// At/above this closing speed (m/s) a conflicting agent is treated as COMMITTED (modelled at its
+/// constant closing speed, classic gap-acceptance); below it the agent is potentially YIELDING and
+/// is modelled by its worst-case RE-ACCELERATION to the conflict instead of trusting the low speed.
+pub const AGENT_YIELD_SPEED_MPS: f64 = 2.0;
+
+/// One conflicting agent for the interaction (Stackelberg) decision: its distance to the conflict
+/// point and its current closing speed toward it (`> 0` = closing). Richer than [`ConflictApproach`]
+/// because the response model needs distance + speed separately, not just a precomputed time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractiveConflict {
+    pub distance_m: f64,
+    pub closing_speed_mps: f64,
+}
+
+/// Worst-case time (s) for `c` to reach the conflict. A **committed** agent (closing ≥
+/// [`AGENT_YIELD_SPEED_MPS`]) is held at constant speed (`d/v`). A **slow / yielding** agent is NOT
+/// trusted to stay slow: the ego models it re-accelerating from its current speed at `reaccel`
+/// (`d = v·t + ½·a·t²` solved for `t`) — the safe follower response. So a momentarily-slow agent
+/// gives a realistic (often *shorter*) time than its `d/v` would suggest, closing the latent gap
+/// where naive gap-acceptance wrongly admits a slow-but-about-to-go agent.
+fn agent_time_to_conflict(c: &InteractiveConflict, reaccel: f64) -> f64 {
+    let d = c.distance_m.max(0.0);
+    let v = c.closing_speed_mps;
+    if v >= AGENT_YIELD_SPEED_MPS {
+        if v > 1e-3 { d / v } else { f64::INFINITY }
+    } else {
+        let (v0, a) = (v.max(0.0), reaccel.max(1e-3));
+        (-v0 + (v0 * v0 + 2.0 * a * d).sqrt()) / a
+    }
+}
+
+/// **Stackelberg leader decision:** may the ego proceed past the conflict now? It proceeds only if
+/// EVERY conflicting agent's worst-case time to the conflict ([`agent_time_to_conflict`]) exceeds
+/// the ego's `critical_gap_s` (its clear time). The ego (leader) reasons about the follower's
+/// response: a slow agent that has genuinely yielded — far enough that even re-accelerating it
+/// cannot arrive within the gap — lets the ego ASSERT; a slow agent that is merely close is NOT
+/// trusted (worst-case re-acceleration HOLDs the ego). Fail-closed (a NaN time is `false` ⇒ HOLD);
+/// KIRRA's RSS independently backstops whatever is committed.
+// SAFETY: SG5 | REQ: stackelberg-interaction-proceed | TEST: no_conflicts_proceeds,a_committed_fast_agent_matches_classic_gap_acceptance,a_genuinely_yielded_agent_lets_the_ego_assert,a_slow_but_close_agent_is_not_trusted_to_stay_slow,a_stopped_agent_re_accelerates_in_the_worst_case,the_worst_case_over_all_agents_binds,a_nonfinite_conflict_fails_closed,the_interaction_model_holds_a_slow_but_close_agent,the_interaction_model_asserts_a_genuinely_yielded_agent
+#[must_use]
+pub fn interactive_proceed(conflicts: &[InteractiveConflict], critical_gap_s: f64, reaccel: f64) -> bool {
+    conflicts.iter().all(|c| agent_time_to_conflict(c, reaccel) > critical_gap_s)
+}
+
 /// Tunables for the behavioral layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BehaviorConfig {
@@ -486,5 +535,62 @@ mod tests {
         // time_to_conflict ≤ 0 (a vehicle in/through the conflict zone now) → HOLD.
         assert!(!accept_turn_gap(&[approach(0.0)], DEFAULT_TURN_CRITICAL_GAP_S));
         assert!(!accept_turn_gap(&[approach(-1.0)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
+
+    // ---- Stackelberg interaction (observed-cooperation) ----------------------------------------
+
+    fn conflict(distance_m: f64, closing_speed_mps: f64) -> InteractiveConflict {
+        InteractiveConflict { distance_m, closing_speed_mps }
+    }
+    const GAP: f64 = DEFAULT_TURN_CRITICAL_GAP_S;
+    const A: f64 = DEFAULT_AGENT_REACCEL_MPS2;
+
+    #[test]
+    fn no_conflicts_proceeds() {
+        assert!(interactive_proceed(&[], GAP, A));
+    }
+
+    #[test]
+    fn a_committed_fast_agent_matches_classic_gap_acceptance() {
+        // At/above the yield speed the agent is modelled at constant speed (d/v), exactly as
+        // gap-acceptance: 12 m at 4 m/s ⇒ 3 s < 4 s gap ⇒ HOLD; 40 m at 4 m/s ⇒ 10 s ⇒ PROCEED.
+        assert!(!interactive_proceed(&[conflict(12.0, 4.0)], GAP, A));
+        assert!(interactive_proceed(&[conflict(40.0, 4.0)], GAP, A));
+    }
+
+    #[test]
+    fn a_genuinely_yielded_agent_lets_the_ego_assert() {
+        // A slow (0.5 m/s) agent 25 m away: even re-accelerating at 2.5 m/s² it needs > 4 s to reach
+        // the conflict, so the ego asserts — exploiting the yielded position.
+        assert!(interactive_proceed(&[conflict(25.0, 0.5)], GAP, A));
+    }
+
+    #[test]
+    fn a_slow_but_close_agent_is_not_trusted_to_stay_slow() {
+        // THE SAFETY POINT. A slow (0.5 m/s) agent only 8 m away: naive gap-acceptance sees
+        // d/v = 16 s ≫ 4 s and would WRONGLY assert. The interaction model assumes worst-case
+        // re-acceleration (~2.3 s to reach the conflict) and correctly HOLDs.
+        let naive_time = 8.0 / 0.5;
+        assert!(naive_time > GAP, "naive d/v would admit this slow agent");
+        assert!(!interactive_proceed(&[conflict(8.0, 0.5)], GAP, A), "but the interaction model holds it");
+    }
+
+    #[test]
+    fn a_stopped_agent_re_accelerates_in_the_worst_case() {
+        // A stopped agent (0 m/s) 15 m off re-accelerates in √(2·15/2.5) ≈ 3.46 s < 4 ⇒ HOLD; 25 m
+        // off needs ≈ 4.47 s ⇒ PROCEED. The ego never assumes a stopped agent simply stays put.
+        assert!(!interactive_proceed(&[conflict(15.0, 0.0)], GAP, A));
+        assert!(interactive_proceed(&[conflict(25.0, 0.0)], GAP, A));
+    }
+
+    #[test]
+    fn the_worst_case_over_all_agents_binds() {
+        // One clear agent + one too-close slow agent ⇒ HOLD (every agent must clear the gap).
+        assert!(!interactive_proceed(&[conflict(40.0, 4.0), conflict(8.0, 0.5)], GAP, A));
+    }
+
+    #[test]
+    fn a_nonfinite_conflict_fails_closed() {
+        assert!(!interactive_proceed(&[conflict(f64::NAN, 4.0)], GAP, A));
     }
 }
