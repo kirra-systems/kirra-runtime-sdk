@@ -38,13 +38,19 @@
 //! "Satisfied" / signal **state** are caller-managed (the integrator tracks the
 //! full-stop dwell and the live signal phase), keeping this layer pure.
 
-/// A traffic-signal indication (the longitudinally-relevant set). Protected /
-/// permitted **turn arrows** are intentionally omitted — they require maneuver
-/// intent, out of this layer's longitudinal scope.
+/// A traffic-signal indication (the longitudinally-relevant set). A solid `Green` is
+/// **permissive** — for a turn it means "proceed *if clear*", so the turn-maneuver layer still
+/// gap-accepts oncoming traffic. `ProtectedGreen` (a green turn arrow) is the **protected** movement
+/// — the conflicting streams hold a red, so the turn proceeds with priority. The protected/permitted
+/// distinction is consumed by the maneuver-intent layer (`mick`'s `TurnAt` grounding), not this
+/// longitudinal layer, where a `ProtectedGreen` is simply "proceed" like `Green`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalState {
-    /// Proceed.
+    /// Proceed. **Permissive** for a turn — yield to oncoming (gap-accept).
     Green,
+    /// Protected green turn arrow — proceed with **priority** (conflicting streams are stopped).
+    /// Longitudinally identical to `Green`; the difference is the turn-maneuver right-of-way.
+    ProtectedGreen,
     /// Steady amber — stop if able (dilemma-zone rule), else clear.
     Amber,
     /// Steady red — hold at the line.
@@ -228,7 +234,9 @@ pub fn evaluate_controls(
                 }
             }
             TrafficControl::TrafficLight { stop_line_x_m, state } => match state {
-                SignalState::Green => {}
+                // Both proceed longitudinally; the protected/permitted turn distinction is the
+                // maneuver layer's (`mick` TurnAt gap-acceptance), not this longitudinal one.
+                SignalState::Green | SignalState::ProtectedGreen => {}
                 SignalState::Red | SignalState::FlashingRed => {
                     if ahead(stop_line_x_m) {
                         out.add_stop(stop_line_x_m);
@@ -316,6 +324,12 @@ mod tests {
         assert_eq!(evaluate_controls(&red, 5.0, 8.0, &CFG).stop_x_m, Some(20.0));
         let green = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Green }];
         assert_eq!(evaluate_controls(&green, 5.0, 8.0, &CFG).stop_x_m, None);
+        // A protected green arrow is longitudinally identical to green — proceed, no stop/cap (the
+        // protected/permitted right-of-way distinction is the maneuver layer's, not this one's).
+        let prot = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::ProtectedGreen }];
+        let b = evaluate_controls(&prot, 5.0, 8.0, &CFG);
+        assert_eq!(b.stop_x_m, None);
+        assert_eq!(b.speed_cap_mps, None);
     }
 
     #[test]
