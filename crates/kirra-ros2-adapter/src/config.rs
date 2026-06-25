@@ -69,12 +69,90 @@ pub struct VehicleConfig {
     /// robot pass an obstacle a robotaxi could not, WITHOUT changing the robotaxi number
     /// (see `docs/CONTRACT_PROFILES.md`, the sibling rule).
     pub rss_lateral_alignment_tolerance_m: f64,
+
+    /// **Differential-drive angular (yaw-rate) bound** (ADR-0029). `Some` only for a
+    /// diff-drive class (`courier()`); the Ackermann profiles (`default_urban`,
+    /// `delivery_av`) leave it **`None`**, so the per-pose path is **byte-identical**
+    /// to today — the robotaxi / AV path stays frozen. When `Some`, the slow loop
+    /// adds a per-segment `|ω| ≤ ω_max(v)` check that bounds the angular axis the
+    /// bicycle steering term silently drops at `v ≈ 0` (in-place rotation).
+    pub angular: Option<CourierAngularBound>,
 }
 
 /// Robotaxi-class RSS lateral band (m) — the frozen reference value (was the module
 /// constant `RSS_LATERAL_ALIGNMENT_TOLERANCE_M` in `validation.rs`). `default_urban` uses
 /// this verbatim, so the robotaxi/AV path is byte-identical.
 pub const DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
+
+/// Below this linear velocity the rollover term is non-binding (the v→0 singularity;
+/// in-place rotation is dominated by ω, not v). **Cited copy** of parko's
+/// `ROLLOVER_MIN_LINEAR_VELOCITY_MPS` (`parko/crates/parko-kirra/src/angular_bound.rs`,
+/// #136) — the diff-drive angular model of record. See ADR-0029.
+pub const ROLLOVER_MIN_LINEAR_VELOCITY_MPS: f64 = 0.05;
+/// Standard gravity, m/s² (rollover term). Cited copy of parko's `GRAVITY_MPS2`.
+const ANGULAR_GRAVITY_MPS2: f64 = 9.81;
+
+/// The differential-drive angular-velocity model for the SDK courier slow-loop
+/// checker — a **cited copy** of parko's `AngularVelocityBound` (#136, SOTIF-derived)
+/// `urban_service_robot_reference()` params + `STOP_EPSILON_RAD_S`. The two workspaces
+/// are dependency-separated (no imports), so per the CONTRACT_PROFILES single-source
+/// rule the numbers travel as a cited copy; parko is the **model of record** and this
+/// MUST equal it (enforced by `courier_angular_bound_matches_parko_record`). ADR-0029.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CourierAngularBound {
+    /// Track width, m (rollover stability factor `t / (2·h)`).
+    pub track_width_m: f64,
+    /// Centre-of-gravity height, m (rollover).
+    pub cog_height_m: f64,
+    /// Bounding-circle radius, m (sweep `r·ω ≤ v_edge`).
+    pub robot_extent_m: f64,
+    /// Safe contact velocity, m/s (ISO/TS 15066; sweep).
+    pub v_edge_safe_mps: f64,
+    /// Max heading change per FTTI, rad.
+    pub theta_max_rad: f64,
+    /// Fault-tolerant time interval, s.
+    pub ftti_s: f64,
+    /// Degraded-posture derate on `v_edge_safe` + `theta_max` (range (0,1]).
+    pub mrc_posture_factor: f64,
+    /// Angular stop epsilon, rad/s (converge-to-zero). Cited copy of `STOP_EPSILON_RAD_S`.
+    pub stop_epsilon_rad_s: f64,
+}
+
+impl CourierAngularBound {
+    /// Cited copy of parko `PlatformParams::urban_service_robot_reference()` (#136)
+    /// with `STOP_EPSILON_RAD_S = 0.02`. The diff-drive model of record; do not edit
+    /// these without updating parko (the correspondence gate fails otherwise).
+    #[must_use]
+    pub fn courier_reference() -> Self {
+        Self {
+            track_width_m:      0.50,
+            cog_height_m:       0.40,
+            robot_extent_m:     0.30,
+            v_edge_safe_mps:    0.25,
+            theta_max_rad:      0.087, // 5°
+            ftti_s:             0.10,
+            mrc_posture_factor: 0.5,
+            stop_epsilon_rad_s: 0.02,
+        }
+    }
+
+    /// Cited copy of parko `AngularVelocityBound::omega_max(v)`:
+    /// `min(rollover(v), sweep, ftti)`, derated by `posture_factor`
+    /// (`1.0` Nominal, `mrc_posture_factor` Degraded). Always non-negative + finite.
+    /// The bound is on `|ω|`.
+    #[must_use]
+    pub fn omega_max(&self, linear_velocity_mps: f64, posture_factor: f64) -> f64 {
+        let v = linear_velocity_mps.abs();
+        let omega_rollover = if v >= ROLLOVER_MIN_LINEAR_VELOCITY_MPS {
+            ANGULAR_GRAVITY_MPS2 * self.track_width_m / (2.0 * self.cog_height_m * v)
+        } else {
+            f64::INFINITY
+        };
+        let omega_sweep = (self.v_edge_safe_mps * posture_factor) / self.robot_extent_m;
+        let omega_ftti = (self.theta_max_rad * posture_factor) / self.ftti_s;
+        omega_rollover.min(omega_sweep).min(omega_ftti)
+    }
+}
 
 impl VehicleConfig {
     /// Defaults for an urban mid-size AV. Matches the kernel's
@@ -98,6 +176,8 @@ impl VehicleConfig {
             max_steering_rad:   35.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(URBAN_ODD_SPEED_CAP_MPS),
             rss_lateral_alignment_tolerance_m: DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M,
+            // Ackermann (robotaxi) — NO angular channel; per-pose path byte-identical.
+            angular: None,
         }
     }
 
@@ -123,6 +203,9 @@ impl VehicleConfig {
             max_steering_rad:   30.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(2.5),
             rss_lateral_alignment_tolerance_m: 0.6,
+            // Differential-drive courier — the diff-drive yaw bound (ADR-0029),
+            // a cited copy of parko's AngularVelocityBound (#136).
+            angular: Some(CourierAngularBound::courier_reference()),
         }
     }
 
@@ -143,6 +226,8 @@ impl VehicleConfig {
             max_steering_rad:   33.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(11.0),
             rss_lateral_alignment_tolerance_m: 2.0,
+            // Delivery-AV is Ackermann (road pod) — NO angular channel.
+            angular: None,
         }
     }
 
@@ -445,5 +530,45 @@ mod tests {
         // ODD cap >= vehicle max → cap is a no-op; warn.
         cfg.odd_speed_cap_mps = Some(40.0);
         assert!(cfg.warn_if_missing_odd_cap());
+    }
+
+    // --- ADR-0029: courier angular channel ---------------------------------
+
+    /// THE correspondence gate: the SDK cited copy MUST equal parko's
+    /// `AngularVelocityBound` model of record (`urban_service_robot_reference()`
+    /// + `STOP_EPSILON_RAD_S`, #136). If parko's numbers move, this fails here —
+    /// drift is caught in CI, not silently in the field.
+    #[test]
+    fn courier_angular_bound_matches_parko_record() {
+        let ab = CourierAngularBound::courier_reference();
+        assert_eq!(ab.track_width_m, 0.50);
+        assert_eq!(ab.cog_height_m, 0.40);
+        assert_eq!(ab.robot_extent_m, 0.30);
+        assert_eq!(ab.v_edge_safe_mps, 0.25);
+        assert_eq!(ab.theta_max_rad, 0.087);
+        assert_eq!(ab.ftti_s, 0.10);
+        assert_eq!(ab.mrc_posture_factor, 0.5);
+        assert_eq!(ab.stop_epsilon_rad_s, 0.02);
+        assert_eq!(ROLLOVER_MIN_LINEAR_VELOCITY_MPS, 0.05);
+        // ω_max(0) = min(∞, sweep 0.25/0.30, ftti 0.087/0.10) ≈ 0.833 rad/s,
+        // matching parko's reference ω_max(0) ≈ 0.833.
+        let w0 = ab.omega_max(0.0, 1.0);
+        assert!((w0 - 0.8333).abs() < 1e-3, "ω_max(0) must equal parko's 0.833 rad/s; got {w0}");
+        // Below the courier's speed range sweep binds (rollover only tightens
+        // past ~7.4 m/s): ω_max is flat at 0.833 across creep speeds...
+        assert_eq!(ab.omega_max(2.0, 1.0), w0, "at courier speeds sweep binds, not rollover");
+        // ...but the rollover term IS correct — at a high v it binds below sweep.
+        assert!(ab.omega_max(10.0, 1.0) < w0, "rollover must bind at high v");
+        // MRC is tighter than Nominal.
+        assert!(ab.omega_max(0.0, ab.mrc_posture_factor) < w0, "MRC must be tighter than Nominal");
+    }
+
+    /// Only the diff-drive class carries the angular channel; the Ackermann
+    /// profiles leave it `None` so their per-pose path is byte-identical (frozen).
+    #[test]
+    fn only_the_courier_carries_an_angular_channel() {
+        assert!(VehicleConfig::courier().angular.is_some(), "courier (diff-drive) must have the bound");
+        assert!(VehicleConfig::default_urban().angular.is_none(), "robotaxi must NOT (frozen AV path)");
+        assert!(VehicleConfig::delivery_av().angular.is_none(), "delivery-AV (Ackermann) must NOT");
     }
 }

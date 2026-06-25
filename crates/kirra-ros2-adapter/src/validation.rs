@@ -291,6 +291,39 @@ pub fn validate_trajectory_slow_capped(
                 return TrajectoryVerdict::MRCFallback;
             }
         }
+
+        // ----- Angular channel (ADR-0029) ------------------------------
+        //
+        // The bicycle steering term (`pose_pair_to_command`) is undefined at
+        // v≈0 and falls back to steering=0 — so an in-place rotation is
+        // silently passed as "stopped, straight". For a diff-drive class
+        // (`config.angular = Some`) we bound the yaw rate directly with the
+        // cited-copy diff-drive model: refuse `|ω| > ω_max(v)` (and any
+        // non-finite ω). Ackermann profiles (`angular = None`) skip this
+        // entirely → the per-pose path is byte-identical. Fail-closed: a
+        // breach collapses the trajectory to the MRC, exactly like a
+        // containment / per-pose breach.
+        // SAFETY: SG3 SG8 | REQ: courier-angular-yaw-bound | TEST: courier_in_place_rotation_at_sane_yaw_is_admitted,courier_in_place_rotation_at_excessive_yaw_mrcs,ackermann_trajectory_has_no_angular_channel,courier_angular_bound_matches_parko_record
+        if let Some(ab) = config.angular {
+            let a = &trajectory[i];
+            let b = &trajectory[i + 1];
+            let dt = b.time_from_start_s - a.time_from_start_s;
+            if dt > 0.0 {
+                // Normalize Δheading to [-π, π] so a heading wrap is not read
+                // as a huge yaw.
+                let raw = b.pose.heading_rad - a.pose.heading_rad;
+                let dheading =
+                    raw - std::f64::consts::TAU * (raw / std::f64::consts::TAU).round();
+                let omega = dheading / dt;
+                // Conservative: the higher segment speed gives the tightest
+                // (smallest) rollover ω_max.
+                let v_seg = a.velocity_mps.abs().max(b.velocity_mps.abs());
+                let posture_factor = if degraded { ab.mrc_posture_factor } else { 1.0 };
+                if !omega.is_finite() || omega.abs() > ab.omega_max(v_seg, posture_factor) {
+                    return TrajectoryVerdict::MRCFallback;
+                }
+            }
+        }
     }
 
     // ----- C) RSS over horizon (SG1) -----------------------------------
