@@ -208,6 +208,11 @@ pub struct AdaptorState {
     /// validation and CLONE; the slow loop does NOT hold the lock across
     /// the computation. Writes replace the whole vector.
     pub objects_cache: Arc<RwLock<Vec<PerceivedObject>>>,
+    /// SECOND, independent perception snapshot (the True-Redundancy analog, gap #2b). Written by
+    /// an optional redundant PredictedObjects subscriber; the slow loop cross-checks it against
+    /// `objects_cache` when the divergence monitor is enabled. Empty/never-written when no
+    /// redundant channel is configured (the monitor stays inert).
+    pub objects_cache_b: Arc<RwLock<Vec<PerceivedObject>>>,
     /// Per-asset vehicle config (Phase 2A: single config, shared). Phase
     /// 4 may make this per-asset.
     pub config: Arc<VehicleConfig>,
@@ -223,6 +228,10 @@ pub struct AdaptorState {
     pub last_trajectory_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST PredictedObjects message arrived.
     pub last_objects_ms:    Arc<AtomicU64>,
+    /// Wall-clock-ms when the LAST *redundant* (channel-B) PredictedObjects message arrived
+    /// (0 = none yet). The slow loop checks it against the staleness timeout: a configured
+    /// redundant channel that goes silent is a redundancy loss → fail closed.
+    pub last_objects_b_ms:  Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST nav_msgs::Odometry message arrived.
     pub last_odom_ms:       Arc<AtomicU64>,
 
@@ -275,10 +284,12 @@ impl AdaptorState {
         Arc::new(Self {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
+            objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::nominal_default_no_source())),
@@ -295,10 +306,12 @@ impl AdaptorState {
         Arc::new(Self {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
+            objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::nominal_default_no_source())),
@@ -318,10 +331,12 @@ impl AdaptorState {
         Arc::new(Self {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
+            objects_cache_b: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
+            last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
                 PostureTracker::with_source())),
@@ -483,6 +498,30 @@ impl AdaptorState {
             .unwrap_or_default()
     }
 
+    /// Replace the SECONDARY (redundant channel-B) perception snapshot and stamp its arrival at
+    /// `now_ms` (the slow loop's staleness check reads that stamp). Called by the optional
+    /// redundant PredictedObjects subscriber; mirrors [`update_objects`](Self::update_objects)
+    /// including the fail-closed RwLock-poisoning handling. Freshness is stamped here (not via a
+    /// separate `touch`) so a redundant channel is liveness-tracked with one call.
+    pub fn update_objects_secondary(&self, objects: Vec<PerceivedObject>, now_ms: u64) {
+        self.last_objects_b_ms.store(now_ms, Ordering::Relaxed);
+        if let Ok(mut guard) = self.objects_cache_b.write() {
+            *guard = objects;
+        } else {
+            tracing::error!("objects_cache_b RwLock POISONED — redundant perception snapshot dropped");
+        }
+    }
+
+    /// Read-and-clone of the latest SECONDARY (channel-B) perception snapshot. The slow loop
+    /// cross-checks this against [`snapshot_objects`](Self::snapshot_objects) when the divergence
+    /// monitor is enabled.
+    pub fn snapshot_objects_secondary(&self) -> Vec<PerceivedObject> {
+        self.objects_cache_b
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
     /// Installs (or replaces) the accepted trajectory for `asset_id`.
     /// Called by the slow loop on verdict::Accept. Returns the previous
     /// trajectory if one existed (useful for tests / audit).
@@ -571,6 +610,31 @@ mod tests {
             velocity_mps: v,
             time_from_start_s: t,
         }
+    }
+
+    /// The redundant (channel-B) perception snapshot round-trips through its own cache and stamps
+    /// freshness, independently of the primary channel.
+    #[test]
+    fn test_secondary_perception_channel_round_trips_and_stamps() {
+        let state = AdaptorState::new();
+        // Fresh: empty and never stamped.
+        assert!(state.snapshot_objects_secondary().is_empty());
+        assert_eq!(state.last_objects_b_ms.load(Ordering::Relaxed), 0);
+
+        let objs = vec![PerceivedObject {
+            id: 5,
+            pos: crate::corridor::Point { x_m: 12.0, y_m: -1.0 },
+            velocity_mps: 3.0,
+            heading_rad: 0.0,
+            vel: crate::corridor::Point { x_m: 3.0, y_m: 0.0 },
+        }];
+        state.update_objects_secondary(objs.clone(), 7_000);
+        let got = state.snapshot_objects_secondary();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, 5);
+        assert_eq!(state.last_objects_b_ms.load(Ordering::Relaxed), 7_000, "B arrival stamped");
+        // The primary channel is untouched by a secondary write.
+        assert!(state.snapshot_objects().is_empty(), "channel A independent of channel B");
     }
 
     /// Phase-1 GAP: a fresh adapter has no trajectory for any asset and

@@ -47,6 +47,9 @@ use crate::validation::{
     check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
 };
 use crate::prediction::predicted_modes_from_objects;
+use crate::perception_redundancy::{
+    more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap, RedundancyConfig,
+};
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
 /// planner's prediction horizon; the checker time-matches each sample to a trajectory pose).
@@ -424,6 +427,29 @@ pub async fn run_adapter(
                 &perception_cache,
                 now_wall,
             );
+
+            // Perception-divergence assurance monitor (True-Redundancy analog, gap #2b) — now
+            // LIVE: cross-check the primary perception channel against the optional redundant
+            // channel B. A divergence (a phantom/missed object, or a speed mismatch), OR a
+            // configured-but-silent channel B (redundancy LOST), maps to an MRC-floor cap that
+            // composes into the SAME Track-C derate (`apply_perception_cap`) — a controlled stop
+            // with no change to the WCET-critical per-pose checker. Disabled (no channel B
+            // configured) → no-op, byte-identical prior behaviour.
+            let objects_b = slow_state.snapshot_objects_secondary();
+            let objects_b_ms =
+                slow_state.last_objects_b_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let objects_b_fresh = objects_b_ms != 0
+                && now_wall.saturating_sub(objects_b_ms) <= subscription_staleness_timeout_ms();
+            let redundancy_cap = resolve_redundancy_cap(
+                perception_redundancy_enabled(),
+                &objects,
+                &objects_b,
+                objects_b_fresh,
+                RedundancyConfig::default(),
+            );
+            // The more-restrictive of the Track-C derate cap and the divergence cap binds.
+            let effective_perception_cap =
+                more_restrictive_cap(effective_perception_cap, redundancy_cap);
 
             // Multi-modal predictive RSS (gap #3) — make the checker's previously-dormant pass
             // LIVE: roll the live perceived objects forward into PredictedMode hypotheses. A
