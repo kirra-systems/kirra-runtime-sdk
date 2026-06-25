@@ -33,6 +33,7 @@ pub mod image_shim;
 pub mod pointcloud2_shim;
 pub mod imu_shim;
 pub mod odometry_shim;
+pub mod platform_profile;
 pub mod posture_state;
 pub mod radar_shim;
 pub mod sensor_mapping;
@@ -50,6 +51,7 @@ pub mod node;
 pub use crate::command_mapping::{enforce_outgoing_twist, OutgoingTwist};
 pub use crate::comparator_adapter::ComparatorAsGovernor;
 pub use crate::config::ParkoNodeConfig;
+pub use crate::platform_profile::CourierPlatformProfile;
 pub use crate::sensor_mapping::{
     CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
     CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping,
