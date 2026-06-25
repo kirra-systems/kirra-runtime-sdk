@@ -21,6 +21,10 @@ pub mod corridor;
 pub mod geometry;
 pub mod state;
 pub mod validation;
+// Multi-modal predictive-RSS mode producer (gap #3) — rolls live perceived objects into
+// CV/CTRV `PredictedMode` hypotheses so the checker's multi-modal pass runs against real
+// perception. Pure, non-ros2-gated; tested under default features.
+pub mod prediction;
 // Perception redundancy cross-check (True-Redundancy analog) — pure, non-ros2-gated.
 pub mod perception_redundancy;
 // KIRRA-OCCY-PMON-003 slice-1 — pure perception-ingest shim/orchestration

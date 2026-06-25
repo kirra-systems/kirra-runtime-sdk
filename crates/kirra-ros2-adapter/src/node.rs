@@ -46,6 +46,12 @@ use crate::state::{
 use crate::validation::{
     check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
 };
+use crate::prediction::predicted_modes_from_objects;
+
+/// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
+/// planner's prediction horizon; the checker time-matches each sample to a trajectory pose).
+const SLOW_PRED_HORIZON_S: f64 = 3.0;
+const SLOW_PRED_DT_S: f64 = 0.5;
 // KIRRA-OCCY-PMON-003 slice-1: pure ingest orchestration (safety logic lives
 // in `perception_ingest` + the kernel; this node only forwards to them).
 use crate::perception_ingest::{perception_derate_enabled, publish_perception_tick};
@@ -419,6 +425,18 @@ pub async fn run_adapter(
                 now_wall,
             );
 
+            // Multi-modal predictive RSS (gap #3) — make the checker's previously-dormant pass
+            // LIVE: roll the live perceived objects forward into PredictedMode hypotheses. A
+            // per-object turn-rate channel is not yet plumbed into the slow loop, so only the
+            // kinematic CV mode is produced here (already strengthens the snapshot RSS by catching
+            // a cut-in that is laterally clear NOW but moves into the path). The producer adds the
+            // CTRV turn-in hypothesis as soon as the tracker's yaw estimate reaches this site (the
+            // planner already consumes it on its side); passing the yaw map flips it on with no
+            // other change.
+            let predicted_owned =
+                predicted_modes_from_objects(&objects, &[], SLOW_PRED_HORIZON_S, SLOW_PRED_DT_S);
+            let predicted_modes: Vec<_> = predicted_owned.iter().map(|m| m.as_mode()).collect();
+
             let verdict = validate_trajectory_slow_capped(
                 &traj.points,
                 slow_corridor.as_ref(),
@@ -431,9 +449,11 @@ pub async fn run_adapter(
                 // does not yet supply a visibility range → None (no-op), mirroring
                 // the perception-derate cap's pre-wiring state.
                 None,
-                // Multi-modal predictive RSS: prediction does not yet supply per-object
-                // modes here → None (no-op); the snapshot RSS remains the bound.
-                None,
+                // Multi-modal predictive RSS (gap #3) — now LIVE: the CV (and, once a yaw
+                // channel lands, CTRV) modes rolled from the live objects above. The checker
+                // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in
+                // breaches even though the snapshot showed the object laterally clear.
+                Some(&predicted_modes),
                 // Frame/localization integrity (S-FI1): the LIVE frame trust resolved from the
                 // integrator's per-tick `update_frame_integrity` report. With no source wired
                 // this returns `Trusted` — the AOU-LOCALIZATION-001 seam (byte-for-byte the
