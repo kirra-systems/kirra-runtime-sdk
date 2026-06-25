@@ -35,10 +35,23 @@ def generate_launch_description():
         default_value='false',
         description='Use simulation time (for Gazebo/Isaac Sim)',
     )
+    use_perception_cap_arg = DeclareLaunchArgument(
+        'use_perception_cap',
+        default_value='false',
+        description='Enable the Taj corridor speed derate on the cmd_vel path '
+                    '(requires the taj_service sidecar + perception_governor node)',
+    )
+    taj_url_arg = DeclareLaunchArgument(
+        'taj_url',
+        default_value='http://localhost:8101',
+        description='Taj perception sidecar URL (kirra-mick example taj_service)',
+    )
 
     kirra_url = LaunchConfiguration('kirra_url')
     kirra_token = LaunchConfiguration('kirra_token')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    use_perception_cap = LaunchConfiguration('use_perception_cap')
+    taj_url = LaunchConfiguration('taj_url')
 
     params_file = PathJoinSubstitution([
         FindPackageShare('kirra_safety'), 'config', 'kirra_params.yaml'
@@ -57,7 +70,22 @@ def generate_launch_description():
                 'input_topic': '/cmd_vel_raw',
                 'output_topic': '/cmd_vel',
                 'use_sim_time': use_sim_time,
+                'use_perception_cap': use_perception_cap,
             },
+        ],
+        output='screen',
+    )
+
+    # Taj corridor -> assured-clear-distance speed cap on the cmd_vel path. Subscribes /scan,
+    # POSTs to the taj_service sidecar, publishes /kirra/perception_speed_cap. The interceptor
+    # applies it (opt-in via use_perception_cap) BEFORE the governor — Taj tightens, KIRRA bounds.
+    perception_governor = Node(
+        package='kirra_safety',
+        executable='perception_governor',
+        name='perception_governor',
+        parameters=[
+            params_file,
+            {'taj_url': taj_url, 'use_sim_time': use_sim_time},
         ],
         output='screen',
     )
@@ -88,7 +116,10 @@ def generate_launch_description():
         kirra_url_arg,
         kirra_token_arg,
         use_sim_time_arg,
+        use_perception_cap_arg,
+        taj_url_arg,
         cmd_vel_interceptor,
+        perception_governor,
         sensor_monitor,
         posture_subscriber,
         # NOTE: Add nav2_bringup and robot_description includes here.

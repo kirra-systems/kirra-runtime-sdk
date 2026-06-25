@@ -29,6 +29,7 @@ setup(
             'cmd_vel_interceptor = kirra_safety.cmd_vel_interceptor:main',
             'sensor_monitor = kirra_safety.sensor_monitor:main',
             'posture_subscriber = kirra_safety.posture_subscriber:main',
+            'perception_governor = kirra_safety.perception_governor:main',
         ],
     },
 )
