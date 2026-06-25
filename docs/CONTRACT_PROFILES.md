@@ -5,7 +5,7 @@
 | Issues | **#312** (per-class profiles), **#313** (VRU-dense courier profile) |
 | Status | **NORMATIVE** for the per-class numbers — both code sides cite this table by parameter id |
 | Req id | **KIRRA-CLASS-PROFILES-001** |
-| Owns | `src/gateway/contract_profiles.rs` (envelope) · `parko-core/src/impact.rs::impact_cfg_for_class` (SG6 threshold) |
+| Owns | `src/gateway/contract_profiles.rs` (envelope) · `parko-core/src/impact.rs::impact_cfg_for_class` (SG6 threshold) · `crates/kirra-ros2-adapter/src/config.rs` (`VehicleConfig::{courier,delivery_av,default_urban,for_class}` — the slow-loop sibling family, incl. `rss_lateral_band`; ADR-0027) |
 
 > **This table is the single source of truth for the per-class numbers.** The two
 > code sides live in **separate workspaces with no dependency edge** (the SDK
@@ -61,6 +61,7 @@ Units: speed/cap m/s; accel/brake/lat m/s²; steering deg; rate deg/s; distances
 | `*.follow` | 2.0 | 3.5 | 2.0 | VALIDATION-PENDING |
 | `*.lat_accel` | 1.5 | 2.5 | 3.5 | VALIDATION-PENDING |
 | `*.wheelbase` | 0.5 | 1.9 | 2.8 | VALIDATION-PENDING |
+| `*.rss_lateral_band` (slow-loop RSS lateral-alignment, ADR-0027) | **0.6** | **2.0** | 4.0 (frozen) | VALIDATION-PENDING / INHERITED-FROZEN |
 | `*.footprint` (w×l, overhangs) | 0.6 × 0.9 (0.2/0.2) | 1.1 × 2.9 (0.5/0.5) | 1.85 × 4.8 (0.9/1.1) | VALIDATION-PENDING |
 | `*.impact_spike` (SG6, parko; **deviation** `\|‖a‖−G\|`, #321) | **2.5** | **8.0** | **22.0** | VALIDATION-PENDING |
 | `*.impact_confirm` (M / N consecutive, #321) | **2 / 3** | **2 / 3** | **1 / 1** | VALIDATION-PENDING |

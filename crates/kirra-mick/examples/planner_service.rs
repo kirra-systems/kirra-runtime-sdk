@@ -77,9 +77,11 @@ struct VehicleReq {
 /// Build the checker's `VehicleConfig` from the request: a base sibling profile selected by
 /// `class`, then explicit overrides. Absent → `default_urban` (robotaxi), unchanged.
 fn vehicle_config(req: &PlanRequest) -> VehicleConfig {
+    // Select the base sibling profile via the single slow-loop class selector (mirrors the
+    // fast-loop VehicleClass::from_str). Absent class → robotaxi (default_urban), unchanged.
     let mut v = match req.vehicle.as_ref().and_then(|o| o.class.as_deref()) {
-        Some("courier") | Some("robot") => VehicleConfig::courier(),
-        _ => VehicleConfig::default_urban(),
+        Some(class) => VehicleConfig::for_class(class),
+        None => VehicleConfig::default_urban(),
     };
     if let Some(o) = &req.vehicle {
         if let Some(x) = o.wheelbase_m { v.wheelbase_m = x; }

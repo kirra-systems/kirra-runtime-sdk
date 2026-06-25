@@ -66,10 +66,14 @@ Defaults are Rosmaster-class; tune them to your chassis:
 | `rss_lateral_alignment_tolerance_m` | 0.6 | per-class RSS lateral band — robot "lane" width, not the car's 4 m |
 | `lateral_clearance_target_m` | 0.6 | how much room the DOER (Occy) demands before proposing a pass |
 
-The `vehicle_class` selects a **sibling profile** in the checker (`VehicleConfig::courier()` vs
-`default_urban()`), per [`docs/CONTRACT_PROFILES.md`](../CONTRACT_PROFILES.md). The robotaxi
-numbers are **frozen and unchanged** (proven by `default_urban_rss_band_is_the_frozen_robotaxi_value`),
-so the small-robot profile **cannot regress the AV path** — the only difference is the numbers.
+The `vehicle_class` selects a **sibling profile** in the checker via the single
+`VehicleConfig::for_class()` selector (`courier` / `delivery-av` / `robotaxi`), the slow-loop
+counterpart of the fast-loop `VehicleClass` — per [`docs/CONTRACT_PROFILES.md`](../CONTRACT_PROFILES.md)
+and **[ADR-0027](../adr/0027-sidewalk-courier-odd.md)** (the sidewalk-courier ODD: a pedestrian-space
+class, not a shrunk car — creep + assured-clear-distance + impact-energy, *not* RSS car-following).
+The robotaxi numbers are **frozen and unchanged** (proven by
+`default_urban_rss_band_is_the_frozen_robotaxi_value`), so the courier profile **cannot regress the
+AV path** — the only difference is the numbers.
 
 ## What it does today (honest scope)
 

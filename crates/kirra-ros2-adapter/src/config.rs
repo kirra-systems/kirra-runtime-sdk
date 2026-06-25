@@ -126,6 +126,40 @@ impl VehicleConfig {
         }
     }
 
+    /// **Delivery-AV class** (road pod, mid-speed) — the sibling between courier and robotaxi,
+    /// per `docs/CONTRACT_PROFILES.md` Delivery-AV column (footprint 1.1 × 2.9 m, wheelbase
+    /// 1.9 m, max 12 m/s, ODD cap 11 m/s, accel 1.8, brake 4.0, steering 33°). The RSS band
+    /// (2.0 m) sits between the courier's sidewalk lane and the robotaxi's road lane.
+    /// **VALIDATION-PENDING**. Included so the slow-loop class family mirrors the fast-loop one.
+    pub fn delivery_av() -> Self {
+        Self {
+            wheelbase_m:        1.9,
+            track_width_m:      0.9,
+            half_length_m:      1.45,   // → length 2.9 m
+            half_width_m:       0.55,   // → width  1.1 m
+            max_speed_mps:      12.0,
+            max_accel_mps2:     1.8,
+            max_decel_mps2:     4.0,
+            max_steering_rad:   33.0_f64.to_radians(),
+            odd_speed_cap_mps:  Some(11.0),
+            rss_lateral_alignment_tolerance_m: 2.0,
+        }
+    }
+
+    /// **The single slow-loop class selector** — the counterpart of the fast-loop
+    /// `VehicleClass::from_str` + `contract_for` (`src/gateway/contract_profiles.rs`), keyed by
+    /// the same class STRING (the two live in dependency-separated workspaces, so they select by
+    /// name, not a shared import — the CONTRACT_PROFILES.md cited-copy discipline). Unknown /
+    /// absent → `default_urban` (robotaxi): the most conservative footprint, so an unrecognized
+    /// class fails safe (over-contains → holds) rather than under-bounding a vehicle.
+    pub fn for_class(class: &str) -> Self {
+        match class.trim().to_ascii_lowercase().as_str() {
+            "courier" | "robot" | "sidewalk" => Self::courier(),
+            "delivery-av" | "delivery_av" | "deliveryav" => Self::delivery_av(),
+            _ => Self::default_urban(), // robotaxi / unknown → frozen reference (fail-safe)
+        }
+    }
+
     /// Deployment-time check. Logs a WARN if no ODD cap is configured or
     /// if the vehicle physical max sits above the cap by more than its
     /// own value (i.e. the integrator hasn't actually tightened the
@@ -258,6 +292,31 @@ mod tests {
             DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M
         );
         assert_eq!(DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M, 4.0);
+    }
+
+    #[test]
+    fn for_class_selects_the_sibling_profiles_by_name() {
+        // One selector, keyed by the same class string the fast-loop VehicleClass parses.
+        assert_eq!(VehicleConfig::for_class("courier").rss_lateral_alignment_tolerance_m, 0.6);
+        assert_eq!(VehicleConfig::for_class("sidewalk").max_speed_mps, 3.0);          // courier alias
+        assert_eq!(VehicleConfig::for_class("delivery-av").rss_lateral_alignment_tolerance_m, 2.0);
+        assert_eq!(VehicleConfig::for_class("robotaxi").rss_lateral_alignment_tolerance_m, 4.0);
+        // Unknown / absent → robotaxi (frozen reference), the fail-safe default.
+        assert_eq!(VehicleConfig::for_class("nonsense").half_length_m,
+                   VehicleConfig::default_urban().half_length_m);
+        assert_eq!(VehicleConfig::for_class("  Courier  ").rss_lateral_alignment_tolerance_m, 0.6);
+    }
+
+    #[test]
+    fn slow_loop_class_family_is_ordered_courier_lt_delivery_lt_robotaxi() {
+        // The family is monotone in the dimensions that scale with vehicle size/speed —
+        // the cited-copy mirror of the fast-loop contract family.
+        let (c, d, r) = (VehicleConfig::courier(), VehicleConfig::delivery_av(), VehicleConfig::default_urban());
+        for f in [|v: &VehicleConfig| v.rss_lateral_alignment_tolerance_m,
+                  |v: &VehicleConfig| v.max_speed_mps,
+                  |v: &VehicleConfig| v.half_length_m] {
+            assert!(f(&c) < f(&d) && f(&d) < f(&r), "courier < delivery-av < robotaxi expected");
+        }
     }
 
     #[test]
