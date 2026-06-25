@@ -48,7 +48,8 @@ use crate::validation::{
 };
 use crate::prediction::slow_loop_modes;
 use crate::perception_redundancy::{
-    more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap, RedundancyConfig,
+    more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap,
+    DivergenceEscalator, RedundancyConfig,
 };
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
@@ -436,6 +437,9 @@ pub async fn run_adapter(
     let capture_tx: Option<mpsc::Sender<CaptureRecord>> =
         capture_enabled().then(spawn_capture_writer);
     let capture_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Sustained-divergence posture escalator — persists across slow-loop ticks (owned by this
+    // task), so a divergence that PERSISTS escalates fleet posture, not just this tick's cap.
+    let mut divergence_escalator = DivergenceEscalator::new();
     tokio::spawn(async move {
         let mut rx = trajectory_rx;
         while let Some(traj) = rx.recv().await {
@@ -487,6 +491,15 @@ pub async fn run_adapter(
             // The more-restrictive of the Track-C derate cap and the divergence cap binds.
             let effective_perception_cap =
                 more_restrictive_cap(effective_perception_cap, redundancy_cap);
+
+            // Sustained-divergence → posture escalation (orthogonal to the per-tick MRC cap
+            // above): a divergence (or lost redundant channel) that PERSISTS is a
+            // perception-integrity fault that escalates the EFFECTIVE fleet posture — Degraded,
+            // then LockedOut — so the whole stack degrades, not just this tick's speed. A
+            // momentary blip leaves posture unchanged (the cap handled it); escalation-only, so
+            // it can never relax the verifier-sourced base posture.
+            divergence_escalator.observe(redundancy_cap == Some(0.0), now_wall);
+            let posture = posture.escalate(divergence_escalator.recommended_posture(now_wall));
 
             // Multi-modal predictive RSS (gap #3) — roll the live objects into PredictedMode
             // hypotheses for the checker's predictive pass. The tracker's per-object yaw estimate
