@@ -55,7 +55,8 @@ pub use behavior::{
 
 pub mod lanemap;
 pub use lanemap::{
-    JunctionContext, Lane, LaneControl, LaneCorridor, LaneEdge, LaneGraph, MAX_ROUTE_LANES,
+    JunctionContext, Lane, LaneControl, LaneCorridor, LaneEdge, LaneGraph, Occluder,
+    MAX_ROUTE_LANES,
 };
 
 pub mod lanelet2;

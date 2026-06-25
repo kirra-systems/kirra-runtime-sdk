@@ -50,6 +50,113 @@ use crate::lane_lines::{LaneBoundary, LineType};
 /// longer than this (or a pathological graph) returns `None` rather than churning.
 pub const MAX_ROUTE_LANES: usize = 64;
 
+/// An axis-aligned ground footprint that **blocks sightlines** at a junction — a
+/// building, hedge, wall, or parked vehicle that hides cross traffic from an
+/// approaching ego. The map/perception layer supplies these (a Lanelet2 map carries
+/// building polygons; perception supplies parked-car boxes); [`LaneGraph::derive_occluded_approaches`]
+/// turns them into the per-approach assured-clear sight distance the occluded-junction
+/// speed cap consumes — replacing the hand-fed [`LaneGraph::with_occluded_approach`] datum.
+///
+/// A footprint is modelled as an `[x_min, x_max] × [y_min, y_max]` rectangle in the
+/// **world frame** the junction model already uses (travel along +x toward the conflict
+/// line, lateral = y — the same straight-approach frame as [`Lane::stop_line_x`]). A
+/// general convex polygon is follow-up; the AABB captures the corner building / parked
+/// car that dominates real blind-junction geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Occluder {
+    /// Footprint extent along travel (world x), metres.
+    pub x_min_m: f64,
+    pub x_max_m: f64,
+    /// Footprint lateral extent (world y), metres.
+    pub y_min_m: f64,
+    pub y_max_m: f64,
+}
+
+impl Occluder {
+    /// A rectangular footprint from its world-frame bounds. The min/max are normalised
+    /// so callers may pass corners in either order. A non-finite input is **preserved as
+    /// NaN** (not silently swallowed by `f64::min`/`max`) so the derivation's `is_finite`
+    /// gate drops the footprint rather than admitting a degenerate box.
+    #[must_use]
+    pub fn new(x0_m: f64, x1_m: f64, y0_m: f64, y1_m: f64) -> Self {
+        let (x_min_m, x_max_m) = Self::order(x0_m, x1_m);
+        let (y_min_m, y_max_m) = Self::order(y0_m, y1_m);
+        Self { x_min_m, x_max_m, y_min_m, y_max_m }
+    }
+
+    /// Order a pair low→high, but if either is non-finite return `(NaN, NaN)` so the
+    /// footprint fails the `is_finite` gate (NaN must not be hidden by `f64::min`).
+    fn order(a: f64, b: f64) -> (f64, f64) {
+        if a.is_finite() && b.is_finite() {
+            (a.min(b), a.max(b))
+        } else {
+            (f64::NAN, f64::NAN)
+        }
+    }
+
+    /// All four coordinates finite — the fail-safe predicate the derivation gates on (a
+    /// footprint with a NaN/Inf bound is dropped rather than corrupting the sight min).
+    #[must_use]
+    fn is_finite(&self) -> bool {
+        self.x_min_m.is_finite()
+            && self.x_max_m.is_finite()
+            && self.y_min_m.is_finite()
+            && self.y_max_m.is_finite()
+    }
+}
+
+/// Lateral reach (m) beyond a lane's edge within which an occluder is treated as a
+/// **corner** occluder that shadows the cross-traffic view. A footprint farther to the
+/// side than this is across the plaza / set back behind other lanes and does not bound
+/// this approach's sight (no spurious creep). One lane-width is a deliberately generous,
+/// conservative band.
+pub const OCCLUSION_CORNER_LATERAL_REACH_M: f64 = 4.0;
+
+/// Pure corner-occlusion model: the assured-clear sight distance (m) toward a junction
+/// `conflict_x` (world x of the conflict line, travel along +x) that a single corner
+/// occluder permits an ego in a lane centred at `lane_y` with half-width `half_width_m`.
+///
+/// Geometry (stated, not hidden): the ego is laterally **blind** to a side while it is
+/// behind the footprint that sits at that corner; it regains the cross-traffic view once
+/// its eye passes the footprint's **junction-facing edge** (`x_max`). The assured-clear
+/// sight toward the conflict is therefore the residual gap from that edge to the conflict
+/// line, `conflict_x − x_max`, floored at 0 (a footprint reaching the conflict line ⇒ 0 ⇒
+/// the ego must be able to stop at the line ⇒ it creeps). Returns `None` when the footprint
+/// is **not** a corner occluder for this approach: in-lane (handled by the object pipeline,
+/// not the sight model), too far to the side, or entirely past the conflict line.
+#[must_use]
+pub fn corner_sight_distance(
+    occ: &Occluder,
+    conflict_x: f64,
+    lane_y: f64,
+    half_width_m: f64,
+) -> Option<f64> {
+    if !occ.is_finite() || !conflict_x.is_finite() || !lane_y.is_finite() {
+        return None;
+    }
+    let hw = half_width_m.max(0.0);
+    // Lateral relevance: the footprint must sit OUTSIDE the lane footprint (an in-lane box
+    // is an in-path object, not an occluder) yet WITHIN the corner reach of an edge.
+    let lane_left = lane_y + hw;
+    let lane_right = lane_y - hw;
+    let off_left = occ.y_min_m >= lane_left && occ.y_min_m <= lane_left + OCCLUSION_CORNER_LATERAL_REACH_M;
+    let off_right = occ.y_max_m <= lane_right && occ.y_max_m >= lane_right - OCCLUSION_CORNER_LATERAL_REACH_M;
+    if !(off_left || off_right) {
+        return None;
+    }
+    // Longitudinal: the footprint must reach up toward the corner (its junction-facing edge
+    // at or before the conflict line). A box entirely past the conflict line shadows nothing
+    // on the approach.
+    if occ.x_max_m <= conflict_x {
+        Some((conflict_x - occ.x_max_m).max(0.0))
+    } else if occ.x_min_m <= conflict_x {
+        // Straddles the conflict line — reaches the corner itself ⇒ fully blind ⇒ 0.
+        Some(0.0)
+    } else {
+        None
+    }
+}
+
 /// A directed connectivity edge out of a [`Lane`]. Mirrors the relations a
 /// Lanelet2 routing graph carries: longitudinal **successors** (drive forward
 /// into) and lateral **neighbors** (the adjacent lane on each side, the lane a
@@ -357,6 +464,53 @@ impl LaneGraph {
     #[must_use]
     pub fn sight_distance(&self, lane: u64) -> Option<f64> {
         self.occlusion_sight.get(&lane).copied()
+    }
+
+    /// **Derive** each approach lane's assured-clear sight distance from occluder geometry,
+    /// populating the same `occlusion_sight` map [`set_occluded_approach`](Self::set_occluded_approach)
+    /// writes — so the occluded-junction speed cap binds from the **map's footprints** instead of
+    /// the hand-fed [`with_occluded_approach`](Self::with_occluded_approach) datum (the honest-scope
+    /// follow-up named in ADR-0016).
+    ///
+    /// For every lane that advances along +x toward its terminus (the conflict line — the
+    /// straight-approach frame the junction model already uses), the worst (minimum) sight over all
+    /// [`corner_sight_distance`] candidates is recorded. A lane no occluder shadows is left with an
+    /// open view (no cap). Fail-safe and additive: non-finite footprints are dropped, a −x /
+    /// degenerate lane is skipped, and an existing hand-set datum is only **tightened** (the
+    /// derivation never relaxes a stricter integrator value).
+    // SAFETY: SG1 SG9 | REQ: occlusion-sight-derived-from-geometry | TEST: derived_sight_is_the_gap_from_the_corner_building_to_the_conflict_line,a_building_closer_to_the_junction_yields_less_sight,a_building_reaching_the_conflict_line_is_fully_blind,no_occluder_leaves_an_open_view,an_in_lane_or_far_lateral_box_does_not_bound_sight,the_worst_of_two_corners_wins,derivation_only_tightens_an_existing_datum_and_fails_safe,occlusion_creep_is_driven_by_map_occluder_geometry_not_a_hand_fed_datum
+    pub fn derive_occluded_approaches(&mut self, occluders: &[Occluder]) {
+        // Collect first (immutable borrow of lanes) then write (mutable borrow of the map).
+        let mut derived: Vec<(u64, f64)> = Vec::new();
+        for lane in self.lanes.values() {
+            let (Some(first), Some(last)) = (lane.centerline.first(), lane.centerline.last()) else {
+                continue; // degenerate lane — no approach geometry
+            };
+            if last.x_m <= first.x_m {
+                continue; // not a +x approach (oncoming / vertical) — outside the model, skip
+            }
+            let conflict_x = lane.stop_line_x();
+            let lane_y = last.y_m;
+            let sight = occluders
+                .iter()
+                .filter_map(|occ| corner_sight_distance(occ, conflict_x, lane_y, lane.half_width_m))
+                .fold(f64::INFINITY, f64::min);
+            if sight.is_finite() {
+                derived.push((lane.id, sight));
+            }
+        }
+        for (id, sight) in derived {
+            // Tighten-only: keep the stricter of an existing datum and the derived one.
+            let tightened = self.occlusion_sight.get(&id).map_or(sight, |&prev| prev.min(sight));
+            self.set_occluded_approach(id, tightened);
+        }
+    }
+
+    /// Builder form of [`derive_occluded_approaches`](Self::derive_occluded_approaches).
+    #[must_use]
+    pub fn with_derived_occlusion(mut self, occluders: &[Occluder]) -> Self {
+        self.derive_occluded_approaches(occluders);
+        self
     }
 
     /// Record that `priority_lane` has right-of-way over `yielding_lane` — traffic in
@@ -1546,6 +1700,80 @@ mod tests {
         let g2 = LaneGraph::new().with_occluded_approach(5, f64::NAN).with_occluded_approach(6, -3.0);
         assert_eq!(g2.sight_distance(5), None, "NaN sight ignored (fail-safe)");
         assert_eq!(g2.sight_distance(6), None, "negative sight ignored (fail-safe)");
+    }
+
+    // A +x approach lane: centred at y=0, half-width 2 m, running x∈[0,30] so the conflict
+    // line (terminus) is at x=30. Used by the derivation tests below.
+    fn approach_lane() -> Lane {
+        Lane::straight(1, 0.0, 0.0, 30.0, 2.0, LineType::Solid, LineType::Solid)
+    }
+
+    #[test]
+    fn derived_sight_is_the_gap_from_the_corner_building_to_the_conflict_line() {
+        // A corner building just off the +y edge, ending 6 m before the conflict line.
+        let near_edge = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_derived_occlusion(&[Occluder::new(10.0, 24.0, 2.5, 8.0)]);
+        assert_eq!(near_edge.sight_distance(1), Some(6.0), "sight = conflict_x − building's junction edge");
+    }
+
+    #[test]
+    fn a_building_closer_to_the_junction_yields_less_sight() {
+        let far = LaneGraph::new().with_lane(approach_lane())
+            .with_derived_occlusion(&[Occluder::new(10.0, 21.0, 2.5, 8.0)]); // ends 9 m out
+        let near = LaneGraph::new().with_lane(approach_lane())
+            .with_derived_occlusion(&[Occluder::new(10.0, 27.0, 2.5, 8.0)]); // ends 3 m out
+        assert_eq!(far.sight_distance(1), Some(9.0));
+        assert_eq!(near.sight_distance(1), Some(3.0));
+        assert!(near.sight_distance(1) < far.sight_distance(1), "closer building ⇒ blinder ⇒ less sight");
+    }
+
+    #[test]
+    fn a_building_reaching_the_conflict_line_is_fully_blind() {
+        let to_line = LaneGraph::new().with_lane(approach_lane())
+            .with_derived_occlusion(&[Occluder::new(10.0, 30.0, 2.5, 8.0)]); // edge AT the line
+        let past = LaneGraph::new().with_lane(approach_lane())
+            .with_derived_occlusion(&[Occluder::new(10.0, 40.0, 2.5, 8.0)]); // straddles the line
+        assert_eq!(to_line.sight_distance(1), Some(0.0), "edge at the conflict line ⇒ 0 ⇒ creep");
+        assert_eq!(past.sight_distance(1), Some(0.0), "straddling the corner ⇒ fully blind");
+    }
+
+    #[test]
+    fn no_occluder_leaves_an_open_view() {
+        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[]);
+        assert_eq!(g.sight_distance(1), None, "nothing shadows the approach ⇒ no cap");
+    }
+
+    #[test]
+    fn an_in_lane_or_far_lateral_box_does_not_bound_sight() {
+        let in_lane = Occluder::new(10.0, 24.0, -1.0, 1.0); // inside the ±2 m lane footprint
+        let far = Occluder::new(10.0, 24.0, 9.0, 12.0); // beyond the corner reach (edge 2 → 9 > 2+4)
+        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[in_lane, far]);
+        assert_eq!(g.sight_distance(1), None, "an in-path object / a set-back building is not a corner occluder");
+    }
+
+    #[test]
+    fn the_worst_of_two_corners_wins() {
+        let left = Occluder::new(10.0, 24.0, 2.5, 8.0); // +y side, sight 6
+        let right = Occluder::new(10.0, 27.0, -8.0, -2.5); // −y side, sight 3 (closer)
+        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[left, right]);
+        assert_eq!(g.sight_distance(1), Some(3.0), "the blinder corner bounds the approach");
+    }
+
+    #[test]
+    fn derivation_only_tightens_an_existing_datum_and_fails_safe() {
+        // A stricter hand-set datum is NOT relaxed by a looser derived one.
+        let tight = LaneGraph::new().with_lane(approach_lane()).with_occluded_approach(1, 2.0)
+            .with_derived_occlusion(&[Occluder::new(10.0, 24.0, 2.5, 8.0)]); // derived 6 > 2
+        assert_eq!(tight.sight_distance(1), Some(2.0), "tighten-only: keep the stricter integrator value");
+
+        // A non-finite footprint is dropped; a −x (oncoming) approach is outside the model.
+        let nan_box = Occluder::new(10.0, f64::NAN, 2.5, 8.0);
+        let oncoming = Lane::straight(2, 0.0, 30.0, 0.0, 2.0, LineType::Solid, LineType::Solid); // advances −x
+        let g = LaneGraph::new().with_lane(approach_lane()).with_lane(oncoming)
+            .with_derived_occlusion(&[nan_box]);
+        assert_eq!(g.sight_distance(1), None, "a NaN footprint is dropped (fail-safe)");
+        assert_eq!(g.sight_distance(2), None, "a −x approach is skipped (outside the straight +x model)");
     }
 
     #[test]
