@@ -119,6 +119,47 @@ pub enum FleetPosture {
     LockedOut,
 }
 
+impl FleetPosture {
+    /// Severity rank — higher is more restrictive: `Nominal` < `Degraded` < `LockedOut`.
+    #[must_use]
+    pub fn severity(&self) -> u8 {
+        match self {
+            FleetPosture::Nominal => 0,
+            FleetPosture::Degraded => 1,
+            FleetPosture::LockedOut => 2,
+        }
+    }
+
+    /// The MORE restrictive of two postures — an **escalation-only** combine. A local safety
+    /// signal (a sustained perception-divergence fault, a frame-integrity fault) can make the
+    /// effective posture stricter, never relax it. Mirrors `parko_core`'s `SafetyPosture::escalate`.
+    #[must_use]
+    pub fn escalate(self, other: FleetPosture) -> FleetPosture {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+#[cfg(test)]
+mod fleet_posture_tests {
+    use super::FleetPosture::{Degraded, LockedOut, Nominal};
+
+    #[test]
+    fn escalate_takes_the_more_restrictive_in_either_order() {
+        assert_eq!(Nominal.escalate(Degraded), Degraded);
+        assert_eq!(Degraded.escalate(Nominal), Degraded);
+        assert_eq!(Degraded.escalate(LockedOut), LockedOut);
+        assert_eq!(LockedOut.escalate(Degraded), LockedOut);
+        assert_eq!(Nominal.escalate(Nominal), Nominal);
+        // Escalation only — a lower posture never relaxes a higher one.
+        assert_eq!(LockedOut.escalate(Nominal), LockedOut);
+        assert!(Nominal.severity() < Degraded.severity() && Degraded.severity() < LockedOut.severity());
+    }
+}
+
 /// Event payload written to the audit chain when the Track-C perception
 /// monitor (KIRRA-OCCY-PMON-001) applies a derate. `reason` is the byte-stable
 /// `DerateCode` token (SCREAMING_SNAKE_CASE) and is used as the chain

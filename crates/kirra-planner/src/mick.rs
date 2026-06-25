@@ -420,7 +420,11 @@ fn plan_along_route(
         .chain(lane.and_then(Lane::right_neighbor))
         .collect();
     let boundaries = if world.lane_boundaries.is_empty() {
-        graph.boundaries_relative_to(ego_lane, &neighbors)
+        // Curve-correct: the lane-line offsets are measured in the ego's Frenet frame at its
+        // current station (not each lane's global mean_y), so the crossing rules see a neighbor
+        // boundary where it actually is through a turn — admitting/blocking a lateral move
+        // correctly on the arc, not just on straights.
+        graph.boundaries_relative_to_at(ego_lane, &neighbors, MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m })
     } else {
         None
     };

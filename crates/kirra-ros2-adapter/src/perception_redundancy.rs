@@ -15,6 +15,7 @@
 //! to the WCET-critical checker.
 
 use crate::state::PerceivedObject;
+use kirra_core::FleetPosture;
 
 /// Tolerances for declaring two channels' objects "the same".
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +137,69 @@ pub fn more_restrictive_cap(a: Option<f64>, b: Option<f64>) -> Option<f64> {
         (Some(x), Some(y)) => Some(x.min(y)),
         (Some(x), None) | (None, Some(x)) => Some(x),
         (None, None) => None,
+    }
+}
+
+/// Continuous-divergence duration (ms) after which the monitor escalates fleet posture to
+/// `Degraded` — a divergence that PERSISTS this long is no longer a transient sensor blip the
+/// per-tick MRC cap absorbs, but a perception-integrity concern.
+pub const DIVERGENCE_DEGRADE_MS: u64 = 1_000;
+/// Continuous-divergence duration (ms) after which the monitor escalates to `LockedOut` — the
+/// redundant world model has been untrustworthy long enough that a controlled stop + human reset
+/// is warranted, not just a speed cap. Mirrors the verifier's LockedOut "human-reset" semantics.
+pub const DIVERGENCE_LOCKOUT_MS: u64 = 5_000;
+
+/// **Sustained-divergence posture escalator.** The per-tick [`resolve_redundancy_cap`] already
+/// brings the vehicle to a controlled stop on ANY divergence (the MRC-floor cap); this adds the
+/// orthogonal, stickier signal the cap cannot express — a divergence that PERSISTS is a
+/// perception-INTEGRITY fault that should escalate FLEET POSTURE, so the whole stack degrades
+/// (and ultimately locks out for a human reset), not just this tick's speed. Pure and
+/// deterministic (the caller supplies `now_ms`); parallels the frame-integrity S-FI1d hysteresis
+/// and the verifier's recovery-streak pattern. A consistent observation clears the streak.
+#[derive(Debug, Clone, Default)]
+pub struct DivergenceEscalator {
+    /// Wall-clock ms when the CURRENT continuous divergence began; `None` while consistent.
+    diverged_since_ms: Option<u64>,
+}
+
+impl DivergenceEscalator {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record this tick's cross-check outcome. `diverged` = the monitor returned a divergence (a
+    /// phantom/miss/speed-mismatch, OR a lost redundant channel). A consistent tick clears the
+    /// streak — the escalation recovers once perception AGREES again (the per-tick cap and the
+    /// verifier's own posture remain the backstops).
+    pub fn observe(&mut self, diverged: bool, now_ms: u64) {
+        if diverged {
+            self.diverged_since_ms.get_or_insert(now_ms);
+        } else {
+            self.diverged_since_ms = None;
+        }
+    }
+
+    /// The posture this monitor RECOMMENDS at `now_ms`, to be escalated INTO the effective fleet
+    /// posture (`base.escalate(recommended)`): `Nominal` while consistent or only MOMENTARILY
+    /// diverged (the MRC cap handles that); `Degraded` once divergence has persisted
+    /// [`DIVERGENCE_DEGRADE_MS`]; `LockedOut` at [`DIVERGENCE_LOCKOUT_MS`]. Escalation-only — it
+    /// can only make the posture stricter, never relax it.
+    #[must_use]
+    pub fn recommended_posture(&self, now_ms: u64) -> FleetPosture {
+        match self.diverged_since_ms {
+            None => FleetPosture::Nominal,
+            Some(since) => {
+                let elapsed = now_ms.saturating_sub(since);
+                if elapsed >= DIVERGENCE_LOCKOUT_MS {
+                    FleetPosture::LockedOut
+                } else if elapsed >= DIVERGENCE_DEGRADE_MS {
+                    FleetPosture::Degraded
+                } else {
+                    FleetPosture::Nominal // momentary → cap-only, no posture change
+                }
+            }
+        }
     }
 }
 
@@ -321,5 +385,48 @@ mod tests {
         assert_eq!(more_restrictive_cap(None, Some(2.0)), Some(2.0));
         assert_eq!(more_restrictive_cap(Some(3.0), Some(0.0)), Some(0.0), "an MRC floor binds");
         assert_eq!(more_restrictive_cap(Some(5.0), Some(2.0)), Some(2.0));
+    }
+
+    // ----- sustained-divergence posture escalation -----
+
+    #[test]
+    fn a_consistent_stream_never_escalates() {
+        let mut e = DivergenceEscalator::new();
+        e.observe(false, 1_000);
+        e.observe(false, 9_999);
+        assert_eq!(e.recommended_posture(9_999), FleetPosture::Nominal);
+    }
+
+    #[test]
+    fn a_momentary_divergence_does_not_escalate_posture() {
+        // The per-tick MRC cap handles a blip; posture stays Nominal under DIVERGENCE_DEGRADE_MS.
+        let mut e = DivergenceEscalator::new();
+        e.observe(true, 1_000);
+        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS - 1), FleetPosture::Nominal);
+    }
+
+    #[test]
+    fn a_sustained_divergence_escalates_degraded_then_locked_out() {
+        let mut e = DivergenceEscalator::new();
+        e.observe(true, 1_000); // divergence onset; stays diverged across ticks
+        e.observe(true, 1_500);
+        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS), FleetPosture::Degraded,
+            "≥ degrade window → Degraded");
+        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS), FleetPosture::LockedOut,
+            "≥ lockout window → LockedOut");
+    }
+
+    #[test]
+    fn divergence_clearing_resets_the_streak() {
+        let mut e = DivergenceEscalator::new();
+        e.observe(true, 1_000);
+        // It had been diverging long enough to escalate...
+        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS), FleetPosture::LockedOut);
+        // ...but a consistent tick clears it → recovers to Nominal (cap + verifier posture remain).
+        e.observe(false, 1_000 + DIVERGENCE_LOCKOUT_MS + 10);
+        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS + 10), FleetPosture::Nominal);
+        // A NEW divergence restarts the streak from its own onset (not the old one).
+        e.observe(true, 100_000);
+        assert_eq!(e.recommended_posture(100_000 + 10), FleetPosture::Nominal, "fresh streak → momentary again");
     }
 }
