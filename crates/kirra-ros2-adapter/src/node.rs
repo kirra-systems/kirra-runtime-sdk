@@ -46,7 +46,7 @@ use crate::state::{
 use crate::validation::{
     check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
 };
-use crate::prediction::predicted_modes_from_objects;
+use crate::prediction::slow_loop_modes;
 use crate::perception_redundancy::{
     more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap, RedundancyConfig,
 };
@@ -451,16 +451,24 @@ pub async fn run_adapter(
             let effective_perception_cap =
                 more_restrictive_cap(effective_perception_cap, redundancy_cap);
 
-            // Multi-modal predictive RSS (gap #3) — make the checker's previously-dormant pass
-            // LIVE: roll the live perceived objects forward into PredictedMode hypotheses. A
-            // per-object turn-rate channel is not yet plumbed into the slow loop, so only the
-            // kinematic CV mode is produced here (already strengthens the snapshot RSS by catching
-            // a cut-in that is laterally clear NOW but moves into the path). The producer adds the
-            // CTRV turn-in hypothesis as soon as the tracker's yaw estimate reaches this site (the
-            // planner already consumes it on its side); passing the yaw map flips it on with no
-            // other change.
-            let predicted_owned =
-                predicted_modes_from_objects(&objects, &[], SLOW_PRED_HORIZON_S, SLOW_PRED_DT_S);
+            // Multi-modal predictive RSS (gap #3) — roll the live objects into PredictedMode
+            // hypotheses for the checker's predictive pass. The tracker's per-object yaw estimate
+            // (the SAME CTRV estimate the planner consumes as MotionState) is read from the yaw
+            // channel and, when FRESH, adds a CTRV turn-in mode alongside CV — genuinely
+            // multi-modal. A stale / unconfigured yaw feed degrades to CV-only (the CV mode +
+            // snapshot RSS still bound the object); it is dropped, not trusted, never a fault.
+            let object_yaw_rates = slow_state.snapshot_object_yaw_rates();
+            let object_yaw_ms =
+                slow_state.last_object_yaw_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let object_yaw_fresh = object_yaw_ms != 0
+                && now_wall.saturating_sub(object_yaw_ms) <= subscription_staleness_timeout_ms();
+            let predicted_owned = slow_loop_modes(
+                &objects,
+                &object_yaw_rates,
+                object_yaw_fresh,
+                SLOW_PRED_HORIZON_S,
+                SLOW_PRED_DT_S,
+            );
             let predicted_modes: Vec<_> = predicted_owned.iter().map(|m| m.as_mode()).collect();
 
             let verdict = validate_trajectory_slow_capped(
@@ -475,8 +483,8 @@ pub async fn run_adapter(
                 // does not yet supply a visibility range → None (no-op), mirroring
                 // the perception-derate cap's pre-wiring state.
                 None,
-                // Multi-modal predictive RSS (gap #3) — now LIVE: the CV (and, once a yaw
-                // channel lands, CTRV) modes rolled from the live objects above. The checker
+                // Multi-modal predictive RSS (gap #3) — LIVE: the CV (and, when the tracker yaw
+                // feed is fresh, CTRV) modes rolled from the live objects above. The checker
                 // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in
                 // breaches even though the snapshot showed the object laterally clear.
                 Some(&predicted_modes),

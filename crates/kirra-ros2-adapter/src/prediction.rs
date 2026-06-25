@@ -111,6 +111,24 @@ pub fn predicted_modes_from_objects(
     modes
 }
 
+/// Build the slow-loop predicted modes from live `objects` plus the tracker's per-object
+/// `yaw_rates`, **gated on the yaw feed's freshness**. A FRESH yaw map adds the CTRV turn-in
+/// hypothesis (genuinely multi-modal); a STALE / unconfigured one degrades to CV-only — a stale
+/// estimate would keep predicting a turn-in after the object straightened, so the enhancement is
+/// dropped rather than trusted. Dropping it is NOT a fault (unlike a lost redundancy channel):
+/// the CV mode (and the snapshot RSS) still bound the object.
+#[must_use]
+pub fn slow_loop_modes(
+    objects: &[PerceivedObject],
+    yaw_rates: &[(u64, f64)],
+    yaw_fresh: bool,
+    horizon_s: f64,
+    dt_s: f64,
+) -> Vec<OwnedPredictedMode> {
+    let yaw: &[(u64, f64)] = if yaw_fresh { yaw_rates } else { &[] };
+    predicted_modes_from_objects(objects, yaw, horizon_s, dt_s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +172,21 @@ mod tests {
         let o = obj(1, 10.0, 0.0, 3.0, 0.0);
         let modes = predicted_modes_from_objects(&[o], &[(1, 0.005)], 2.0, 0.5);
         assert_eq!(modes.len(), 1, "sub-epsilon yaw → no duplicate CTRV mode");
+    }
+
+    #[test]
+    fn slow_loop_modes_adds_ctrv_only_when_the_yaw_feed_is_fresh() {
+        let o = obj(1, 10.0, 0.0, 3.0, 0.0);
+        let yaw = [(1u64, 0.4)];
+        // Fresh yaw → CV + CTRV (genuinely multi-modal).
+        let fresh = slow_loop_modes(&[o], &yaw, true, 2.0, 0.5);
+        assert_eq!(fresh.len(), 2, "fresh yaw adds the CTRV hypothesis");
+        // Stale yaw → CV only (the turn estimate is dropped, not trusted) — never a fault.
+        let stale = slow_loop_modes(&[o], &yaw, false, 2.0, 0.5);
+        assert_eq!(stale.len(), 1, "stale yaw degrades to CV-only");
+        // No yaw configured behaves like stale.
+        let none = slow_loop_modes(&[o], &[], true, 2.0, 0.5);
+        assert_eq!(none.len(), 1, "no yaw map → CV-only");
     }
 
     #[test]
