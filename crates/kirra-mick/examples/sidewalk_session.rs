@@ -1,4 +1,4 @@
-//! **A deterministic sidewalk-courier drive exercising the ADR-0027 behaviors end to end.**
+//! **A deterministic sidewalk-courier drive exercising the ADR-0028 behaviors end to end.**
 //! Mick authors a sidewalk intent each tick, Occy grounds it, KIRRA (the COURIER profile)
 //! bounds it, and only an admitted plan carries the ego forward — so the new `Yield` and
 //! `CrossWhenClear` primitives are shown COMPOSING in a continuous drive, not just in unit tests.
@@ -58,7 +58,7 @@ fn run_scenario(
 ) {
     let corridor = MockCorridorSource::straight_5m_half_width(100.0);
     let vcfg = VehicleConfig::courier(); // the checker judges a small robot, not a car
-    // The DOER's robot-scale planner preset (ADR-0027 / step B): stop ~1 m short of a person,
+    // The DOER's robot-scale planner preset (ADR-0028 / step B): stop ~1 m short of a person,
     // route around with the courier clearance, small footprint — overridden cruise to creep.
     let mut occy = GeometricPlanner::new(GeometricPlannerConfig { cruise_speed_mps: CREEP_CRUISE_MPS, ..GeometricPlannerConfig::courier() });
 
@@ -116,7 +116,7 @@ fn run_scenario(
 }
 
 fn main() {
-    println!("Sidewalk courier — Mick(intent) → Occy(doer) → KIRRA(courier checker), ADR-0027\n");
+    println!("Sidewalk courier — Mick(intent) → Occy(doer) → KIRRA(courier checker), ADR-0028\n");
 
     // 1) YIELD: a pedestrian STANDS in the courier's path at x=9 (in the personal-space band) for
     //    ~6 s, then steps aside. The courier creeps in under the yield cap, stops ~1 m short, HOLDS

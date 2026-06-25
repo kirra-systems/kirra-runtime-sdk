@@ -116,7 +116,7 @@ checker-admissible commands. The collector depends on `kirra-capture-schema`
 **only** (never the verifier), so it is mechanically incapable of reaching the
 verdict path.
 
-### Sidewalk courier — the slow-loop trajectory dataset (ADR-0027)
+### Sidewalk courier — the slow-loop trajectory dataset (ADR-0028)
 
 The above captures the **fast-loop command gateway**. The courier's decisions live in the
 **slow loop** (Mick intent → Occy trajectory → KIRRA verdict), so they capture as

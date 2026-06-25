@@ -1,4 +1,4 @@
-//! **Capture the courier's slow-loop decisions into the learning loop (ADR-0027 / E).** Runs a
+//! **Capture the courier's slow-loop decisions into the learning loop (ADR-0028 / E).** Runs a
 //! sidewalk-courier drive (Mick intent → Occy plan → KIRRA verdict) and writes, per tick, a
 //! `kirra_capture_schema::CaptureRecord` (`SlowLoopTrajectory` source) plus the matching
 //! `BusMessage` — exactly what `kirra-collector` joins into a Parquet supervised dataset. Where

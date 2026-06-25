@@ -600,7 +600,7 @@ impl Default for GeometricPlannerConfig {
 }
 
 impl GeometricPlannerConfig {
-    /// **Sidewalk-courier preset** (ADR-0027) — the DOER's robot-scale geometry. The default is
+    /// **Sidewalk-courier preset** (ADR-0028) — the DOER's robot-scale geometry. The default is
     /// car-scale: it stops 5 m behind an in-path object and demands 4.5 m of lateral room to route
     /// around one, which makes a small robot creep nowhere and refuse passes a robot-sized corridor
     /// could admit. This preset scales those to a courier: stop ~1 m short (the Yield standoff),
@@ -2888,7 +2888,7 @@ mod tests {
 
     #[test]
     fn courier_preset_stops_closer_to_an_in_path_object_than_the_car_default() {
-        // The doer-side courier tuning (ADR-0027 / step B): the car default stops 5 m behind an
+        // The doer-side courier tuning (ADR-0028 / step B): the car default stops 5 m behind an
         // in-path object; the courier stops ~1 m short (the Yield standoff), so it advances much
         // closer before holding — and KIRRA (courier profile) still admits the closer stop.
         // Object close enough that BOTH reach their stop point within one planning horizon, so the

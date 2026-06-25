@@ -124,19 +124,19 @@ pub enum MickIntent {
     ///
     /// [`GoTo`]: MickIntent::GoTo
     RouteTo { x_m: f64, y_m: f64 },
-    /// **Sidewalk-courier: yield to pedestrians while following the goal** (ADR-0027). Drives
+    /// **Sidewalk-courier: yield to pedestrians while following the goal** (ADR-0028). Drives
     /// toward `{x_m, y_m}` but caps speed to give way to the nearest VRU in its personal-space
     /// band — creeping to a stop a standoff before a pedestrian and HOLDing while one is in the
     /// way, then resuming when clear ([`behavior::yield_to_vru_speed_cap`]). The defining
     /// sidewalk behavior; KIRRA's containment + impact-energy bound backstop it.
     Yield { x_m: f64, y_m: f64 },
-    /// **Sidewalk-courier: cross a road at a crosswalk only when clear** (ADR-0027). Steps off
+    /// **Sidewalk-courier: cross a road at a crosswalk only when clear** (ADR-0028). Steps off
     /// toward `{x_m, y_m}` ONLY if every conflicting road agent is far enough that even its
     /// worst-case re-acceleration cannot reach the crossing before the slow courier clears it
     /// ([`behavior::cross_when_clear`]); otherwise HOLDs at the curb. KIRRA's crossing RSS
     /// backstops a misjudged step-off.
     CrossWhenClear { x_m: f64, y_m: f64 },
-    /// **Sidewalk-courier: creep through a crowd toward `{x_m, y_m}`** (ADR-0027). Like [`Yield`]
+    /// **Sidewalk-courier: creep through a crowd toward `{x_m, y_m}`** (ADR-0028). Like [`Yield`]
     /// but, instead of freezing a full standoff before the nearest pedestrian, it keeps inching
     /// forward at a gentle nudge ([`behavior::creep_through_crowd_speed_cap`]) — stopping only at a
     /// tight contact floor — so a dense crowd does not deadlock the courier. A deliberate, opt-in
@@ -451,7 +451,7 @@ pub fn plan_for_intent(
             plan_along_route(planner, world, graph, ego_lane, &route, goal)
         }
         MickIntent::Yield { x_m, y_m } => {
-            // Sidewalk yield (ADR-0027): follow the goal but cap speed to give way to the nearest
+            // Sidewalk yield (ADR-0028): follow the goal but cap speed to give way to the nearest
             // pedestrian in the courier's path band — creep to a stop a standoff before it, HOLD
             // while one is in the way, resume when clear. KIRRA's containment + energy bound backstop.
             if !x_m.is_finite() || !y_m.is_finite() {
@@ -475,7 +475,7 @@ pub fn plan_for_intent(
             }
         }
         MickIntent::CrossWhenClear { x_m, y_m } => {
-            // Sidewalk crosswalk crossing (ADR-0027): step off toward the far curb ONLY when every
+            // Sidewalk crosswalk crossing (ADR-0028): step off toward the far curb ONLY when every
             // conflicting road agent is far enough that even its worst-case re-acceleration cannot
             // reach the crossing before the slow courier clears it; else HOLD at the curb.
             if !x_m.is_finite() || !y_m.is_finite() {
@@ -498,7 +498,7 @@ pub fn plan_for_intent(
             planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() })
         }
         MickIntent::CreepThrough { x_m, y_m } => {
-            // Sidewalk crowd creep (ADR-0027): like Yield, but inch forward at a gentle nudge through
+            // Sidewalk crowd creep (ADR-0028): like Yield, but inch forward at a gentle nudge through
             // pedestrians instead of freezing a full standoff back — stopping only at a tight contact
             // floor. Keeps a dense crowd from deadlocking the courier; KIRRA's impact-energy backstops.
             if !x_m.is_finite() || !y_m.is_finite() {
@@ -1232,7 +1232,7 @@ mod tests {
         assert!(admits(&out.trajectory, &corr, &[]), "KIRRA admits the grounded plan");
     }
 
-    // --- sidewalk-courier intents (ADR-0027) --------------------------------
+    // --- sidewalk-courier intents (ADR-0028) --------------------------------
 
     fn pedestrian(x: f64, y: f64) -> PerceivedObject {
         PerceivedObject { id: 7, pos: Point { x_m: x, y_m: y }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }

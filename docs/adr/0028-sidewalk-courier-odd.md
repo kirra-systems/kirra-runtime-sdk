@@ -1,4 +1,4 @@
-# ADR-0027: Sidewalk courier ODD — a pedestrian-space class, not a shrunk car
+# ADR-0028: Sidewalk courier ODD — a pedestrian-space class, not a shrunk car
 
 | Field | Value |
 |---|---|

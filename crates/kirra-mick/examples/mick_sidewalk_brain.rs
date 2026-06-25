@@ -1,4 +1,4 @@
-//! **The sidewalk-courier brain: a local LLM authors sidewalk intents, KIRRA bounds them (ADR-0027).**
+//! **The sidewalk-courier brain: a local LLM authors sidewalk intents, KIRRA bounds them (ADR-0028).**
 //! Mick's `LlmBrain::courier(...)` prompts a pedestrian-space persona offered ONLY the sidewalk
 //! intents (`go_to` / `yield` / `cross_when_clear` / `creep_through` / `hold`) — no road maneuvers —
 //! and is grammar-constrained to them. Each authored intent is grounded by Occy (courier planner)
