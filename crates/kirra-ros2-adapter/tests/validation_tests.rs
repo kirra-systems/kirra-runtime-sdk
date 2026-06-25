@@ -893,3 +893,57 @@ fn rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distanc
         assert_eq!(v, TrajectoryVerdict::MRCFallback, "a lateral cut-in at {lat_speed} m/s must be MRC'd, got {v:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0029 — courier angular (yaw-rate) channel
+// ---------------------------------------------------------------------------
+
+/// In-place rotation: poses fixed at (5, 0), heading sweeping at `omega_rad_s`,
+/// zero linear velocity — exactly the regime the bicycle steering term silently
+/// drops (`v·Δt ≈ 0` → steering = 0).
+fn in_place_rotation(num_poses: usize, omega_rad_s: f64, dt: f64) -> Vec<TrajectoryPoint> {
+    (0..num_poses)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: (i as f64) * omega_rad_s * dt },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * dt,
+        })
+        .collect()
+}
+
+#[test]
+fn courier_in_place_rotation_at_sane_yaw_is_admitted() {
+    // ω = 0.5 rad/s < courier ω_max(0) ≈ 0.833 → now CHECKED and admitted
+    // (was silently passed before; now it is positively bounded).
+    let traj = in_place_rotation(6, 0.5, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "a sane in-place yaw must be admitted; got {verdict:?}");
+}
+
+#[test]
+fn courier_in_place_rotation_at_excessive_yaw_mrcs() {
+    // ω = 1.5 rad/s > courier ω_max(0) ≈ 0.833 → the silent-drop bug, now refused.
+    let traj = in_place_rotation(6, 1.5, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "an excessive in-place yaw must MRC (was silently passed pre-ADR-0029); got {verdict:?}");
+}
+
+#[test]
+fn ackermann_trajectory_has_no_angular_channel() {
+    // FROZEN PROOF: the SAME excessive-yaw trajectory under the robotaxi profile
+    // (angular = None) is byte-identical to today — the angular check is skipped,
+    // so the rotation is admitted exactly as before. The AV path is untouched.
+    let traj = in_place_rotation(6, 1.5, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    assert!(cfg.angular.is_none(), "robotaxi must carry no angular channel");
+    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "robotaxi (angular None) must NOT angular-MRC — byte-identical to pre-ADR-0029; got {verdict:?}");
+}

@@ -69,7 +69,7 @@ Defaults are Rosmaster-class; tune them to your chassis:
 The `vehicle_class` selects a **sibling profile** in the checker via the single
 `VehicleConfig::for_class()` selector (`courier` / `delivery-av` / `robotaxi`), the slow-loop
 counterpart of the fast-loop `VehicleClass` — per [`docs/CONTRACT_PROFILES.md`](../CONTRACT_PROFILES.md)
-and **[ADR-0027](../adr/0027-sidewalk-courier-odd.md)** (the sidewalk-courier ODD: a pedestrian-space
+and **[ADR-0028](../adr/0028-sidewalk-courier-odd.md)** (the sidewalk-courier ODD: a pedestrian-space
 class, not a shrunk car — creep + assured-clear-distance + impact-energy, *not* RSS car-following).
 The robotaxi numbers are **frozen and unchanged** (proven by
 `default_urban_rss_band_is_the_frozen_robotaxi_value`), so the courier profile **cannot regress the
@@ -98,7 +98,7 @@ number stays frozen (`courier_admits_a_side_object_a_robotaxi_refuses`). So the 
 now be *judged* as a robot, not a 4.8 m car.
 
 **Doer-side robot tuning (done).** `GeometricPlannerConfig::courier()` is the robot-scale planner
-preset (ADR-0027): Occy stops ~1 m short of an in-path object (the Yield standoff, not the car's
+preset (ADR-0028): Occy stops ~1 m short of an in-path object (the Yield standoff, not the car's
 5 m) and routes around with the courier's ~0.7 m clearance (not 4.5 m). `planner_service` selects
 it for `class:"courier"`, so the courier now *proposes* robot-scale motion the car default never
 would, and the per-class checker admits it. (Bend-FOLLOWING still needs Phase-B perception — Taj

@@ -111,7 +111,7 @@ pub fn intent_schema() -> serde_json::Value {
     })
 }
 
-/// Render the world into a **sidewalk-courier** prompt (ADR-0027). Same strict typed-intent
+/// Render the world into a **sidewalk-courier** prompt (ADR-0028). Same strict typed-intent
 /// contract and "a governor enforces the hard limits" framing as [`build_prompt`], but a
 /// pedestrian-space persona offered ONLY the sidewalk intents — no road maneuvers (no
 /// lane-change / overtake / junction turns). A courier follows its path, yields to people,
@@ -170,7 +170,7 @@ pub fn courier_intent_schema() -> serde_json::Value {
     })
 }
 
-/// Which persona [`LlmBrain`] prompts as — a road chauffeur or a sidewalk courier (ADR-0027).
+/// Which persona [`LlmBrain`] prompts as — a road chauffeur or a sidewalk courier (ADR-0028).
 /// The persona selects the prompt + the constrained-decode schema; the fail-closed parse is the
 /// same for both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Cruise { target_speed_mps: 4.0 });
     }
 
-    // --- sidewalk-courier persona (ADR-0027 / D) ----------------------------
+    // --- sidewalk-courier persona (ADR-0028 / D) ----------------------------
 
     #[test]
     fn courier_prompt_offers_the_sidewalk_intents_and_not_road_maneuvers() {

@@ -97,7 +97,7 @@ impl MickDecisionRecord {
             MickIntent::TurnAt { .. } => ("turn_at", None, None, None, None),
             // The routed destination reuses the goal_x_m/goal_y_m record fields.
             MickIntent::RouteTo { x_m, y_m } => ("route_to", Some(x_m), Some(y_m), None, None),
-            // Sidewalk-courier intents (ADR-0027) — the goal point is the destination/far-curb.
+            // Sidewalk-courier intents (ADR-0028) — the goal point is the destination/far-curb.
             MickIntent::Yield { x_m, y_m } => ("yield", Some(x_m), Some(y_m), None, None),
             MickIntent::CrossWhenClear { x_m, y_m } => ("cross_when_clear", Some(x_m), Some(y_m), None, None),
             MickIntent::CreepThrough { x_m, y_m } => ("creep_through", Some(x_m), Some(y_m), None, None),

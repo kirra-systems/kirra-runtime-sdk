@@ -206,7 +206,7 @@ pub fn interactive_proceed(conflicts: &[InteractiveConflict], critical_gap_s: f6
 }
 
 // ===========================================================================
-// Sidewalk-courier behavior primitives (ADR-0027): yield to pedestrians, and
+// Sidewalk-courier behavior primitives (ADR-0028): yield to pedestrians, and
 // cross a road at a crosswalk only when clear. The sidewalk ODD's defining
 // behaviors — give way to people, creep, wait at the curb — not road maneuvers.
 // ===========================================================================
@@ -717,7 +717,7 @@ mod tests {
         assert!(!interactive_proceed(&[conflict(f64::NAN, 4.0)], GAP, A));
     }
 
-    // --- sidewalk-courier primitives (ADR-0027) -----------------------------
+    // --- sidewalk-courier primitives (ADR-0028) -----------------------------
 
     const BAND: f64 = DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M; // 0.8
     const STANDOFF: f64 = DEFAULT_VRU_YIELD_STANDOFF_M;    // 1.0
@@ -792,7 +792,7 @@ mod tests {
         assert!(!cross_when_clear(&[conflict(8.0, 0.5)], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
     }
 
-    // --- creep through a crowd (ADR-0027) -----------------------------------
+    // --- creep through a crowd (ADR-0028) -----------------------------------
 
     const FLOOR: f64 = DEFAULT_CROWD_CONTACT_FLOOR_M;   // 0.4
     const NUDGE: f64 = DEFAULT_CROWD_NUDGE_SPEED_MPS;   // 0.3
