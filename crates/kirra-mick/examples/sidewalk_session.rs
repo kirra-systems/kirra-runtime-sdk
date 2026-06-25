@@ -58,7 +58,9 @@ fn run_scenario(
 ) {
     let corridor = MockCorridorSource::straight_5m_half_width(100.0);
     let vcfg = VehicleConfig::courier(); // the checker judges a small robot, not a car
-    let mut occy = GeometricPlanner::new(GeometricPlannerConfig { cruise_speed_mps: CREEP_CRUISE_MPS, ..Default::default() });
+    // The DOER's robot-scale planner preset (ADR-0027 / step B): stop ~1 m short of a person,
+    // route around with the courier clearance, small footprint — overridden cruise to creep.
+    let mut occy = GeometricPlanner::new(GeometricPlannerConfig { cruise_speed_mps: CREEP_CRUISE_MPS, ..GeometricPlannerConfig::courier() });
 
     let mut ego_x = ego_start_x;
     let mut speed = 0.0;

@@ -97,10 +97,12 @@ courier verdict is `Accept` (admitted)** — same scene, same checker logic — 
 number stays frozen (`courier_admits_a_side_object_a_robotaxi_refuses`). So the small robot can
 now be *judged* as a robot, not a 4.8 m car.
 
-**Still a doer-side follow-up.** The checker now *admits* a robot-scale side pass, but Occy
-(the doer) still *proposes* `SafeStop` for an in-corridor object at robot scale — proposing the
-pass is the untrusted doer's own robot-scale tuning, separate from the safety checker. And
-bend-following additionally needs Phase-B perception (Taj Phase A only makes straight corridors).
+**Doer-side robot tuning (done).** `GeometricPlannerConfig::courier()` is the robot-scale planner
+preset (ADR-0027): Occy stops ~1 m short of an in-path object (the Yield standoff, not the car's
+5 m) and routes around with the courier's ~0.7 m clearance (not 4.5 m). `planner_service` selects
+it for `class:"courier"`, so the courier now *proposes* robot-scale motion the car default never
+would, and the per-class checker admits it. (Bend-FOLLOWING still needs Phase-B perception — Taj
+Phase A only makes straight corridors.)
 
 ## Where Mick and Parko plug in (Phase 2)
 

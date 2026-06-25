@@ -136,10 +136,15 @@ fn handle_plan(req: &PlanRequest) -> PlanResponse {
         lane_graph: None, signal_states: &[],
     };
 
-    // The DOER: real Occy grounds the GoTo intent. A robot profile drops the lateral-
-    // clearance target so Occy will PROPOSE a robot-scale pass (the car-scale 4.5 default
-    // never fits a robot corridor); the checker's per-class RSS band then admits it.
-    let mut cfg = GeometricPlannerConfig { cruise_speed_mps: req.cruise, ..Default::default() };
+    // The DOER: real Occy grounds the GoTo intent. A courier class selects the robot-scale
+    // planner preset (stops ~1 m short, routes around with the courier clearance, small
+    // footprint) so Occy PROPOSES robot-scale motion the car-scale default never would; the
+    // checker's per-class profile then bounds it. `class` mirrors the VehicleConfig selector.
+    let mut cfg = match req.vehicle.as_ref().and_then(|o| o.class.as_deref()) {
+        Some("courier") | Some("robot") | Some("sidewalk") => GeometricPlannerConfig::courier(),
+        _ => GeometricPlannerConfig::default(),
+    };
+    cfg.cruise_speed_mps = req.cruise;
     if let Some(ct) = lateral_clearance_target(req) { cfg.lateral_clearance_target_m = ct; }
     let plan = plan_for_intent(&mut GeometricPlanner::new(cfg), &MickIntent::GoTo { x_m: req.goal.x, y_m: req.goal.y }, &world);
     // The CHECKER: KIRRA's verdict on the proposal (the client applies it / falls back accordingly).
