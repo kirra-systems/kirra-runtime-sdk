@@ -228,4 +228,49 @@ mod tests {
         assert_eq!(fp.overhang_front_m, fp.overhang_rear_m, "overhangs symmetric about the center pose");
         assert_eq!(fp.overhang_front_m, 0.45);
     }
+
+    /// S-PK1c: the REAL `DiffDrivePlatform` bounded by the SAME generic SG2 seam
+    /// (`validate_platform_containment`) that bounds the Ackermann AV — the
+    /// thesis demonstrated end-to-end on a non-Ackermann platform.
+    #[test]
+    fn diffdrive_is_bounded_by_the_generic_containment_seam() {
+        use kirra_core::containment::{Corridor, Point, Pose};
+        use kirra_core::frame_integrity::FrameTrust;
+        use kirra_core::kinematics_contract::{DenyCode, EnforceAction};
+        use kirra_core::platform_kinematics::validate_platform_containment;
+
+        let p = platform(); // 0.6 m × 0.9 m diff-drive robot, center convention
+        // Corridor half-width 1.0 m: robot half-width 0.3 + 0.40 margin = 0.70 < 1.0 → fits centered.
+        let n = 8;
+        let dx = 100.0 / (n as f64 - 1.0);
+        let left: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: 1.0 }).collect();
+        let right: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: -1.0 }).collect();
+        let corridor = Corridor {
+            left: &left,
+            right: &right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
+        };
+
+        let centered = vec![Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 }];
+        assert!(
+            matches!(
+                validate_platform_containment(&p, &centered, &corridor, FrameTrust::Trusted),
+                EnforceAction::Allow
+            ),
+            "a 0.6 m diff-drive robot fits a 2 m corridor"
+        );
+
+        // Shoved to the edge → its left edge (y = 1.2) departs the corridor.
+        let off = vec![Pose { x_m: 50.0, y_m: 0.9, heading_rad: 0.0 }];
+        assert!(
+            matches!(
+                validate_platform_containment(&p, &off, &corridor, FrameTrust::Trusted),
+                EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
+            ),
+            "the same robot departs when shoved to the corridor edge — same SG2 seam"
+        );
+    }
 }

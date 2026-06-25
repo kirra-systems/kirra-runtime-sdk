@@ -180,9 +180,21 @@ smuggled in as "just a different polygon."
     which in parko folds in the pushed RSS verdict — wider scope. Reflects parko's
     existing architecture (no separate public pure-kinematic entry); separating it
     is out of S-PK1b scope.
-- **S-PK1c** — wire **containment + RSS** to consume `PlatformKinematics` (footprint
-  + envelope from the trait); confirm the 2D checker is drive-agnostic. Free-space
-  boundary-polygon generalization only if/when #1 needs it (§6).
+- **S-PK1c** — ✅ the generic SG2 **containment seam**:
+  `validate_platform_containment<P: PlatformKinematics>(platform, trajectory,
+  corridor, frame_trust)` (`crates/kirra-core/src/platform_kinematics.rs`) sources
+  the footprint from the trait and runs the existing
+  `validate_trajectory_containment`. Decisions held: footprint stays
+  `VehicleFootprint` + center convention (finding #1); **containment-seam-only — NOT
+  slow-loop unification** (finding #2 acknowledged); RSS / per-command stay
+  platform-specific. Purely additive (per-pose `validate_vehicle_command` path and
+  the Ackermann slow loop UNTOUCHED), fail-closed by construction — conformant to
+  the CLAUDE.md doer-checker invariants. **Dual-platform proof:** a mock narrow
+  platform and the Ackermann AV are bounded by the *same* seam in kirra-core
+  (verdict differs purely from `footprint()`), and the real `DiffDrivePlatform` is
+  bounded by it in parko-kirra. kirra-core 161 + parko-kirra tests pass; clippy +
+  workspace clean. *Scope:* the seam + proof, not a live diff-drive deployment (no
+  diff-drive node consumes it yet; diff-drive's checker remains parko's governor).
 - **S-PK1d** — (optional, gated by a customer) Tier-B 3D containment + aerial
   envelope.
 - **S-PK1e** — RTM / AoU updates + ADR-0017 to Accepted; new-platform safety goals

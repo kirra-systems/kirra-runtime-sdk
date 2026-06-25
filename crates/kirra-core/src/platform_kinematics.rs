@@ -30,7 +30,8 @@
 //! containment/RSS wiring are S-PK1b / S-PK1c. The scalar `KirraKernelGovernor`
 //! is the composable primitive (clamp + rate-limit), **not** a platform (D3).
 
-use crate::containment::VehicleFootprint;
+use crate::containment::{validate_trajectory_containment, Corridor, Pose, VehicleFootprint};
+use crate::frame_integrity::FrameTrust;
 use crate::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
     STOP_EPSILON_MPS,
@@ -144,6 +145,33 @@ impl PlatformKinematics for AckermannPlatform {
     }
 }
 
+/// Bound **any** platform's trajectory by the existing SG2 drivable-space checker
+/// (Stage S-PK1c) — the moment the abstraction goes from *expressible* to
+/// *enforced*. The footprint is sourced from the platform's behavioral
+/// [`PlatformKinematics::footprint`], so a differential-drive robot (and future
+/// omni) is contained by the **same** checker that bounds the Ackermann AV, with
+/// no per-platform reimplementation.
+///
+/// Drive-agnostic by construction: it reads only the trait's footprint, never
+/// platform *mechanism* (wheelbase, ICR). Conformant to the doer-checker
+/// invariants (CLAUDE.md): purely **additive** — it does not touch the
+/// WCET-critical per-pose `validate_vehicle_command` path or any existing slow
+/// loop — and **fail-closed**, since the underlying `validate_trajectory_containment`
+/// refuses an absent / stale / degenerate corridor or an `Untrusted` frame.
+///
+/// Scope: this is the generic *seam* + proof, not a deployment — no live
+/// differential-drive node consumes it yet (diff-drive's checker is parko's
+/// `KirraGovernor`, a separate path).
+#[must_use]
+pub fn validate_platform_containment<P: PlatformKinematics>(
+    platform: &P,
+    trajectory: &[Pose],
+    corridor: &Corridor,
+    frame_trust: FrameTrust,
+) -> EnforceAction {
+    validate_trajectory_containment(trajectory, corridor, &platform.footprint(), frame_trust)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +249,109 @@ mod tests {
         assert_eq!(platform.max_speed_mps(), c.max_speed_mps);
         assert_eq!(platform.max_brake_mps2(), c.max_brake_mps2);
         assert_eq!(platform.stop_epsilon_mps(), STOP_EPSILON_MPS);
+    }
+
+    // --- S-PK1c: the generic containment seam -------------------------------
+
+    use crate::containment::Point;
+    use crate::kinematics_contract::DenyCode;
+
+    /// A second, non-Ackermann platform (narrow footprint) used to prove the seam
+    /// is footprint-driven and drive-agnostic entirely within kirra-core. (The
+    /// real `DiffDrivePlatform` is exercised through the same seam in parko-kirra.)
+    struct TinyBot;
+    impl PlatformKinematics for TinyBot {
+        type Command = ();
+        type State = ();
+        type Verdict = EnforceAction;
+        fn evaluate(&self, _c: &(), _s: &()) -> EnforceAction {
+            EnforceAction::Allow
+        }
+        fn footprint(&self) -> VehicleFootprint {
+            VehicleFootprint {
+                width_m: 0.3,
+                length_m: 0.4,
+                overhang_front_m: 0.2,
+                overhang_rear_m: 0.2,
+                wheelbase_m: 0.0,
+            }
+        }
+        fn max_speed_mps(&self) -> f64 {
+            1.0
+        }
+        fn max_brake_mps2(&self) -> f64 {
+            1.0
+        }
+        fn stop_epsilon_mps(&self) -> f64 {
+            0.05
+        }
+    }
+
+    fn straight_corridor(half_w: f64, x_max: f64) -> (Vec<Point>, Vec<Point>) {
+        let n = 8;
+        let dx = x_max / (n as f64 - 1.0);
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64 * dx;
+            left.push(Point { x_m: x, y_m: half_w });
+            right.push(Point { x_m: x, y_m: -half_w });
+        }
+        (left, right)
+    }
+
+    fn healthy_corridor<'a>(left: &'a [Point], right: &'a [Point]) -> Corridor<'a> {
+        Corridor { left, right, confidence: 0.95, age_ms: 10, min_confidence: 0.5, max_age_ms: 500 }
+    }
+
+    fn at(x: f64, y: f64) -> Pose {
+        Pose { x_m: x, y_m: y, heading_rad: 0.0 }
+    }
+
+    /// THE thesis proof: the SAME seam + SAME corridor + SAME pose, two platforms.
+    /// A narrow robot fits where a full-width vehicle departs — the verdict differs
+    /// purely from `footprint()`, so SG2 containment is genuinely drive-agnostic.
+    #[test]
+    fn seam_bounds_any_platform_by_footprint() {
+        let (left, right) = straight_corridor(0.7, 100.0); // half-width 0.7 m
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![at(50.0, 0.0)];
+
+        let ackermann = AckermannPlatform::new(contract());
+        assert_eq!(
+            validate_platform_containment(&ackermann, &traj, &corridor, FrameTrust::Trusted),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "a full-width vehicle cannot fit a 1.4 m corridor with margin"
+        );
+        assert_eq!(
+            validate_platform_containment(&TinyBot, &traj, &corridor, FrameTrust::Trusted),
+            EnforceAction::Allow,
+            "a 0.3 m-wide robot fits the SAME corridor — same seam, footprint-driven"
+        );
+    }
+
+    #[test]
+    fn seam_allows_a_platform_within_a_wide_corridor() {
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![at(50.0, 0.0)];
+        let ackermann = AckermannPlatform::new(contract());
+        assert_eq!(
+            validate_platform_containment(&ackermann, &traj, &corridor, FrameTrust::Trusted),
+            EnforceAction::Allow
+        );
+    }
+
+    /// The seam inherits the frame-integrity gate: an Untrusted frame refuses
+    /// before any geometry, for any platform.
+    #[test]
+    fn seam_inherits_the_frame_gate() {
+        let (left, right) = straight_corridor(3.0, 100.0);
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![at(50.0, 0.0)];
+        assert_eq!(
+            validate_platform_containment(&TinyBot, &traj, &corridor, FrameTrust::Untrusted),
+            EnforceAction::DenyBreach(DenyCode::FrameIntegrityUntrusted)
+        );
     }
 }
