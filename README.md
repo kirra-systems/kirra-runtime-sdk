@@ -245,7 +245,8 @@ Modern robotic and autonomous deployments increasingly rely on AI models to gene
 ### Autonomous Vehicle / Occy line
 - **SG2 drivable-space containment (ENFORCED)** — lateral margin ≥ 0.40 m against the HD-map corridor
 - **Option-B per-trajectory wiring** — two-rate (slow @ planning / fast @ control) Governor check on Autoware
-- **RSS-over-horizon** — IEEE 2846 safe-distance enforcement via parko-core (SG3)
+- **RSS-over-horizon** — IEEE 2846 safe-distance enforcement (SG3), as the **§4 conjunction** (danger needs BOTH longitudinal AND lateral unsafe — admits a safe stationary queue / stopped lead), plus **occlusion (RSS Rule 4)**, **multi-modal predictive RSS** (CV/CTRV modes, worst-cased), and a **True-Redundancy perception-divergence monitor** (two channels must agree; divergence → MRC-floor)
+- **Doer-checker planner (Occy)** — a swappable, never-trusted DOER (geometric / learned / LLM-driven Mick intents incl. **multi-junction `RouteTo`** and **occlusion-aware junction creep**) PROPOSES; KIRRA BOUNDS. `LearnedManeuverPlanner` proves a 2-D learned vocabulary stays governed.
 - **MRC publication** — `TrajectoryVerdict::{Accept,Clamp,MRCFallback,Pending}` published to the vehicle stack
 - **Lanelet2 corridor source** — cxx-rs wrapper around `lanelet2_core` + `boost::serialization` for `LaneletMapBin.data`
 - **Subscription-staleness watchdog** — fast-loop refuses to advance when trajectory / objects / odometry feeds go silent
@@ -602,6 +603,35 @@ KIRRA_VERIFIER_MODE=passive_standby KIRRA_INSTANCE_ID=kirra-standby ./kirra_veri
 ## Releases
 
 ### v1.2.0 (Occy line — in progress)
+
+**Junction safety + RSS completeness (doer-checker depth)**
+- **Multi-junction routing** — `MickIntent::RouteTo { x_m, y_m }`: resolve ego + destination
+  lanes, plan the lane-id route across every junction (`LaneGraph::route_to_point`, Dijkstra),
+  follow the stitched `route_corridor` through each turn; re-resolved from the ego pose each tick
+  (receding horizon). KIRRA bounds the corridor exactly as any other.
+- **Dynamic obstacle mid-turn** — the doer yields (predictive yield) / follows (lead-match) a
+  moving obstacle on the *curved* route corridor, and KIRRA's per-pose RSS bounds it; a dedicated
+  mid-turn predictive-yield gap (aligned to the checker's longitudinal-conflict distance) makes the
+  yield checker-*admissible* instead of fail-closing to MRC.
+- **Occlusion-aware speed bound at junctions** (RSS Rule 4, lateral) — a blind junction caps the
+  approach speed to the assured-clear-distance speed (`behavior::OccludedApproach`), so the ego
+  CREEPS in able to stop for emergent cross-traffic; sight distance carried per approach-lane on
+  `LaneGraph`.
+- **Multi-modal-prediction-aware RSS** (LIVE) — the checker's `predictive_rss_breach` now runs on
+  real perception: `prediction::predicted_modes_from_objects` rolls live objects into CV (+ CTRV
+  when the tracker yaw feed is fresh) `PredictedMode`s, worst-cased — catching a cut-in / turn-in
+  the snapshot RSS filtered as laterally clear.
+- **Perception-divergence assurance monitor** (True-Redundancy analog, LIVE) — `cross_check` of two
+  independent perception channels; a divergence (phantom / miss / speed mismatch) or a silent
+  redundant channel maps to an MRC-floor cap composed into the Track-C derate. Channel B feeds from
+  a `~/input/objects_secondary` subscription, gated on `KIRRA_PERCEPTION_REDUNDANCY_ENABLED`.
+- **Learned *maneuvering* doer** — `LearnedManeuverPlanner`: the Hydra-MDP-shaped learned planner
+  generalized to a 2-D (lateral offset × speed) trajectory vocabulary, so the learned scorer can
+  route AROUND a hazard — bounded by KIRRA (admits a band-clearing pass that fits, rejects one that
+  doesn't or a misaligned straight-through).
+- **Safety-weighted perception eval** — `kirra-taj::SemanticEvalSummary`: scores the semantic
+  detector at the fusion level (`UnsafeMiss` / `OverConservative` / `Correct`, `hazard_recall`,
+  per-class breakdown) — a missed hazard is the headline bar, not mAP.
 
 **S131 Option-B per-trajectory wiring on Autoware (#131 — closed)**
 - New `crates/kirra-ros2-adapter` crate (feature-gated on `ros2`)
