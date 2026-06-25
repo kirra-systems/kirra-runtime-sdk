@@ -115,3 +115,32 @@ Each Parquet row carries the governor's correction joined to the doer's proposal
 checker-admissible commands. The collector depends on `kirra-capture-schema`
 **only** (never the verifier), so it is mechanically incapable of reaching the
 verdict path.
+
+### Sidewalk courier — the slow-loop trajectory dataset (ADR-0027)
+
+The above captures the **fast-loop command gateway**. The courier's decisions live in the
+**slow loop** (Mick intent → Occy trajectory → KIRRA verdict), so they capture as
+`SlowLoopTrajectory` records. `cargo run -p kirra-mick --example sidewalk_capture` runs a
+courier drive (yield to a pedestrian; cross when clear) and writes `sidewalk.capture.jsonl`
++ `sidewalk.bag.json`; feed them to the same collector:
+
+```
+cargo run -p kirra-collector -- --capture sidewalk.capture.jsonl \
+  --bag-json sidewalk.bag.json --out dataset/ --window-ms 100
+```
+
+A 120-tick courier run produces (verified):
+
+```
+reconciliation:
+  records_in            = 120 (gateway 0, trajectory 120; 0 duplicate(s) dropped)
+  interventions / passes= 83 / 37
+  joined / orphans      = 120 / 0 (orphan_rate 0.000)
+dataset/
+  manifest.json
+  doer_version=occy-courier-v0/source=SLOW_LOOP_TRAJECTORY/part-000.parquet
+```
+
+Each row carries the courier's trajectory summary (point/object counts, endpoints, target
+speed) joined to KIRRA's verdict — the supervised signal for tuning the courier DOER. Same
+collector, same one-way dependency; only the capture **source** differs.

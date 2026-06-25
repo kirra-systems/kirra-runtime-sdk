@@ -2012,6 +2012,7 @@ dependencies = [
 name = "kirra-mick"
 version = "0.1.0"
 dependencies = [
+ "kirra-capture-schema",
  "kirra-core",
  "kirra-planner",
  "kirra-ros2-adapter",
