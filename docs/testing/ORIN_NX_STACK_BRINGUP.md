@@ -51,6 +51,11 @@ scripts/orin_bringup.sh            # build the 4 components + run the headless s
 scripts/orin_bringup.sh --serve    # ALSO start verifier (:8090) + Occy planner (:8100) + Taj (:8101)
 ```
 
+To run the verifier + sidecars **on boot** instead of by hand, install the systemd units:
+`sudo deploy/systemd/install.sh` (see [`deploy/systemd/README.md`](../../deploy/systemd/README.md)).
+When the stack is running under systemd, launch the robot with `start_sidecars:=false`
+(and the Gazebo demo's `start_verifier:=false`) so the launch doesn't double-bind the ports.
+
 The script sanity-checks the toolchain, detects the Jetson, builds release binaries, and runs
 the headless four-component demo. Expected output:
 

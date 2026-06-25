@@ -1,0 +1,38 @@
+# deploy/systemd/kirra-taj.service
+#
+# systemd unit for the Taj perception sidecar (the kirra-mick `taj_service`
+# example): a small HTTP endpoint (POST /perception) that turns a LaserScan into
+# the geometric corridor + an assured-clear-distance speed cap for the cmd_vel
+# path. Perception PRODUCER, not the safety authority — no secrets, no state.
+#
+# Companion to kirra-verifier.service; install/enable via deploy/systemd/install.sh.
+
+[Unit]
+Description=Kirra Taj perception sidecar (POST /perception — cmd_vel speed cap)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target
+Wants=network-online.target
+PartOf=kirra.target
+
+[Service]
+Type=simple
+ExecStart=/opt/kirra/taj_service
+Environment=KIRRA_TAJ_ADDR=127.0.0.1:8101
+# Optional shared config (bind-addr overrides etc.); '-' makes it non-fatal if absent.
+EnvironmentFile=-/etc/kirra/kirra.env
+Restart=always
+RestartSec=3
+# Least privilege.
+User=kirra
+Group=kirra
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
