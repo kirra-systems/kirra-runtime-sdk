@@ -14,6 +14,11 @@ Description=Kirra runtime safety verifier (fail-closed governor)
 Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
 After=network-online.target
 Wants=network-online.target
+# Disable the start-rate limiter so a safety service is ALWAYS brought back: the
+# verifier exits(1) at startup if KIRRA_ADMIN_TOKEN is absent/empty (SG-008), so it
+# must keep retrying and self-heal once /etc/kirra/kirra.env is populated. (This key
+# lives in [Unit], not [Service] — systemd ignores it under [Service].)
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -28,11 +33,10 @@ WatchdogSec=10s
 
 # Fail-closed restart: process death is already safe (panic=abort, DDS Volatile
 # durability, HA heartbeat absence within PROMOTION_TIMEOUT_MS); systemd brings
-# it back. A watchdog miss counts as a failure → restart. StartLimitIntervalSec=0
-# disables start-rate limiting so a safety service is always brought back.
+# it back. A watchdog miss counts as a failure → restart. (The start-rate limiter
+# is disabled in the [Unit] section above, so restarts are never given up on.)
 Restart=on-failure
 RestartSec=2s
-StartLimitIntervalSec=0
 
 # Secrets/config (KIRRA_ADMIN_TOKEN, KIRRA_SUPERVISOR_RESET_KEY, KIRRA_DB_PATH,
 # KIRRA_VERIFIER_ADDR, ...) via an operator-provided file. '-' makes it optional.

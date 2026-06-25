@@ -11,6 +11,22 @@ cmd_vel_interceptor:
     posture_topic: "/kirra/fleet_posture"
     timeout_ms: 50               # Kirra API timeout (ms) -- fail-closed on timeout
     fallback_on_timeout: "stop"  # "stop" (fail-closed) or "passthrough" (degraded mode)
+    use_perception_cap: false    # opt-in: apply Taj's assured-clear-distance cap before the governor
+    perception_cap_topic: "/kirra/perception_speed_cap"
+    perception_cap_stale_ms: 300 # cap older than this is a perception fault -> fail-closed stop
+
+perception_governor:
+  ros__parameters:
+    taj_url: "http://localhost:8101"   # the Taj perception sidecar (kirra-mick example taj_service)
+    scan_topic: "/scan"
+    cap_topic: "/kirra/perception_speed_cap"
+    health_topic: "/kirra/perception_health"
+    timeout_ms: 40
+    forward_extent_m: 8.0        # Taj geometric horizon (m)
+    decel_mps2: 1.5              # assumed comfortable brake for the ACD cap
+    margin_m: 0.4                # standoff distance (matches the checker's lateral margin)
+    lane_half_m: 0.6             # in-lane half-width for object gating (m)
+    confidence_floor: 0.5        # corridor confidence below this -> unhealthy -> 0.0 cap
 
 sensor_monitor:
   ros__parameters:

@@ -23,9 +23,10 @@ import threading
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Float64
 
 from kirra_safety.enforcement_decision import decide_enforcement, Forward
+from kirra_safety.perception_cap import apply_perception_cap, DISABLED
 
 try:
     import requests
@@ -53,6 +54,12 @@ class CmdVelInterceptor(Node):
         self.declare_parameter('posture_topic', '/kirra/fleet_posture')
         self.declare_parameter('timeout_ms', 50)
         self.declare_parameter('fallback_on_timeout', 'stop')
+        # Taj perception derate (opt-in). When enabled, Taj's assured-clear-distance cap
+        # (published by the perception_governor node) tightens the proposed forward speed
+        # BEFORE the governor — Taj tightens, KIRRA bounds. Default OFF → byte-identical path.
+        self.declare_parameter('use_perception_cap', False)
+        self.declare_parameter('perception_cap_topic', '/kirra/perception_speed_cap')
+        self.declare_parameter('perception_cap_stale_ms', 300)
 
         self._kirra_url = self.get_parameter('kirra_url').value
         self._kirra_token = self.get_parameter('kirra_token').value
@@ -61,6 +68,8 @@ class CmdVelInterceptor(Node):
         self._max_speed_mps = self.get_parameter('max_speed_mps').value
         self._timeout_s = self.get_parameter('timeout_ms').value / 1000.0
         self._fallback = self.get_parameter('fallback_on_timeout').value
+        self._use_perception_cap = self.get_parameter('use_perception_cap').value
+        self._cap_stale_s = self.get_parameter('perception_cap_stale_ms').value / 1000.0
 
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
@@ -71,6 +80,9 @@ class CmdVelInterceptor(Node):
         self._current_steering_deg = 0.0
         self._last_cmd_time = time.monotonic()
         self._lock = threading.Lock()
+        # Latest Taj perception cap (m/s) and the monotonic time it arrived.
+        self._perception_cap = None
+        self._perception_cap_time = None
 
         # Publishers
         self._pub_safe = self.create_publisher(Twist, output_topic, 10)
@@ -83,6 +95,13 @@ class CmdVelInterceptor(Node):
             self._on_cmd_vel,
             10,
         )
+        if self._use_perception_cap:
+            self._sub_cap = self.create_subscription(
+                Float64,
+                self.get_parameter('perception_cap_topic').value,
+                self._on_perception_cap,
+                10,
+            )
 
         if not REQUESTS_AVAILABLE:
             self.get_logger().error(
@@ -142,12 +161,36 @@ class CmdVelInterceptor(Node):
             'current_steering_angle_deg': current_s,
         }
 
+    def _on_perception_cap(self, msg: Float64):
+        with self._lock:
+            self._perception_cap = float(msg.data)
+            self._perception_cap_time = time.monotonic()
+
+    def _apply_perception_cap(self, proposed: dict) -> str:
+        """Tighten the proposed forward speed to Taj's ACD cap, fail-closed. Returns a
+        short reason suffix for the action log ('' when the derate is off)."""
+        if not self._use_perception_cap:
+            return ''
+        with self._lock:
+            cap = self._perception_cap
+            cap_time = self._perception_cap_time
+        cap_age = (time.monotonic() - cap_time) if cap_time is not None else None
+        capped_v, reason = apply_perception_cap(
+            proposed['linear_velocity_mps'], cap, cap_age,
+            enabled=True, stale_s=self._cap_stale_s,
+        )
+        proposed['linear_velocity_mps'] = capped_v
+        return '' if reason == DISABLED else f'|{reason}'
+
     def _on_cmd_vel(self, msg: Twist):
         if not REQUESTS_AVAILABLE:
             self._publish_stop('NO_REQUESTS_LIB')
             return
 
         proposed = self._twist_to_proposed_command(msg)
+        # Taj tightens the proposed speed BEFORE the governor (perception derate); the
+        # governor then bounds whatever survives. Fail-closed on a stale/absent cap.
+        cap_suffix = self._apply_perception_cap(proposed)
 
         try:
             resp = requests.post(
@@ -175,7 +218,7 @@ class CmdVelInterceptor(Node):
                     safe_twist = self._build_safe_twist(
                         msg, decision.enforced_v, decision.enforced_s)
                     self._pub_safe.publish(safe_twist)
-                    self._publish_action(f'{decision.action}:v={decision.enforced_v:.2f}')
+                    self._publish_action(f'{decision.action}:v={decision.enforced_v:.2f}{cap_suffix}')
 
                     with self._lock:
                         self._current_velocity_mps = decision.enforced_v

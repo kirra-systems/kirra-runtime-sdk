@@ -54,11 +54,12 @@ const RSS_REACTION_TIME_S: f64 = 0.5;
 /// rejecting a trajectory for float noise / a sub-decimetre overshoot of the cap.
 const OCCLUSION_SPEED_TOL_MPS: f64 = 0.1;
 
-/// Distance below which two objects are considered laterally aligned
-/// (and therefore subject to RSS longitudinal evaluation). Anything
-/// beyond this lateral offset is in another corridor; containment
-/// covers it.
-const RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
+// The RSS lateral-alignment band (distance below which two objects are laterally
+// aligned and so subject to RSS longitudinal evaluation; beyond it, containment covers
+// it) is now a PER-CLASS field on `VehicleConfig`
+// (`rss_lateral_alignment_tolerance_m`), not a global constant — a robotaxi uses a
+// lane-width-scale 4.0 m, a small robot a much tighter band. The robotaxi value lives in
+// `config::DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M` (see docs/CONTRACT_PROFILES.md).
 
 /// Object lateral-velocity magnitude (m/s) above which a same-lane object is treated as
 /// **cutting in** (a genuine side-collision risk) rather than a straight-running lead or a
@@ -318,8 +319,8 @@ pub fn validate_trajectory_slow_capped(
                 continue;
             }
             // Lateral filter — object is in a different lane; let
-            // containment cover it.
-            if dy_ego.abs() > RSS_LATERAL_ALIGNMENT_TOLERANCE_M {
+            // containment cover it. Per-class band (robotaxi 4.0 m; robot tighter).
+            if dy_ego.abs() > config.rss_lateral_alignment_tolerance_m {
                 continue;
             }
 
@@ -511,7 +512,7 @@ fn predictive_rss_breach(
             if dx_ego <= 0.0 {
                 continue; // behind the ego at that time
             }
-            if dy_ego.abs() > RSS_LATERAL_ALIGNMENT_TOLERANCE_M {
+            if dy_ego.abs() > config.rss_lateral_alignment_tolerance_m {
                 continue; // predicted to be in another corridor — containment covers it
             }
             if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M {

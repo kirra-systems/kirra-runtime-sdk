@@ -17,9 +17,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::behavior::{
-    interactive_proceed, InteractiveConflict, SignalState, TrafficControl, DEFAULT_AGENT_REACCEL_MPS2,
-    DEFAULT_TURN_CRITICAL_GAP_S,
+    cross_when_clear, interactive_proceed, yield_to_vru_speed_cap, InteractiveConflict, SignalState,
+    TrafficControl, VruApproach, DEFAULT_AGENT_REACCEL_MPS2, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S,
+    DEFAULT_TURN_CRITICAL_GAP_S, DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
 };
+
+/// Comfortable courier brake (m/s²) used to derive the yield speed cap — gentle so the cap is
+/// conservative w.r.t. the checker's brake, keeping the yielded plan checker-admissible.
+const COURIER_YIELD_BRAKE_MPS2: f64 = 1.5;
+/// Courier creep / crossing speed (m/s) — pedestrian pace. The planner clamps and KIRRA caps
+/// again, so this only ever slows the motion.
+const COURIER_CREEP_MPS: f64 = 1.0;
 use crate::{
     FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
     PredictedPath, MAX_ROUTE_LANES,
@@ -115,6 +123,18 @@ pub enum MickIntent {
     ///
     /// [`GoTo`]: MickIntent::GoTo
     RouteTo { x_m: f64, y_m: f64 },
+    /// **Sidewalk-courier: yield to pedestrians while following the goal** (ADR-0027). Drives
+    /// toward `{x_m, y_m}` but caps speed to give way to the nearest VRU in its personal-space
+    /// band — creeping to a stop a standoff before a pedestrian and HOLDing while one is in the
+    /// way, then resuming when clear ([`behavior::yield_to_vru_speed_cap`]). The defining
+    /// sidewalk behavior; KIRRA's containment + impact-energy bound backstop it.
+    Yield { x_m: f64, y_m: f64 },
+    /// **Sidewalk-courier: cross a road at a crosswalk only when clear** (ADR-0027). Steps off
+    /// toward `{x_m, y_m}` ONLY if every conflicting road agent is far enough that even its
+    /// worst-case re-acceleration cannot reach the crossing before the slow courier clears it
+    /// ([`behavior::cross_when_clear`]); otherwise HOLDs at the curb. KIRRA's crossing RSS
+    /// backstops a misjudged step-off.
+    CrossWhenClear { x_m: f64, y_m: f64 },
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -138,6 +158,10 @@ enum IntentJson {
     TurnAt { direction: String },
     #[serde(rename = "route_to")]
     RouteTo { x_m: f64, y_m: f64 },
+    #[serde(rename = "yield")]
+    Yield { x_m: f64, y_m: f64 },
+    #[serde(rename = "cross_when_clear")]
+    CrossWhenClear { x_m: f64, y_m: f64 },
 }
 
 impl MickIntent {
@@ -173,6 +197,8 @@ impl MickIntent {
                 MickIntent::TurnAt { direction: dir }
             }
             IntentJson::RouteTo { x_m, y_m } => MickIntent::RouteTo { x_m, y_m },
+            IntentJson::Yield { x_m, y_m } => MickIntent::Yield { x_m, y_m },
+            IntentJson::CrossWhenClear { x_m, y_m } => MickIntent::CrossWhenClear { x_m, y_m },
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -190,6 +216,8 @@ impl MickIntent {
             MickIntent::PullOver => true,
             MickIntent::TurnAt { .. } => true,
             MickIntent::RouteTo { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
+            MickIntent::Yield { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
+            MickIntent::CrossWhenClear { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
         }
     }
 }
@@ -408,7 +436,70 @@ pub fn plan_for_intent(
             };
             plan_along_route(planner, world, graph, ego_lane, &route, goal)
         }
+        MickIntent::Yield { x_m, y_m } => {
+            // Sidewalk yield (ADR-0027): follow the goal but cap speed to give way to the nearest
+            // pedestrian in the courier's path band — creep to a stop a standoff before it, HOLD
+            // while one is in the way, resume when clear. KIRRA's containment + energy bound backstop.
+            if !x_m.is_finite() || !y_m.is_finite() {
+                return PlanOutput::safe_stop(world.ego.pose);
+            }
+            let vrus = vru_approaches(world);
+            let cap = yield_to_vru_speed_cap(
+                &vrus,
+                DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+                DEFAULT_VRU_YIELD_STANDOFF_M,
+                COURIER_YIELD_BRAKE_MPS2,
+            );
+            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
+            match cap {
+                // A pedestrian within the standoff → give way: stop and hold.
+                Some(c) if c <= f64::EPSILON => PlanOutput::safe_stop(world.ego.pose),
+                // A pedestrian ahead → creep toward the goal at the yield cap.
+                Some(c) => planner.plan(&PlanInput { goal, target_speed_mps: Some(c), ..world.clone() }),
+                // No pedestrian in the band → follow the goal (KIRRA + the courier cap still bound it).
+                None => planner.plan(&PlanInput { goal, ..world.clone() }),
+            }
+        }
+        MickIntent::CrossWhenClear { x_m, y_m } => {
+            // Sidewalk crosswalk crossing (ADR-0027): step off toward the far curb ONLY when every
+            // conflicting road agent is far enough that even its worst-case re-acceleration cannot
+            // reach the crossing before the slow courier clears it; else HOLD at the curb.
+            if !x_m.is_finite() || !y_m.is_finite() {
+                return PlanOutput::safe_stop(world.ego.pose);
+            }
+            let crossing = MapPoint { x_m, y_m };
+            let conflicts = turn_interactive_conflicts(world, crossing, world.cedes_to_ego_ids);
+            // The span the courier must clear ≈ ego→far-curb distance; it crosses at creep pace.
+            let width = (x_m - world.ego.pose.x_m).hypot(y_m - world.ego.pose.y_m);
+            if !cross_when_clear(
+                &conflicts,
+                width,
+                COURIER_CREEP_MPS,
+                DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S,
+                DEFAULT_AGENT_REACCEL_MPS2,
+            ) {
+                return PlanOutput::safe_stop(world.ego.pose); // not clear → wait at the curb
+            }
+            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
+            planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() })
+        }
     }
+}
+
+/// Pedestrians/VRUs ahead of the ego, in its frame, for the sidewalk yield ([`MickIntent::Yield`]).
+/// Each perceived object is transformed into `(ahead_m, lateral_offset_m)` relative to the ego's
+/// heading; the yield primitive then keeps only those in the personal-space band. On a sidewalk the
+/// courier yields to ANY object ahead — there is no "ignore another lane".
+fn vru_approaches(world: &PlanInput<'_>) -> Vec<VruApproach> {
+    let (sin_h, cos_h) = world.ego.pose.heading_rad.sin_cos();
+    world
+        .objects
+        .iter()
+        .map(|o| {
+            let (dx, dy) = (o.pos.x_m - world.ego.pose.x_m, o.pos.y_m - world.ego.pose.y_m);
+            VruApproach { ahead_m: dx * cos_h + dy * sin_h, lateral_offset_m: -dx * sin_h + dy * cos_h }
+        })
+        .collect()
 }
 
 /// Materialize a lane-id `route` into its drivable corridor and plan along it toward `goal`.
@@ -1100,6 +1191,76 @@ mod tests {
         let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(max_x > 10.0, "Mick's GoTo drives the ego toward the goal, got {max_x}");
         assert!(admits(&out.trajectory, &corr, &[]), "KIRRA admits the grounded plan");
+    }
+
+    // --- sidewalk-courier intents (ADR-0027) --------------------------------
+
+    fn pedestrian(x: f64, y: f64) -> PerceivedObject {
+        PerceivedObject { id: 7, pos: Point { x_m: x, y_m: y }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+    }
+    fn crossing_car(x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
+        PerceivedObject { id: 8, pos: Point { x_m: x, y_m: y }, velocity_mps: vx.hypot(vy), heading_rad: vy.atan2(vx), vel: Point { x_m: vx, y_m: vy } }
+    }
+
+    #[test]
+    fn yield_stops_for_a_pedestrian_within_the_standoff() {
+        // Ego at x=5; a pedestrian 0.5 m ahead (inside the 1.0 m standoff) → give way: stop.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [pedestrian(5.5, 0.0)];
+        let w = world(&corr, &objs, &[]);
+        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
+        assert_eq!(out.kind, ProposalKind::SafeStop, "courier yields (stops) for a pedestrian in the way");
+    }
+
+    #[test]
+    fn yield_drives_toward_the_goal_when_the_path_is_clear() {
+        // No pedestrian in the band → Yield follows the goal (KIRRA + the courier cap still bound it).
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
+        assert_eq!(out.kind, ProposalKind::Motion);
+        assert!(out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max) > 8.0, "advances toward the goal");
+    }
+
+    #[test]
+    fn yield_with_an_off_band_pedestrian_defers_to_a_plain_goto() {
+        // A pedestrian 2 m to the side (beyond the 0.8 m personal-space band) adds NO yield cap, so
+        // Yield must behave exactly like GoTo (whatever the obstacle-aware planner does with the
+        // side object, Yield does too — the yield primitive contributes nothing here).
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [pedestrian(8.0, 2.0)];
+        let w = world(&corr, &objs, &[]);
+        let yld = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
+        let goto = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
+        assert_eq!(yld.kind, goto.kind, "an off-band pedestrian: Yield defers to plain GoTo");
+    }
+
+    #[test]
+    fn cross_when_clear_crosses_an_empty_road() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[], &[]);
+        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::CrossWhenClear { x_m: 12.0, y_m: 0.0 }, &w);
+        assert_eq!(out.kind, ProposalKind::Motion, "an empty crosswalk → step off");
+    }
+
+    #[test]
+    fn cross_when_clear_holds_at_the_curb_for_oncoming_traffic() {
+        // A car closing on the crossing point (12,0) from the side at 10 m/s, ~2 s away — far less
+        // than the ~9 s the slow courier needs to clear a 7 m road → HOLD at the curb.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [crossing_car(12.0, -20.0, 0.0, 10.0)];
+        let w = world(&corr, &objs, &[]);
+        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::CrossWhenClear { x_m: 12.0, y_m: 0.0 }, &w);
+        assert_eq!(out.kind, ProposalKind::SafeStop, "a closing car holds the courier at the curb");
+    }
+
+    #[test]
+    fn from_llm_json_round_trips_the_sidewalk_intents() {
+        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"yield","x_m":12.0,"y_m":0.0}"#).unwrap(),
+                   MickIntent::Yield { x_m: 12.0, y_m: 0.0 });
+        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":3.0}"#).unwrap(),
+                   MickIntent::CrossWhenClear { x_m: 12.0, y_m: 3.0 });
+        assert!(MickIntent::from_llm_json(r#"{"intent":"yield","x_m":null,"y_m":0.0}"#).is_err(), "malformed → fail-closed");
     }
 
     #[test]

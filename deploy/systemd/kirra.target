@@ -1,0 +1,22 @@
+# deploy/systemd/kirra.target
+#
+# A grouping target for the whole on-box Kirra stack: the verifier (governance
+# plane) + the Occy planner + the Taj perception sidecars. `Wants=` pulls all
+# three in; combined with the PartOf= on each service (the verifier gets a
+# PartOf drop-in from install.sh), this gives one-command lifecycle:
+#
+#   systemctl start kirra.target      # bring the whole stack up
+#   systemctl stop kirra.target       # take it all down
+#   systemctl restart kirra.target    # bounce all three
+#   systemctl status kirra.target     # at-a-glance health
+#
+# Enabling it (install.sh does) also brings the stack up on boot.
+
+[Unit]
+Description=Kirra governor stack (verifier + Occy planner + Taj perception)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+Wants=kirra-verifier.service kirra-planner.service kirra-taj.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

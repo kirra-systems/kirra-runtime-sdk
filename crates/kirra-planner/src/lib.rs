@@ -596,6 +596,45 @@ impl Default for GeometricPlannerConfig {
     }
 }
 
+impl GeometricPlannerConfig {
+    /// **Sidewalk-courier preset** (ADR-0027) — the DOER's robot-scale geometry. The default is
+    /// car-scale: it stops 5 m behind an in-path object and demands 4.5 m of lateral room to route
+    /// around one, which makes a small robot creep nowhere and refuse passes a robot-sized corridor
+    /// could admit. This preset scales those to a courier: stop ~1 m short (the Yield standoff),
+    /// route around with the courier's ~0.7 m clearance (just over the courier RSS band so a
+    /// cleared object is still RSS-filtered), and a small footprint so an offset path fits a narrow
+    /// corridor.
+    ///
+    /// This is the **untrusted DOER side only** — it changes only what Occy *proposes*; KIRRA's
+    /// checker (the courier `VehicleConfig`) still bounds every plan, so a too-aggressive number
+    /// here costs availability, never safety. `cruise_speed_mps` is overridden by the caller.
+    /// `predictive_yield_gap_m` deliberately stays at the default (the checker's longitudinal
+    /// conflict window) so a predicted-CROSSING yield remains checker-admissible.
+    #[must_use]
+    pub fn courier() -> Self {
+        Self {
+            cruise_speed_mps: 1.5,
+            max_accel_mps2: 1.0,
+            max_decel_mps2: 1.5,
+            object_lane_tolerance_m: 0.6,
+            object_stop_gap_m: 1.0,        // stop ~1 m short (the Yield standoff), not 5 m
+            object_approach_speed_mps: 1.0,
+            lateral_clearance_target_m: 0.7, // just over the courier RSS band (0.6) → cleared object RSS-filtered
+            lateral_offset_max_m: 1.0,
+            vehicle_half_width_m: 0.2,
+            containment_margin_m: 0.2,
+            vehicle_length_m: 0.4,
+            lateral_pass_speed_mps: 1.0,
+            lead_lateral_band_m: 0.6,
+            lead_following_gap_m: 1.5,
+            prediction_lane_half_m: 0.6,
+            overtake_offset_max_m: 1.5,
+            wheelbase_m: 0.2,
+            ..Self::default()
+        }
+    }
+}
+
 /// A deterministic geometric go-to-goal planner: it follows the drivable
 /// **corridor centerline** toward the goal with a trapezoidal speed profile that
 /// tapers to a controlled stop at the goal.
@@ -2842,6 +2881,37 @@ mod tests {
         assert_eq!(out.kind, ProposalKind::Motion, "routes around, does not stop");
         let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
         assert!(min_y <= -1.0, "path offsets away from the object, got min_y {min_y}");
+    }
+
+    #[test]
+    fn courier_preset_stops_closer_to_an_in_path_object_than_the_car_default() {
+        // The doer-side courier tuning (ADR-0027 / step B): the car default stops 5 m behind an
+        // in-path object; the courier stops ~1 m short (the Yield standoff), so it advances much
+        // closer before holding — and KIRRA (courier profile) still admits the closer stop.
+        // Object close enough that BOTH reach their stop point within one planning horizon, so the
+        // comparison isolates the stop GAP (not the courier's lower cruise speed).
+        let corridor = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [obj_at(10.0, 0.0)]; // dead-centre object 8 m ahead of the ego
+
+        let car = GeometricPlanner::default().plan(&input_with_objects(&corridor, 2.0, 30.0, &objs));
+        let courier = GeometricPlanner::new(GeometricPlannerConfig::courier())
+            .plan(&input_with_objects(&corridor, 2.0, 30.0, &objs));
+
+        let reach = |o: &PlanOutput| o.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert_eq!(car.kind, ProposalKind::Motion);
+        assert_eq!(courier.kind, ProposalKind::Motion);
+        // Car holds ~5 m short; the courier advances notably closer in a single plan (its full
+        // ~1 m-short stop point is reached over successive replans — receding horizon — and its
+        // slow creep approach means one horizon doesn't cover the whole way).
+        assert!(reach(&courier) > reach(&car) + 1.0,
+            "courier advances closer (1 m gap vs 5 m): courier {:.1} m vs car {:.1} m", reach(&courier), reach(&car));
+
+        // The closer courier stop is still admitted by the courier checker.
+        let verdict = validate_trajectory_slow(
+            &courier.trajectory, &corridor, &objs, &VehicleConfig::courier(), None, FleetPosture::Nominal,
+        );
+        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "courier checker admits the closer stop, got {verdict:?}");
     }
 
     #[test]

@@ -1,0 +1,38 @@
+# deploy/systemd/kirra-planner.service
+#
+# systemd unit for the Occy planner sidecar (the kirra-mick `planner_service`
+# example): a small HTTP endpoint (POST /plan) that grounds a Mick intent with the
+# real planner + checker. It is a DOER-side sidecar — not safety-critical, no
+# secrets, no persistent state — so the sandbox is simpler than the verifier's.
+#
+# Companion to kirra-verifier.service; install/enable via deploy/systemd/install.sh.
+
+[Unit]
+Description=Kirra Occy planner sidecar (POST /plan)
+Documentation=https://github.com/kirra-systems/kirra-runtime-sdk
+After=network-online.target
+Wants=network-online.target
+PartOf=kirra.target
+
+[Service]
+Type=simple
+ExecStart=/opt/kirra/planner_service
+Environment=KIRRA_PLANNER_ADDR=127.0.0.1:8100
+# Optional shared config (bind-addr overrides etc.); '-' makes it non-fatal if absent.
+EnvironmentFile=-/etc/kirra/kirra.env
+Restart=always
+RestartSec=3
+# Least privilege.
+User=kirra
+Group=kirra
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -29,3 +29,7 @@ serde_json = "1"
 # VehicleConfig + the mock corridor.
 kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
 kirra-core = { path = "../kirra-core" }
+# Taj (ADR-0015) perception for the `taj_occy_kirra_stack` example — the four-component
+# on-Orin stack (Taj → Mick → Occy → KIRRA). Taj is lean (kirra-core only, no ROS), so
+# this keeps the example off the adapter's ros2/tokio tree.
+kirra-taj = { path = "../kirra-taj" }

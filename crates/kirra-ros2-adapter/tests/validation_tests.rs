@@ -115,6 +115,47 @@ fn test_rss_violation_rejects() {
 }
 
 // ---------------------------------------------------------------------------
+// 3a. Per-class RSS lateral band — a small-robot (courier) profile admits a side
+//     object a robotaxi refuses, WITHOUT changing the robotaxi number (#1 / the
+//     CONTRACT_PROFILES.md sibling rule). The checker LOGIC is identical; only the
+//     `rss_lateral_alignment_tolerance_m` differs between the two profiles.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn courier_admits_a_side_object_a_robotaxi_refuses() {
+    // A stationary object ~1 m ahead and 1.0 m to the SIDE — inside both the robotaxi
+    // 4.0 m RSS lateral band AND the 2.5 m longitudinal-overlap band, so the robotaxi
+    // evaluates it as a near lead → MRC. For the courier (0.6 m band) it is in ANOTHER
+    // lane → filtered → containment covers it → admitted. Same scene, same checker.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let objects = vec![PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 6.0, y_m: 1.0 },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+
+    // Robotaxi (default_urban, band 4.0 m) — REFUSES.
+    let robotaxi = straight_trajectory(5, 10.0, 0.1);
+    let v_taxi = validate_trajectory_slow(
+        &robotaxi, &corridor, &objects,
+        &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+    );
+    assert_eq!(v_taxi, TrajectoryVerdict::MRCFallback,
+        "robotaxi: a 1 m-ahead object within the 4 m band is RSS-evaluated → MRC; got {v_taxi:?}");
+
+    // Courier (band 0.6 m, robot speed) — ADMITS the SAME scene.
+    let courier = straight_trajectory(5, 2.0, 0.1);
+    let v_courier = validate_trajectory_slow(
+        &courier, &corridor, &objects,
+        &VehicleConfig::courier(), None, FleetPosture::Nominal,
+    );
+    assert!(matches!(v_courier, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "courier: the same object is beyond the 0.6 m band → containment covers it → admitted; got {v_courier:?}");
+}
+
+// ---------------------------------------------------------------------------
 // 3b. Head-on (oncoming) RSS — direction flips the verdict at the same gap
 // ---------------------------------------------------------------------------
 
