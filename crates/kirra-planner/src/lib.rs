@@ -524,6 +524,19 @@ pub struct GeometricPlannerConfig {
     /// uncomfortable. Below the checker's own lateral-accel ceiling, so this is a
     /// comfort refinement; `0` (or a huge value) effectively disables it.
     pub comfort_lateral_accel_mps2: f64,
+    /// Comfort steering-RATE limit (rad/s) for the curvature-transition speed cap. The
+    /// curvature-aware cap above bounds steering *angle* (lateral accel) for a curve's κ, but a
+    /// sharp **transition** — κ changing fast along the path (entering/exiting a bend, an S) —
+    /// demands steering *rate* ∝ `v·dκ/ds`, which it does not bound. This caps the speed where the
+    /// curvature is changing fast so the steering rate stays within the envelope, via the
+    /// bicycle relation `δ = atan(L·κ)` ([`wheelbase_m`](Self::wheelbase_m)). Kept below the
+    /// checker's hard steering-rate ceiling, so a plan capped here is checker-admissible (the doer
+    /// slows the transition instead of being clamped). `0` disables it; a straight or
+    /// constant-curvature path is unaffected (`dκ/ds = 0` ⇒ no cap).
+    pub max_steering_rate_rads: f64,
+    /// Wheelbase (m) for the bicycle-model steering relation `δ = atan(L·κ)` the steering-rate cap
+    /// uses. A larger wheelbase implies more steering angle per curvature, so a tighter cap.
+    pub wheelbase_m: f64,
 }
 
 impl Default for GeometricPlannerConfig {
@@ -560,6 +573,8 @@ impl Default for GeometricPlannerConfig {
             pull_over_stop_margin_m: 2.0,
             pull_over_edge_clearance_m: 2.2,
             comfort_lateral_accel_mps2: 2.0,
+            max_steering_rate_rads: 0.4,
+            wheelbase_m: 2.7,
         }
     }
 }
@@ -1022,11 +1037,23 @@ impl GeometricPlanner {
             .map(|i| {
                 let s = (i as f64 * ds).min(dist);
                 let mut lim = target;
-                if lat > 0.0 {
-                    let k = curvature_at(guide, s_ego + s, 3.0);
-                    if k > 1e-4 {
-                        lim = lim.min((lat / k).sqrt());
-                    }
+                let k = curvature_at(guide, s_ego + s, 3.0);
+                // Curvature (lateral-accel) cap — slow for a curve's κ.
+                if lat > 0.0 && k > 1e-4 {
+                    lim = lim.min((lat / k).sqrt());
+                }
+                // Curvature-TRANSITION (steering-rate) cap — slow where κ is changing fast (a sharp
+                // entry/exit or S-bend), so the steering rate stays within the comfort envelope and
+                // the plan is checker-admissible. A no-op on a straight / constant-curvature path.
+                if self.cfg.max_steering_rate_rads > 0.0 {
+                    let k_next = curvature_at(guide, s_ego + s + ds, 3.0);
+                    let dk_ds = (k_next - k) / ds;
+                    lim = lim.min(steering_rate_speed_cap(
+                        k,
+                        dk_ds,
+                        self.cfg.wheelbase_m,
+                        self.cfg.max_steering_rate_rads,
+                    ));
                 }
                 lim
             })
@@ -1418,6 +1445,21 @@ fn curvature_at(guide: &[(f64, f64)], s: f64, d: f64) -> f64 {
     // Twice the signed triangle area (cross product), magnitude.
     let area2 = ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)).abs();
     (2.0 * area2) / denom
+}
+
+/// The speed (m/s) at which a curvature TRANSITION of rate `dkappa_ds` (1/m per m of arc length)
+/// at curvature `kappa` keeps the bicycle-model steering rate at the comfort limit `max_rate_rads`.
+/// Steering angle `δ = atan(L·κ)` ⇒ `dδ/dt = [L/(1+(Lκ)²)]·(dκ/ds)·v`; solving `dδ/dt = max_rate`
+/// for `v` gives the cap. Returns `f64::INFINITY` (no cap) on a straight / constant-curvature path
+/// (`dκ/ds ≈ 0`) or when disabled (`max_rate ≤ 0`), so it is a no-op exactly there.
+fn steering_rate_speed_cap(kappa: f64, dkappa_ds: f64, wheelbase_m: f64, max_rate_rads: f64) -> f64 {
+    let dk = dkappa_ds.abs();
+    if dk <= 1e-6 || max_rate_rads <= 0.0 {
+        return f64::INFINITY;
+    }
+    let l = wheelbase_m.max(1e-3);
+    let ddelta_dkappa = l / (1.0 + (l * kappa).powi(2));
+    max_rate_rads / (ddelta_dkappa * dk)
 }
 
 /// Position at arc-length `s` along a `Point` polyline (the predicted-path / lane
@@ -1947,8 +1989,10 @@ mod tests {
     fn curvature_aware_speed_slows_for_a_curve() {
         let corr = curve_corridor();
         // In-curve region (world x in [18, 44]) min speed: the ego SLOWS for the bend.
+        // Isolate the lateral-accel (curvature) cap: disable the steering-rate cap so this test
+        // varies only `comfort_lateral_accel_mps2` (the steering-rate cap has its own tests).
         let curve_min_speed = |comfort: f64| -> f64 {
-            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, ..Default::default() };
+            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, max_steering_rate_rads: 0.0, ..Default::default() };
             let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
             out.trajectory.iter()
                 .filter(|p| p.pose.x_m >= 18.0 && p.pose.x_m <= 44.0)
@@ -1971,7 +2015,7 @@ mod tests {
             GeometricPlannerConfig::default().path_smoothing_iterations,
         );
         let peak_lat = |comfort: f64| -> f64 {
-            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, ..Default::default() };
+            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, max_steering_rate_rads: 0.0, ..Default::default() };
             let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
             out.trajectory.iter()
                 .map(|p| {
@@ -2001,7 +2045,11 @@ mod tests {
         // on the open straight (not needlessly slow), dip for the curve, recover
         // after it, and decelerate to 0 at the stop — a SEQUENCE the incremental
         // look-ahead cannot resolve jointly.
-        let p = GeometricPlanner::default();
+        // Isolate the forward–backward curve+stop sequencing on this RAW (unsmoothed) guide: disable
+        // the steering-rate cap, whose curvature-transition bound on a sharp unsmoothed vertex would
+        // (correctly) ripple upstream and confound the "cruise on the open straight" check. The
+        // steering-rate cap has its own tests (on smoothed guides, as the planner actually uses).
+        let p = GeometricPlanner::new(GeometricPlannerConfig { max_steering_rate_rads: 0.0, ..Default::default() });
         let guide: Vec<(f64, f64)> = vec![
             (0.0, 0.0), (30.0, 0.0), (42.0, 14.0), (90.0, 62.0),
         ];
@@ -2064,6 +2112,72 @@ mod tests {
         assert_eq!(out.kind, ProposalKind::Motion);
         let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
         assert!(max_x > 20.0, "the smoothed path drives through the kink, got max_x {max_x}");
+    }
+
+    #[test]
+    fn steering_rate_cap_helper_is_sound() {
+        let (l, rate) = (2.7, 0.4);
+        // No curvature transition (dκ/ds = 0) or disabled → no cap.
+        assert_eq!(steering_rate_speed_cap(0.05, 0.0, l, rate), f64::INFINITY);
+        assert_eq!(steering_rate_speed_cap(0.05, 0.02, l, 0.0), f64::INFINITY);
+        // A transition → a finite, positive speed cap.
+        let cap = steering_rate_speed_cap(0.05, 0.02, l, rate);
+        assert!(cap.is_finite() && cap > 0.0, "a transition produces a finite cap, got {cap}");
+        // A sharper transition (larger |dκ/ds|) → tighter cap; more rate budget → looser cap.
+        assert!(steering_rate_speed_cap(0.05, 0.04, l, rate) < cap, "sharper transition ⇒ slower");
+        assert!(steering_rate_speed_cap(0.05, 0.02, l, rate * 2.0) > cap, "more rate budget ⇒ faster");
+        // Only the magnitude of dκ/ds matters (entering vs exiting a bend are symmetric).
+        assert_eq!(steering_rate_speed_cap(0.05, -0.02, l, rate), cap);
+    }
+
+    #[test]
+    fn steering_rate_cap_slows_a_sharp_transition_and_kirra_admits() {
+        // Isolate the steering-rate cap from the lateral-accel cap (disable the latter): on the
+        // kink's sharp curvature TRANSITION the steering-rate cap slows the ego where the κ-only cap
+        // would not (κ is still small at the entry, but dκ/ds is large).
+        let corr = curve_corridor(); // a sharp ~55° turn at x≈20
+        let transition_min_speed = |rate: f64| -> f64 {
+            // Disable the κ-cap so the two arms differ ONLY in the steering-rate cap — the variable
+            // under test. At the bend ENTRY κ is still ramping (loose κ-cap) but dκ/ds is large.
+            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: 1.0e9, max_steering_rate_rads: rate, ..Default::default() };
+            GeometricPlanner::new(cfg)
+                .plan(&curve_input(&corr))
+                .trajectory
+                .iter()
+                .filter(|p| p.pose.x_m >= 18.0 && p.pose.x_m <= 44.0)
+                .map(|p| p.velocity_mps)
+                .fold(f64::INFINITY, f64::min)
+        };
+        let capped = transition_min_speed(0.4);
+        let uncapped = transition_min_speed(0.0);
+        assert!(capped.is_finite() && uncapped.is_finite(), "the ego reaches the transition");
+        assert!(capped < uncapped - 0.5,
+            "the steering-rate cap slows the sharp transition: capped={capped:.2}, uncapped={uncapped:.2}");
+
+        // The shipped default (both caps on) is checker-admissible through the bend.
+        let out = GeometricPlanner::default().plan(&curve_input(&corr));
+        let verdict = validate_trajectory_slow(
+            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        );
+        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            "the steering-rate-capped turn is admissible, got {verdict:?}");
+    }
+
+    #[test]
+    fn steering_rate_cap_is_a_no_op_on_a_straight_road() {
+        // No curvature ⇒ no transition ⇒ the cap never binds: the speed profile is byte-identical
+        // whether it is enabled or not (the WCET-critical straight path is unchanged).
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let peak = |rate: f64| -> f64 {
+            let cfg = GeometricPlannerConfig { max_steering_rate_rads: rate, ..Default::default() };
+            GeometricPlanner::new(cfg)
+                .plan(&sample_input(&corr))
+                .trajectory
+                .iter()
+                .map(|p| p.velocity_mps)
+                .fold(0.0_f64, f64::max)
+        };
+        assert!((peak(0.4) - peak(0.0)).abs() < 1e-9, "no curvature transition ⇒ identical profile");
     }
 
     #[test]

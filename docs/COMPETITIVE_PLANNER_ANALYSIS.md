@@ -156,8 +156,14 @@ parameters — both levers, not one.
    pass that propagates every downstream constraint (each curve, the stop) upstream
    — one principled pass that SUBSUMES the curvature cap and the brake-to-stop
    trigger and resolves SEQUENCES (a curve then a stop) jointly; the jerk-limited
-   forward integration executes it. **Remaining:** an explicit steering-rate cap
-   for very sharp transitions, and joint path+speed optimization.
+   forward integration executes it. **Done (steering-rate cap):** a
+   curvature-TRANSITION speed cap (`max_steering_rate_rads`) — the curvature cap above
+   bounds steering *angle* (lateral accel) for a curve's κ, but a sharp transition (κ
+   changing fast, `dκ/ds` large) demands steering *rate* ∝ `v·dκ/ds`; this caps the
+   speed via the bicycle relation `δ = atan(L·κ)` so the doer SLOWS a sharp entry/exit
+   instead of being clamped, staying below the checker's steering-rate ceiling
+   (checker-admissible). No-op on a straight / constant-curvature path. **Remaining:**
+   joint path+speed optimization (an MPC-style coupled solve).
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
