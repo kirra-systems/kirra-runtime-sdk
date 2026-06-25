@@ -134,6 +134,7 @@ fn lane_follow_samples(path: &[Point], speed_mps: f64, horizon_s: f64, dt_s: f64
 ///
 /// Returns owned modes; borrow them as `&[PredictedMode]` via [`OwnedPredictedMode::as_mode`] for
 /// `validate_trajectory_slow_capped`. A non-positive `dt_s` is floored to a small step.
+// SAFETY: SG1 | REQ: multi-modal-predicted-mode-producer | TEST: cv_mode_rolls_position_forward_on_velocity,a_turn_rate_adds_a_distinct_ctrv_mode,slow_loop_modes_adds_ctrv_only_when_the_yaw_feed_is_fresh,a_lane_path_adds_a_distinct_lane_follow_mode_that_traces_the_curve,produced_cv_mode_catches_a_cut_in_the_snapshot_rss_misses,produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff,produced_lane_follow_mode_catches_a_curving_in_object_that_cv_misses
 #[must_use]
 pub fn predicted_modes_from_objects(
     objects: &[PerceivedObject],

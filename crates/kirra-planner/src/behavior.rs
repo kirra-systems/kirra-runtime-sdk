@@ -110,6 +110,7 @@ const OCCLUSION_REACTION_TIME_S: f64 = 0.5;
 /// 0. Mirrors the checker's `assured_clear_distance_speed_cap` so a doer plan capped here
 /// (with a comfortable decel ≤ the checker's brake decel) is checker-admissible, not just
 /// fail-closed.
+// SAFETY: SG1 SG9 | REQ: occlusion-assured-clear-distance-speed-bound | TEST: occluded_approach_caps_speed_to_the_assured_clear_distance,occluded_approach_stops_capping_once_the_conflict_is_passed,occlusion_cap_composes_with_other_speed_caps_taking_the_lowest,the_ego_creeps_into_a_blind_junction_but_cruises_an_open_one,occlusion_creep_composes_with_a_stop_sign_at_the_same_blind_junction
 #[must_use]
 pub fn assured_clear_distance_speed_cap(visible_m: f64, brake_decel_mps2: f64) -> f64 {
     let a = brake_decel_mps2.max(0.0);

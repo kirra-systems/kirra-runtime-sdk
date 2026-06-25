@@ -111,6 +111,7 @@ pub fn perception_redundancy_enabled() -> bool {
 /// 4. enabled, secondary **STALE / silent** → `Some(0.0)` (the redundant channel dropped out, so
 ///    the primary can no longer be cross-checked — redundancy LOST → fail closed, the
 ///    True-Redundancy doctrine).
+// SAFETY: SG9 | REQ: perception-divergence-fails-closed | TEST: a_phantom_in_one_channel_diverges_and_caps_to_mrc,an_object_only_in_channel_b_also_diverges,a_matched_pair_disagreeing_on_speed_diverges,enabled_but_silent_secondary_fails_closed,disabled_monitor_is_inert_even_when_channels_diverge
 #[must_use]
 pub fn resolve_redundancy_cap(
     enabled: bool,
@@ -185,6 +186,7 @@ impl DivergenceEscalator {
     /// diverged (the MRC cap handles that); `Degraded` once divergence has persisted
     /// [`DIVERGENCE_DEGRADE_MS`]; `LockedOut` at [`DIVERGENCE_LOCKOUT_MS`]. Escalation-only — it
     /// can only make the posture stricter, never relax it.
+    // SAFETY: SG8 SG9 | REQ: sustained-divergence-escalates-posture | TEST: a_sustained_divergence_escalates_degraded_then_locked_out,a_momentary_divergence_does_not_escalate_posture,divergence_clearing_resets_the_streak,a_consistent_stream_never_escalates
     #[must_use]
     pub fn recommended_posture(&self, now_ms: u64) -> FleetPosture {
         match self.diverged_since_ms {

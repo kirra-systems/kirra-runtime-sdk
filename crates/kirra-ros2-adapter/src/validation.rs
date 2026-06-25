@@ -483,6 +483,7 @@ fn nearest_in_time(trajectory: &[TrajectoryPoint], t: f64) -> Option<&Trajectory
 /// ego-frame projection, same §4 lateral-alignment + longitudinal-overlap gating, same
 /// same-/opposite-direction primitive), but evaluates the object at its PREDICTED
 /// position+velocity (derived from the inter-sample motion) rather than its snapshot.
+// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance
 fn predictive_rss_breach(
     trajectory: &[TrajectoryPoint],
     modes: &[PredictedMode<'_>],
