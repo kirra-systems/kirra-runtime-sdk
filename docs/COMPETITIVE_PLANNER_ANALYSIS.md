@@ -168,8 +168,12 @@ parameters — both levers, not one.
    (scored through the velocity profile, so a flatter/shorter line's speed AND distance both count);
    KIRRA bounds the in-corridor result. Honest finding (ADR-0025): Chaikin smoothing already
    minimizes path curvature, so the constant-offset gain is material mainly on a TIGHT bend.
-   **Remaining:** an apex-varying offset profile + oriented-footprint containment, toward a coupled
-   QP / iLQR solve.
+   **Done (stronger optimizer):** a curvature-proportional APEX offset (`signed_curvature_at` —
+   cuts the corner, shortening the path across the apex, so it improves a sharp bend on the
+   production smoothed guide too) + **oriented-footprint** containment (`footprint_corners` +
+   `project_signed` vs `corridor_half_width`, replacing the swing-slack/x-indexed heuristic with a
+   projection-based check correct on a curve). **Remaining:** a continuous coupled **QP / iLQR**
+   path+speed solve — the next depth beyond bounded sample-and-score.
 4. **Lateral behaviors** — lane-change / merge / overtake decisions. **Done
    (overtake):** the `PlanInput` reference-path vs drivable-area split +
    `compute_overtake_bump` let Occy *propose* a cross-centerline pass into the
