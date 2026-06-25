@@ -53,6 +53,7 @@ the verification passes for the target deployment.
 | AOU-CLEARANCE-AUTH-001 | The integrator/verifier shall issue an `OperatorClearanceGrant` ONLY after authenticating the operator (the parko clearance loop enforces structure, not identity) | Integrator (verifier / operations) | **AoU** (by design) — structural loop live (#103 / PR #267); authentication delegated | the SG6 post-collision no-resume (`ClearanceLoop::try_clear` is the only un-latch path); SS-003 human-reset intent |
 | AOU-TIMESYNC-001 | Sensor/message timestamps consumed by governor staleness/deadline validation are synchronized, monotonic, drift-bounded vs the boundary clock domain, and converted to it before publication (HVCHAN §5 non-mixing rule) | Integrator (time sync / platform) | **AoU-GAP** — integrator obligation; drift bound **VALIDATION-PENDING** (set with the FTTI budget, #274/#278) | the governor staleness/deadline barrier (HVCHAN §3 judge; the #271 harness + #273 spike deadline checks); PTP/gPTP expected discharge |
 | AOU-HW-QNX-TARGET-001 | The QNX-resident safety partition and its **certified-WCET** evidence run on an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX Thor) running DRIVE OS + QNX OS for Safety — **NOT** a Jetson module (Orin NX / AGX Orin / Jetson Thor), which runs L4T/Linux and which NVIDIA does **not** support QNX on | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate; vendor-fixed (informational) | the QNX-target WCET / FTTI claim (`TBD-QNX-TARGET`, #274); the EPIC #270 QNX safety-partition lane; ADR `KIRRA_QNX_CROSSCOMPILE` aarch64 path |
+| AOU-PLATFORM-GEOMETRY-001 | A non-Ackermann platform deployed behind the `PlatformKinematics` abstraction supplies a footprint and kinematic limits (via its impl) that MATCH the physical platform; for a platform using the center-convention `VehicleFootprint` (`wheelbase_m = 0`, symmetric overhangs), the supplied pose is the **geometric center** | Integrator (platform) | **AoU** (by design) — abstraction + SG2 seam IMPLEMENTED and dual-platform-PROVEN (S-PK1a/b/c, ADR-0027); a live non-Ackermann **deployment** is **DEPLOYMENT-PENDING** (integrator wires a node consuming `validate_platform_containment` + supplies verified geometry/limits). The Ackermann path is unchanged/ENFORCED | SG2 drivable-space containment for any platform via `validate_platform_containment` (`crates/kirra-core/src/platform_kinematics.rs`); the per-platform envelope (`evaluate`) + RSS stay platform-specific |
 
 ---
 
@@ -1022,3 +1023,53 @@ gated on DRIVE hardware.
 - **EPIC #270**; **AOU-TIMESYNC-001** (the boundary-clock-domain sibling, also #274/#278).
 - Sources (2026-06): QNX OS for Safety in DRIVE AGX Thor GA; NVIDIA "no QNX on Jetson"
   (developer forums; DRIVE AGX FAQ).
+
+---
+
+## AOU-PLATFORM-GEOMETRY-001 — A non-Ackermann platform supplies geometry/limits that match the physical platform
+
+### Assumption
+> *A platform deployed behind the `PlatformKinematics` abstraction (Stage S-PK1 /
+> ADR-0027) supplies a footprint and kinematic limits — via its impl's
+> `footprint()` / `max_speed_mps()` / `max_brake_mps2()` / `stop_epsilon_mps()` —
+> that match the physical platform. For a platform using the center-convention
+> `VehicleFootprint` (`wheelbase_m = 0`, symmetric overhangs, e.g.
+> `DiffDrivePlatform::centered_footprint`), the pose handed to containment is the
+> robot's **geometric center**.*
+
+### Why it is load-bearing
+SG2 drivable-space containment for any platform runs `validate_platform_containment`
+against `platform.footprint()`. The check is only as sound as that footprint: an
+under-sized footprint admits a trajectory that clips the corridor; a wrong pose
+convention mislocates every corner. This is the platform-side analog of the
+integrator's existing obligation to supply a correct `VehicleConfig` for the
+Ackermann path — generalized to the trait.
+
+### Status / scope (claimable maturity)
+- **Ackermann** — **ENFORCED**, unchanged. The `AckermannPlatform` adapter is
+  verbatim over the frozen `validate_vehicle_command`; the existing talisman tests
+  are the regression proof.
+- **The abstraction + the SG2 seam** — **IMPLEMENTED and dual-platform-PROVEN**
+  (S-PK1a/b/c): the Ackermann AV and the real `DiffDrivePlatform` are bounded by the
+  *same* `validate_platform_containment` (the verdict differs purely from
+  `footprint()`).
+- **A live non-Ackermann deployment** — **DEPLOYMENT-PENDING**: no production node
+  consumes the seam yet (diff-drive's per-command checker remains parko's
+  `KirraGovernor`, a separate path). Wiring a node + supplying the platform's
+  *verified* geometry/limits is the integrator obligation this AoU names. **No
+  new-platform safety goal is marked ENFORCED on the basis of the seam alone.**
+
+### Residual / follow-ons
+- RSS and the per-command verdict stay platform-specific (the seam unifies
+  *containment* only — ADR-0027, deliberate scope).
+- Whether the shared footprint type should be genericized (drive-agnostic) vs the
+  center-convention `VehicleFootprint` is a tracked S-PK design point, not a gate.
+- Tier B (aerial, 3D containment) and the unified slow loop are gated (need a named
+  driver); Tier C (manipulator) is cut.
+
+### Evidence
+- `crates/kirra-core/src/platform_kinematics.rs` — `PlatformKinematics`,
+  `validate_platform_containment`, the dual-platform seam tests.
+- `parko/crates/parko-kirra/src/platform.rs` — `DiffDrivePlatform`,
+  `centered_footprint`, `diffdrive_is_bounded_by_the_generic_containment_seam`.
+- ADR-0027; `docs/safety/STAGE_S-PK1_PLATFORM_KINEMATICS.md`.

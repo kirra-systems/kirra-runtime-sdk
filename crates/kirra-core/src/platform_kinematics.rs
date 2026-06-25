@@ -162,6 +162,7 @@ impl PlatformKinematics for AckermannPlatform {
 /// Scope: this is the generic *seam* + proof, not a deployment — no live
 /// differential-drive node consumes it yet (diff-drive's checker is parko's
 /// `KirraGovernor`, a separate path).
+// SAFETY: SG2 | REQ: platform-kinematics-containment-seam | TEST: seam_bounds_any_platform_by_footprint,seam_allows_a_platform_within_a_wide_corridor,seam_inherits_the_frame_gate,diffdrive_is_bounded_by_the_generic_containment_seam
 #[must_use]
 pub fn validate_platform_containment<P: PlatformKinematics>(
     platform: &P,
