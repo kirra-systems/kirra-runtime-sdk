@@ -50,6 +50,9 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     let root = doc.root_element();
 
     let mut nodes: BTreeMap<u64, Point> = BTreeMap::new();
+    // Geographic nodes (`lat`/`lon`, no pre-projected `local_x`/`local_y`) are buffered and
+    // projected after the scan, once the projection origin (the lowest-id geographic node) is known.
+    let mut geo_nodes: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
     let mut ways: BTreeMap<u64, Way> = BTreeMap::new();
     let mut raw_lanelets: Vec<RawLanelet> = Vec::new();
     // `right_of_way` regulatory elements, as (priority lanes, yielding lanes).
@@ -61,11 +64,17 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
         match el.tag_name().name() {
             "node" => {
                 let id = attr_u64(&el, "id").ok_or_else(|| Lanelet2ParseError::BadNode("id".into()))?;
-                let x = tag_f64(&el, "local_x")
-                    .ok_or_else(|| Lanelet2ParseError::BadNode(format!("node {id} local_x")))?;
-                let y = tag_f64(&el, "local_y")
-                    .ok_or_else(|| Lanelet2ParseError::BadNode(format!("node {id} local_y")))?;
-                nodes.insert(id, Point { x_m: x, y_m: y });
+                // Prefer Autoware's pre-projected metric coords; fall back to geographic
+                // `lat`/`lon` attributes (projected after the scan). Neither present → fail closed.
+                if let (Some(x), Some(y)) = (tag_f64(&el, "local_x"), tag_f64(&el, "local_y")) {
+                    nodes.insert(id, Point { x_m: x, y_m: y });
+                } else if let (Some(lat), Some(lon)) = (attr_f64(&el, "lat"), attr_f64(&el, "lon")) {
+                    geo_nodes.insert(id, (lat, lon));
+                } else {
+                    return Err(Lanelet2ParseError::BadNode(format!(
+                        "node {id}: neither local_x/local_y tags nor lat/lon attributes"
+                    )));
+                }
             }
             "way" => {
                 let Some(id) = attr_u64(&el, "id") else { continue };
@@ -138,6 +147,15 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    // Project any geographic nodes to local metric coordinates about the lowest-id geographic node
+    // (a deterministic origin; the choice only translates the whole map, which nothing downstream
+    // depends on). A pre-projected `local_x`/`local_y` node of the same id is never overwritten.
+    if let Some((&_origin_id, &(lat0, lon0))) = geo_nodes.iter().next() {
+        for (id, (lat, lon)) in &geo_nodes {
+            nodes.entry(*id).or_insert_with(|| project_geographic(*lat, *lon, lat0, lon0));
         }
     }
 
@@ -339,6 +357,26 @@ fn line_type_of(ty: Option<&str>, subtype: Option<&str>) -> LineType {
 
 fn attr_u64(el: &roxmltree::Node, name: &str) -> Option<u64> {
     el.attribute(name)?.parse().ok()
+}
+
+fn attr_f64(el: &roxmltree::Node, name: &str) -> Option<f64> {
+    el.attribute(name)?.parse().ok()
+}
+
+/// WGS84 mean Earth radius (m) — the sphere the local geographic projection uses.
+const WGS84_RADIUS_M: f64 = 6_378_137.0;
+
+/// Project a geographic `(lat, lon)` (degrees) to local metric `(east, north)` on the tangent
+/// plane about `(lat0, lon0)` — the equirectangular / local-Cartesian projection a Lanelet2 loader
+/// applies when a map carries geographic coordinates instead of Autoware's pre-projected
+/// `local_x`/`local_y`. East = +x, north = +y. Accurate to centimetres over a lanelet-scale map
+/// (sub-km), and translation-invariant downstream (the origin choice only shifts all coordinates by
+/// a constant, which connectivity / headings / routing do not depend on).
+fn project_geographic(lat: f64, lon: f64, lat0: f64, lon0: f64) -> Point {
+    Point {
+        x_m: WGS84_RADIUS_M * (lon - lon0).to_radians() * lat0.to_radians().cos(),
+        y_m: WGS84_RADIUS_M * (lat - lat0).to_radians(),
+    }
 }
 
 /// The `v` of a child `<tag k="key" v="...">`, if present.
@@ -553,5 +591,77 @@ mod tests {
         let g = parse_lanelet2_osm(xml).unwrap();
         assert_eq!(g.len(), 1, "the crosswalk lanelet is excluded");
         assert!(g.lane(1).is_some() && g.lane(2).is_none());
+    }
+
+    // ---- Geographic (lat/lon) maps ---------------------------------------------------------
+
+    /// Inverse of [`project_geographic`]: a `(lat, lon)` (deg) whose forward projection ABOUT THE
+    /// SAME base recovers local `(x, y)` (m). Used to author a geographic map in metres so the
+    /// parser's projection must recover the intended geometry.
+    fn inv_project(x: f64, y: f64, lat0: f64, lon0: f64) -> (f64, f64) {
+        let lat = lat0 + (y / WGS84_RADIUS_M).to_degrees();
+        let lon = lon0 + (x / (WGS84_RADIUS_M * lat0.to_radians().cos())).to_degrees();
+        (lat, lon)
+    }
+
+    /// A two-lanelet successor chain (same shape as `CHAIN`) authored as a GEOGRAPHIC map about
+    /// `(lat0, lon0)` — `lat`/`lon` node attributes, no `local_x`/`local_y`.
+    fn geo_chain(lat0: f64, lon0: f64) -> String {
+        let pts = [(0.0, 1.75), (30.0, 1.75), (60.0, 1.75), (0.0, -1.75), (30.0, -1.75), (60.0, -1.75)];
+        let mut s = String::from("<?xml version=\"1.0\"?>\n<osm>\n");
+        for (i, (x, y)) in pts.iter().enumerate() {
+            let (lat, lon) = inv_project(*x, *y, lat0, lon0);
+            s.push_str(&format!("  <node id=\"{}\" lat=\"{lat:.15}\" lon=\"{lon:.15}\"/>\n", i + 1));
+        }
+        s.push_str(
+            r#"  <way id="10"><nd ref="1"/><nd ref="2"/><tag k="subtype" v="solid"/></way>
+  <way id="11"><nd ref="4"/><nd ref="5"/><tag k="subtype" v="dashed"/></way>
+  <way id="20"><nd ref="2"/><nd ref="3"/><tag k="subtype" v="solid"/></way>
+  <way id="21"><nd ref="5"/><nd ref="6"/><tag k="subtype" v="dashed"/></way>
+  <relation id="100"><tag k="type" v="lanelet"/><member type="way" role="left" ref="10"/><member type="way" role="right" ref="11"/></relation>
+  <relation id="200"><tag k="type" v="lanelet"/><member type="way" role="left" ref="20"/><member type="way" role="right" ref="21"/></relation>
+</osm>"#,
+        );
+        s
+    }
+
+    #[test]
+    fn parses_a_geographic_lat_lon_map() {
+        // A map with geographic node coordinates (no Autoware local_x/local_y) parses into the same
+        // metric lane the projected chain does: straight, ~1.75 m half-width, eastbound, routable.
+        let g = parse_lanelet2_osm(&geo_chain(35.0, 139.0)).unwrap();
+        assert_eq!(g.len(), 2, "both lanelets parse from geographic coords");
+        let l = g.lane(100).unwrap();
+        assert!((l.half_width_m - 1.75).abs() < 0.02, "projected half-width ≈ 1.75 m, got {}", l.half_width_m);
+        assert!(l.heading_rad.abs() < 1e-3, "runs eastbound (+x), got heading {}", l.heading_rad);
+        assert_eq!(l.left_line, LineType::Solid);
+        assert_eq!(l.right_line, LineType::Broken);
+        assert_eq!(g.route(100, 200), Some(vec![100, 200]), "connectivity derives the same as the metric map");
+    }
+
+    #[test]
+    fn geographic_projection_is_origin_invariant() {
+        // The SAME metric shape authored at two very different places on Earth recovers byte-equal
+        // local geometry — each projects about its own (lowest-id) node, so the origin cancels.
+        let a = parse_lanelet2_osm(&geo_chain(35.0, 139.0)).unwrap();
+        let b = parse_lanelet2_osm(&geo_chain(-22.0, -43.0)).unwrap();
+        let (la, lb) = (a.lane(100).unwrap(), b.lane(100).unwrap());
+        assert_eq!(la.centerline.len(), lb.centerline.len());
+        for (pa, pb) in la.centerline.iter().zip(&lb.centerline) {
+            // Agree to 0.1 mm despite being on opposite sides of Earth (residual = lat/lon string
+            // round-trip precision, not a projection difference).
+            assert!((pa.x_m - pb.x_m).abs() < 1e-4 && (pa.y_m - pb.y_m).abs() < 1e-4, "projection is origin-invariant");
+        }
+        assert!((la.half_width_m - lb.half_width_m).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_node_with_no_coordinates_fails_closed() {
+        // Neither local_x/local_y tags nor lat/lon attributes → a hard parse error (no silent 0,0).
+        let xml = r#"<osm>
+  <node id="1"><tag k="name" v="nowhere"/></node>
+  <way id="10"><nd ref="1"/></way>
+</osm>"#;
+        assert!(matches!(parse_lanelet2_osm(xml), Err(Lanelet2ParseError::BadNode(_))));
     }
 }
