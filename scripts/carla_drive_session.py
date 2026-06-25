@@ -23,6 +23,9 @@ per-run scorecard (intervention rate, mean clamp per axis) prints at the end.
   --shadow   autopilot drives; the governor is evaluated but NOT applied (pure
              observation + data collection, non-intrusive).
   --enforce  apply the governor-enforced control (the real doer-checker loop). [default]
+  --occy URL the DOER is REAL Occy via the planner endpoint (cargo run -p kirra-mick
+             --example planner_service) instead of the built-in lane-follower; the
+             corridor is built from the map waypoints and Occy's trajectory drives.
 
 SAFETY: tune the DOER from this data (propose checker-admissible commands more
 often); NEVER the checker's envelope — the speed cap, the 0.40 m margin, and the
@@ -92,6 +95,58 @@ def propose(world_map, vehicle, tick):
     return target_v, steer_deg
 
 
+def occy_propose(occy_url, world, world_map, vehicle, ego_idx):
+    """The DOER = REAL Occy via the planner endpoint. Build a corridor from the map's waypoints
+    ahead of the ego, post the world snapshot, and extract a (target speed, steering angle) from the
+    returned KIRRA-validated trajectory ~0.3 s ahead. Falls back to the local controller on error."""
+    import urllib.request
+    tf = vehicle.get_transform()
+    wp = world_map.get_waypoint(tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    if not wp:
+        return None
+    # Sample the lane ahead; left/right boundaries are ± half lane-width along each waypoint's right.
+    left, right, chain = [], [], wp
+    for _ in range(20):
+        nx = chain.next(2.0)
+        if not nx:
+            break
+        chain = nx[0]
+        rv = chain.transform.get_right_vector()
+        hw = chain.lane_width / 2.0
+        c = chain.transform.location
+        left.append([c.x - rv.x * hw, c.y - rv.y * hw])
+        right.append([c.x + rv.x * hw, c.y + rv.y * hw])
+    if len(left) < 2:
+        return None
+    goal = [(left[-1][0] + right[-1][0]) / 2.0, (left[-1][1] + right[-1][1]) / 2.0]
+    objs = []
+    for a in world.get_actors().filter("vehicle.*"):
+        if a.id == vehicle.id:
+            continue
+        al, av = a.get_location(), a.get_velocity()
+        objs.append({"id": int(a.id) % 100000, "x": al.x, "y": al.y, "vx": av.x, "vy": av.y})
+    req = {
+        "ego": {"x": tf.location.x, "y": tf.location.y, "heading": math.radians(tf.rotation.yaw), "speed": speed_of(vehicle)},
+        "goal": {"x": goal[0], "y": goal[1]}, "cruise": CRUISE_MPS,
+        "left": left, "right": right, "objects": objs,
+    }
+    try:
+        r = urllib.request.Request(occy_url.rstrip("/") + "/plan", data=json.dumps(req).encode(), method="POST")
+        r.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(r, timeout=5) as resp:
+            plan = json.loads(resp.read())
+    except Exception as e:
+        print(f"occy ego {ego_idx}: {e}", file=sys.stderr)
+        return None
+    traj = plan.get("trajectory", [])
+    if plan.get("kind") != "Motion" or len(traj) < 4:
+        return 0.0, 0.0  # Occy holds → propose a stop
+    pt = traj[min(3, len(traj) - 1)]  # ~0.3 s ahead
+    desired = math.degrees(math.atan2(pt["y"] - tf.location.y, pt["x"] - tf.location.x))
+    steer = max(-MAX_STEER_DEG, min(MAX_STEER_DEG, (desired - tf.rotation.yaw + 180.0) % 360.0 - 180.0))
+    return pt["v"], steer
+
+
 def enforced_to_control(target_v, steer_deg, current_v):
     """Map an enforced (target speed, steering angle) back to a CARLA control."""
     steer = max(-1.0, min(1.0, steer_deg / MAX_STEER_DEG))
@@ -111,6 +166,8 @@ def main():
     ap.add_argument("--ticks", type=int, default=4000)
     ap.add_argument("--follow", type=int, default=0, help="ego index the spectator follows")
     ap.add_argument("--out", default="carla_drive_session.jsonl")
+    ap.add_argument("--occy", default=None, help="planner-service URL (e.g. http://localhost:8100) — "
+                    "drive with REAL Occy instead of the built-in lane-follower doer")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--enforce", dest="enforce", action="store_true", default=True)
     mode.add_argument("--shadow", dest="enforce", action="store_false")
@@ -166,7 +223,14 @@ def main():
             for idx, ego in enumerate(egos):
                 cur_v = speed_of(ego)
                 cur_steer = ego.get_control().steer * MAX_STEER_DEG
-                tv, sd = propose(wmap, ego, tick)
+                # The DOER: real Occy via the planner endpoint, or the built-in lane-follower.
+                tv = sd = None
+                if args.occy:
+                    res = occy_propose(args.occy, world, wmap, ego, idx)
+                    if res is not None:
+                        tv, sd = res
+                if tv is None:
+                    tv, sd = propose(wmap, ego, tick)
                 proposal = {
                     "linear_velocity_mps": tv, "current_velocity_mps": cur_v,
                     "delta_time_s": dt, "steering_angle_deg": sd,

@@ -57,6 +57,23 @@ KIRRA_VERIFIER_URL=http://localhost:8090 KIRRA_ADMIN_TOKEN=test-token \
   governor is only **observed** (non-intrusive) — pure data collection.
 - Requires the `carla` Python package importable (the CARLA egg / `pip install carla`).
 
+## 2c. Drive with REAL Occy as the doer (not the placeholder controller)
+
+The harnesses above use a built-in controller as the doer. To drive egos with the
+**actual planner**, run the Occy planner endpoint and point the harness at it:
+
+```bash
+cargo run -p kirra-mick --example planner_service          # Occy on :8100 (POST /plan)
+
+KIRRA_VERIFIER_URL=http://localhost:8090 \
+  python3 scripts/carla_drive_session.py --town Town03 --egos 3 --occy http://localhost:8100
+```
+
+Per tick, the harness builds a corridor from the map's lane waypoints ahead of each ego,
+POSTs the world snapshot to `/plan`, and drives from Occy's KIRRA-validated trajectory.
+`crates/kirra-mick/examples/drive_session.rs` is the same Occy↔KIRRA loop fully in Rust
+(no CARLA), with the `MickEvalSummary` scorecard — use it to sanity-check the doer offline.
+
 ## 3. Tune from the capture
 
 Each JSONL row carries the proposal, the enforced result, and the per-axis Δ. Use it to:
