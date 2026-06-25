@@ -62,6 +62,14 @@ Defaults are Rosmaster-class; tune them to your chassis:
 | `max_steering_deg` | 30 | steering limit (Ackermann) |
 | `corridor_back_m` | 0.5 | how far to extend the corridor behind the robot (footprint containment) |
 | `lookahead_m` | 0.8 | pure-pursuit lookahead |
+| `vehicle_class` | `courier` | per-class checker profile (`courier` = small robot, `robotaxi` = the frozen AV) |
+| `rss_lateral_alignment_tolerance_m` | 0.6 | per-class RSS lateral band — robot "lane" width, not the car's 4 m |
+| `lateral_clearance_target_m` | 0.6 | how much room the DOER (Occy) demands before proposing a pass |
+
+The `vehicle_class` selects a **sibling profile** in the checker (`VehicleConfig::courier()` vs
+`default_urban()`), per [`docs/CONTRACT_PROFILES.md`](../CONTRACT_PROFILES.md). The robotaxi
+numbers are **frozen and unchanged** (proven by `default_urban_rss_band_is_the_frozen_robotaxi_value`),
+so the small-robot profile **cannot regress the AV path** — the only difference is the numbers.
 
 ## What it does today (honest scope)
 
@@ -76,9 +84,19 @@ Verified end to end (real `taj_service` + `planner_service` + the real `doer_cor
 So today the doer **drives straight down clear corridors and stops before obstacles** —
 exactly the right first-hardware behavior (the robot moves and is safe). `GoTo` tracks the
 drivable **corridor centerline**, so it does not beeline to an off-axis goal; turning follows
-the corridor. **Turning to follow a bend / routing around an obstacle needs robot-scaled
-RSS/containment constants** in the checker (currently car-tuned) — a tracked follow-up — plus,
-for bends, Phase-B perception (Taj Phase A only makes straight corridors).
+the corridor.
+
+**Per-class checker profile (done).** The slow-loop checker's RSS lateral band is now a
+per-class number (`VehicleConfig::courier()` 0.6 m vs robotaxi 4.0 m), proven end to end: for
+a side object 0.8 m off the path, the **robotaxi verdict is `MRCFallback` (refused) and the
+courier verdict is `Accept` (admitted)** — same scene, same checker logic — while the robotaxi
+number stays frozen (`courier_admits_a_side_object_a_robotaxi_refuses`). So the small robot can
+now be *judged* as a robot, not a 4.8 m car.
+
+**Still a doer-side follow-up.** The checker now *admits* a robot-scale side pass, but Occy
+(the doer) still *proposes* `SafeStop` for an in-corridor object at robot scale — proposing the
+pass is the untrusted doer's own robot-scale tuning, separate from the safety checker. And
+bend-following additionally needs Phase-B perception (Taj Phase A only makes straight corridors).
 
 ## Where Mick and Parko plug in (Phase 2)
 

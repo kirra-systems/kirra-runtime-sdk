@@ -53,28 +53,48 @@ struct PlanRequest {
 }
 fn default_cruise() -> f64 { 10.0 }
 
-/// Override fields for the checker's `VehicleConfig` (all optional; absent fields keep the
-/// urban-car default). Half-extents are bumper-to-centre, matching `VehicleConfig`.
+/// Vehicle profile for BOTH the checker (`VehicleConfig`) and the doer's lateral-clearance
+/// target. `class` picks the base sibling profile (`robotaxi` default, or `courier` for a
+/// small robot — see docs/CONTRACT_PROFILES.md); the remaining fields fine-tune it. All
+/// optional; absent → the urban-car/robotaxi default, so the AV path is unchanged.
 #[derive(Deserialize)]
 struct VehicleReq {
+    class: Option<String>,
     wheelbase_m: Option<f64>,
     half_length_m: Option<f64>,
     half_width_m: Option<f64>,
     max_speed_mps: Option<f64>,
     max_steering_deg: Option<f64>,
+    /// Per-class RSS lateral-alignment band (m). Robotaxi 4.0; a small robot needs a
+    /// tighter band to pass an obstacle a car couldn't (the checker side of the pass).
+    rss_lateral_alignment_tolerance_m: Option<f64>,
+    /// The DOER's lateral clearance target (m) — how much room Occy demands before it will
+    /// PROPOSE a pass. Robot scale must drop this (default 4.5 is car-scale) or Occy never
+    /// proposes the pass in the first place; the checker (`rss_...`) then admits it.
+    lateral_clearance_target_m: Option<f64>,
 }
 
-/// Build the checker's `VehicleConfig` from the request (urban-car default + overrides).
+/// Build the checker's `VehicleConfig` from the request: a base sibling profile selected by
+/// `class`, then explicit overrides. Absent → `default_urban` (robotaxi), unchanged.
 fn vehicle_config(req: &PlanRequest) -> VehicleConfig {
-    let mut v = VehicleConfig::default_urban();
+    let mut v = match req.vehicle.as_ref().and_then(|o| o.class.as_deref()) {
+        Some("courier") | Some("robot") => VehicleConfig::courier(),
+        _ => VehicleConfig::default_urban(),
+    };
     if let Some(o) = &req.vehicle {
         if let Some(x) = o.wheelbase_m { v.wheelbase_m = x; }
         if let Some(x) = o.half_length_m { v.half_length_m = x; }
         if let Some(x) = o.half_width_m { v.half_width_m = x; }
         if let Some(x) = o.max_speed_mps { v.max_speed_mps = x; }
         if let Some(x) = o.max_steering_deg { v.max_steering_rad = x.to_radians(); }
+        if let Some(x) = o.rss_lateral_alignment_tolerance_m { v.rss_lateral_alignment_tolerance_m = x; }
     }
     v
+}
+
+/// The DOER's lateral-clearance target from the request (default keeps the planner default).
+fn lateral_clearance_target(req: &PlanRequest) -> Option<f64> {
+    req.vehicle.as_ref().and_then(|o| o.lateral_clearance_target_m)
 }
 
 #[derive(Serialize)]
@@ -114,8 +134,11 @@ fn handle_plan(req: &PlanRequest) -> PlanResponse {
         lane_graph: None, signal_states: &[],
     };
 
-    // The DOER: real Occy grounds the GoTo intent.
-    let cfg = GeometricPlannerConfig { cruise_speed_mps: req.cruise, ..Default::default() };
+    // The DOER: real Occy grounds the GoTo intent. A robot profile drops the lateral-
+    // clearance target so Occy will PROPOSE a robot-scale pass (the car-scale 4.5 default
+    // never fits a robot corridor); the checker's per-class RSS band then admits it.
+    let mut cfg = GeometricPlannerConfig { cruise_speed_mps: req.cruise, ..Default::default() };
+    if let Some(ct) = lateral_clearance_target(req) { cfg.lateral_clearance_target_m = ct; }
     let plan = plan_for_intent(&mut GeometricPlanner::new(cfg), &MickIntent::GoTo { x_m: req.goal.x, y_m: req.goal.y }, &world);
     // The CHECKER: KIRRA's verdict on the proposal (the client applies it / falls back accordingly).
     let verdict = validate_trajectory_slow(&plan.trajectory, &corr, &objects, &vehicle_config(req), None, FleetPosture::Nominal);

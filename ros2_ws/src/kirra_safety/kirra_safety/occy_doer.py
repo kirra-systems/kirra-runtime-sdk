@@ -68,10 +68,15 @@ class OccyDoer(Node):
         # The robot's footprint/kinematics for the CHECKER. A small differential robot MUST
         # pass these, or the planner's default urban-car (4.8 m) footprint can't fit a
         # robot-scale corridor and KIRRA MRCs every plan. Defaults: a Rosmaster-class robot.
+        self.declare_parameter('vehicle_class', 'courier')  # per-class checker profile (CONTRACT_PROFILES.md)
         self.declare_parameter('wheelbase_m', 0.2)
         self.declare_parameter('half_length_m', 0.18)
         self.declare_parameter('half_width_m', 0.15)
         self.declare_parameter('max_steering_deg', 30.0)
+        # Per-class RSS band (checker) + the doer's lateral-clearance target. Robot-scale so
+        # the small robot is judged as a robot, not a 4.8 m car. See CONTRACT_PROFILES.md.
+        self.declare_parameter('rss_lateral_alignment_tolerance_m', 0.6)
+        self.declare_parameter('lateral_clearance_target_m', 0.6)
         # Extend the corridor behind the robot so its footprint (which sits behind the lidar
         # at the origin) is contained — Taj only reports forward free space.
         self.declare_parameter('corridor_back_m', 0.5)
@@ -88,11 +93,15 @@ class OccyDoer(Node):
         self._timeout_s = self.get_parameter('http_timeout_ms').value / 1000.0
         self._back_m = self.get_parameter('corridor_back_m').value
         self._vehicle = {
+            'class': self.get_parameter('vehicle_class').value,
             'wheelbase_m': self.get_parameter('wheelbase_m').value,
             'half_length_m': self.get_parameter('half_length_m').value,
             'half_width_m': self.get_parameter('half_width_m').value,
             'max_speed_mps': self.get_parameter('max_speed_mps').value,
             'max_steering_deg': self.get_parameter('max_steering_deg').value,
+            'rss_lateral_alignment_tolerance_m':
+                self.get_parameter('rss_lateral_alignment_tolerance_m').value,
+            'lateral_clearance_target_m': self.get_parameter('lateral_clearance_target_m').value,
         }
 
         self._pose = None         # (x, y, yaw, speed)

@@ -60,7 +60,21 @@ pub struct VehicleConfig {
     /// [`VehicleConfig::warn_if_missing_odd_cap`] — a deployment that
     /// drops the cap by accident is loud, not silent.
     pub odd_speed_cap_mps: Option<f64>,
+
+    /// **RSS lateral-alignment band** (m): the lateral offset below which an object is
+    /// "in my lane" and so subject to RSS longitudinal evaluation; beyond it, containment
+    /// covers it. This is **per-class** — a lane-width-scale number for a robotaxi (4.0 m),
+    /// but a much tighter band for a small robot (a sidewalk courier's "lane" is ~1 m wide,
+    /// not ~4 m). Making it a config field instead of a global constant is what lets a small
+    /// robot pass an obstacle a robotaxi could not, WITHOUT changing the robotaxi number
+    /// (see `docs/CONTRACT_PROFILES.md`, the sibling rule).
+    pub rss_lateral_alignment_tolerance_m: f64,
 }
+
+/// Robotaxi-class RSS lateral band (m) — the frozen reference value (was the module
+/// constant `RSS_LATERAL_ALIGNMENT_TOLERANCE_M` in `validation.rs`). `default_urban` uses
+/// this verbatim, so the robotaxi/AV path is byte-identical.
+pub const DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M: f64 = 4.0;
 
 impl VehicleConfig {
     /// Defaults for an urban mid-size AV. Matches the kernel's
@@ -83,6 +97,32 @@ impl VehicleConfig {
             // 35° steering rack on a 2.8 m wheelbase ≈ 0.6109 rad.
             max_steering_rad:   35.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(URBAN_ODD_SPEED_CAP_MPS),
+            rss_lateral_alignment_tolerance_m: DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M,
+        }
+    }
+
+    /// **Courier / small-robot class** (a sibling of [`default_urban`], per
+    /// `docs/CONTRACT_PROFILES.md`). Robot-scale footprint + kinematics + a tight RSS
+    /// lateral band so the slow-loop checker judges a sidewalk/indoor robot, not a 4.8 m
+    /// car. The checker LOGIC is identical to the robotaxi path — only these numbers differ,
+    /// and `default_urban` is untouched, so the AV profile cannot regress.
+    ///
+    /// Numbers track the `docs/CONTRACT_PROFILES.md` Courier column (footprint 0.6 × 0.9 m,
+    /// wheelbase 0.5 m, max 3.0 m/s, ODD cap 2.5 m/s, accel 1.0, brake 3.0, steering 30°) and
+    /// are **VALIDATION-PENDING** — placeholders with a stated basis, not certified values.
+    /// The RSS band (0.6 m) is the courier "lane" half-scale; tune per chassis.
+    pub fn courier() -> Self {
+        Self {
+            wheelbase_m:        0.5,
+            track_width_m:      0.4,
+            half_length_m:      0.45,   // → length 0.9 m
+            half_width_m:       0.3,    // → width  0.6 m
+            max_speed_mps:      3.0,
+            max_accel_mps2:     1.0,
+            max_decel_mps2:     3.0,
+            max_steering_rad:   30.0_f64.to_radians(),
+            odd_speed_cap_mps:  Some(2.5),
+            rss_lateral_alignment_tolerance_m: 0.6,
         }
     }
 
@@ -207,6 +247,31 @@ impl VehicleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_urban_rss_band_is_the_frozen_robotaxi_value() {
+        // The robotaxi/AV path must be byte-identical: the RSS lateral band stays the
+        // 4.0 m that was the global constant before it became per-class (#1 / the
+        // CONTRACT_PROFILES.md sibling rule — change a number ⇒ change it deliberately).
+        assert_eq!(
+            VehicleConfig::default_urban().rss_lateral_alignment_tolerance_m,
+            DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M
+        );
+        assert_eq!(DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M, 4.0);
+    }
+
+    #[test]
+    fn courier_is_a_smaller_sibling_not_the_robotaxi() {
+        // The small-robot profile differs ONLY in numbers (tighter band, smaller
+        // footprint, lower speed) — it is a sibling, not a fork of the logic.
+        let robot = VehicleConfig::courier();
+        let car = VehicleConfig::default_urban();
+        assert!(robot.rss_lateral_alignment_tolerance_m < car.rss_lateral_alignment_tolerance_m);
+        assert!(robot.half_length_m < car.half_length_m);
+        assert!(robot.half_width_m < car.half_width_m);
+        assert!(robot.max_speed_mps < car.max_speed_mps);
+        assert_eq!(robot.rss_lateral_alignment_tolerance_m, 0.6);
+    }
 
     #[test]
     fn default_urban_matches_kernel_nominal_geometry() {
