@@ -13,7 +13,7 @@
 
 use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl, LaneEdge,
-    LaneGraph, LineType, MickIntent, PlanInput, Pose, ProposalKind, TrajectoryVerdict,
+    LaneGraph, LineType, MickIntent, Occluder, PlanInput, Pose, ProposalKind, TrajectoryVerdict,
 };
 use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
 use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
@@ -94,6 +94,45 @@ fn the_ego_creeps_into_a_blind_junction_but_cruises_an_open_one() {
     let blinder_g = approach(Some(3.0));
     let blinder = plan_for_intent(&mut GeometricPlanner::default(), &intent, &world(&corr, &blinder_g));
     assert!(peak_speed(&blinder) < blind_peak, "less sight → slower creep ({} vs {blind_peak})", peak_speed(&blinder));
+}
+
+#[test]
+fn occlusion_creep_is_driven_by_map_occluder_geometry_not_a_hand_fed_datum() {
+    // The same creep, but the sight distance is DERIVED from a corner building's footprint instead
+    // of being hand-fed. A building just off the +y edge of the approach, ending 5 m before the
+    // conflict line (x=40) ⇒ derived sight = 40 − 35 = 5 m — identical to the `Some(5.0)` blind
+    // case above. This proves the geometry closes the loop to the existing consumer end to end:
+    // map footprint → derive_occluded_approaches → derive_controls → creep cap → Occy → KIRRA.
+    let corr = MockCorridorSource::straight_5m_half_width(100.0);
+    let intent = MickIntent::GoTo { x_m: 60.0, y_m: 0.0 };
+    let cfg = VehicleConfig::default_urban();
+    let admit = |p: &kirra_planner::PlanOutput| matches!(
+        validate_trajectory_slow(&p.trajectory, &corr, &[], &cfg, None, FleetPosture::Nominal),
+        TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+    );
+
+    // approach() lane 1 is centred at y=0 with half-width 3 m; a building at y∈[3.5, 9] off the +y
+    // edge, x∈[10, 35], is a corner occluder whose junction edge (x=35) sits 5 m before the line.
+    let building = Occluder::new(10.0, 35.0, 3.5, 9.0);
+    let derived_g = approach(None).with_derived_occlusion(&[building]);
+    assert_eq!(derived_g.sight_distance(1), Some(5.0), "the sight distance is derived from the footprint");
+
+    let derived = plan_for_intent(&mut GeometricPlanner::default(), &intent, &world(&corr, &derived_g));
+    assert_eq!(derived.kind, ProposalKind::Motion, "the ego creeps the geometry-derived blind junction");
+    let derived_peak = peak_speed(&derived);
+
+    // Byte-for-byte the same outcome as the hand-fed Some(5.0) datum: same cap, same creep.
+    let handfed = plan_for_intent(&mut GeometricPlanner::default(), &intent, &world(&corr, &approach(Some(5.0))));
+    assert!((derived_peak - peak_speed(&handfed)).abs() < 1e-9, "derived geometry == hand-fed datum");
+    assert!(derived_peak < 5.0, "creep-capped to the assured-clear speed, got peak {derived_peak}");
+    assert!(admit(&derived), "KIRRA admits the geometry-derived occlusion creep");
+
+    // And an open junction (no footprint anywhere) is still taken at cruise — the derivation is
+    // a no-op when nothing shadows the approach.
+    let open_g = approach(None).with_derived_occlusion(&[Occluder::new(10.0, 35.0, 40.0, 50.0)]); // far away
+    assert_eq!(open_g.sight_distance(1), None, "a distant footprint shadows nothing");
+    let open = plan_for_intent(&mut GeometricPlanner::default(), &intent, &world(&corr, &open_g));
+    assert!(peak_speed(&open) > 6.0, "open junction taken at cruise");
 }
 
 #[test]
