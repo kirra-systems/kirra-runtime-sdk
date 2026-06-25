@@ -83,8 +83,11 @@ Point a client at them:
   a complete governed-robot loop, light Jetson load. **Taj's geometric corridor is now wired into
   this path**: the `perception_governor` node turns `/scan` into an assured-clear-distance speed
   cap (via the `taj_service` sidecar) that derates `cmd_vel` before the governor — opt-in,
-  fail-closed (`use_perception_cap:=true`; see `ros2_ws/src/kirra_safety/README.md`). The Parko
-  TensorRT detector (semantic objects) is **Phase 2**.
+  fail-closed (`use_perception_cap:=true`; see `ros2_ws/src/kirra_safety/README.md`). The launch
+  starts the Rust sidecars (Occy planner + Taj) itself, so one `ros2 launch` brings up the whole
+  governed stack — but pass `start_sidecars:=false` if you already started them via
+  `orin_bringup.sh --serve` (otherwise the ports double-bind). The Parko TensorRT detector
+  (semantic objects) is **Phase 2**.
 - **Headless / desktop** — `scripts/governor_drive_session.py` drives a kinematic ego through the
   real governor and captures the divergence (and a `kirra-collector` dataset; see
   [DRIVE_SESSION_SETUP.md](DRIVE_SESSION_SETUP.md)).
