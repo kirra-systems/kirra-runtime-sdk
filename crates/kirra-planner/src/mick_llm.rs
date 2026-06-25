@@ -97,7 +97,8 @@ pub fn intent_schema() -> serde_json::Value {
         "properties": {
             "intent": {
                 "type": "string",
-                "enum": ["go_to", "lane_change", "hold", "cruise", "overtake", "pull_over", "turn_at", "route_to"]
+                "enum": ["go_to", "lane_change", "hold", "cruise", "overtake", "pull_over", "turn_at", "route_to",
+                         "yield", "cross_when_clear", "creep_through"]
             },
             "x_m": { "type": "number" },
             "y_m": { "type": "number" },
@@ -110,23 +111,125 @@ pub fn intent_schema() -> serde_json::Value {
     })
 }
 
+/// Render the world into a **sidewalk-courier** prompt (ADR-0027). Same strict typed-intent
+/// contract and "a governor enforces the hard limits" framing as [`build_prompt`], but a
+/// pedestrian-space persona offered ONLY the sidewalk intents — no road maneuvers (no
+/// lane-change / overtake / junction turns). A courier follows its path, yields to people,
+/// creeps through crowds, and crosses roads only at crosswalks when clear.
+#[must_use]
+pub fn build_courier_prompt(ctx: &WorldContext) -> String {
+    let situation = serde_json::to_string_pretty(ctx).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "You are Mick, a careful sidewalk delivery courier — a small robot in pedestrian space \
+(sidewalks, plazas, crosswalks). Choose the SINGLE best high-level intent for the situation.\n\
+\n\
+Respond with ONLY one JSON object (no prose, no code fence), in one of these forms:\n\
+  {{\"intent\":\"go_to\",\"x_m\":<number>,\"y_m\":<number>}}        follow the path toward a point (ego frame)\n\
+  {{\"intent\":\"yield\",\"x_m\":<number>,\"y_m\":<number>}}         give way to a pedestrian in your path, then go on\n\
+  {{\"intent\":\"creep_through\",\"x_m\":<number>,\"y_m\":<number>}} inch gently through a crowd of pedestrians\n\
+  {{\"intent\":\"cross_when_clear\",\"x_m\":<number>,\"y_m\":<number>}}  cross a road at a crosswalk, only when clear\n\
+  {{\"intent\":\"hold\"}}                                          stop and hold\n\
+\n\
+You move at a slow, walking pace and ALWAYS give way to people — you never assert. A separate \
+safety governor enforces collision limits and your speed/energy envelope, so you cannot hurt \
+anyone; focus on being polite and making steady progress. Coordinates are ego-relative: \
++ahead is forward, +left is to your left.\n\
+\n\
+Examples (situation → intent):\n\
+- clear path, goal ahead → {{\"intent\":\"go_to\",\"x_m\":8,\"y_m\":0}}\n\
+- a pedestrian standing in your path ahead → {{\"intent\":\"yield\",\"x_m\":8,\"y_m\":0}}\n\
+- a dense crowd of pedestrians around you → {{\"intent\":\"creep_through\",\"x_m\":8,\"y_m\":0}}\n\
+- at a crosswalk, a car approaching on the road → {{\"intent\":\"cross_when_clear\",\"x_m\":9,\"y_m\":0}}\n\
+- blocked, or off your route → {{\"intent\":\"hold\"}}\n\
+\n\
+Situation:\n{situation}\n\
+\n\
+Intent:"
+    )
+}
+
+/// The **courier** intent schema — the constrained-decode subset for the sidewalk persona
+/// ([`build_courier_prompt`]): only the sidewalk tags. Passed to a schema/grammar-constrained
+/// backend so a courier model can ONLY emit a sidewalk intent — it cannot emit a road maneuver
+/// (lane-change/overtake/turn) that does not apply on a sidewalk. A strict subset of
+/// [`intent_schema`]'s enum, so every courier tag is still in the fail-closed parser.
+#[must_use]
+pub fn courier_intent_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["go_to", "yield", "cross_when_clear", "creep_through", "hold"]
+            },
+            "x_m": { "type": "number" },
+            "y_m": { "type": "number" }
+        },
+        "required": ["intent"],
+        "additionalProperties": false
+    })
+}
+
+/// Which persona [`LlmBrain`] prompts as — a road chauffeur or a sidewalk courier (ADR-0027).
+/// The persona selects the prompt + the constrained-decode schema; the fail-closed parse is the
+/// same for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persona {
+    Chauffeur,
+    SidewalkCourier,
+}
+
+impl Persona {
+    /// The prompt for this persona.
+    #[must_use]
+    pub fn prompt(self, ctx: &WorldContext) -> String {
+        match self {
+            Persona::Chauffeur => build_prompt(ctx),
+            Persona::SidewalkCourier => build_courier_prompt(ctx),
+        }
+    }
+
+    /// The constrained-decode schema for this persona (passed to Ollama's `format`).
+    #[must_use]
+    pub fn schema(self) -> serde_json::Value {
+        match self {
+            Persona::Chauffeur => intent_schema(),
+            Persona::SidewalkCourier => courier_intent_schema(),
+        }
+    }
+}
+
 /// A [`MickBrain`] driven by any [`ModelClient`]: render the prompt, ask the model, parse
 /// the reply into a typed intent. Fail-closed at every step — a transport error or an
 /// unparseable / out-of-schema reply returns `Err`, on which the caller HOLDs.
 pub struct LlmBrain<M: ModelClient> {
     model: M,
+    persona: Persona,
 }
 
 impl<M: ModelClient> LlmBrain<M> {
+    /// A road-chauffeur brain (the default persona).
     #[must_use]
     pub fn new(model: M) -> Self {
-        Self { model }
+        Self { model, persona: Persona::Chauffeur }
+    }
+
+    /// A sidewalk-courier brain — prompts the courier persona, offered only sidewalk intents.
+    #[must_use]
+    pub fn courier(model: M) -> Self {
+        Self { model, persona: Persona::SidewalkCourier }
+    }
+
+    /// This brain's persona.
+    #[must_use]
+    pub fn persona(&self) -> Persona {
+        self.persona
     }
 }
 
 impl<M: ModelClient> MickBrain for LlmBrain<M> {
     fn decide(&mut self, ctx: &WorldContext) -> Result<MickIntent, MickError> {
-        let prompt = build_prompt(ctx);
+        let prompt = self.persona.prompt(ctx);
         let raw = self.model.complete(&prompt).map_err(|_| "MICK_MODEL_ERROR")?;
         // from_llm_json is already fail-closed + tolerant of small-model framing.
         MickIntent::from_llm_json(&raw)
@@ -222,6 +325,9 @@ mod tests {
             (r#"{"intent":"pull_over"}"#, "pull_over"),
             (r#"{"intent":"turn_at","direction":"left"}"#, "turn_at"),
             (r#"{"intent":"route_to","x_m":120.0,"y_m":40.0}"#, "route_to"),
+            (r#"{"intent":"yield","x_m":12.0,"y_m":0.0}"#, "yield"),
+            (r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":0.0}"#, "cross_when_clear"),
+            (r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#, "creep_through"),
         ];
         for (json, tag) in cases {
             assert!(enum_tags.contains(&tag.to_string()), "schema enum must list {tag}");
@@ -235,6 +341,44 @@ mod tests {
     fn llm_brain_parses_a_valid_model_reply() {
         let mut brain = LlmBrain::new(MockModel::replying(r#"{"intent":"cruise","target_speed_mps":4.0}"#));
         assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Cruise { target_speed_mps: 4.0 });
+    }
+
+    // --- sidewalk-courier persona (ADR-0027 / D) ----------------------------
+
+    #[test]
+    fn courier_prompt_offers_the_sidewalk_intents_and_not_road_maneuvers() {
+        let p = build_courier_prompt(&sample_ctx());
+        for tag in ["go_to", "yield", "cross_when_clear", "creep_through", "hold"] {
+            assert!(p.contains(tag), "courier prompt must offer the {tag} intent");
+        }
+        // A courier does not get road maneuvers.
+        for tag in ["lane_change", "overtake", "turn_at", "route_to"] {
+            assert!(!p.contains(tag), "courier prompt must NOT offer the road maneuver {tag}");
+        }
+        assert!(p.contains("courier") && p.contains("pedestrian"), "the sidewalk persona is present");
+    }
+
+    #[test]
+    fn courier_schema_is_a_subset_of_the_parseable_tags() {
+        let courier: Vec<String> = courier_intent_schema()["properties"]["intent"]["enum"]
+            .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let full: Vec<String> = intent_schema()["properties"]["intent"]["enum"]
+            .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert_eq!(courier, ["go_to", "yield", "cross_when_clear", "creep_through", "hold"]);
+        for tag in &courier {
+            assert!(full.contains(tag), "courier tag {tag} must be in the full parseable set");
+        }
+    }
+
+    #[test]
+    fn courier_brain_authors_and_parses_a_sidewalk_intent() {
+        // The courier persona round-trips a sidewalk intent through the brain.
+        let mut brain = LlmBrain::courier(MockModel::replying(r#"{"intent":"yield","x_m":8.0,"y_m":0.0}"#));
+        assert_eq!(brain.persona(), Persona::SidewalkCourier);
+        assert_eq!(brain.decide(&sample_ctx()).unwrap(), MickIntent::Yield { x_m: 8.0, y_m: 0.0 });
+
+        let mut creeper = LlmBrain::courier(MockModel::replying(r#"{"intent":"creep_through","x_m":8.0,"y_m":0.0}"#));
+        assert_eq!(creeper.decide(&sample_ctx()).unwrap(), MickIntent::CreepThrough { x_m: 8.0, y_m: 0.0 });
     }
 
     #[test]
