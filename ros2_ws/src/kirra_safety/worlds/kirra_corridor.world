@@ -1,0 +1,50 @@
+<?xml version="1.0" ?>
+<!-- A short straight corridor with an end wall, for the Kirra cmd_vel-derate demo.
+     The robot starts at the origin facing +X and is commanded forward by the (untrusted)
+     doer; Taj's corridor sees the end wall as a shrinking clear distance and derates the
+     speed, KIRRA bounds it, and the robot brakes to a controlled stop before the wall. -->
+<sdf version="1.6">
+  <world name="kirra_corridor">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- Left wall (y = +1.5), 10 m long -->
+    <model name="wall_left">
+      <static>true</static>
+      <pose>5 1.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>10 0.1 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>10 0.1 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.7 0.7 0.7 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Right wall (y = -1.5), 10 m long -->
+    <model name="wall_right">
+      <static>true</static>
+      <pose>5 -1.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>10 0.1 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>10 0.1 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.7 0.7 0.7 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- End wall dead ahead at x = 5 m: the obstacle Taj caps the approach speed against. -->
+    <model name="wall_end">
+      <static>true</static>
+      <pose>5 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 3.0 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 3.0 1.0</size></box></geometry>
+          <material><ambient>0.7 0.2 0.2 1</ambient><diffuse>0.9 0.25 0.25 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <gui>
+      <camera name="user_camera">
+        <pose>-3 -4 4 0 0.5 0.7</pose>
+      </camera>
+    </gui>
+  </world>
+</sdf>

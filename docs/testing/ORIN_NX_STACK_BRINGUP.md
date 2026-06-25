@@ -8,9 +8,10 @@ then (optionally) bring up the governance plane so a ROS 2 / Python client can d
 > **The Orin is the robot's brain, not a sim host.** CARLA's photoreal server is x86 + desktop
 > GPU only — it does *not* run on the Orin. You don't need it: the stack below is pure Rust
 > compute (no GPU, no CARLA, no ROS required to run the demo), so it executes on the Orin
-> exactly as it would on the vehicle. For visuals on the Orin use Gazebo/Ignition (ARM-native,
-> wired in `ros2_ws/src/kirra_safety`); for CARLA cities put CARLA in the cloud with the Orin
-> as the client.
+> exactly as it would on the vehicle. For a watchable robot sim on the Orin, the Gazebo demo
+> (ARM-native) drives a robot into a wall and Taj+KIRRA brake it — see
+> [GAZEBO_ON_ORIN.md](GAZEBO_ON_ORIN.md). For CARLA cities put CARLA in the cloud with the
+> Orin as the client.
 
 ## The four components
 

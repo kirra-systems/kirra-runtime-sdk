@@ -63,6 +63,18 @@ source install/setup.bash
 ros2 launch kirra_safety kirra_with_robot.launch.py kirra_token:=$KIRRA_ADMIN_TOKEN
 ```
 
+## Gazebo demo — watch Taj + KIRRA stop a robot
+
+`kirra_gazebo_demo.launch.py` drives a simulated robot toward a wall while a naive doer
+keeps commanding it forward; Taj's corridor cap + the governor brake it to a controlled
+stop. One command brings up the verifier, sidecars, safety nodes, Gazebo, robot, and doer.
+See [`docs/testing/GAZEBO_ON_ORIN.md`](../../../../docs/testing/GAZEBO_ON_ORIN.md).
+
+```bash
+export KIRRA_ADMIN_TOKEN=test-token KIRRA_SUPERVISOR_RESET_KEY=test-reset-key
+ros2 launch kirra_safety kirra_gazebo_demo.launch.py
+```
+
 ## Full Documentation
 
 See [`docs/ros2_interlock.md`](../../../../docs/ros2_interlock.md) for:

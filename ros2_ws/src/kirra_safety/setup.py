@@ -16,6 +16,10 @@ setup(
             glob(os.path.join('launch', '*launch.[pxy][yma]*'))),
         (os.path.join('share', package_name, 'config'),
             glob(os.path.join('config', '*.yaml'))),
+        (os.path.join('share', package_name, 'worlds'),
+            glob(os.path.join('worlds', '*.world'))),
+        (os.path.join('share', package_name, 'urdf'),
+            glob(os.path.join('urdf', '*.urdf'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +34,7 @@ setup(
             'sensor_monitor = kirra_safety.sensor_monitor:main',
             'posture_subscriber = kirra_safety.posture_subscriber:main',
             'perception_governor = kirra_safety.perception_governor:main',
+            'doer_commander = kirra_safety.doer_commander:main',
         ],
     },
 )
