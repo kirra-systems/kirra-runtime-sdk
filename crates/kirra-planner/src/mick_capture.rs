@@ -100,6 +100,7 @@ impl MickDecisionRecord {
             // Sidewalk-courier intents (ADR-0027) — the goal point is the destination/far-curb.
             MickIntent::Yield { x_m, y_m } => ("yield", Some(x_m), Some(y_m), None, None),
             MickIntent::CrossWhenClear { x_m, y_m } => ("cross_when_clear", Some(x_m), Some(y_m), None, None),
+            MickIntent::CreepThrough { x_m, y_m } => ("creep_through", Some(x_m), Some(y_m), None, None),
         };
         let turn_direction = match *intent {
             MickIntent::TurnAt { direction } => Some(direction.as_str()),

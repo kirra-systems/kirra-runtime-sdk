@@ -92,10 +92,16 @@ right-of-way. A courier does not negotiate for position; it yields and creeps.
 HOLDs while one is in the way; `CrossWhenClear` steps off only when every conflicting road agent's
 worst-case re-acceleration still can't reach the crossing before the slow courier clears it (the
 Stackelberg `interactive_proceed` model), else HOLDs at the curb. `FollowPath` ≈ `GoTo`/`Cruise` at
-creep; `Hold` already exists. `creep-through-crowd` (a soft nudge through dense pedestrians) remains
-a follow-up. The two behaviors are shown composing in a continuous drive (give way to a pedestrian
-and resume; wait at a curb for a car and cross) by `cargo run -p kirra-mick --example
-sidewalk_session` — Mick → Occy → KIRRA (courier profile), every committed pose checker-admitted.
+creep; `Hold` already exists. **`creep-through-crowd` is now implemented too**
+(`behavior::creep_through_crowd_speed_cap` + `MickIntent::CreepThrough`): instead of freezing a
+full standoff before the nearest pedestrian (which deadlocks a dense crowd), the courier inches
+forward at a gentle nudge, stopping only at a tight contact floor so it never pushes into anyone —
+a deliberate, opt-in relaxation of the full-stop yield, sub-walking-pace, KIRRA's impact-energy
+bound backstopping. `Yield` and `CrossWhenClear` are shown composing in a continuous drive (give
+way to a pedestrian and resume; wait at a curb for a car and cross) by `cargo run -p kirra-mick
+--example sidewalk_session` — Mick → Occy → KIRRA (courier profile), every committed pose
+checker-admitted. The full sidewalk intent set (`FollowPath`/`Yield`/`CrossWhenClear`/`CreepThrough`/
+`Hold`) is now in place.
 
 ### 4. Class mapping (one selector, two loops, cited copies)
 

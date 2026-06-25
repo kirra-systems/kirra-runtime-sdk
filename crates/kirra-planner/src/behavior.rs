@@ -288,6 +288,46 @@ pub fn cross_when_clear(
     )
 }
 
+/// Hard contact floor (m): the courier never advances within this of a pedestrian — it stops,
+/// never nudges into someone. Tighter than the Yield standoff (a deliberate, last-resort minimum).
+pub const DEFAULT_CROWD_CONTACT_FLOOR_M: f64 = 0.4;
+
+/// The gentle "nudge" speed (m/s) the courier creeps at through a crowd — slow enough that people
+/// make way and any contact is negligible-energy (KIRRA's impact-energy bound backstops it).
+pub const DEFAULT_CROWD_NUDGE_SPEED_MPS: f64 = 0.3;
+
+/// **Creep through a crowd (a soft nudge, not a freeze).** A pure [`yield_to_vru_speed_cap`] stops a
+/// full standoff (≈1 m) before the nearest pedestrian — which, in a dense crowd, freezes the courier
+/// indefinitely. This relaxes that to a gentle creep: the courier keeps inching forward at up to
+/// `nudge_speed_mps` while a pedestrian is in its path band, ramping to a stop only at the much
+/// tighter `contact_floor_m` (so it NEVER pushes into anyone). Returns the speed cap (m/s), or
+/// `None` when no VRU is in the band. A VRU within the contact floor → `Some(0.0)` (stop).
+///
+/// Derate-only / fail-closed: the cap is `min(nudge, assured-clear-distance over the gap to the
+/// contact floor)`, so it can only LOWER speed and tapers to zero at the floor. It is a deliberate,
+/// opt-in RELAXATION of the full-stop yield for crowd ODDs; the speed stays sub-walking-pace and
+/// KIRRA's impact-energy + containment bounds independently backstop it.
+// SAFETY: SG1 SG6 | REQ: sidewalk-creep-through-crowd | TEST: no_vru_means_no_crowd_cap,a_vru_in_the_crowd_caps_to_a_gentle_nudge,a_vru_at_the_contact_floor_stops_the_courier,the_crowd_nudge_never_exceeds_the_nudge_speed,creep_through_advances_where_a_full_yield_would_freeze
+#[must_use]
+pub fn creep_through_crowd_speed_cap(
+    vrus: &[VruApproach],
+    band_half_width_m: f64,
+    contact_floor_m: f64,
+    nudge_speed_mps: f64,
+    brake_decel_mps2: f64,
+) -> Option<f64> {
+    let nearest = vrus
+        .iter()
+        .filter(|v| v.ahead_m > 0.0 && v.lateral_offset_m.abs() <= band_half_width_m)
+        .map(|v| v.ahead_m)
+        .fold(f64::INFINITY, f64::min);
+    if !nearest.is_finite() {
+        return None;
+    }
+    let acd = assured_clear_distance_speed_cap((nearest - contact_floor_m).max(0.0), brake_decel_mps2);
+    Some(acd.min(nudge_speed_mps.max(0.0)))
+}
+
 /// Tunables for the behavioral layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BehaviorConfig {
@@ -750,5 +790,45 @@ mod tests {
         // A car crawling at 0.5 m/s just 8 m away reads as 16 s by d/v, but the interaction model
         // worst-cases its re-acceleration → it is NOT trusted; the courier holds.
         assert!(!cross_when_clear(&[conflict(8.0, 0.5)], 6.0, 1.0, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, A));
+    }
+
+    // --- creep through a crowd (ADR-0027) -----------------------------------
+
+    const FLOOR: f64 = DEFAULT_CROWD_CONTACT_FLOOR_M;   // 0.4
+    const NUDGE: f64 = DEFAULT_CROWD_NUDGE_SPEED_MPS;   // 0.3
+
+    #[test]
+    fn no_vru_means_no_crowd_cap() {
+        assert_eq!(creep_through_crowd_speed_cap(&[], BAND, FLOOR, NUDGE, DECEL), None);
+    }
+
+    #[test]
+    fn a_vru_in_the_crowd_caps_to_a_gentle_nudge() {
+        // A pedestrian 1.5 m ahead, in band → a small positive nudge (not a freeze).
+        let cap = creep_through_crowd_speed_cap(&[vru(1.5, 0.0)], BAND, FLOOR, NUDGE, DECEL).unwrap();
+        assert!(cap > 0.0 && cap <= NUDGE + 1e-9, "gentle nudge expected, got {cap}");
+    }
+
+    #[test]
+    fn a_vru_at_the_contact_floor_stops_the_courier() {
+        // A pedestrian inside the hard contact floor → stop (never nudge into someone).
+        assert_eq!(creep_through_crowd_speed_cap(&[vru(0.3, 0.0)], BAND, FLOOR, NUDGE, DECEL), Some(0.0));
+    }
+
+    #[test]
+    fn the_crowd_nudge_never_exceeds_the_nudge_speed() {
+        // Even with lots of clear space, the crowd creep is capped at the nudge speed.
+        let cap = creep_through_crowd_speed_cap(&[vru(10.0, 0.0)], BAND, FLOOR, NUDGE, DECEL).unwrap();
+        assert!((cap - NUDGE).abs() < 1e-9, "capped at the nudge speed, got {cap}");
+    }
+
+    #[test]
+    fn creep_through_advances_where_a_full_yield_would_freeze() {
+        // The payoff: a pedestrian 0.8 m ahead is INSIDE the 1 m Yield standoff → Yield freezes (0).
+        // The crowd creep keeps inching (a positive nudge) because 0.8 m is beyond the 0.4 m floor.
+        let close = [vru(0.8, 0.0)];
+        assert_eq!(yield_to_vru_speed_cap(&close, BAND, STANDOFF, DECEL), Some(0.0), "yield freezes");
+        let crowd = creep_through_crowd_speed_cap(&close, BAND, FLOOR, NUDGE, DECEL).unwrap();
+        assert!(crowd > 0.0, "crowd creep advances where yield freezes, got {crowd}");
     }
 }

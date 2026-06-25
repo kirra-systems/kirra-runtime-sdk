@@ -17,8 +17,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::behavior::{
-    cross_when_clear, interactive_proceed, yield_to_vru_speed_cap, InteractiveConflict, SignalState,
-    TrafficControl, VruApproach, DEFAULT_AGENT_REACCEL_MPS2, DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S,
+    creep_through_crowd_speed_cap, cross_when_clear, interactive_proceed, yield_to_vru_speed_cap,
+    InteractiveConflict, SignalState, TrafficControl, VruApproach, DEFAULT_AGENT_REACCEL_MPS2,
+    DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, DEFAULT_CROWD_CONTACT_FLOOR_M, DEFAULT_CROWD_NUDGE_SPEED_MPS,
     DEFAULT_TURN_CRITICAL_GAP_S, DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
 };
 
@@ -135,6 +136,15 @@ pub enum MickIntent {
     /// ([`behavior::cross_when_clear`]); otherwise HOLDs at the curb. KIRRA's crossing RSS
     /// backstops a misjudged step-off.
     CrossWhenClear { x_m: f64, y_m: f64 },
+    /// **Sidewalk-courier: creep through a crowd toward `{x_m, y_m}`** (ADR-0027). Like [`Yield`]
+    /// but, instead of freezing a full standoff before the nearest pedestrian, it keeps inching
+    /// forward at a gentle nudge ([`behavior::creep_through_crowd_speed_cap`]) — stopping only at a
+    /// tight contact floor — so a dense crowd does not deadlock the courier. A deliberate, opt-in
+    /// relaxation of the full-stop yield; the speed stays sub-walking-pace and KIRRA's impact-energy
+    /// + containment bounds backstop it.
+    ///
+    /// [`Yield`]: MickIntent::Yield
+    CreepThrough { x_m: f64, y_m: f64 },
 }
 
 /// LLM JSON wire schema (tagged on `"intent"`). Kept separate from [`MickIntent`]
@@ -162,6 +172,8 @@ enum IntentJson {
     Yield { x_m: f64, y_m: f64 },
     #[serde(rename = "cross_when_clear")]
     CrossWhenClear { x_m: f64, y_m: f64 },
+    #[serde(rename = "creep_through")]
+    CreepThrough { x_m: f64, y_m: f64 },
 }
 
 impl MickIntent {
@@ -199,6 +211,7 @@ impl MickIntent {
             IntentJson::RouteTo { x_m, y_m } => MickIntent::RouteTo { x_m, y_m },
             IntentJson::Yield { x_m, y_m } => MickIntent::Yield { x_m, y_m },
             IntentJson::CrossWhenClear { x_m, y_m } => MickIntent::CrossWhenClear { x_m, y_m },
+            IntentJson::CreepThrough { x_m, y_m } => MickIntent::CreepThrough { x_m, y_m },
         };
         if !intent.is_finite() {
             return Err("MICK_NONFINITE_INTENT");
@@ -218,6 +231,7 @@ impl MickIntent {
             MickIntent::RouteTo { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
             MickIntent::Yield { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
             MickIntent::CrossWhenClear { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
+            MickIntent::CreepThrough { x_m, y_m } => x_m.is_finite() && y_m.is_finite(),
         }
     }
 }
@@ -482,6 +496,31 @@ pub fn plan_for_intent(
             }
             let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
             planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() })
+        }
+        MickIntent::CreepThrough { x_m, y_m } => {
+            // Sidewalk crowd creep (ADR-0027): like Yield, but inch forward at a gentle nudge through
+            // pedestrians instead of freezing a full standoff back — stopping only at a tight contact
+            // floor. Keeps a dense crowd from deadlocking the courier; KIRRA's impact-energy backstops.
+            if !x_m.is_finite() || !y_m.is_finite() {
+                return PlanOutput::safe_stop(world.ego.pose);
+            }
+            let vrus = vru_approaches(world);
+            let cap = creep_through_crowd_speed_cap(
+                &vrus,
+                DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M,
+                DEFAULT_CROWD_CONTACT_FLOOR_M,
+                DEFAULT_CROWD_NUDGE_SPEED_MPS,
+                COURIER_YIELD_BRAKE_MPS2,
+            );
+            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
+            match cap {
+                // A pedestrian within the contact floor → stop (never nudge into someone).
+                Some(c) if c <= f64::EPSILON => PlanOutput::safe_stop(world.ego.pose),
+                // A pedestrian ahead but beyond the floor → inch forward at the nudge.
+                Some(c) => planner.plan(&PlanInput { goal, target_speed_mps: Some(c), ..world.clone() }),
+                // No pedestrian in the band → follow the goal at creep.
+                None => planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() }),
+            }
         }
     }
 }
@@ -1260,7 +1299,39 @@ mod tests {
                    MickIntent::Yield { x_m: 12.0, y_m: 0.0 });
         assert_eq!(MickIntent::from_llm_json(r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":3.0}"#).unwrap(),
                    MickIntent::CrossWhenClear { x_m: 12.0, y_m: 3.0 });
+        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#).unwrap(),
+                   MickIntent::CreepThrough { x_m: 12.0, y_m: 0.0 });
         assert!(MickIntent::from_llm_json(r#"{"intent":"yield","x_m":null,"y_m":0.0}"#).is_err(), "malformed → fail-closed");
+    }
+
+    fn courier_planner() -> GeometricPlanner {
+        GeometricPlanner::new(crate::GeometricPlannerConfig::courier())
+    }
+
+    #[test]
+    fn creep_through_inches_forward_through_pedestrians() {
+        // A pedestrian 3 m ahead (ego at x=5) in the path band → CreepThrough proposes MOTION (the
+        // courier keeps inching forward through the crowd) rather than freezing. The nudge MAGNITUDE
+        // is enforced by the primitive (creep_through_crowd_speed_cap, unit-tested); here we pin the
+        // load-bearing grounding property: it advances, it does not deadlock.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [pedestrian(8.0, 0.0)];
+        let w = world(&corr, &objs, &[]);
+        let creep = plan_for_intent(&mut courier_planner(), &MickIntent::CreepThrough { x_m: 16.0, y_m: 0.0 }, &w);
+        assert_eq!(creep.kind, ProposalKind::Motion, "CreepThrough inches forward through the crowd");
+        let max_x = creep.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        assert!(max_x > 5.5, "the courier advances past the ego start, got {max_x:.1}");
+    }
+
+    #[test]
+    fn creep_through_still_stops_when_a_pedestrian_is_at_the_contact_floor() {
+        // A pedestrian within the contact floor (0.3 m ahead) → CreepThrough still stops: it never
+        // nudges into someone.
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [pedestrian(5.3, 0.0)]; // ego at x=5 → 0.3 m ahead, inside the 0.4 m floor
+        let w = world(&corr, &objs, &[]);
+        let creep = plan_for_intent(&mut courier_planner(), &MickIntent::CreepThrough { x_m: 16.0, y_m: 0.0 }, &w);
+        assert_eq!(creep.kind, ProposalKind::SafeStop, "stops at the contact floor — never pushes into a person");
     }
 
     #[test]
