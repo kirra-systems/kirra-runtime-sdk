@@ -17,7 +17,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::behavior::{
-    accept_turn_gap, ConflictApproach, SignalState, TrafficControl, DEFAULT_TURN_CRITICAL_GAP_S,
+    interactive_proceed, InteractiveConflict, SignalState, TrafficControl, DEFAULT_AGENT_REACCEL_MPS2,
+    DEFAULT_TURN_CRITICAL_GAP_S,
 };
 use crate::{
     FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
@@ -366,8 +367,12 @@ pub fn plan_for_intent(
                 _ => world.cedes_to_ego_ids,
             };
             if let Some(t) = term {
-                let conflicts = turn_conflict_approaches(world, t, cedes);
-                if !accept_turn_gap(&conflicts, DEFAULT_TURN_CRITICAL_GAP_S) {
+                // Stackelberg interaction model: the ego (leader) reasons about each conflicting
+                // agent's worst-case response — a slow agent is modelled re-accelerating, not trusted
+                // to stay slow, so the ego asserts only a genuinely-yielded gap. Subsumes plain
+                // gap-acceptance (a committed fast agent is its constant-speed `d/v`).
+                let conflicts = turn_interactive_conflicts(world, t, cedes);
+                if !interactive_proceed(&conflicts, DEFAULT_TURN_CRITICAL_GAP_S, DEFAULT_AGENT_REACCEL_MPS2) {
                     return PlanOutput::safe_stop(world.ego.pose);
                 }
             }
@@ -504,14 +509,13 @@ fn turn_is_protected(graph: &LaneGraph, ego_lane: u64, signal_states: &[(u64, Si
 /// it is stopped, receding, or moving tangentially — so it is not a gap-acceptance conflict.
 const TURN_CONFLICT_MIN_CLOSING_MPS: f64 = 0.5;
 
-/// Build the [`ConflictApproach`] list for a turn whose conflict point is `conflict` (the junction):
-/// every perceived vehicle that is CLOSING on the conflict and which the ego must yield to — i.e.
-/// NOT on its right-of-way `cedes` set. Each contributes its time-to-conflict
-/// (`distance / closing-speed`). A vehicle that is not closing (stopped / receding / tangential) is
-/// excluded — it is not a conflict — while one already AT the conflict yields `0.0` (an immediate
-/// hold). This is the conservative junction proxy: any vehicle bearing down on the junction the ego
-/// has no priority over gates the turn, and KIRRA's RSS backstops regardless.
-fn turn_conflict_approaches(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[u64]) -> Vec<ConflictApproach> {
+/// Build the [`InteractiveConflict`] list for a turn whose conflict point is `conflict` (the
+/// junction): every perceived vehicle CLOSING on the conflict and which the ego must yield to — i.e.
+/// NOT on its right-of-way `cedes` set — as its `(distance, closing-speed)`. A vehicle that is not
+/// closing (stopped / receding / tangential) is excluded (it is not a conflict; KIRRA still
+/// backstops a sudden re-acceleration); one already AT the conflict yields `(0, …)` (an immediate
+/// hold). The interaction model then reasons about each agent's worst-case response separately.
+fn turn_interactive_conflicts(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[u64]) -> Vec<InteractiveConflict> {
     world
         .objects
         .iter()
@@ -520,12 +524,12 @@ fn turn_conflict_approaches(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[
             let (dx, dy) = (conflict.x_m - o.pos.x_m, conflict.y_m - o.pos.y_m);
             let dist = dx.hypot(dy);
             if dist <= f64::EPSILON {
-                return Some(ConflictApproach { time_to_conflict_s: 0.0 }); // already at the conflict
+                return Some(InteractiveConflict { distance_m: 0.0, closing_speed_mps: o.velocity_mps });
             }
             // Closing speed = the object's velocity component along the bearing to the conflict.
             let closing = (o.vel.x_m * dx + o.vel.y_m * dy) / dist;
             (closing > TURN_CONFLICT_MIN_CLOSING_MPS)
-                .then_some(ConflictApproach { time_to_conflict_s: dist / closing })
+                .then_some(InteractiveConflict { distance_m: dist, closing_speed_mps: closing })
         })
         .collect()
 }
