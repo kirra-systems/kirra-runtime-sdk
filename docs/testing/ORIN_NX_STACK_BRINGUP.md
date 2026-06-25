@@ -47,7 +47,7 @@ git clone https://github.com/kirra-systems/kirra-runtime-sdk && cd kirra-runtime
 
 ```bash
 scripts/orin_bringup.sh            # build the 4 components + run the headless stack demo
-scripts/orin_bringup.sh --serve    # ALSO start the verifier (:8090) + Occy planner (:8100)
+scripts/orin_bringup.sh --serve    # ALSO start verifier (:8090) + Occy planner (:8100) + Taj (:8101)
 ```
 
 The script sanity-checks the toolchain, detects the Jetson, builds release binaries, and runs
@@ -73,8 +73,10 @@ regime Occy only PROPOSES; KIRRA admits or refuses. In **LockedOut**, KIRRA refu
 
 ## 2. Drive real egos through the live governor
 
-With `--serve` the **governance plane** (the verifier on `:8090`) and the **Occy planner
-endpoint** (`POST /plan` on `:8100`) are up. Point a client at them:
+With `--serve` the **governance plane** (the verifier on `:8090`), the **Occy planner
+endpoint** (`POST /plan` on `:8100`), and the **Taj perception sidecar** (`POST /perception`
+on `:8101` — the cmd_vel speed cap) are up, each health-checked before the banner prints.
+Point a client at them:
 
 - **On the robot** — the `ros2_ws/src/kirra_safety` launch wires the R2's `cmd_vel` through the
   governor (Ackermann envelope + posture + LLM-claim filtering). This is ADR-0014 **Phase 1**:
