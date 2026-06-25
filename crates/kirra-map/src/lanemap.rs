@@ -112,6 +112,18 @@ impl Occluder {
 /// conservative band.
 pub const OCCLUSION_CORNER_LATERAL_REACH_M: f64 = 4.0;
 
+/// Junction-box radius (m): two approach lanes whose termini (stop lines) lie within this of each
+/// other are treated as entering the **same junction** — the structural signal the right-of-way
+/// derivation ([`LaneGraph::derive_right_of_way_from_controls`]) uses to find conflicting
+/// approaches. Deliberately generous (a wide junction); a tighter map can pre-cluster.
+pub const JUNCTION_CONFLICT_RADIUS_M: f64 = 12.0;
+
+/// Minimum heading difference (rad, ≈45°) for two approaches to count as **crossing**. Below it
+/// they are parallel — same-direction (a following relation) or opposing (a head-on relation) —
+/// both governed by RSS, not by junction right-of-way, so the derivation asserts no priority
+/// between them.
+pub const ROW_CROSSING_MIN_RAD: f64 = std::f64::consts::FRAC_PI_4;
+
 /// Pure corner-occlusion model: the assured-clear sight distance (m) toward a junction
 /// `conflict_x` (world x of the conflict line, travel along +x) that a single corner
 /// occluder permits an ego in a lane centred at `lane_y` with half-width `half_width_m`.
@@ -523,6 +535,86 @@ impl LaneGraph {
     #[must_use]
     pub fn with_right_of_way(mut self, priority_lane: u64, yielding_lane: u64) -> Self {
         self.add_right_of_way(priority_lane, yielding_lane);
+        self
+    }
+
+    /// **Derive** junction right-of-way from each approach lane's traffic **control**, populating
+    /// the same `priority_over` relation [`add_right_of_way`](Self::add_right_of_way) writes — so
+    /// the cede list falls out of the map's signs instead of being integrator-supplied (the
+    /// roadmap-#4 follow-up: the upstream right-of-way *derivation* from the lane graph + controls).
+    ///
+    /// Rule (MUTCD / Vienna Convention, the uncontrolled-vs-controlled core): where two **crossing**
+    /// approaches share a junction (their termini within [`JUNCTION_CONFLICT_RADIUS_M`], headings at
+    /// least [`ROW_CROSSING_MIN_RAD`] apart), an approach carrying a STOP or YIELD control yields to
+    /// a conflicting approach with **no** control — the uncontrolled (through) road has priority.
+    /// Only this unambiguous case asserts a relation; every ambiguous one is left **unasserted**, so
+    /// the ego then yields to that agent and KIRRA's RSS backstops regardless (fail-safe):
+    ///
+    /// * both uncontrolled, or both controlled (an all-way stop — first-come, not a static relation): none.
+    /// * a TRAFFIC LIGHT on either approach: none — its priority is the live signal state each tick,
+    ///   not static map structure (handled by the signal path).
+    /// * parallel (same / opposing) approaches: none — a following / head-on relation, not RoW.
+    ///
+    /// Additive and road-correct: it only **adds** priority assertions the rules grant; an
+    /// integrator-set relation is kept. Degenerate / non-finite-terminus lanes are skipped.
+    // SAFETY: SG5 | REQ: junction-right-of-way-derived-from-controls | TEST: through_road_has_priority_over_a_stop_controlled_side_road,two_uncontrolled_approaches_assert_no_priority,an_all_way_stop_asserts_no_priority,a_traffic_light_defers_to_the_signal_state_not_static_priority,parallel_approaches_get_no_right_of_way,distinct_junctions_do_not_interact,derivation_is_additive_to_a_hand_set_relation,junction_context_falls_out_of_derived_right_of_way
+    pub fn derive_right_of_way_from_controls(&mut self) {
+        // Snapshot the approach geometry first (immutable borrow), then mutate `priority_over`.
+        struct Approach {
+            id: u64,
+            tx: f64,
+            ty: f64,
+            heading: f64,
+            control: Option<LaneControl>,
+        }
+        let approaches: Vec<Approach> = self
+            .lanes
+            .values()
+            .filter_map(|l| {
+                let t = l.centerline.last()?;
+                (t.x_m.is_finite() && t.y_m.is_finite()).then_some(Approach {
+                    id: l.id,
+                    tx: t.x_m,
+                    ty: t.y_m,
+                    heading: l.heading_rad,
+                    control: l.control,
+                })
+            })
+            .collect();
+
+        let mut grants: Vec<(u64, u64)> = Vec::new(); // (priority_lane, yielding_lane)
+        for i in 0..approaches.len() {
+            for j in (i + 1)..approaches.len() {
+                let (a, b) = (&approaches[i], &approaches[j]);
+                // Same junction? (termini within the junction-box radius)
+                let (dx, dy) = (a.tx - b.tx, a.ty - b.ty);
+                if dx.hypot(dy) > JUNCTION_CONFLICT_RADIUS_M {
+                    continue;
+                }
+                // Crossing? (not parallel same / opposing)
+                let dh = wrap_pi(a.heading - b.heading).abs();
+                if !(ROW_CROSSING_MIN_RAD..=std::f64::consts::PI - ROW_CROSSING_MIN_RAD).contains(&dh) {
+                    continue;
+                }
+                // Uncontrolled beats stop/yield-controlled. A traffic light (or matching control
+                // classes) asserts nothing.
+                let give = |c: Option<LaneControl>| matches!(c, Some(LaneControl::Stop | LaneControl::Yield));
+                if a.control.is_none() && give(b.control) {
+                    grants.push((a.id, b.id));
+                } else if b.control.is_none() && give(a.control) {
+                    grants.push((b.id, a.id));
+                }
+            }
+        }
+        for (priority, yielding) in grants {
+            self.add_right_of_way(priority, yielding);
+        }
+    }
+
+    /// Builder form of [`derive_right_of_way_from_controls`](Self::derive_right_of_way_from_controls).
+    #[must_use]
+    pub fn with_derived_right_of_way(mut self) -> Self {
+        self.derive_right_of_way_from_controls();
         self
     }
 
@@ -1774,6 +1866,116 @@ mod tests {
             .with_derived_occlusion(&[nan_box]);
         assert_eq!(g.sight_distance(1), None, "a NaN footprint is dropped (fail-safe)");
         assert_eq!(g.sight_distance(2), None, "a −x approach is skipped (outside the straight +x model)");
+    }
+
+    // ---- Right-of-way derivation from controls --------------------------------------------
+
+    /// An approach lane from `from`→`to` (its terminus is `to`, where the conflict sits), with the
+    /// given world heading and optional control. Used to build crossing-junction scenes below.
+    fn approach_to(id: u64, from: Point, to: Point, heading_rad: f64, control: Option<LaneControl>) -> Lane {
+        let mut l = Lane::straight(id, 0.0, 0.0, 1.0, 2.0, LineType::Solid, LineType::Solid);
+        l.centerline = vec![from, to];
+        l.heading_rad = heading_rad;
+        l.control = control;
+        l
+    }
+
+    /// A stationary perceived object at `(x, y)` — only id + position matter for the RoW sets.
+    fn obj_at(id: u64, x: f64, y: f64) -> PerceivedObject {
+        PerceivedObject { id, pos: Point { x_m: x, y_m: y }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+    }
+
+    /// East-bound through approach (heading 0) and a north-bound side approach (heading π/2) that
+    /// terminate at the same junction point (0,0). `side_control` flags the side road's sign.
+    fn crossing_junction(side_control: Option<LaneControl>, through_control: Option<LaneControl>) -> LaneGraph {
+        use std::f64::consts::FRAC_PI_2;
+        LaneGraph::new()
+            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, through_control))
+            .with_lane(approach_to(2, Point { x_m: 0.0, y_m: -30.0 }, Point { x_m: 0.0, y_m: 0.0 }, FRAC_PI_2, side_control))
+    }
+
+    #[test]
+    fn through_road_has_priority_over_a_stop_controlled_side_road() {
+        let g = crossing_junction(Some(LaneControl::Stop), None).with_derived_right_of_way();
+        // The uncontrolled through lane (1) gains priority over the stop-controlled side lane (2).
+        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2], "side road yields to the through road");
+        assert_eq!(g.lanes_yielding_to(2).count(), 0, "the stop-controlled road asserts no priority");
+
+        // And it falls through to the consumer sets: a car on the side road cedes to the ego on
+        // the through road; a car on the through road does NOT cede to the side-road ego.
+        let on_side = [obj_at(7, 0.0, -10.0)];
+        let on_through = [obj_at(8, -10.0, 0.0)];
+        assert_eq!(g.cedes_to_ego(1, &on_side), vec![7], "through ego: the side-road car cedes");
+        assert_eq!(g.cedes_to_ego(2, &on_through), Vec::<u64>::new(), "side-road ego asserts no priority");
+    }
+
+    #[test]
+    fn two_uncontrolled_approaches_assert_no_priority() {
+        let g = crossing_junction(None, None).with_derived_right_of_way();
+        assert_eq!(g.lanes_yielding_to(1).count(), 0);
+        assert_eq!(g.lanes_yielding_to(2).count(), 0, "no signs ⇒ no static RoW ⇒ ego yields to all (fail-safe)");
+    }
+
+    #[test]
+    fn an_all_way_stop_asserts_no_priority() {
+        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::Stop)).with_derived_right_of_way();
+        assert_eq!(g.lanes_yielding_to(1).count(), 0);
+        assert_eq!(g.lanes_yielding_to(2).count(), 0, "all-way stop is first-come, not a static relation");
+    }
+
+    #[test]
+    fn a_traffic_light_defers_to_the_signal_state_not_static_priority() {
+        // A light on the through road vs a stop on the side road: NO static priority is asserted —
+        // the light's priority is the live signal each tick, owned by the signal path.
+        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::TrafficLight)).with_derived_right_of_way();
+        assert_eq!(g.lanes_yielding_to(1).count(), 0, "a traffic light asserts no static RoW");
+        assert_eq!(g.lanes_yielding_to(2).count(), 0);
+    }
+
+    #[test]
+    fn parallel_approaches_get_no_right_of_way() {
+        // Two SAME-direction approaches (both heading 0) sharing a junction, one stop-controlled:
+        // they are a following relation (RSS), not a crossing — no RoW asserted.
+        let g = LaneGraph::new()
+            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, None))
+            .with_lane(approach_to(2, Point { x_m: -30.0, y_m: 3.5 }, Point { x_m: 0.0, y_m: 3.5 }, 0.0, Some(LaneControl::Stop)))
+            .with_derived_right_of_way();
+        assert_eq!(g.lanes_yielding_to(1).count(), 0, "parallel lanes are not a right-of-way relation");
+    }
+
+    #[test]
+    fn distinct_junctions_do_not_interact() {
+        // A through lane and a stop lane whose termini are far apart (different junctions): the
+        // crossing test would match on heading, but the junction-radius gate keeps them separate.
+        use std::f64::consts::FRAC_PI_2;
+        let g = LaneGraph::new()
+            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, None))
+            .with_lane(approach_to(2, Point { x_m: 100.0, y_m: -30.0 }, Point { x_m: 100.0, y_m: 0.0 }, FRAC_PI_2, Some(LaneControl::Stop)))
+            .with_derived_right_of_way();
+        assert_eq!(g.lanes_yielding_to(1).count(), 0, "lanes at different junctions do not interact");
+    }
+
+    #[test]
+    fn derivation_is_additive_to_a_hand_set_relation() {
+        // A hand-set relation is preserved; the derivation adds the road-correct one alongside.
+        let g = crossing_junction(Some(LaneControl::Yield), None)
+            .with_right_of_way(2, 99) // integrator asserted lane 2 over some lane 99
+            .with_derived_right_of_way();
+        let yields_to_2: Vec<u64> = g.lanes_yielding_to(2).collect();
+        assert!(yields_to_2.contains(&99), "the hand-set relation is kept");
+        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2], "and the derived one is added");
+    }
+
+    #[test]
+    fn junction_context_falls_out_of_derived_right_of_way() {
+        // End-to-end: NO hand-fed add_right_of_way — the junction_context cede set is produced
+        // purely from the derived relation. Ego on the through road (pose at (-5,0)).
+        let g = crossing_junction(Some(LaneControl::Stop), None).with_derived_right_of_way();
+        let objs = [obj_at(7, 0.0, -10.0)];
+        let ctx = g.junction_context(Point { x_m: -5.0, y_m: 0.0 }, &objs);
+        assert_eq!(ctx.ego_lane, Some(1));
+        assert_eq!(ctx.cedes_to_ego, vec![7], "the side-road car cedes to the through ego — derived, not hand-fed");
+        assert!(ctx.must_yield_to.is_empty(), "the through ego waits for no one here");
     }
 
     #[test]
