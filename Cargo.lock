@@ -2015,6 +2015,7 @@ dependencies = [
  "kirra-core",
  "kirra-planner",
  "kirra-ros2-adapter",
+ "kirra-taj",
  "reqwest",
  "serde",
  "serde_json",
