@@ -347,22 +347,34 @@ pub fn plan_for_intent(
             let Some(route) = turn_route(graph, ego_lane, direction) else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            // UNPROTECTED-TURN GAP-ACCEPTANCE: before committing the turn, check there is an
-            // adequate gap in the traffic the ego must yield to. The conflict point is the
-            // junction (the ego lane's terminus); the conflicting stream is every perceived
-            // vehicle CLOSING on it that the ego does NOT have asserted priority over (i.e. not on
-            // the right-of-way cede set). No adequate gap → HOLD at the junction and wait; KIRRA's
-            // head-on / crossing RSS independently backstops a misjudged acceptance. A protected
-            // turn (conflicting vehicles are on the cede set) is not gated.
-            if let Some(term) = graph.lane(ego_lane).and_then(|l| l.centerline.last().copied()) {
-                let conflicts = turn_conflict_approaches(world, term, world.cedes_to_ego_ids);
+            // TURN GAP-ACCEPTANCE — permitted vs PROTECTED. The conflict point is the junction
+            // (the ego lane's terminus). A PROTECTED turn (a green ARROW: the conflicting streams
+            // hold a red, so the signal grants the ego priority) asserts priority over every vehicle
+            // closing on the junction — they are folded into the cede set, so BOTH gap-acceptance
+            // and the planner's predictive yield treat them as yielding and the ego proceeds. A
+            // PERMITTED movement (a solid green, a sign, or an uncontrolled approach) keeps the
+            // map's cede set and must find an adequate gap: any closing vehicle it has no priority
+            // over within the critical gap → HOLD and wait. KIRRA's head-on / crossing RSS
+            // independently backstops whatever is committed.
+            let term = graph.lane(ego_lane).and_then(|l| l.centerline.last().copied());
+            let protected_cedes: Vec<u64>;
+            let cedes: &[u64] = match term {
+                Some(t) if turn_is_protected(graph, ego_lane, world.signal_states) => {
+                    protected_cedes = protected_turn_cedes(world, t);
+                    &protected_cedes
+                }
+                _ => world.cedes_to_ego_ids,
+            };
+            if let Some(t) = term {
+                let conflicts = turn_conflict_approaches(world, t, cedes);
                 if !accept_turn_gap(&conflicts, DEFAULT_TURN_CRITICAL_GAP_S) {
                     return PlanOutput::safe_stop(world.ego.pose);
                 }
             }
-            // Follow the turn's route corridor; the goal is unchanged (the turn drives toward
-            // whatever the world goal already is). KIRRA bounds it like any corridor.
-            plan_along_route(planner, world, graph, ego_lane, &route, world.goal)
+            // Follow the turn's route corridor with the effective cede set (so predictive yield
+            // matches the gap decision); the goal is unchanged. KIRRA bounds it like any corridor.
+            let turn_world = PlanInput { cedes_to_ego_ids: cedes, ..world.clone() };
+            plan_along_route(planner, &turn_world, graph, ego_lane, &route, world.goal)
         }
         MickIntent::RouteTo { x_m, y_m } => {
             // Multi-junction routing: resolve ego + destination lanes and plan the lane-id
@@ -476,6 +488,18 @@ fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
     }
 }
 
+/// Is the ego's turn **protected** — does the signal grant it priority over the conflicting
+/// streams (a green ARROW), so gap-acceptance is bypassed? True only when the ego lane is
+/// traffic-light controlled AND its live signal is [`SignalState::ProtectedGreen`]. Every other
+/// case — a solid green (PERMITTED: proceed if clear), a sign, an uncontrolled approach, or an
+/// absent signal — is permissive and must gap-accept. Fail-safe: an unknown / missing signal is
+/// NOT protected, so the ego yields.
+// SAFETY: SG5 | REQ: protected-vs-permitted-turn | TEST: a_permitted_green_yields_to_oncoming_on_a_tight_gap,a_protected_arrow_proceeds_through_the_same_tight_gap,a_permitted_green_takes_an_ample_gap,a_red_light_holds_regardless_of_the_gap,red_light_requires_stop_green_does_not
+fn turn_is_protected(graph: &LaneGraph, ego_lane: u64, signal_states: &[(u64, SignalState)]) -> bool {
+    graph.lane(ego_lane).is_some_and(|l| l.control == Some(LaneControl::TrafficLight))
+        && signal_states.iter().any(|(id, s)| *id == ego_lane && *s == SignalState::ProtectedGreen)
+}
+
 /// Below this closing speed a vehicle is not meaningfully approaching the turn conflict point —
 /// it is stopped, receding, or moving tangentially — so it is not a gap-acceptance conflict.
 const TURN_CONFLICT_MIN_CLOSING_MPS: f64 = 0.5;
@@ -504,6 +528,25 @@ fn turn_conflict_approaches(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[
                 .then_some(ConflictApproach { time_to_conflict_s: dist / closing })
         })
         .collect()
+}
+
+/// The cede set for a **protected** turn: the existing right-of-way cede ids UNION every vehicle
+/// currently closing on the junction `conflict`. A green arrow grants the ego priority over the
+/// crossing/oncoming streams, so they are treated as yielding by every downstream gate
+/// (gap-acceptance here and the planner's predictive yield), and the ego proceeds. Deduplicated.
+fn protected_turn_cedes(world: &PlanInput<'_>, conflict: MapPoint) -> Vec<u64> {
+    let mut ids: Vec<u64> = world.cedes_to_ego_ids.to_vec();
+    for o in world.objects {
+        let (dx, dy) = (conflict.x_m - o.pos.x_m, conflict.y_m - o.pos.y_m);
+        let dist = dx.hypot(dy);
+        let closing = if dist <= f64::EPSILON { f64::INFINITY } else { (o.vel.x_m * dx + o.vel.y_m * dy) / dist };
+        if closing > TURN_CONFLICT_MIN_CLOSING_MPS {
+            ids.push(o.id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// Horizon (s) over which a map-intention predicted path is materialized — a generous fixed
