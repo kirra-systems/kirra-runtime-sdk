@@ -41,8 +41,24 @@ the baseline.
 - **Honest scope — the load-bearing finding:** the existing **Chaikin smoothing already minimizes
   path curvature**, so a *constant* lateral offset adds little on an already-smoothed gentle corridor;
   the joint gain is material mainly on a **tight** bend (where curvature genuinely limits speed) with
-  a corridor wide enough to deviate. A stronger optimizer needs an **apex-varying** offset profile
-  (peaks at the apex, returns) rather than a ramped-constant one, and a true **oriented-footprint**
-  containment check rather than the swing-slack bound (the x-indexed boundary check is unreliable on a
-  tight bend). Both are the follow-up toward a coupled (QP / iLQR) solve — the heavier path #3 also
-  names. Default-off keeps this an opt-in experiment until that depth lands.
+  a corridor wide enough to deviate.
+
+### Update — the stronger optimizer landed (curvature-proportional apex + oriented containment)
+
+The two follow-ups this ADR named are now implemented (same opt-in flag):
+
+- **Apex-varying offset** — `offset_guide` is now `delta · signed_κ(s)/κ_max` (`signed_curvature_at`),
+  ramped from the ego: zero on a straight, peaking at the bend's apex, signed toward the inside. It is
+  a real corner-cut (it shortens the path across the apex), so the optimizer improves a **sharp bend
+  taken through the production Chaikin-smoothed guide** — where the ramped-constant offset could not.
+- **Oriented-footprint containment** — each candidate's rotated footprint corners (`footprint_corners`,
+  using `vehicle_length_m`) are projected onto the centerline (`project_signed`) and must lie within
+  the corridor's narrowest half-width (`corridor_half_width`). This replaces the swing-slack heuristic
+  and the unreliable x-indexed boundary check with a projection-based test that is correct on a curve,
+  so a candidate is never proposed that KIRRA's oriented containment would reject (verified by the
+  narrow-corridor no-op test).
+
+The gain remains **bend-dependent** (a gentle bend needs no racing line — the optimizer returns the
+centerline there) and the search is still a bounded *sample-and-score*, not a continuous solve.
+**Remaining:** a continuous coupled **QP / iLQR** path+speed optimization (the heavier path #3 names)
+— the next depth beyond sampling. Default-off keeps this opt-in until then.

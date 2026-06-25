@@ -449,6 +449,12 @@ pub struct GeometricPlannerConfig {
     /// real footprint; this is the planner's conservative assumption).
     pub vehicle_half_width_m: f64,
     pub containment_margin_m: f64,
+    /// The planner's model of the vehicle LENGTH (m), used by the joint optimizer's
+    /// **oriented-footprint** containment check: a candidate racing line's rotated footprint
+    /// corners (front/back reach ±`vehicle_length_m`/2 along heading) are projected onto the
+    /// corridor centerline and must stay within the half-width — so the line stays inside KIRRA's
+    /// oriented containment on a curve, where a centered half-width check would miss the swing.
+    pub vehicle_length_m: f64,
     /// Speed cap while routing around an object (the lateral pass), low enough to
     /// keep the maneuver inside the steering-rate / lateral-accel envelope.
     pub lateral_pass_speed_mps: f64,
@@ -567,6 +573,7 @@ impl Default for GeometricPlannerConfig {
             lateral_ramp_slope: 0.35,
             vehicle_half_width_m: 1.0,
             containment_margin_m: 0.45,
+            vehicle_length_m: 4.5,
             lateral_pass_speed_mps: 4.0,
             lead_speed_threshold_mps: 0.5,
             lead_lateral_band_m: 3.5,
@@ -1103,35 +1110,55 @@ impl GeometricPlanner {
     ) -> Vec<(f64, f64)> {
         let (left, right) = (map.left_boundary(), map.right_boundary());
         let guide_len = polyline_len(guide);
-        // Footprint half-width inflated by a swing slack: while the offset line follows a curve the
-        // vehicle rectangle is ANGLED to the corridor and its corners reach further laterally than
-        // the centered half-width, so a candidate that fits geometrically can still clip KIRRA's
-        // (oriented-footprint) containment. The slack keeps the racing line conservatively inside.
-        let fh = self.cfg.vehicle_half_width_m + self.cfg.containment_margin_m + JOINT_FOOTPRINT_SWING_SLACK_M;
-        // Largest offset that keeps the (inflated) footprint inside the corridor over the path.
-        let mut max_off = f64::INFINITY;
+        // The bend's peak curvature drives the apex offset (zero where straight) and a κ≈0 path makes
+        // the optimizer a no-op (a straight road can't be improved by a corner cut).
+        let mut kappa_max = 0.0_f64;
         let mut s = s_ego;
         while s <= guide_len {
-            let (gx, _) = point_at(guide, s);
-            let half = 0.5 * (boundary_y_at(left, gx) - boundary_y_at(right, gx));
-            max_off = max_off.min(half - fh);
+            kappa_max = kappa_max.max(signed_curvature_at(guide, s, 3.0).abs());
             s += VELOCITY_PROFILE_DS;
         }
-        if max_off <= 0.1 {
-            return guide.to_vec(); // corridor too tight to deviate — keep the centerline
+        if kappa_max <= 1e-4 {
+            return guide.to_vec();
         }
-        // `max_off` (above) already bounds every candidate's inflated footprint inside the corridor,
-        // so each offset line stays containment-admissible without a per-candidate boundary scan
-        // (the x-indexed boundary check is unreliable on a tight bend — KIRRA is the real authority).
+        // Oriented-footprint containment: a candidate is admissible iff every pose's rotated footprint
+        // corner projects within the corridor's narrowest half-width (less the margin) — the angled
+        // footprint on a curve, checked via `project_signed` (robust where an x-indexed scan is not).
+        let half_width = corridor_half_width(guide, left, right);
+        let (half_len, half_wid) = (0.5 * self.cfg.vehicle_length_m, self.cfg.vehicle_half_width_m);
+        let lateral_limit = half_width - self.cfg.containment_margin_m;
+        if lateral_limit <= half_wid {
+            return guide.to_vec(); // corridor barely fits the footprint — no room to deviate
+        }
+        let admissible = |cand: &[(f64, f64)]| -> bool {
+            let len = polyline_len(cand);
+            let mut s = s_ego;
+            while s <= len {
+                let (x, y) = point_at(cand, s);
+                let h = heading_at(cand, s);
+                for (cx, cy) in footprint_corners(x, y, h, half_len, half_wid) {
+                    if project_signed(guide, cx, cy).1.abs() > lateral_limit {
+                        return false;
+                    }
+                }
+                s += VELOCITY_PROFILE_DS;
+            }
+            true
+        };
+        // Offset amplitude is bounded by the lateral room; sample symmetric apex amplitudes.
+        let max_off = lateral_limit - half_wid;
         let step = max_off / JOINT_OFFSET_SAMPLES_PER_SIDE as f64;
         let n = JOINT_OFFSET_SAMPLES_PER_SIDE as i64;
-        let mut best = guide.to_vec(); // the centerline (offset 0) is always a candidate
+        let mut best = guide.to_vec(); // the centerline (offset 0) is always an admissible candidate
         let mut best_cost = f64::INFINITY;
         for k in -n..=n {
             let delta = k as f64 * step;
-            let cand = offset_guide(guide, s_ego, delta);
+            let cand = offset_guide(guide, s_ego, delta, kappa_max);
+            if !admissible(&cand) {
+                continue; // never propose a line KIRRA's oriented containment would reject
+            }
             // Objective = time to reach the GOAL along this candidate (a flatter AND/OR shorter line
-            // reaches it sooner), so the score is comparable across candidates of different length.
+            // reaches it sooner), comparable across candidates of different length.
             let goal_s = project_arc_length(&cand, goal.0, goal.1);
             let dist = (goal_s - s_ego).max(VELOCITY_PROFILE_DS);
             let prof = self.velocity_profile(&cand, s_ego, dist, target, decel, true);
@@ -1558,22 +1585,33 @@ const JOINT_DEVIATION_WEIGHT_S_PER_M: f64 = 0.04;
 /// Arc length (m) over which a candidate offset ramps in from the ego, so the path does not jump
 /// laterally at the start (the ego sits on the centerline).
 const JOINT_OFFSET_RAMP_M: f64 = 6.0;
-/// Extra lateral slack (m) the joint optimizer reserves for the vehicle footprint SWINGING out as
-/// the offset line follows a curve at an angle to the corridor — so a kept candidate stays inside
-/// KIRRA's oriented-footprint containment, not just the point-on-centerline bound.
-const JOINT_FOOTPRINT_SWING_SLACK_M: f64 = 1.6;
 
 /// Total arc length of a polyline.
 fn polyline_len(p: &[(f64, f64)]) -> f64 {
     p.windows(2).map(|w| dist2d(w[0].0, w[0].1, w[1].0, w[1].1)).sum()
 }
 
-/// A copy of `guide` displaced laterally by a RAMPED perpendicular offset: 0 at the ego's
-/// arc-length `s_ego`, ramping linearly to `delta` over [`JOINT_OFFSET_RAMP_M`], then held. The
-/// sign matches the trajectory's lateral convention (`+` is left, toward +y at heading 0). The
-/// joint optimizer scores each such candidate's curvature through the velocity profile.
-fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64) -> Vec<(f64, f64)> {
-    if delta == 0.0 || guide.len() < 2 {
+/// **Signed** path curvature (1/m) at arc-length `s`: the unsigned Menger [`curvature_at`] magnitude
+/// with the turn's sign — **positive = left turn** (the path bends toward +perpendicular). The joint
+/// optimizer's apex offset uses the sign to cut toward the INSIDE of each bend.
+fn signed_curvature_at(guide: &[(f64, f64)], s: f64, d: f64) -> f64 {
+    let kappa = curvature_at(guide, s, d);
+    let a = point_at(guide, s - d);
+    let b = point_at(guide, s);
+    let c = point_at(guide, s + d);
+    // z of (b−a)×(c−b): > 0 ⇒ left turn.
+    let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+    if cross >= 0.0 { kappa } else { -kappa }
+}
+
+/// A copy of `guide` displaced by an **apex-varying** perpendicular offset: at each station the
+/// offset is `delta · signed_κ(s)/κ_max`, ramped in from the ego — so it is ZERO on a straight
+/// (κ=0), peaks at the bend's apex (max κ), and is signed toward the INSIDE of the turn. This is a
+/// real corner-cut (it shortens the path across the apex), where a constant offset merely
+/// parallel-shifts an already-Chaikin-smoothed line and buys nothing. The joint optimizer scores
+/// each candidate's curvature + length through the velocity profile.
+fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64, kappa_max: f64) -> Vec<(f64, f64)> {
+    if delta == 0.0 || guide.len() < 2 || kappa_max <= 1e-6 {
         return guide.to_vec();
     }
     let mut acc = 0.0;
@@ -1582,15 +1620,47 @@ fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64) -> Vec<(f64, f64)>
         if i > 0 {
             acc += dist2d(guide[i - 1].0, guide[i - 1].1, guide[i].0, guide[i].1);
         }
-        let o = if acc <= s_ego {
-            0.0
-        } else {
-            delta * ((acc - s_ego) / JOINT_OFFSET_RAMP_M).min(1.0)
-        };
+        let ramp = if acc <= s_ego { 0.0 } else { ((acc - s_ego) / JOINT_OFFSET_RAMP_M).min(1.0) };
+        let frac = (signed_curvature_at(guide, acc, 3.0) / kappa_max).clamp(-1.0, 1.0);
+        let o = delta * frac * ramp;
         let h = heading_at(guide, acc);
         out.push((guide[i].0 - o * h.sin(), guide[i].1 + o * h.cos()));
     }
     out
+}
+
+/// The four corners (m) of the vehicle footprint at pose `(x, y, heading)`: a rectangle
+/// `±half_len` along heading × `±half_wid` across it. Used by the joint optimizer's oriented
+/// containment so a candidate line's ANGLED footprint (its corners reach further laterally on a
+/// curve) is checked, not just the path centroid.
+fn footprint_corners(x: f64, y: f64, heading: f64, half_len: f64, half_wid: f64) -> [(f64, f64); 4] {
+    let (c, s) = (heading.cos(), heading.sin());
+    let mut out = [(0.0, 0.0); 4];
+    for (i, (sl, sw)) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)].iter().enumerate() {
+        let (dx, dy) = (sl * half_len, sw * half_wid);
+        out[i] = (x + dx * c - dy * s, y + dx * s + dy * c);
+    }
+    out
+}
+
+/// The corridor's narrowest half-width (m): the minimum, over centerline samples, of the
+/// perpendicular distance to either boundary. A conservative scalar the oriented containment checks
+/// each footprint corner's centerline-relative lateral offset against. Uses `project_signed`, so it
+/// is correct on a curve (unlike an x-indexed boundary lookup).
+fn corridor_half_width(centerline: &[(f64, f64)], left: &[Point], right: &[Point]) -> f64 {
+    let left2: Vec<(f64, f64)> = left.iter().map(|p| (p.x_m, p.y_m)).collect();
+    let right2: Vec<(f64, f64)> = right.iter().map(|p| (p.x_m, p.y_m)).collect();
+    let len = polyline_len(centerline);
+    let mut hw = f64::INFINITY;
+    let mut s = 0.0;
+    while s <= len {
+        let (cx, cy) = point_at(centerline, s);
+        let dl = project_signed(&left2, cx, cy).1.abs();
+        let dr = project_signed(&right2, cx, cy).1.abs();
+        hw = hw.min(dl).min(dr);
+        s += VELOCITY_PROFILE_DS;
+    }
+    hw
 }
 
 /// Position at arc-length `s` along a `Point` polyline (the predicted-path / lane
@@ -2313,12 +2383,11 @@ mod tests {
 
     #[test]
     fn joint_optimizer_finds_a_faster_line_through_a_bend_and_kirra_admits() {
-        // A wide (±9 m) corridor with a sharp bend whose curvature genuinely BINDS the speed (so a
-        // flatter line buys time), with width + the footprint-swing slack to stay admissible. The
-        // guide is the raw centerline: a constant offset only relieves curvature where curvature
-        // actually limits speed (Chaikin pre-smoothing alone already flattens a gentle bend, which
-        // is why the joint gain shows on a tight one — see ADR-0025 honest scope).
-        // Centerline (0,0)→(20,0)→(34,18)→(48,36)→(90,36): a ~52° bend.
+        // A wide (±9 m) corridor with a sharp ~52° bend, taken through the production CHAIKIN-SMOOTHED
+        // guide. The curvature-proportional APEX offset cuts the corner (shortens the path across the
+        // apex) where a constant parallel shift bought nothing, and the oriented-footprint containment
+        // (not a swing-slack heuristic) keeps the line admissible. Centerline
+        // (0,0)→(20,0)→(34,18)→(48,36)→(90,36).
         let corr = KinkedCorridor {
             left: vec![
                 Point { x_m: 0.0, y_m: 9.0 }, Point { x_m: 20.0, y_m: 9.0 },
@@ -2337,7 +2406,10 @@ mod tests {
         };
         let cfg = GeometricPlannerConfig { joint_path_optimize: true, ..Default::default() };
         let p = GeometricPlanner::new(cfg);
-        let base = centerline_from(corr.left_boundary(), corr.right_boundary());
+        let base = chaikin_smooth(
+            &centerline_from(corr.left_boundary(), corr.right_boundary()),
+            GeometricPlannerConfig::default().path_smoothing_iterations,
+        );
         let s_ego = project_arc_length(&base, 6.0, 0.0);
         let (target, decel) = (8.0, 2.5);
         let best = p.optimize_guide(&base, &corr, s_ego, goal, target, decel);
@@ -2379,6 +2451,54 @@ mod tests {
             assert!((a.pose.y_m - b.pose.y_m).abs() < 1e-9 && (a.velocity_mps - b.velocity_mps).abs() < 1e-9,
                 "straight road: the optimizer keeps the centerline ⇒ identical plan");
         }
+    }
+
+    #[test]
+    fn signed_curvature_has_the_turn_sign() {
+        // A left bend (turning toward +y) is positive; a right bend negative; a straight ~0. Evaluate
+        // at the bend VERTEX (arc 15) so the ±d samples straddle the turn, not a straight segment.
+        let left = vec![(0.0, 0.0), (15.0, 0.0), (28.0, 10.0)];
+        let right = vec![(0.0, 0.0), (15.0, 0.0), (28.0, -10.0)];
+        let straight = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)];
+        assert!(signed_curvature_at(&left, 15.0, 3.0) > 0.0, "left turn ⇒ +κ");
+        assert!(signed_curvature_at(&right, 15.0, 3.0) < 0.0, "right turn ⇒ −κ");
+        assert!(signed_curvature_at(&straight, 15.0, 3.0).abs() < 1e-6, "straight ⇒ 0");
+    }
+
+    #[test]
+    fn footprint_corners_rotate_with_heading() {
+        // At heading 0 the corners are axis-aligned at (±half_len, ±half_wid) about the pose.
+        let c = footprint_corners(0.0, 0.0, 0.0, 2.0, 1.0);
+        assert!(c.iter().any(|p| (p.0 - 2.0).abs() < 1e-9 && (p.1 - 1.0).abs() < 1e-9));
+        assert!(c.iter().any(|p| (p.0 + 2.0).abs() < 1e-9 && (p.1 + 1.0).abs() < 1e-9));
+        // Rotated +90°: the +length axis now points +y, so a front corner sits near (∓1, +2).
+        let r = footprint_corners(0.0, 0.0, std::f64::consts::FRAC_PI_2, 2.0, 1.0);
+        assert!(r.iter().any(|p| p.1 > 1.9), "the length axis swung to +y");
+        assert!(r.iter().all(|p| p.0.abs() <= 1.0 + 1e-9), "the width axis is now along x");
+    }
+
+    #[test]
+    fn joint_optimizer_keeps_the_centerline_when_the_corridor_is_too_narrow() {
+        // A narrow corridor that barely fits the footprint leaves no lateral room: oriented
+        // containment rejects every offset, so the optimizer returns the centerline unchanged.
+        let corr = KinkedCorridor {
+            left: vec![
+                Point { x_m: 0.0, y_m: 1.3 }, Point { x_m: 20.0, y_m: 1.3 },
+                Point { x_m: 34.0, y_m: 19.0 }, Point { x_m: 48.0, y_m: 37.0 },
+            ],
+            right: vec![
+                Point { x_m: 0.0, y_m: -1.3 }, Point { x_m: 20.0, y_m: -1.3 },
+                Point { x_m: 34.0, y_m: 16.4 }, Point { x_m: 48.0, y_m: 34.4 },
+            ],
+        };
+        let base = chaikin_smooth(
+            &centerline_from(corr.left_boundary(), corr.right_boundary()),
+            GeometricPlannerConfig::default().path_smoothing_iterations,
+        );
+        let p = GeometricPlanner::new(GeometricPlannerConfig { joint_path_optimize: true, ..Default::default() });
+        let s_ego = project_arc_length(&base, 6.0, 0.0);
+        let best = p.optimize_guide(&base, &corr, s_ego, (40.0, 30.0), 8.0, 2.5);
+        assert_eq!(best, base, "no lateral room ⇒ the centerline is kept (oriented containment rejects offsets)");
     }
 
     #[test]
