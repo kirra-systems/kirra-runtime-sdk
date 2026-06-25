@@ -45,6 +45,7 @@ Respond with ONLY one JSON object (no prose, no code fence), in one of these for
   {{\"intent\":\"overtake\"}}                                   pass the slow/stopped lead ahead\n\
   {{\"intent\":\"pull_over\"}}                                  get to the road edge and stop\n\
   {{\"intent\":\"turn_at\",\"direction\":\"left|right|straight\"}}  take the junction branch that way\n\
+  {{\"intent\":\"route_to\",\"x_m\":<number>,\"y_m\":<number>}}  drive to a destination via the road network\n\
   {{\"intent\":\"hold\"}}                                       stop and hold\n\
 \n\
 Drive smoothly and comfortably; ease off near objects and when posture is DEGRADED. You \
@@ -63,6 +64,7 @@ Examples (situation → intent):\n\
 {{\"intent\":\"pull_over\"}}\n\
 - a junction ahead and the goal is to your left → {{\"intent\":\"turn_at\",\"direction\":\"left\"}}\n\
 - the goal is off to one side and reachable → {{\"intent\":\"go_to\",\"x_m\":20,\"y_m\":-4}}\n\
+- a far destination reachable through several junctions → {{\"intent\":\"route_to\",\"x_m\":120,\"y_m\":40}}\n\
 \n\
 Situation:\n{situation}\n\
 \n\
@@ -95,7 +97,7 @@ pub fn intent_schema() -> serde_json::Value {
         "properties": {
             "intent": {
                 "type": "string",
-                "enum": ["go_to", "lane_change", "hold", "cruise", "overtake", "pull_over", "turn_at"]
+                "enum": ["go_to", "lane_change", "hold", "cruise", "overtake", "pull_over", "turn_at", "route_to"]
             },
             "x_m": { "type": "number" },
             "y_m": { "type": "number" },
@@ -178,7 +180,7 @@ mod tests {
     fn prompt_carries_the_schema_and_the_situation() {
         let p = build_prompt(&sample_ctx());
         // The typed-intent contract the model must follow.
-        for tag in ["cruise", "go_to", "lane_change", "overtake", "pull_over", "turn_at", "hold"] {
+        for tag in ["cruise", "go_to", "lane_change", "overtake", "pull_over", "turn_at", "route_to", "hold"] {
             assert!(p.contains(tag), "prompt must list the {tag} intent");
         }
         // The ego-relative situation is embedded (serialized WorldContext).
@@ -219,6 +221,7 @@ mod tests {
             (r#"{"intent":"overtake"}"#, "overtake"),
             (r#"{"intent":"pull_over"}"#, "pull_over"),
             (r#"{"intent":"turn_at","direction":"left"}"#, "turn_at"),
+            (r#"{"intent":"route_to","x_m":120.0,"y_m":40.0}"#, "route_to"),
         ];
         for (json, tag) in cases {
             assert!(enum_tags.contains(&tag.to_string()), "schema enum must list {tag}");
