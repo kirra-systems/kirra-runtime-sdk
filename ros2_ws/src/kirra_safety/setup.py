@@ -35,6 +35,7 @@ setup(
             'posture_subscriber = kirra_safety.posture_subscriber:main',
             'perception_governor = kirra_safety.perception_governor:main',
             'doer_commander = kirra_safety.doer_commander:main',
+            'occy_doer = kirra_safety.occy_doer:main',
         ],
     },
 )

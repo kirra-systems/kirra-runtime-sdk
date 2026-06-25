@@ -50,6 +50,18 @@ def generate_launch_description():
         description='Enable the Taj corridor speed derate on the cmd_vel path '
                     '(requires the taj_service sidecar + perception_governor node)',
     )
+    use_occy_doer_arg = DeclareLaunchArgument(
+        'use_occy_doer',
+        default_value='false',
+        description='Run the Occy doer bridge: drives the robot to a /goal_pose using the '
+                    'planner + Taj + KIRRA (publishes proposals to /cmd_vel_raw). Needs the '
+                    'planner sidecar (and Taj if use_perception_cap).',
+    )
+    planner_url_arg = DeclareLaunchArgument(
+        'planner_url',
+        default_value='http://localhost:8100',
+        description='Occy planner sidecar URL (kirra-mick example planner_service).',
+    )
     taj_url_arg = DeclareLaunchArgument(
         'taj_url',
         default_value='http://localhost:8101',
@@ -88,6 +100,8 @@ def generate_launch_description():
     kirra_token = LaunchConfiguration('kirra_token')
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_perception_cap = LaunchConfiguration('use_perception_cap')
+    use_occy_doer = LaunchConfiguration('use_occy_doer')
+    planner_url = LaunchConfiguration('planner_url')
     taj_url = LaunchConfiguration('taj_url')
     start_sidecars = LaunchConfiguration('start_sidecars')
     start_planner_service = LaunchConfiguration('start_planner_service')
@@ -100,8 +114,11 @@ def generate_launch_description():
     # otherwise). The perception_governor node mirrors the Taj-service condition.
     planner_cond = IfCondition(PythonExpression(
         ["'", start_sidecars, "' == 'true' and '", start_planner_service, "' == 'true'"]))
+    # Taj is needed by the perception cap AND by the Occy doer (for the corridor), so start
+    # it when sidecars are on and EITHER is enabled.
     taj_cond = IfCondition(PythonExpression(
-        ["'", start_sidecars, "' == 'true' and '", use_perception_cap, "' == 'true'"]))
+        ["'", start_sidecars, "' == 'true' and ('",
+         use_perception_cap, "' == 'true' or '", use_occy_doer, "' == 'true')"]))
 
     params_file = PathJoinSubstitution([
         FindPackageShare('kirra_safety'), 'config', 'kirra_params.yaml'
@@ -150,6 +167,22 @@ def generate_launch_description():
         output='screen',
     )
 
+    # The Occy DOER (opt-in): drives the robot to a /goal_pose. Each tick it feeds the robot
+    # pose + goal + the Taj corridor to the planner sidecar (/plan) and republishes the
+    # KIRRA-validated trajectory to /cmd_vel_raw — which the interceptor then re-governs.
+    # Occy PROPOSES; KIRRA DISPOSES (twice: planner slow-loop + interceptor fast-loop).
+    occy_doer = Node(
+        package='kirra_safety',
+        executable='occy_doer',
+        name='occy_doer',
+        condition=IfCondition(use_occy_doer),
+        parameters=[
+            params_file,
+            {'taj_url': taj_url, 'planner_url': planner_url, 'use_sim_time': use_sim_time},
+        ],
+        output='screen',
+    )
+
     # Taj corridor -> assured-clear-distance speed cap on the cmd_vel path. Subscribes /scan,
     # POSTs to the taj_service sidecar, publishes /kirra/perception_speed_cap. The interceptor
     # applies it (opt-in via use_perception_cap) BEFORE the governor — Taj tightens, KIRRA bounds.
@@ -192,6 +225,8 @@ def generate_launch_description():
         kirra_token_arg,
         use_sim_time_arg,
         use_perception_cap_arg,
+        use_occy_doer_arg,
+        planner_url_arg,
         taj_url_arg,
         start_sidecars_arg,
         start_planner_service_arg,
@@ -201,6 +236,7 @@ def generate_launch_description():
         planner_service,
         taj_service,
         cmd_vel_interceptor,
+        occy_doer,
         perception_governor,
         sensor_monitor,
         posture_subscriber,

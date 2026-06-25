@@ -58,6 +58,9 @@ fn default_lane_half() -> f64 { 0.6 }
 fn default_floor() -> f32 { 0.5 }
 
 #[derive(Serialize)]
+struct ObjOut { id: u64, x: f64, y: f64, vx: f64, vy: f64 }
+
+#[derive(Serialize)]
 struct PerceptionResponse {
     healthy: bool,
     confidence: f32,
@@ -66,6 +69,12 @@ struct PerceptionResponse {
     nearest_object_m: Option<f64>,
     object_count: usize,
     speed_cap_mps: f64,
+    // The corridor geometry + objects, in the SAME shapes the Occy planner endpoint
+    // (`planner_service` POST /plan) consumes, so the doer bridge can pass them straight
+    // through: left/right boundary polylines as [[x,y],..] and objects as {id,x,y,vx,vy}.
+    left: Vec<[f64; 2]>,
+    right: Vec<[f64; 2]>,
+    objects: Vec<ObjOut>,
 }
 
 /// The corridor's straight-ahead reach: the smaller of the two boundary polylines'
@@ -117,6 +126,17 @@ fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
         0.0
     };
 
+    let to_poly = |pts: &[kirra_core::corridor::Point]| -> Vec<[f64; 2]> {
+        pts.iter().map(|p| [p.x_m, p.y_m]).collect()
+    };
+    let left = to_poly(perception.corridor.left_boundary());
+    let right = to_poly(perception.corridor.right_boundary());
+    let objects = perception
+        .objects
+        .iter()
+        .map(|o| ObjOut { id: o.id, x: o.pos.x_m, y: o.pos.y_m, vx: o.vel.x_m, vy: o.vel.y_m })
+        .collect();
+
     PerceptionResponse {
         healthy,
         confidence,
@@ -125,6 +145,9 @@ fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
         nearest_object_m,
         object_count: perception.objects.len(),
         speed_cap_mps,
+        left,
+        right,
+        objects,
     }
 }
 

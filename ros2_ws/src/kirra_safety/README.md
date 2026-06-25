@@ -2,10 +2,11 @@
 
 ROS2 safety interlock package for the Kirra runtime legitimacy engine.
 
-Provides four nodes that enforce kinematic contracts, derive a perception speed cap, monitor sensor health, and gate motion commands based on fleet posture:
+Provides the nodes that enforce kinematic contracts, derive a perception speed cap, drive the robot to a goal, monitor sensor health, and gate motion commands based on fleet posture:
 
 - **cmd_vel_interceptor** — intercepts `/cmd_vel`, enforces via Kirra, publishes to `/cmd_vel_safe`
 - **perception_governor** — turns `/scan` into Taj's corridor and an assured-clear-distance (ACD) speed cap on `/kirra/perception_speed_cap` (see below)
+- **occy_doer** — the DOER: drives the robot to a `/goal_pose` using Occy + Taj + KIRRA, publishing proposals to `/cmd_vel_raw` (see [`docs/testing/OCCY_DOER_BRIDGE.md`](../../../../docs/testing/OCCY_DOER_BRIDGE.md))
 - **sensor_monitor** — reports LiDAR, IMU, camera, and odometry health to Kirra
 - **posture_subscriber** — bridges the Kirra SSE posture stream to ROS2 topics and triggers emergency stops on `LockedOut` transitions
 

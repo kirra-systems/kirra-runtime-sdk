@@ -44,8 +44,38 @@ struct PlanRequest {
     right: Vec<[f64; 2]>,
     #[serde(default)]
     objects: Vec<ObjReq>,
+    /// Optional vehicle footprint/kinematics for the CHECKER. Absent → the urban-car
+    /// default (4.8 m). A small differential robot (e.g. a Rosmaster) MUST pass its own
+    /// dimensions, or the car-sized footprint can't fit a robot-scale corridor and KIRRA
+    /// MRCs every plan.
+    #[serde(default)]
+    vehicle: Option<VehicleReq>,
 }
 fn default_cruise() -> f64 { 10.0 }
+
+/// Override fields for the checker's `VehicleConfig` (all optional; absent fields keep the
+/// urban-car default). Half-extents are bumper-to-centre, matching `VehicleConfig`.
+#[derive(Deserialize)]
+struct VehicleReq {
+    wheelbase_m: Option<f64>,
+    half_length_m: Option<f64>,
+    half_width_m: Option<f64>,
+    max_speed_mps: Option<f64>,
+    max_steering_deg: Option<f64>,
+}
+
+/// Build the checker's `VehicleConfig` from the request (urban-car default + overrides).
+fn vehicle_config(req: &PlanRequest) -> VehicleConfig {
+    let mut v = VehicleConfig::default_urban();
+    if let Some(o) = &req.vehicle {
+        if let Some(x) = o.wheelbase_m { v.wheelbase_m = x; }
+        if let Some(x) = o.half_length_m { v.half_length_m = x; }
+        if let Some(x) = o.half_width_m { v.half_width_m = x; }
+        if let Some(x) = o.max_speed_mps { v.max_speed_mps = x; }
+        if let Some(x) = o.max_steering_deg { v.max_steering_rad = x.to_radians(); }
+    }
+    v
+}
 
 #[derive(Serialize)]
 struct TrajPt { x: f64, y: f64, heading: f64, v: f64, t: f64 }
@@ -88,7 +118,7 @@ fn handle_plan(req: &PlanRequest) -> PlanResponse {
     let cfg = GeometricPlannerConfig { cruise_speed_mps: req.cruise, ..Default::default() };
     let plan = plan_for_intent(&mut GeometricPlanner::new(cfg), &MickIntent::GoTo { x_m: req.goal.x, y_m: req.goal.y }, &world);
     // The CHECKER: KIRRA's verdict on the proposal (the client applies it / falls back accordingly).
-    let verdict = validate_trajectory_slow(&plan.trajectory, &corr, &objects, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
+    let verdict = validate_trajectory_slow(&plan.trajectory, &corr, &objects, &vehicle_config(req), None, FleetPosture::Nominal);
 
     PlanResponse {
         kind: match plan.kind { ProposalKind::Motion => "Motion", ProposalKind::SafeStop => "SafeStop" }.to_string(),

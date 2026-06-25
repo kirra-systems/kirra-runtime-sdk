@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""
+Occy doer bridge — the planner that decides where to go (the DOER).
+
+This is the missing piece that makes real Occy drive the robot to a goal, governed by
+KIRRA. Each tick it:
+  1. reads the robot pose + speed (/odom) and the current goal (/goal_pose, e.g. RViz
+     "2D Goal Pose", or an LLM/Mick publisher),
+  2. POSTs the latest lidar scan (/scan) to the Taj sidecar → the geometric corridor
+     (left/right polylines) + objects,
+  3. POSTs {ego, goal-in-base, Taj corridor, objects} to the Occy planner sidecar
+     (/plan) → a KIRRA-validated trajectory,
+  4. converts that trajectory to a Twist (pure pursuit) and publishes it on
+     /cmd_vel_raw — the PROPOSAL.
+
+The proposal then flows through the cmd_vel_interceptor (Taj speed cap + the KIRRA
+kinematic governor) before reaching the wheels, so Occy only PROPOSES and KIRRA still
+DISPOSES — twice (the planner runs the slow-loop checker; the interceptor runs the
+fast-loop one). The doer is fail-soft: no goal, a stale scan, a service error, or a
+refused plan all publish a zero Twist (hold).
+
+  doer (this node) ─/cmd_vel_raw→ cmd_vel_interceptor [Taj cap + KIRRA] ─/cmd_vel→ wheels
+
+Where Parko fits (Phase 2): when the Parko ML detector is up, its semantic objects feed
+the same `objects` list (richer than Taj's geometric clusters) — this node's seam is
+unchanged. Mick (the LLM) fits by publishing the goal/intent instead of RViz.
+"""
+
+import time
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist, PoseStamped
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+
+from kirra_safety.doer_core import (
+    yaw_from_quaternion, goal_to_base, goal_reached, decide, extend_corridor_back,
+)
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+ZERO = Twist()
+
+
+class OccyDoer(Node):
+    def __init__(self):
+        super().__init__('occy_doer')
+        self.declare_parameter('taj_url', 'http://localhost:8101')
+        self.declare_parameter('planner_url', 'http://localhost:8100')
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('goal_topic', '/goal_pose')
+        self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('cmd_topic', '/cmd_vel_raw')
+        self.declare_parameter('plan_hz', 5.0)
+        self.declare_parameter('cruise_speed_mps', 1.2)
+        self.declare_parameter('max_speed_mps', 1.2)
+        self.declare_parameter('max_yaw_rate_rps', 1.5)
+        self.declare_parameter('lookahead_m', 0.8)
+        self.declare_parameter('goal_tolerance_m', 0.25)
+        self.declare_parameter('forward_extent_m', 8.0)
+        self.declare_parameter('scan_stale_s', 0.5)
+        self.declare_parameter('http_timeout_ms', 60)
+        # The robot's footprint/kinematics for the CHECKER. A small differential robot MUST
+        # pass these, or the planner's default urban-car (4.8 m) footprint can't fit a
+        # robot-scale corridor and KIRRA MRCs every plan. Defaults: a Rosmaster-class robot.
+        self.declare_parameter('wheelbase_m', 0.2)
+        self.declare_parameter('half_length_m', 0.18)
+        self.declare_parameter('half_width_m', 0.15)
+        self.declare_parameter('max_steering_deg', 30.0)
+        # Extend the corridor behind the robot so its footprint (which sits behind the lidar
+        # at the origin) is contained — Taj only reports forward free space.
+        self.declare_parameter('corridor_back_m', 0.5)
+
+        self._taj = self.get_parameter('taj_url').value.rstrip('/')
+        self._planner = self.get_parameter('planner_url').value.rstrip('/')
+        self._cruise = self.get_parameter('cruise_speed_mps').value
+        self._max_v = self.get_parameter('max_speed_mps').value
+        self._max_w = self.get_parameter('max_yaw_rate_rps').value
+        self._lookahead = self.get_parameter('lookahead_m').value
+        self._goal_tol = self.get_parameter('goal_tolerance_m').value
+        self._extent = self.get_parameter('forward_extent_m').value
+        self._scan_stale_s = self.get_parameter('scan_stale_s').value
+        self._timeout_s = self.get_parameter('http_timeout_ms').value / 1000.0
+        self._back_m = self.get_parameter('corridor_back_m').value
+        self._vehicle = {
+            'wheelbase_m': self.get_parameter('wheelbase_m').value,
+            'half_length_m': self.get_parameter('half_length_m').value,
+            'half_width_m': self.get_parameter('half_width_m').value,
+            'max_speed_mps': self.get_parameter('max_speed_mps').value,
+            'max_steering_deg': self.get_parameter('max_steering_deg').value,
+        }
+
+        self._pose = None         # (x, y, yaw, speed)
+        self._goal = None         # (x, y) in the odom/world frame
+        self._scan = None         # (LaserScan, monotonic_recv_time)
+
+        self._pub = self.create_publisher(Twist, self.get_parameter('cmd_topic').value, 10)
+        self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self._on_odom, 20)
+        self.create_subscription(PoseStamped, self.get_parameter('goal_topic').value, self._on_goal, 10)
+        self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self._on_scan, 10)
+        self.create_timer(1.0 / self.get_parameter('plan_hz').value, self._tick)
+
+        if not REQUESTS_AVAILABLE:
+            self.get_logger().error('python3-requests missing — doer holds (publishes zero).')
+        self.get_logger().info(
+            f'occy_doer: Taj({self._taj}) + Occy({self._planner}) -> '
+            f'{self.get_parameter("cmd_topic").value}. Send a goal on '
+            f'{self.get_parameter("goal_topic").value} (RViz "2D Goal Pose").'
+        )
+
+    # --- subscriptions ------------------------------------------------------
+    def _on_odom(self, msg: Odometry):
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
+        speed = msg.twist.twist.linear.x
+        self._pose = (p.x, p.y, yaw, speed)
+
+    def _on_goal(self, msg: PoseStamped):
+        self._goal = (msg.pose.position.x, msg.pose.position.y)
+        self.get_logger().info(f'new goal: ({self._goal[0]:.2f}, {self._goal[1]:.2f})')
+
+    def _on_scan(self, msg: LaserScan):
+        self._scan = (msg, time.monotonic())
+
+    # --- the doer loop ------------------------------------------------------
+    def _hold(self, why: str):
+        self._pub.publish(ZERO)
+        self.get_logger().debug(f'hold: {why}')
+
+    def _tick(self):
+        if not REQUESTS_AVAILABLE:
+            return self._hold('no-requests')
+        if self._pose is None or self._goal is None:
+            return self._hold('awaiting pose/goal')
+        if self._scan is None or (time.monotonic() - self._scan[1]) > self._scan_stale_s:
+            return self._hold('stale-scan')  # fail-soft: no fresh perception → hold
+
+        rx, ry, ryaw, speed = self._pose
+        gx, gy = goal_to_base(rx, ry, ryaw, self._goal[0], self._goal[1])
+        if goal_reached(gx, gy, self._goal_tol):
+            return self._hold('goal-reached')
+
+        scan = self._scan[0]
+        try:
+            taj = requests.post(f'{self._taj}/perception', timeout=self._timeout_s, json={
+                'angle_min_rad': float(scan.angle_min),
+                'angle_increment_rad': float(scan.angle_increment),
+                'range_min_m': float(scan.range_min),
+                'range_max_m': float(scan.range_max),
+                'ranges': [float(r) for r in scan.ranges],
+                'stamp_ms': 0, 'forward_extent_m': self._extent,
+            }).json()
+
+            # Extend the Taj corridor behind the robot (footprint containment) and tell the
+            # checker the robot's real size, so KIRRA judges a robot — not a 4.8 m car.
+            left, right = extend_corridor_back(taj.get('left', []), taj.get('right', []), self._back_m)
+            plan = requests.post(f'{self._planner}/plan', timeout=self._timeout_s, json={
+                'ego': {'x': 0.0, 'y': 0.0, 'heading': 0.0, 'speed': float(speed)},
+                'goal': {'x': gx, 'y': gy},
+                'cruise': self._cruise,
+                'left': left,
+                'right': right,
+                'objects': taj.get('objects', []),
+                'vehicle': self._vehicle,
+            }).json()
+        except Exception as e:  # noqa: BLE001 — any fault holds (fail-soft)
+            return self._hold(f'service-error:{e}')
+
+        v, w, reason = decide(plan, self._lookahead, self._max_v, self._max_w)
+        twist = Twist()
+        twist.linear.x = v
+        twist.angular.z = w
+        self._pub.publish(twist)
+        self.get_logger().debug(f'{reason}  v={v:.2f} w={w:.2f}  goal_base=({gx:.1f},{gy:.1f})')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OccyDoer()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
