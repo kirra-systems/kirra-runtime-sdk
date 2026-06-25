@@ -1,22 +1,24 @@
 # Stage S-PK1 — Platform Kinematics (one platform-parameterized governor)
 
-> ## ⚠ PROPOSED — NOT A SAFETY CLAIM
-> This is a **design proposal**. It is **not implementation** and confers **no
-> safety coverage** until **ACCEPTED via ADR-0017** and its sub-stages land. The
-> RTM / `TRACEABILITY_MATRIX` must **NOT** list S-PK1 (or any new-platform safety
-> goal) as ENFORCED until the corresponding sub-stage is complete. A PROPOSED
-> safety doc is fine in `docs/safety/`; a PROPOSED doc *counted as coverage* is the
-> failure mode this banner prevents.
+> ## ✅ RATIFIED — scope-bounded safety claim (S-PK1a–e landed)
+> Decision of record: **ADR-0027** (ratified on merge). S-PK1a/b/c (code) and
+> S-PK1e (RTM/AoU/ADR) have landed. **Claimable status is scope-bounded:** the
+> **Ackermann** path is **ENFORCED** (unchanged — the adapter is verbatim over the
+> frozen talisman); the abstraction + the SG2 seam are **IMPLEMENTED and
+> dual-platform-PROVEN**; a live **non-Ackermann deployment** is
+> **DEPLOYMENT-PENDING** (**AOU-PLATFORM-GEOMETRY-001**). The RTM must **NOT** mark
+> any new-platform safety goal ENFORCED on the basis of the seam alone — only the
+> Ackermann path and the proven-but-undeployed status are recorded.
 
-**Status:** PROPOSED — design-for-review. No code written. Awaiting owner sign-off.
-**Date:** 2026-06-24
+**Status:** RATIFIED (ADR-0027) — S-PK1a/b/c/e landed; Tier B (aerial) + slow-loop unification gated; Tier C (manipulator) cut.
+**Date:** 2026-06-24 (spec) / 2026-06-25 (ratified)
 **Owner:** Kirra Systems, LLC
 **Scope:** Lift the governor's three scattered, platform-specific expressions into a
 single **platform-parameterized kinematic contract** so the existing safety
 surface (envelope, containment, RSS, decel-to-stop, frame-integrity) extends to
 non-Ackermann platforms. This is the Track-3 keystone: the prerequisite for the
 doer–checker thesis to hold *at all* on a new platform.
-**Future decision of record:** ADR-0017 (filed on acceptance).
+**Decision of record:** ADR-0027 (`docs/adr/0027-platform-kinematics-abstraction.md`).
 **Companion:** the frame-integrity gate (`STAGE_S-FI1_FRAME_INTEGRITY_GATE.md`) is
 the model for format and discipline.
 
@@ -197,8 +199,12 @@ smuggled in as "just a different polygon."
   diff-drive node consumes it yet; diff-drive's checker remains parko's governor).
 - **S-PK1d** — (optional, gated by a customer) Tier-B 3D containment + aerial
   envelope.
-- **S-PK1e** — RTM / AoU updates + ADR-0017 to Accepted; new-platform safety goals
-  marked ENFORCED only here.
+- **S-PK1e** — ✅ DONE — **ADR-0027** filed (ratified on merge); `TRACEABILITY_MATRIX`
+  gains the SG2 containment-seam row + the platform-generalization note on the SG2
+  disposition; **AOU-PLATFORM-GEOMETRY-001** records the integrator obligation and
+  the honest claimable status (Ackermann ENFORCED; abstraction+seam PROVEN; a
+  non-Ackermann deployment DEPLOYMENT-PENDING). No new-platform goal is marked
+  ENFORCED on the seam alone.
 
 ## 9. What this stage explicitly does NOT do
 
