@@ -65,11 +65,57 @@ pub trait SafetyGovernor: Send + Sync {
         delta_time_s: f64,
         posture: SafetyPosture,
     ) -> EnforcementAction;
+
+    /// The fleet posture this governor RECOMMENDS based on its internal state — the seam that
+    /// lets a governor drive posture, not just clamp the current command. Default `Nominal`
+    /// (a plain governor recommends nothing); a redundancy comparator overrides it to escalate
+    /// to `Degraded` / `LockedOut` on persistent disagreement. The runtime reads this after a
+    /// tick and ESCALATES the effective posture with it (`posture.escalate(recommended)`).
+    fn recommended_posture(&self) -> SafetyPosture {
+        SafetyPosture::Nominal
+    }
+}
+
+impl SafetyPosture {
+    /// Severity rank — higher is more restrictive: `Nominal` < `Degraded` < `LockedOut`.
+    #[must_use]
+    pub fn severity(self) -> u8 {
+        match self {
+            SafetyPosture::Nominal => 0,
+            SafetyPosture::Degraded => 1,
+            SafetyPosture::LockedOut => 2,
+        }
+    }
+
+    /// The MORE restrictive of two postures — escalation-only combine (a posture can be made
+    /// stricter by a fault signal, never relaxed).
+    #[must_use]
+    pub fn escalate(self, other: SafetyPosture) -> SafetyPosture {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn posture_escalate_takes_the_more_restrictive_and_a_plain_governor_recommends_nominal() {
+        use SafetyPosture::{Degraded, LockedOut, Nominal};
+        // Escalation-only: the result is the more severe of the two, in either order; equal is a no-op.
+        assert_eq!(Nominal.escalate(Degraded), Degraded);
+        assert_eq!(Degraded.escalate(Nominal), Degraded);
+        assert_eq!(Degraded.escalate(LockedOut), LockedOut);
+        assert_eq!(LockedOut.escalate(Degraded), LockedOut);
+        assert_eq!(Nominal.escalate(Nominal), Nominal);
+        assert!(Nominal.severity() < Degraded.severity() && Degraded.severity() < LockedOut.severity());
+        // The trait default recommends nothing (a plain governor drives no posture escalation).
+        assert_eq!(AllowAllGovernor.recommended_posture(), Nominal);
+    }
 
     /// Test governor that allows everything.
     struct AllowAllGovernor;

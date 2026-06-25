@@ -35,16 +35,12 @@ impl<S: SafetyGovernor> SafetyGovernor for ComparatorAsGovernor<S> {
     ) -> EnforcementAction {
         self.0.evaluate(proposed, previous, delta_time_s, posture)
     }
-}
 
-impl<S: SafetyGovernor> ComparatorAsGovernor<S> {
-    /// The fleet posture the wrapped comparator's divergence state recommends (see
-    /// [`GovernorComparator::recommended_posture`]). The node reads this after a tick and
-    /// drives the posture engine with it — the seam that turns governor disagreement into a
-    /// live safety posture (`Degraded`, then `LockedOut` when persistent), not just an audit
-    /// line. Escalation-only at the node: `posture = max(posture, governor.recommended_posture())`.
-    #[must_use]
-    pub fn recommended_posture(&self) -> SafetyPosture {
+    /// Surface the wrapped comparator's divergence-derived posture through the `SafetyGovernor`
+    /// trait, so the runtime (which holds a `dyn SafetyGovernor`) can read it after a tick and
+    /// ESCALATE the effective posture — the seam that turns governor disagreement into a live
+    /// safety posture (`Degraded`, then `LockedOut` when persistent), not just an audit line.
+    fn recommended_posture(&self) -> SafetyPosture {
         self.0.recommended_posture()
     }
 }

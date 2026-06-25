@@ -59,6 +59,34 @@ fn mnist_end_to_end_inference() {
         assert!(s.is_finite(), "non-finite score at index {}: {}", i, s);
     }
 
+    // Golden-output regression pin. Finiteness + shape prove the inference path
+    // *runs*; they do NOT prove it computes the right thing — a transposed input,
+    // a wrong-weights load, or an ABI/layout drift in a future ONNX Runtime can
+    // still emit ten finite scores. With an all-zeros input the MNIST-12 graph is
+    // deterministic (the output is the trailing-layer bias propagated through the
+    // fixed weights), so the logits are a stable fingerprint of correct numerics.
+    //
+    // Captured from a known-green CI run (ORT 1.23.2, CPU EP — the exact pair this
+    // job installs). The tolerance is wide enough to absorb last-ULP CPU/version
+    // float drift yet far tighter than any real numerics regression: a genuine
+    // layout/weights fault shifts these logits by O(0.1+), orders of magnitude
+    // past 1e-2, while the values themselves sit in [-0.13, 0.14]. This pins ORT's
+    // numerics INDEPENDENTLY of the parko-openvino cross-backend equivalence test
+    // (which only catches an ORT/OV *divergence*), so an identical drift in both —
+    // or a skipped OpenVINO job — can no longer pass silently here.
+    const GOLDEN: [f32; 10] = [
+        -0.044856027, 0.007791661, 0.06810082, 0.02999374, -0.12640963, 0.14021875,
+        -0.055284902, -0.049383815, 0.08432205, -0.054540414,
+    ];
+    const TOL: f32 = 1e-2;
+    for (i, (got, want)) in scores.iter().zip(GOLDEN.iter()).enumerate() {
+        assert!(
+            (got - want).abs() <= TOL,
+            "MNIST logit regression at class {i}: got {got}, golden {want}, |Δ|>{TOL} \
+             (an all-zeros-input numerics drift — suspect input layout / weights / ORT ABI)"
+        );
+    }
+
     println!("MNIST inference successful. Output: {:?}", scores);
 }
 
