@@ -93,7 +93,9 @@ HOLDs while one is in the way; `CrossWhenClear` steps off only when every confli
 worst-case re-acceleration still can't reach the crossing before the slow courier clears it (the
 Stackelberg `interactive_proceed` model), else HOLDs at the curb. `FollowPath` ≈ `GoTo`/`Cruise` at
 creep; `Hold` already exists. `creep-through-crowd` (a soft nudge through dense pedestrians) remains
-a follow-up.
+a follow-up. The two behaviors are shown composing in a continuous drive (give way to a pedestrian
+and resume; wait at a curb for a car and cross) by `cargo run -p kirra-mick --example
+sidewalk_session` — Mick → Occy → KIRRA (courier profile), every committed pose checker-admitted.
 
 ### 4. Class mapping (one selector, two loops, cited copies)
 
