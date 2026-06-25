@@ -16,7 +16,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::behavior::{SignalState, TrafficControl};
+use crate::behavior::{
+    accept_turn_gap, ConflictApproach, SignalState, TrafficControl, DEFAULT_TURN_CRITICAL_GAP_S,
+};
 use crate::{
     FleetPosture, Goal, Lane, LaneControl, LaneGraph, PlanInput, PlanOutput, Planner, Pose,
     PredictedPath, MAX_ROUTE_LANES,
@@ -345,6 +347,19 @@ pub fn plan_for_intent(
             let Some(route) = turn_route(graph, ego_lane, direction) else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
+            // UNPROTECTED-TURN GAP-ACCEPTANCE: before committing the turn, check there is an
+            // adequate gap in the traffic the ego must yield to. The conflict point is the
+            // junction (the ego lane's terminus); the conflicting stream is every perceived
+            // vehicle CLOSING on it that the ego does NOT have asserted priority over (i.e. not on
+            // the right-of-way cede set). No adequate gap → HOLD at the junction and wait; KIRRA's
+            // head-on / crossing RSS independently backstops a misjudged acceptance. A protected
+            // turn (conflicting vehicles are on the cede set) is not gated.
+            if let Some(term) = graph.lane(ego_lane).and_then(|l| l.centerline.last().copied()) {
+                let conflicts = turn_conflict_approaches(world, term, world.cedes_to_ego_ids);
+                if !accept_turn_gap(&conflicts, DEFAULT_TURN_CRITICAL_GAP_S) {
+                    return PlanOutput::safe_stop(world.ego.pose);
+                }
+            }
             // Follow the turn's route corridor; the goal is unchanged (the turn drives toward
             // whatever the world goal already is). KIRRA bounds it like any corridor.
             plan_along_route(planner, world, graph, ego_lane, &route, world.goal)
@@ -459,6 +474,36 @@ fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
         }
         None => Vec::new(),
     }
+}
+
+/// Below this closing speed a vehicle is not meaningfully approaching the turn conflict point —
+/// it is stopped, receding, or moving tangentially — so it is not a gap-acceptance conflict.
+const TURN_CONFLICT_MIN_CLOSING_MPS: f64 = 0.5;
+
+/// Build the [`ConflictApproach`] list for a turn whose conflict point is `conflict` (the junction):
+/// every perceived vehicle that is CLOSING on the conflict and which the ego must yield to — i.e.
+/// NOT on its right-of-way `cedes` set. Each contributes its time-to-conflict
+/// (`distance / closing-speed`). A vehicle that is not closing (stopped / receding / tangential) is
+/// excluded — it is not a conflict — while one already AT the conflict yields `0.0` (an immediate
+/// hold). This is the conservative junction proxy: any vehicle bearing down on the junction the ego
+/// has no priority over gates the turn, and KIRRA's RSS backstops regardless.
+fn turn_conflict_approaches(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[u64]) -> Vec<ConflictApproach> {
+    world
+        .objects
+        .iter()
+        .filter(|o| !cedes.contains(&o.id))
+        .filter_map(|o| {
+            let (dx, dy) = (conflict.x_m - o.pos.x_m, conflict.y_m - o.pos.y_m);
+            let dist = dx.hypot(dy);
+            if dist <= f64::EPSILON {
+                return Some(ConflictApproach { time_to_conflict_s: 0.0 }); // already at the conflict
+            }
+            // Closing speed = the object's velocity component along the bearing to the conflict.
+            let closing = (o.vel.x_m * dx + o.vel.y_m * dy) / dist;
+            (closing > TURN_CONFLICT_MIN_CLOSING_MPS)
+                .then_some(ConflictApproach { time_to_conflict_s: dist / closing })
+        })
+        .collect()
 }
 
 /// Horizon (s) over which a map-intention predicted path is materialized — a generous fixed

@@ -119,6 +119,37 @@ pub fn assured_clear_distance_speed_cap(visible_m: f64, brake_decel_mps2: f64) -
     (((a * t).powi(2) + 2.0 * a * d).sqrt() - a * t).max(0.0)
 }
 
+/// Critical gap (s) for accepting an **unprotected turn** — the time the ego needs to clear the
+/// junction conflict zone before a vehicle it must yield to arrives, plus a reaction/safety margin.
+/// Standard gap-acceptance (HCM left-turn critical gap ≈ 4–4.5 s). The doer BEGINS the turn only if
+/// every conflicting approach is at least this far away in time; otherwise it HOLDs for a gap.
+pub const DEFAULT_TURN_CRITICAL_GAP_S: f64 = 4.0;
+
+/// One conflicting vehicle's approach to a turn's conflict point, reduced to the single quantity
+/// gap-acceptance needs: the **time** until it reaches the conflict (`distance / closing-speed`).
+/// The caller computes it from perception (only vehicles actually CLOSING on the conflict and which
+/// the ego must yield to — i.e. NOT on its right-of-way cede list — are passed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConflictApproach {
+    /// Seconds until this vehicle reaches the turn conflict point (`> 0`, finite, when closing).
+    pub time_to_conflict_s: f64,
+}
+
+/// Gap-acceptance: may the ego BEGIN an unprotected turn now? It proceeds only if **every**
+/// conflicting approach is more than `critical_gap_s` away in time (the smallest gap clears the
+/// critical gap); any closer conflict → HOLD and wait for a gap. No conflicts → proceed.
+///
+/// Fail-closed by construction: the test is `time > critical_gap_s`, so a NaN time (bad data) is
+/// `false` ⇒ HOLD; a `critical_gap_s` that is non-finite/≤0 (misconfig) makes no approach pass
+/// unless genuinely clear. A non-closing vehicle is excluded UPSTREAM (it is not a conflict), so it
+/// is never represented as a `ConflictApproach`. KIRRA's head-on / crossing RSS independently
+/// backstops a misjudged acceptance.
+// SAFETY: SG5 | REQ: unprotected-turn-gap-acceptance | TEST: no_conflicts_accepts_the_turn,an_ample_gap_accepts_the_turn,a_tight_gap_holds_the_turn,the_critical_gap_boundary_is_strict,a_nonfinite_gap_fails_closed_to_hold,a_vehicle_already_at_the_conflict_holds,a_tight_gap_holds_the_turn,asserting_right_of_way_proceeds_through_the_same_tight_gap
+#[must_use]
+pub fn accept_turn_gap(approaches: &[ConflictApproach], critical_gap_s: f64) -> bool {
+    approaches.iter().all(|a| a.time_to_conflict_s > critical_gap_s)
+}
+
 /// Tunables for the behavioral layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BehaviorConfig {
@@ -398,4 +429,48 @@ mod tests {
 
     // The lane-line crossing-rule tests moved with their types to
     // `kirra_map::lane_lines` (de-monolith Stage 6b).
+
+    // ---- Unprotected-turn gap-acceptance --------------------------------------------------
+
+    fn approach(t: f64) -> ConflictApproach {
+        ConflictApproach { time_to_conflict_s: t }
+    }
+
+    #[test]
+    fn no_conflicts_accepts_the_turn() {
+        assert!(accept_turn_gap(&[], DEFAULT_TURN_CRITICAL_GAP_S), "nothing to yield to ⇒ proceed");
+    }
+
+    #[test]
+    fn an_ample_gap_accepts_the_turn() {
+        // Both conflicting vehicles are well over the critical gap away.
+        assert!(accept_turn_gap(&[approach(6.0), approach(8.0)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
+
+    #[test]
+    fn a_tight_gap_holds_the_turn() {
+        // One vehicle is closer than the critical gap → the smallest gap binds → HOLD.
+        assert!(!accept_turn_gap(&[approach(6.0), approach(2.5)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
+
+    #[test]
+    fn the_critical_gap_boundary_is_strict() {
+        // Exactly at the critical gap is NOT enough (strict >): the ego waits for clearly more.
+        assert!(!accept_turn_gap(&[approach(DEFAULT_TURN_CRITICAL_GAP_S)], DEFAULT_TURN_CRITICAL_GAP_S));
+        assert!(accept_turn_gap(&[approach(DEFAULT_TURN_CRITICAL_GAP_S + 0.01)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
+
+    #[test]
+    fn a_nonfinite_gap_fails_closed_to_hold() {
+        // Bad perception data (NaN time) must not be read as "clear" — `NaN > c` is false ⇒ HOLD.
+        assert!(!accept_turn_gap(&[approach(f64::NAN)], DEFAULT_TURN_CRITICAL_GAP_S));
+        assert!(!accept_turn_gap(&[approach(10.0), approach(f64::NAN)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
+
+    #[test]
+    fn a_vehicle_already_at_the_conflict_holds() {
+        // time_to_conflict ≤ 0 (a vehicle in/through the conflict zone now) → HOLD.
+        assert!(!accept_turn_gap(&[approach(0.0)], DEFAULT_TURN_CRITICAL_GAP_S));
+        assert!(!accept_turn_gap(&[approach(-1.0)], DEFAULT_TURN_CRITICAL_GAP_S));
+    }
 }
