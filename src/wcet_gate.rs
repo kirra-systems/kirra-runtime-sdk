@@ -146,11 +146,16 @@ pub const GOVERNOR_PERCEPTION_GUARD_WCET_CI_THRESHOLD_MICROS: u64 = 10_000;
 /// Returns `(max_ns, p99_9_ns)`.
 ///
 /// Single-threaded, no warmup, `std::time::Instant` — adequate for a
-/// gross-regression CI gate. The gate asserts on max (any single sample
-/// exceeding the threshold trips the regression check); p99.9 is reported
-/// alongside as a stability indicator (a max that's far above p99.9
-/// usually indicates a transient OS / scheduler stall, not a real
-/// code-path regression).
+/// gross-regression CI gate. The gate asserts on **p99.9** (the steady-state
+/// regression signal); `max` is reported alongside for diagnostics but is NOT
+/// gated, because a single-sample max in an `Instant`-based microbench is
+/// dominated by OS / hypervisor jitter (cgroup preemption, steal time, page
+/// faults), not code-path work. (F7: earlier docs here and on the module test
+/// block claimed the gate asserts on *max* — it does not, and never did; the
+/// assertion at `assert_under_budget` is on p99.9. The claim is corrected so
+/// the safety case does not mis-cite this host gate as a max-WCET bound — real
+/// WCET evidence is the QNX-target-under-FIFO measurement in
+/// `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`, not this CI regression check.)
 #[cfg(test)]
 fn measure_stats<F: FnMut()>(iterations: u32, mut f: F) -> (u128, u128) {
     // Imported here (function-local, test-only) rather than at module scope:
@@ -177,15 +182,21 @@ fn measure_stats<F: FnMut()>(iterations: u32, mut f: F) -> (u128, u128) {
 // ---------------------------------------------------------------------------
 //
 // Each test exercises one verdict-path entry point at a representative
-// worst-case input + asserts the per-call max latency stays under
-// `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS`. The measured max is printed
-// for diagnostic / trend-tracking. A failure here means either the
-// verdict path took >1ms (gross regression) or CI hardware is severely
-// degraded — both warrant investigation.
+// worst-case input + asserts the per-call **p99.9** latency stays under
+// `GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS` (F7: the gate is p99.9, not max;
+// max is printed for diagnostic / trend-tracking only). A failure here means
+// either the verdict path's steady-state latency regressed past 1 ms (e.g. an
+// accidental heap alloc / lock / I/O slipped onto the hot path) or CI hardware
+// is severely degraded — both warrant investigation.
 //
-// Timing gates are hardware-sensitive. Numbers here are CI-relative;
-// re-validated on the target SoC under S8 (#120) for the actual
-// SG9 timeout setting.
+// HONEST FRAMING (F7): this is a HOST-SIDE, INDICATIVE regression-smoke gate —
+// NOT certified WCET evidence, and NOT a max bound. It also benches the KERNEL
+// verdict functions directly; the additional cost of the deployed HTTP path
+// (serde deserialize + re-serialize on a clamp) is characterized separately by
+// `regression_deployed_shape_serde_plus_verdict` below. The certified max-WCET
+// number is the QNX-target-under-FIFO measurement
+// (`docs/safety/WCET_MEASUREMENT_METHODOLOGY.md` / S8 #120), which sets the real
+// SG9 fail-closed timeout for deployment.
 #[cfg(test)]
 mod ci_gate_tests {
     use super::*;
@@ -203,7 +214,8 @@ mod ci_gate_tests {
         let max_us = max_ns / 1000;
         let p999_us = p999_ns / 1000;
         println!(
-            "WCET-GATE {name}: max={max_ns}ns ({max_us}us)  p99.9={p999_ns}ns ({p999_us}us) \
+            "GOVERNOR REGRESSION-GATE (host-indicative p99.9, NOT certified WCET) {name}: \
+             max={max_ns}ns ({max_us}us)  p99.9={p999_ns}ns ({p999_us}us) \
              over {ITERS} iterations  vs CI-threshold {}us  (target {}us)",
             GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS,
             GOVERNOR_VERDICT_WCET_TARGET_MICROS,
@@ -218,12 +230,12 @@ mod ci_gate_tests {
         // outliers visible.
         assert!(
             p999_us < GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS as u128,
-            "WCET REGRESSION on {name}: p99.9 {p999_us}us exceeds CI threshold {}us \
+            "GOVERNOR LATENCY REGRESSION on {name}: p99.9 {p999_us}us exceeds CI threshold {}us \
              — a verdict-path p99.9 this large indicates an accidental heap alloc, \
              Mutex acquisition, or I/O on the hot path. Investigate before merging. \
-             (max={max_us}us is reported for diagnostic but not gated, since \
-             single-sample max in `Instant`-based microbenchmarks reflects OS \
-             scheduler / VM jitter, not code-path work.)",
+             (This is a host-indicative regression gate, NOT certified WCET; max={max_us}us is \
+             reported for diagnostic but NOT gated, since single-sample max in `Instant`-based \
+             microbenchmarks reflects OS scheduler / VM jitter, not code-path work.)",
             GOVERNOR_VERDICT_WCET_CI_THRESHOLD_MICROS,
         );
     }
@@ -251,6 +263,38 @@ mod ci_gate_tests {
             ));
         });
         assert_under_budget("validate_vehicle_command::Allow", max_ns, p999_ns);
+    }
+
+    #[test]
+    fn regression_deployed_shape_serde_plus_verdict() {
+        // F7: the kernel benches measure `validate_vehicle_command` ALONE. The
+        // DEPLOYED actuator path (`enforce_actuator_safety_envelope`) additionally
+        // DESERIALIZES the JSON command and, on a clamp, RE-SERIALIZES it — serde
+        // work the kernel-only gate never sees, and the exact "measured thing is not
+        // the deployed thing" gap the review flags. Characterize that deployed shape:
+        // deserialize a representative wire payload, run the verdict, and re-serialize
+        // (the clamp worst case).
+        //
+        // Unlike the kernel gate, serde allocation here is EXPECTED — this gate
+        // catches a GROSS regression (a serde blowup, or the verdict path slipping),
+        // not "any heap alloc". It is still HOST-INDICATIVE p99.9, NOT certified WCET,
+        // and it does NOT capture the async Tower/axum layer cost (a sync microbench
+        // cannot); the certified end-to-end number remains the QNX-target measurement.
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let wire = serde_json::to_vec(&nominal_cmd()).expect("serialize representative command");
+        let (max_ns, p999_ns) = measure_stats(ITERS, || {
+            let cmd: ProposedVehicleCommand =
+                serde_json::from_slice(std::hint::black_box(&wire)).expect("deserialize");
+            let _ = std::hint::black_box(validate_vehicle_command(
+                std::hint::black_box(&cmd),
+                std::hint::black_box(&contract),
+            ));
+            // The deployed path re-serializes only on a clamp — measure that worst case.
+            let _ = std::hint::black_box(
+                serde_json::to_vec(std::hint::black_box(&cmd)).expect("re-serialize"),
+            );
+        });
+        assert_under_budget("deployed_shape::serde_deser+verdict+reserialize", max_ns, p999_ns);
     }
 
     #[test]
