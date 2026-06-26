@@ -211,9 +211,15 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// Busy timeout for a read-only replica connection (ms): brief, so a reader
-/// rides out a concurrent WAL checkpoint instead of surfacing `SQLITE_BUSY`.
-const READ_REPLICA_BUSY_TIMEOUT_MS: u64 = 250;
+/// Busy timeout (ms) applied to EVERY connection — writer, durable, and read
+/// replica (P2). Brief, so a connection rides out a concurrent WAL checkpoint
+/// (which briefly locks the WAL) instead of immediately surfacing `SQLITE_BUSY`.
+/// Without it on the writer/durable connections, a checkpoint transient surfaced
+/// as a fail-closed error on the heartbeat/epoch path (a spurious self-demote
+/// signal). 250 ms is well inside the heartbeat interval, so durability is
+/// unaffected — the write either acquires the lock or fails as before, just
+/// after a short, bounded wait.
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 250;
 
 pub struct VerifierStore {
     /// Hot/read connection — `synchronous=NORMAL`. Carries the verdict-adjacent
@@ -404,6 +410,9 @@ impl VerifierStore {
         let conn = Connection::open(path)?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // P2: ride out a concurrent WAL checkpoint instead of surfacing SQLITE_BUSY
+        // as a fail-closed error (the read replica already does this).
+        conn.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS nodes (
@@ -706,6 +715,10 @@ impl VerifierStore {
         } else {
             let dc = Connection::open(path)?;
             dc.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+            // P2: same checkpoint-transient absorption on the durable (epoch CAS /
+            // nonce burn) connection — a SQLITE_BUSY here would fail an HA epoch or
+            // federation write that is otherwise valid.
+            dc.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
             Some(dc)
         };
 
@@ -741,7 +754,7 @@ impl VerifierStore {
         )?;
         // A read-only WAL reader can briefly contend with a checkpoint; a short
         // busy timeout rides it out rather than surfacing SQLITE_BUSY.
-        conn.busy_timeout(std::time::Duration::from_millis(READ_REPLICA_BUSY_TIMEOUT_MS))?;
+        conn.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
         Ok(Self {
             conn,
             durable_conn: None,
