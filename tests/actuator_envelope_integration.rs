@@ -630,3 +630,46 @@ async fn test_capture_emits_a_record_per_arm() {
     assert_eq!(rec2.safe_value, Some(35.0), "the correction Kirra imposed");
 }
 
+/// A3: the drop-on-full of the bounded audit + capture channels is now COUNTED,
+/// not just logged. With capacity-1 writers and no draining consumer, the first
+/// DenyBreach fills both channels and the second overflows them — bumping
+/// `audit_write_drops` and `capture_drops` while the verdict/response is unchanged
+/// (the drop is off the verdict path).
+#[tokio::test]
+async fn a3_drop_counters_count_audit_and_capture_overflow() {
+    use kirra_verifier::audit_writer::AuditWriteJob;
+    use kirra_verifier::capture::CaptureRecord;
+
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+
+    // Capacity-1, NO draining consumer → first record fills, second overflows.
+    // Keep the receivers alive so the channels report Full (not Closed).
+    let (cap_tx, _cap_rx) = tokio::sync::mpsc::channel::<CaptureRecord>(1);
+    let (aud_tx, _aud_rx) = tokio::sync::mpsc::channel::<AuditWriteJob>(1);
+    svc.app.install_capture_writer(cap_tx);
+    svc.app.install_audit_writer(aud_tx);
+
+    // DenyBreach (negative dt) drives BOTH the capture emit (every arm) and the
+    // audit emit (deny arm).
+    let deny = serde_json::to_vec(&ProposedVehicleCommand {
+        linear_velocity_mps: 5.0,
+        current_velocity_mps: 4.0,
+        delta_time_s: -0.1,
+        steering_angle_deg: 0.0,
+        current_steering_angle_deg: 0.0,
+    })
+    .unwrap();
+
+    // Request 1: both capacity-1 channels fill (no drop yet).
+    let s1 = send(build_actuator_app(Arc::clone(&svc)), Body::from(deny.clone())).await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST, "DenyBreach must 400");
+    assert_eq!(svc.app.capture_drops.load(Ordering::Relaxed), 0, "first capture record fits");
+    assert_eq!(svc.app.audit_write_drops.load(Ordering::Relaxed), 0, "first audit record fits");
+
+    // Request 2: both overflow → the A3 counters increment; response still a clean 400.
+    let s2 = send(build_actuator_app(Arc::clone(&svc)), Body::from(deny)).await;
+    assert_eq!(s2, StatusCode::BAD_REQUEST, "drop is off the verdict path — still 400");
+    assert_eq!(svc.app.capture_drops.load(Ordering::Relaxed), 1, "capture drop counted");
+    assert_eq!(svc.app.audit_write_drops.load(Ordering::Relaxed), 1, "audit drop counted");
+}
+

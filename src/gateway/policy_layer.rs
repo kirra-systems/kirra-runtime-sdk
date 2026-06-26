@@ -275,11 +275,13 @@ pub async fn enforce_actuator_safety_envelope(
         match tx.try_send(rec) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                svc.app.capture_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(
                     "capture queue FULL — dropping verdict record (best-effort; safety never waits)"
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                svc.app.capture_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!("capture writer task GONE — verdict record dropped");
             }
         }
@@ -366,12 +368,14 @@ pub async fn enforce_actuator_safety_envelope(
                 match tx.try_send(job) {
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        svc.app.audit_write_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             reason = %code,
                             "audit queue FULL — dropping kinematic DenyBreach record; sequence gap will be detectable in the chain"
                         );
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        svc.app.audit_write_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             reason = %code,
                             "audit writer task GONE — kinematic DenyBreach record dropped"
