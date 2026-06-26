@@ -32,6 +32,7 @@ pub mod startup_sentinel;
 pub mod attestation;
 pub mod verifier;
 pub mod verifier_store;
+pub mod store_handle;
 pub mod key_registry;
 pub mod posture_cache;
 pub mod posture_engine;

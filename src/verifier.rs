@@ -192,7 +192,10 @@ pub struct AppState {
     /// `pending_challenges` (INVARIANT #5): never persisted, TTL-bounded, single-use.
     pub pending_clearance_challenges: DashMap<String, ClearanceChallengeEntry>,
     /// Durable store for nodes and dependency graph (write-through, read on boot).
-    pub store: Arc<Mutex<VerifierStore>>,
+    /// Accessed through the [`StoreHandle`] seam (`with` / `call`) — never a raw
+    /// lock. Phase 2 of the DB-actor migration swaps the handle's internals for a
+    /// dedicated-thread connection owner.
+    pub store: crate::store_handle::StoreHandle,
     /// Runtime-mutable operational mode.
     /// true = Active (accepts mutations); false = PassiveStandby (read-only).
     /// LOCAL only — coordinates this process. Distributed split-brain is
@@ -298,7 +301,7 @@ impl AppState {
     pub fn new(store: VerifierStore, mode: VerifierOperationMode) -> Self {
         let (posture_tx, _) = broadcast::channel(POSTURE_BROADCAST_CAPACITY);
         // Pass B1 cache seed (S3 / #115): read the current durable epoch
-        // before wrapping the store in the Mutex so the gate has a fresh
+        // before moving the store into the handle so the gate has a fresh
         // value before any request lands. Unreadable → 0 (gate falls through).
         let initial_db_epoch = store.current_epoch().unwrap_or(0);
         Self {
@@ -306,7 +309,7 @@ impl AppState {
             dependency_graph: DashMap::new(),
             pending_challenges: DashMap::new(),
             pending_clearance_challenges: DashMap::new(),
-            store: Arc::new(Mutex::new(store)),
+            store: crate::store_handle::StoreHandle::new(store),
             mode_active: Arc::new(AtomicBool::new(mode == VerifierOperationMode::Active)),
             held_epoch: Arc::new(AtomicU64::new(0)),
             cached_db_epoch: Arc::new(AtomicU64::new(initial_db_epoch)),
@@ -378,9 +381,8 @@ impl AppState {
     // needing a typed reason (the detail is logged at the store layer).
     #[allow(clippy::result_unit_err)]
     pub fn persist_and_insert_node(&self, node: RegisteredNode) -> Result<(), ()> {
-        self.store.lock()
-            .map_err(|_| ())?
-            .save_node(&node)
+        self.store
+            .with(|store| store.save_node(&node))
             .map_err(|_| ())?;
         self.nodes.insert(node.node_id.clone(), node);
         Ok(())
@@ -415,9 +417,8 @@ impl AppState {
     /// Persist dependency list to SQLite then update in-memory graph (fail-closed).
     #[allow(clippy::result_unit_err)] // intentional fail-closed `()` error; see persist_and_insert_node.
     pub fn persist_and_insert_deps(&self, node_id: &str, deps: Vec<String>) -> Result<(), ()> {
-        self.store.lock()
-            .map_err(|_| ())?
-            .save_dependencies(node_id, &deps)
+        self.store
+            .with(|store| store.save_dependencies(node_id, &deps))
             .map_err(|_| ())?;
         self.dependency_graph.insert(node_id.to_string(), deps);
         Ok(())

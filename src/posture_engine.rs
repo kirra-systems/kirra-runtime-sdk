@@ -19,11 +19,9 @@ pub static POSTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Initialize the generation counter from the last persisted value.
 /// Call once at service startup after VerifierStore is opened.
 pub fn init_generation_from_store(app: &Arc<AppState>) {
-    if let Ok(store) = app.store.lock() {
-        let last = store.load_last_generation().unwrap_or(0);
-        if last > 0 {
-            POSTURE_GENERATION.store(last + 1, Ordering::SeqCst);
-        }
+    let last = app.store.with(|store| store.load_last_generation().unwrap_or(0));
+    if last > 0 {
+        POSTURE_GENERATION.store(last + 1, Ordering::SeqCst);
     }
 }
 
@@ -159,38 +157,28 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         "POSTURE_CACHE_REFRESHED"
     };
 
-    let audit_committed = match app.store.lock() {
-        Ok(mut store) => {
-            match store.save_posture_event_chained(
-                "posture_engine",
-                event_type,
-                &audit_payload.to_string(),
-                Some("Fleet posture recomputed from DAG traversal"),
-                ts,
-            ) {
-                Ok(()) => {
-                    let _ = store.save_last_generation(generation);
-                    true
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error      = %e,
-                        generation = generation,
-                        "AUDIT-CHAIN WRITE FAILED for posture transition — suppressing cache/broadcast (fail closed)"
-                    );
-                    false
-                }
+    let audit_committed = app.store.with(|store| {
+        match store.save_posture_event_chained(
+            "posture_engine",
+            event_type,
+            &audit_payload.to_string(),
+            Some("Fleet posture recomputed from DAG traversal"),
+            ts,
+        ) {
+            Ok(()) => {
+                let _ = store.save_last_generation(generation);
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    error      = %e,
+                    generation = generation,
+                    "AUDIT-CHAIN WRITE FAILED for posture transition — suppressing cache/broadcast (fail closed)"
+                );
+                false
             }
         }
-        Err(e) => {
-            tracing::error!(
-                error      = %e,
-                generation = generation,
-                "store lock poisoned — posture audit not written; suppressing cache/broadcast (fail closed)"
-            );
-            false
-        }
-    };
+    });
 
     if !audit_committed {
         return;
@@ -732,8 +720,9 @@ mod posture_engine_tests {
         recalculate_and_broadcast(&app, &cache);
         assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded));
 
-        let store = app.store.lock().unwrap();
-        let events = store.load_all_posture_events().expect("load events");
+        let events = app
+            .store
+            .with(|store| store.load_all_posture_events().expect("load events"));
         assert!(
             events.iter().any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
             "the flood escalation must emit the existing posture-transition audit event"

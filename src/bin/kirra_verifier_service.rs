@@ -510,29 +510,13 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.health_check() {
-            Ok(()) => (StatusCode::OK, Json(HealthResponse { status: "ready".to_string() }))
-                .into_response(),
-            Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
-                       Json(HealthResponse { status: "db_unavailable".to_string() }))
-                .into_response(),
-        },
+    match svc.app.store.with(|store| store.health_check()) {
+        Ok(()) => (StatusCode::OK, Json(HealthResponse { status: "ready".to_string() }))
+            .into_response(),
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
-                   Json(HealthResponse { status: "store_lock_poisoned".to_string() }))
+                   Json(HealthResponse { status: "db_unavailable".to_string() }))
             .into_response(),
     }
-}
-
-/// A store offload could not run to completion (distinct from a DB-level error,
-/// which the closure returns itself). Both variants are fail-closed and map to a
-/// 500 by callers — exactly like the prior inline `store.lock()` `Err` arm.
-#[derive(Debug)]
-enum StoreOffloadError {
-    /// The store mutex was poisoned (a prior holder panicked).
-    LockPoisoned,
-    /// The `spawn_blocking` task panicked / was cancelled.
-    TaskFailed,
 }
 
 /// Outcome of the offloaded federation commit (`submit_federated_report`), mapped
@@ -549,40 +533,12 @@ enum FedCommitOutcome {
     Fenced(String),
 }
 
-/// Run a blocking `VerifierStore` operation OFF the async worker threads.
-///
-/// Long-held SQLite ops (full backup export, audit-chain verification, the
-/// federation commit transaction) otherwise occupy a tokio worker for their whole
-/// duration while holding the global store mutex on it. Cloning the store `Arc`
-/// into `tokio::task::spawn_blocking` and acquiring the lock there keeps the async
-/// runtime responsive — the same offload `audit_writer::spawn_audit_writer` already
-/// uses for the single-writer audit path. `VerifierStore` is `Send`, so this is
-/// sound. The `MutexGuard` derefs to `&mut VerifierStore`, so `f` may call both
-/// `&self` reads and `&mut self` writes. Fail-closed: a poisoned lock or a panicked
-/// task surfaces as `Err`, never a silent success.
-async fn with_store_blocking<F, R>(app: &Arc<AppState>, f: F) -> Result<R, StoreOffloadError>
-where
-    F: FnOnce(&mut VerifierStore) -> R + Send + 'static,
-    R: Send + 'static,
-{
-    let store = Arc::clone(&app.store);
-    match tokio::task::spawn_blocking(move || match store.lock() {
-        Ok(mut guard) => Ok(f(&mut guard)),
-        Err(_) => Err(StoreOffloadError::LockPoisoned),
-    })
-    .await
-    {
-        Ok(inner) => inner,
-        Err(_) => Err(StoreOffloadError::TaskFailed),
-    }
-}
-
 async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     let exported_at_ms = now_ms();
     // Three full-table loads (nodes + dependencies + all posture events) under one
     // lock — the heaviest read. Run it off the worker pool so a large dump cannot
     // pin a tokio worker (and hold the store mutex on it) for its whole duration.
-    let result = with_store_blocking(&svc.app, move |store| {
+    let result = svc.app.store.call(move |store| {
         let nodes = store.load_nodes().ok()?;
         let dependencies = store.load_dependencies().ok()?;
         let posture_events = store.load_all_posture_events().ok()?;
@@ -623,12 +579,10 @@ async fn register_node(
     // (fail-closed: no window where the requirement silently does not apply). A
     // store error here fails the whole registration — the node is not inserted.
     {
-        let store = match svc.app.store.lock() {
-            Ok(s) => s,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                              Json(json!({ "error": "store lock poisoned" }))).into_response(),
-        };
-        if store.set_node_attestation_policy(&req.node_id, req.require_tpm_quote).is_err() {
+        let policy_err = svc.app.store.with(|store| {
+            store.set_node_attestation_policy(&req.node_id, req.require_tpm_quote).is_err()
+        });
+        if policy_err {
             return (StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "failed to persist attestation policy" }))).into_response();
         }
@@ -727,14 +681,10 @@ async fn verify_attestation(
     // Fail-closed: a policy-lookup error, a required-but-absent quote, an absent
     // expectation to check against, or an invalid quote all REJECT. Runs BEFORE
     // `consume_challenge`, so a quote failure does NOT burn the nonce (retry).
-    let require_quote = match svc.app.store.lock() {
-        Ok(store) => match store.node_requires_tpm_quote(&req.node_id) {
-            Ok(v) => v,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                              Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
-        },
+    let require_quote = match svc.app.store.with(|store| store.node_requires_tpm_quote(&req.node_id)) {
+        Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                          Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
     };
     match (&req.tpm_quote, require_quote) {
         (Some(quote), _) => {
@@ -811,14 +761,14 @@ async fn verify_attestation(
 
     let posture = svc.app.calculate_posture(&req.node_id);
     if let Ok(posture_json) = serde_json::to_string(&posture) {
-        if let Ok(mut store) = svc.app.store.lock() {
+        svc.app.store.with(|store| {
             if let Err(e) = store.save_posture_event_chained(
                 &req.node_id, "ATTESTATION_TRUSTED", &posture_json, None, now,
             ) {
                 tracing::error!(error=%e, node_id=%req.node_id,
                     "AUDIT-CHAIN WRITE FAILED for ATTESTATION_TRUSTED — event missing from tamper-evident log");
             }
-        }
+        });
     }
     emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.node_id.clone()));
     enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -880,29 +830,25 @@ struct AvSubsystemView {
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,
 /// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
 async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_av_subsystems() {
-            Ok(rows) => {
-                let subsystems: Vec<AvSubsystemView> = rows
-                    .into_iter()
-                    .map(|r| AvSubsystemView {
-                        node_id: r.node_id,
-                        subsystem_type: r.subsystem_type,
-                        hardware_id: r.hardware_id,
-                        confidence_floor: r.confidence_floor,
-                        last_telemetry_ms: r.last_telemetry_ms,
-                        recovery_streak_count: r.recovery_streak_count,
-                        recovery_streak_start_ms: r.recovery_streak_start_ms,
-                    })
-                    .collect();
-                let total = subsystems.len();
-                Json(json!({ "subsystems": subsystems, "total": total })).into_response()
-            }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to load av subsystems" }))).into_response(),
-        },
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    match svc.app.store.with(|store| store.load_av_subsystems()) {
+        Ok(rows) => {
+            let subsystems: Vec<AvSubsystemView> = rows
+                .into_iter()
+                .map(|r| AvSubsystemView {
+                    node_id: r.node_id,
+                    subsystem_type: r.subsystem_type,
+                    hardware_id: r.hardware_id,
+                    confidence_floor: r.confidence_floor,
+                    last_telemetry_ms: r.last_telemetry_ms,
+                    recovery_streak_count: r.recovery_streak_count,
+                    recovery_streak_start_ms: r.recovery_streak_start_ms,
+                })
+                .collect();
+            let total = subsystems.len();
+            Json(json!({ "subsystems": subsystems, "total": total })).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "error": "failed to load av subsystems" }))).into_response(),
     }
 }
 
@@ -918,32 +864,28 @@ struct OperatorView {
 /// Read-only listing of registered operators. Admin-gated. Exposes only the
 /// public-key FINGERPRINT (never the PEM), matching the write-side convention. (#385)
 async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_operators() {
-            Ok(rows) => {
-                let operators: Vec<OperatorView> = rows
-                    .into_iter()
-                    .map(|r| {
-                        let active = r.is_active();
-                        OperatorView {
-                            operator_key_fingerprint:
-                                kirra_verifier::attestation::operator_key_fingerprint(&r.pubkey_pem)
-                                    .unwrap_or_else(|| "unparseable".to_string()),
-                            operator_id: r.operator_id,
-                            registered_at_ms: r.registered_at_ms,
-                            revoked_at_ms: r.revoked_at_ms,
-                            active,
-                        }
-                    })
-                    .collect();
-                let total = operators.len();
-                Json(json!({ "operators": operators, "total": total })).into_response()
-            }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to load operators" }))).into_response(),
-        },
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    match svc.app.store.with(|store| store.load_operators()) {
+        Ok(rows) => {
+            let operators: Vec<OperatorView> = rows
+                .into_iter()
+                .map(|r| {
+                    let active = r.is_active();
+                    OperatorView {
+                        operator_key_fingerprint:
+                            kirra_verifier::attestation::operator_key_fingerprint(&r.pubkey_pem)
+                                .unwrap_or_else(|| "unparseable".to_string()),
+                        operator_id: r.operator_id,
+                        registered_at_ms: r.registered_at_ms,
+                        revoked_at_ms: r.revoked_at_ms,
+                        active,
+                    }
+                })
+                .collect();
+            let total = operators.len();
+            Json(json!({ "operators": operators, "total": total })).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "error": "failed to load operators" }))).into_response(),
     }
 }
 
@@ -963,14 +905,14 @@ async fn register_dependencies(
     let posture = svc.app.calculate_posture(&req.node_id);
     let now = now_ms();
     if let Ok(posture_json) = serde_json::to_string(&posture) {
-        if let Ok(mut store) = svc.app.store.lock() {
+        svc.app.store.with(|store| {
             if let Err(e) = store.save_posture_event_chained(
                 &req.node_id, "DEPENDENCY_UPDATED", &posture_json, None, now,
             ) {
                 tracing::error!(error=%e, node_id=%req.node_id,
                     "AUDIT-CHAIN WRITE FAILED for DEPENDENCY_UPDATED — event missing from tamper-evident log");
             }
-        }
+        });
     }
     emit_posture_event(&svc.app, "DEPENDENCY_GRAPH_MUTATED", Some(req.node_id.clone()));
     enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged);
@@ -982,14 +924,10 @@ async fn get_node_history(
     State(svc): State<Arc<ServiceState>>,
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_node_history(&node_id) {
-            Ok(history) => Json(json!({ "node_id": node_id, "history": history })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to load history" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.load_node_history(&node_id)) {
+        Ok(history) => Json(json!({ "node_id": node_id, "history": history })).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "failed to load history" }))).into_response(),
     }
 }
 
@@ -998,21 +936,17 @@ async fn get_node_flap_status(
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
     let five_minutes_ago = now_ms().saturating_sub(300_000);
-    match svc.app.store.lock() {
-        Ok(store) => match store.count_recent_posture_events(&node_id, five_minutes_ago) {
-            Ok(count) => {
-                let status = FlapStatus {
-                    node_id: node_id.clone(),
-                    flapping: count >= 3,
-                    event_count_5m: count,
-                };
-                Json(status).into_response()
-            }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to query events" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.count_recent_posture_events(&node_id, five_minutes_ago)) {
+        Ok(count) => {
+            let status = FlapStatus {
+                node_id: node_id.clone(),
+                flapping: count >= 3,
+                event_count_5m: count,
+            };
+            Json(status).into_response()
+        }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "failed to query events" }))).into_response(),
     }
 }
 
@@ -1023,7 +957,7 @@ async fn verify_audit_chain(
     // with a per-row Ed25519 verification is the heaviest read-side op — run it off
     // the worker pool so it can't pin a tokio worker (and hold the store mutex).
     let vk = svc.audit_verifying_key;
-    let result = with_store_blocking(&svc.app, move |store| {
+    let result = svc.app.store.call(move |store| {
         store.verify_audit_chain_full(vk.as_ref())
     })
     .await;
@@ -1065,14 +999,10 @@ async fn handle_audit_export(
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
     let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_audit_chain_page(limit, offset, vk) {
-            Ok(page) => Json(page).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "export query failed" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.load_audit_chain_page(limit, offset, vk)) {
+        Ok(page) => Json(page).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "export query failed" }))).into_response(),
     }
 }
 
@@ -1111,30 +1041,32 @@ async fn handle_audit_rotate_key(
     // #79: pass our held fencing token so the durable write re-checks it INSIDE
     // the transaction, closing the gate→commit TOCTOU.
     let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-    match svc.app.store.lock() {
-        Ok(mut store) => match store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch) {
-            Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
-            Err(DurableWriteError::Fenced(reason)) => {
-                // Superseded between the request-path gate and this commit.
-                // Mirror the gate: self-demote and reject fail-closed (no write
-                // landed). Subsequent mutations hit the standby check above.
-                drop(store);
-                svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                tracing::error!(
-                    path = "/system/audit/rotate-signing-key",
-                    fence = ?reason,
-                    "FENCED at top-tier write (in-transaction epoch re-check) — self-demoting to PassiveStandby and rejecting"
-                );
-                (StatusCode::SERVICE_UNAVAILABLE,
-                 Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
-            }
-            // NonceReplay cannot arise here (key rotation never touches the nonce
-            // table); fold it into the generic server-error arm for exhaustiveness.
-            Err(DurableWriteError::Db(_) | DurableWriteError::NonceReplay) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to record key rotation" }))).into_response(),
-        },
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    // The mutation runs under one acquisition; the closure returns the
+    // record_key_rotation result. The Fenced self-demote (a mode_active store)
+    // happens OUTSIDE the closure — the lock is already released by then,
+    // matching the prior `drop(store)`-before-self-demote ordering (Rule 4).
+    let rotation = svc.app.store.with(|store| {
+        store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch)
+    });
+    match rotation {
+        Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
+        Err(DurableWriteError::Fenced(reason)) => {
+            // Superseded between the request-path gate and this commit.
+            // Mirror the gate: self-demote and reject fail-closed (no write
+            // landed). Subsequent mutations hit the standby check above.
+            svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                path = "/system/audit/rotate-signing-key",
+                fence = ?reason,
+                "FENCED at top-tier write (in-transaction epoch re-check) — self-demoting to PassiveStandby and rejecting"
+            );
+            (StatusCode::SERVICE_UNAVAILABLE,
+             Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
+        }
+        // NonceReplay cannot arise here (key rotation never touches the nonce
+        // table); fold it into the generic server-error arm for exhaustiveness.
+        Err(DurableWriteError::Db(_) | DurableWriteError::NonceReplay) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "error": "failed to record key rotation" }))).into_response(),
     }
 }
 
@@ -1145,13 +1077,13 @@ async fn evaluate_action_filter(
     let claim = match body {
         Ok(Json(c)) => c,
         Err(rejection) => {
-            if let Ok(mut store) = svc.app.store.lock() {
+            svc.app.store.with(|store| {
                 let _ = store.save_posture_event_chained(
                     "action_filter", "ACTION_FILTER_MALFORMED_REQUEST",
                     &json!({ "error": rejection.body_text() }).to_string(),
                     Some("malformed request body"), now_ms(),
                 );
-            }
+            });
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "MALFORMED_REQUEST",
                 "detail": rejection.body_text(),
@@ -1187,12 +1119,12 @@ async fn evaluate_action_filter(
         "posture": posture_str,
         "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
     });
-    if let Ok(mut store) = svc.app.store.lock() {
+    svc.app.store.with(|store| {
         let _ = store.save_posture_event_chained(
             "action_filter", audit_event_type,
             &event.to_string(), None, now_ms(),
         );
-    }
+    });
 
     tracing::info!(
         action_type = %claim.action_type,
@@ -1244,29 +1176,29 @@ fn enforce_industrial_replay(
         now,
         kirra_verifier::protocol_adapter::INDUSTRIAL_FRESHNESS_WINDOW_MS,
     );
-    let mut store = match svc.app.store.lock() {
-        Ok(s) => s,
-        Err(_) => return Some("INDUSTRIAL_REPLAY_STORE_POISONED"),
-    };
-    let reason = match fresh {
-        Some(r) => Some(r),
-        None => match store.industrial_seq_check_and_advance(source_id, sequence, now) {
-            Ok(true) => None,
-            Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
-            Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
-        },
-    };
-    if let Some(r) = reason {
-        let payload = json!({
-            "protocol": protocol, "source_id": source_id,
-            "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
-        });
-        let _ = store.save_posture_event_chained(
-            "industrial_replay_guard", "INDUSTRIAL_MESSAGE_REJECTED",
-            &payload.to_string(), Some(r), now,
-        );
-    }
-    reason
+    // The seq check-and-advance and the rejection audit write share ONE store
+    // acquisition (Rule 5: keep the read-then-write atomic).
+    svc.app.store.with(|store| {
+        let reason = match fresh {
+            Some(r) => Some(r),
+            None => match store.industrial_seq_check_and_advance(source_id, sequence, now) {
+                Ok(true) => None,
+                Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
+                Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
+            },
+        };
+        if let Some(r) = reason {
+            let payload = json!({
+                "protocol": protocol, "source_id": source_id,
+                "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
+            });
+            let _ = store.save_posture_event_chained(
+                "industrial_replay_guard", "INDUSTRIAL_MESSAGE_REJECTED",
+                &payload.to_string(), Some(r), now,
+            );
+        }
+        reason
+    })
 }
 
 /// Standard rejection response for a replay/freshness denial (200 + allowed:false,
@@ -1332,24 +1264,17 @@ async fn evaluate_industrial_adapter(
                 } else {
                     "INDUSTRIAL_ACTION_DENIED"
                 };
-                let audit_ok = match svc.app.store.lock() {
-                    Ok(mut store) => match store.save_posture_event_chained(
-                        "industrial_adapter", event_type,
-                        &audit.to_string(), None, now_ms(),
-                    ) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::error!(error = %e, event_type = event_type,
-                                "AUDIT-CHAIN WRITE FAILED for industrial adapter event — event missing from tamper-evident log");
-                            false
-                        }
-                    },
-                    Err(_) => {
-                        tracing::error!(event_type = event_type,
-                            "industrial adapter: store lock poisoned — audit write SKIPPED for this event");
+                let audit_ok = svc.app.store.with(|store| match store.save_posture_event_chained(
+                    "industrial_adapter", event_type,
+                    &audit.to_string(), None, now_ms(),
+                ) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, event_type = event_type,
+                            "AUDIT-CHAIN WRITE FAILED for industrial adapter event — event missing from tamper-evident log");
                         false
                     }
-                };
+                });
 
                 // TR-012a: a broadcast whose mandatory audit could not be
                 // written is BLOCKED (fail-closed); non-broadcast audit failure
@@ -1413,29 +1338,22 @@ async fn evaluate_ethernet_ip_adapter(
     let audit_ref = now_ms().to_string();
 
     if !allowed {
-        match svc.app.store.lock() {
-            Ok(mut store) => {
-                if let Err(e) = store.save_posture_event_chained(
-                    "ethernet_ip_adapter", "INDUSTRIAL_ACTION_DENIED",
-                    &json!({
-                        "service_name": eval.service_name,
-                        "safety_relevant": eval.safety_relevant,
-                        "posture": posture_str,
-                        "denial_reason": denial_reason,
-                        "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-                    }).to_string(),
-                    None, now_ms(),
-                ) {
-                    tracing::error!(error = %e, event_type = "INDUSTRIAL_ACTION_DENIED",
-                        "AUDIT-CHAIN WRITE FAILED for ethernet_ip adapter event — event missing from tamper-evident log");
-                }
+        svc.app.store.with(|store| {
+            if let Err(e) = store.save_posture_event_chained(
+                "ethernet_ip_adapter", "INDUSTRIAL_ACTION_DENIED",
+                &json!({
+                    "service_name": eval.service_name,
+                    "safety_relevant": eval.safety_relevant,
+                    "posture": posture_str,
+                    "denial_reason": denial_reason,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
+                }).to_string(),
+                None, now_ms(),
+            ) {
+                tracing::error!(error = %e, event_type = "INDUSTRIAL_ACTION_DENIED",
+                    "AUDIT-CHAIN WRITE FAILED for ethernet_ip adapter event — event missing from tamper-evident log");
             }
-            Err(_) => {
-                tracing::error!(
-                    "ethernet_ip adapter: store lock poisoned — audit write SKIPPED for this denial"
-                );
-            }
-        }
+        });
     }
 
     Json(json!({
@@ -1550,41 +1468,34 @@ async fn evaluate_canopen_adapter(
     }
 
     if !allowed || eval.triggers_recalculation {
-        match svc.app.store.lock() {
-            Ok(mut store) => {
-                let event_type = if eval.triggers_recalculation {
-                    if attributed_fleet_node.is_some() {
-                        "CANOPEN_NMT_NODE_OFFLINE"
-                    } else {
-                        "CANOPEN_NMT_OFFLINE_UNATTRIBUTED"
-                    }
+        svc.app.store.with(|store| {
+            let event_type = if eval.triggers_recalculation {
+                if attributed_fleet_node.is_some() {
+                    "CANOPEN_NMT_NODE_OFFLINE"
                 } else {
-                    "INDUSTRIAL_ACTION_DENIED"
-                };
-                if let Err(e) = store.save_posture_event_chained(
-                    "canopen_adapter", event_type,
-                    &json!({
-                        "node_id": eval.node_id,
-                        "fleet_node_id": attributed_fleet_node.clone(),
-                        "node_offline_attributed": attributed_fleet_node.is_some(),
-                        "message_type": format!("{:?}", eval.message_type),
-                        "is_emergency": eval.is_emergency,
-                        "triggers_recalculation": eval.triggers_recalculation,
-                        "posture": posture_str,
-                        "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-                    }).to_string(),
-                    None, now_ms(),
-                ) {
-                    tracing::error!(error = %e, event_type = event_type,
-                        "AUDIT-CHAIN WRITE FAILED for canopen adapter event — event missing from tamper-evident log");
+                    "CANOPEN_NMT_OFFLINE_UNATTRIBUTED"
                 }
+            } else {
+                "INDUSTRIAL_ACTION_DENIED"
+            };
+            if let Err(e) = store.save_posture_event_chained(
+                "canopen_adapter", event_type,
+                &json!({
+                    "node_id": eval.node_id,
+                    "fleet_node_id": attributed_fleet_node.clone(),
+                    "node_offline_attributed": attributed_fleet_node.is_some(),
+                    "message_type": format!("{:?}", eval.message_type),
+                    "is_emergency": eval.is_emergency,
+                    "triggers_recalculation": eval.triggers_recalculation,
+                    "posture": posture_str,
+                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
+                }).to_string(),
+                None, now_ms(),
+            ) {
+                tracing::error!(error = %e, event_type = event_type,
+                    "AUDIT-CHAIN WRITE FAILED for canopen adapter event — event missing from tamper-evident log");
             }
-            Err(_) => {
-                tracing::error!(
-                    "canopen adapter: store lock poisoned — audit write SKIPPED for this event"
-                );
-            }
-        }
+        });
     }
 
     Json(json!({
@@ -1687,23 +1598,16 @@ async fn evaluate_dnp3_adapter(
             "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
         })
         .to_string();
-        let audit_ok = match svc.app.store.lock() {
-            Ok(mut store) => match store.save_posture_event_chained(
-                "dnp3_adapter", event_type, &audit_payload, None, now_ms(),
-            ) {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::error!(error = %e, event_type = event_type,
-                        "AUDIT-CHAIN WRITE FAILED for dnp3 adapter event — event missing from tamper-evident log");
-                    false
-                }
-            },
-            Err(_) => {
-                tracing::error!(event_type = event_type,
-                    "dnp3 adapter: store lock poisoned — audit write SKIPPED for this event");
+        let audit_ok = svc.app.store.with(|store| match store.save_posture_event_chained(
+            "dnp3_adapter", event_type, &audit_payload, None, now_ms(),
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(error = %e, event_type = event_type,
+                    "AUDIT-CHAIN WRITE FAILED for dnp3 adapter event — event missing from tamper-evident log");
                 false
             }
-        };
+        });
 
         // TR-012a: a BROADCAST whose mandatory audit could not be written is
         // BLOCKED (fail-closed). Unicast audit failure is non-fatal (TR-012b).
@@ -1740,17 +1644,13 @@ async fn register_federation_controller(
         return (StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "controller_id and public_key_b64 are required" }))).into_response();
     }
-    match svc.app.store.lock() {
-        Ok(store) => match store.save_trusted_federation_controller(
-            &req.controller_id, &req.public_key_b64, now_ms(),
-        ) {
-            Ok(()) => (StatusCode::CREATED,
-                       Json(json!({ "controller_id": req.controller_id, "registered": true }))).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to register controller" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.save_trusted_federation_controller(
+        &req.controller_id, &req.public_key_b64, now_ms(),
+    )) {
+        Ok(()) => (StatusCode::CREATED,
+                   Json(json!({ "controller_id": req.controller_id, "registered": true }))).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "failed to register controller" }))).into_response(),
     }
 }
 
@@ -1769,20 +1669,17 @@ async fn register_node_identity(
                 Json(json!({ "error": "node_id and ak_public_fingerprint_hex are required" }))).into_response();
     }
     let now = now_ms();
-    match svc.app.store.lock() {
-        Ok(mut store) => match store.register_attestation_identity(
-            &req.node_id, &req.ak_public_fingerprint_hex, "admin", now,
-        ) {
-            Ok(()) => {
-                emit_posture_event(&svc.app, "NODE_IDENTITY_PROVISIONED", Some(req.node_id.clone()));
-                (StatusCode::CREATED,
-                 Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
-            }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to register identity" }))).into_response(),
-        },
+    let registered = svc.app.store.with(|store| store.register_attestation_identity(
+        &req.node_id, &req.ak_public_fingerprint_hex, "admin", now,
+    ));
+    match registered {
+        Ok(()) => {
+            emit_posture_event(&svc.app, "NODE_IDENTITY_PROVISIONED", Some(req.node_id.clone()));
+            (StatusCode::CREATED,
+             Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
+        }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "failed to register identity" }))).into_response(),
     }
 }
 
@@ -1813,7 +1710,7 @@ async fn submit_federated_report(
     // the lock, as before) and the durable commit re-checks it INSIDE its
     // transaction, so the slightly larger read→lock window remains harmless. All
     // rejection-path audit writes stay inside the locked closure (same atomicity).
-    let outcome = with_store_blocking(&svc.app, move |store| {
+    let outcome = svc.app.store.call(move |store| {
         let pk_b64 = match store.load_trusted_federation_controller_key(&report.source_controller_id) {
             Ok(Some(key)) => key,
             Ok(None) => {
@@ -1907,27 +1804,25 @@ async fn get_federated_reports(
     State(svc): State<Arc<ServiceState>>,
     Path(asset_id): Path<String>,
 ) -> impl IntoResponse {
-    let store = match svc.app.store.lock() {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    };
-
-    let reports = match store.load_federated_reports_for_asset(&asset_id) {
-        Ok(r) => r,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "failed to load reports" }))).into_response(),
-    };
-
-    // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
-    // reports into the single authoritative posture (higher generation wins;
-    // ties fall back to issued_at_ms, then fail closed to the more restrictive
-    // posture). `null` when no reports exist for the asset. This is a read-time
-    // view only — it does NOT feed the local posture engine that gates actuators.
-    let authoritative = match store.load_federated_report_v2s_for_asset(&asset_id) {
-        Ok(v2s) => authoritative_posture(&v2s),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "failed to reconcile reports" }))).into_response(),
+    // Both reads share ONE acquisition (Rule 5). The closure returns a Result so
+    // the per-read error responses are produced OUTSIDE the closure (Rule 4).
+    let loaded = svc.app.store.with(|store| {
+        let reports = store.load_federated_reports_for_asset(&asset_id)
+            .map_err(|_| "failed to load reports")?;
+        // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
+        // reports into the single authoritative posture (higher generation wins;
+        // ties fall back to issued_at_ms, then fail closed to the more restrictive
+        // posture). `null` when no reports exist for the asset. This is a read-time
+        // view only — it does NOT feed the local posture engine that gates actuators.
+        let authoritative = store.load_federated_report_v2s_for_asset(&asset_id)
+            .map(|v2s| authoritative_posture(&v2s))
+            .map_err(|_| "failed to reconcile reports")?;
+        Ok::<_, &'static str>((reports, authoritative))
+    });
+    let (reports, authoritative) = match loaded {
+        Ok(pair) => pair,
+        Err(msg) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": msg }))).into_response(),
     };
 
     Json(json!({
@@ -1970,7 +1865,7 @@ async fn handle_actuator_motion_command(
         "delta_time_s":                 cmd.delta_time_s,
         "admitted_at_ms":               now,
     });
-    if let Ok(mut store) = svc.app.store.lock() {
+    svc.app.store.with(|store| {
         if let Err(e) = store.save_posture_event_chained(
             "actuator_motion", "MOTION_COMMAND_ADMITTED",
             &audit.to_string(), None, now,
@@ -1978,7 +1873,7 @@ async fn handle_actuator_motion_command(
             tracing::error!(error=%e,
                 "AUDIT-CHAIN WRITE FAILED for MOTION_COMMAND_ADMITTED — event missing from tamper-evident log");
         }
-    }
+    });
 
     // Response speaks the ROS interceptor's schema (action / enforced_*) AND
     // the legacy keys (now accurate). See `EnforcementOutcome::response_body`.
@@ -2000,22 +1895,20 @@ async fn handle_sensor_fault_report(
 
     let now = now_ms();
 
-    let confidence_floor = match svc.app.store.lock() {
-        Ok(store) => store.load_av_confidence_floor(&req.source_node_id)
+    let confidence_floor = svc.app.store.with(|store| {
+        store.load_av_confidence_floor(&req.source_node_id)
             .unwrap_or(None)
-            .unwrap_or(0.70),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    };
+            .unwrap_or(0.70)
+    });
 
     let is_degraded = req.hardware_fault_detected || req.confidence_score < confidence_floor;
 
     if is_degraded {
         let reason = if req.hardware_fault_detected { "hardware_fault" } else { "low_confidence" };
 
-        if let Ok(store) = svc.app.store.lock() {
+        svc.app.store.with(|store| {
             let _ = store.reset_recovery_streak(&req.source_node_id, now);
-        }
+        });
 
         let updated = match svc.app.nodes.get(&req.source_node_id) {
             Some(n) => RegisteredNode {
@@ -2043,7 +1936,7 @@ async fn handle_sensor_fault_report(
             "hardware_fault_detected": req.hardware_fault_detected,
             "reason":                  reason,
         });
-        if let Ok(mut store) = svc.app.store.lock() {
+        svc.app.store.with(|store| {
             if let Err(e) = store.save_posture_event_chained(
                 &req.source_node_id, "SENSOR_HEALTH_REPORT_FAULT",
                 &event.to_string(), None, now,
@@ -2051,7 +1944,7 @@ async fn handle_sensor_fault_report(
                 tracing::error!(error=%e, node_id=%req.source_node_id,
                     "AUDIT-CHAIN WRITE FAILED for SENSOR_HEALTH_REPORT_FAULT — event missing from tamper-evident log");
             }
-        }
+        });
 
         emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
         enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -2071,9 +1964,9 @@ async fn handle_sensor_fault_report(
         .unwrap_or(false);
 
     if !currently_untrusted {
-        if let Ok(store) = svc.app.store.lock() {
+        svc.app.store.with(|store| {
             let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
-        }
+        });
         return (StatusCode::OK, Json(json!({
             "source_node_id": req.source_node_id,
             "accepted": true,
@@ -2081,15 +1974,13 @@ async fn handle_sensor_fault_report(
         }))).into_response();
     }
 
-    let decision = match svc.app.store.lock() {
-        // `&*store` dereferences the MutexGuard so the generic
+    let decision = svc.app.store.with(|store| {
+        // `&*store` dereferences to `&VerifierStore` so the generic
         // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
-        // resolves to `&VerifierStore` (S3 / #115 — trait seam, behavior
-        // unchanged: the trait impl delegates verbatim).
-        Ok(store) => evaluate_recovery_report(&*store, &req.source_node_id, now),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    };
+        // resolves correctly (S3 / #115 — trait seam, behavior unchanged:
+        // the trait impl delegates verbatim).
+        evaluate_recovery_report(&*store, &req.source_node_id, now)
+    });
 
     match &decision {
         HysteresisDecision::RecoveryConfirmed { streak } => {
@@ -2113,7 +2004,7 @@ async fn handle_sensor_fault_report(
                         Json(json!({ "error": "failed to persist node state" }))).into_response();
             }
 
-            if let Ok(mut store) = svc.app.store.lock() {
+            svc.app.store.with(|store| {
                 let _ = store.reset_recovery_streak(&req.source_node_id, now);
                 let event = json!({
                     "source_node_id": req.source_node_id,
@@ -2126,7 +2017,7 @@ async fn handle_sensor_fault_report(
                     tracing::error!(error=%e, node_id=%req.source_node_id,
                         "AUDIT-CHAIN WRITE FAILED for SENSOR_RECOVERY_CONFIRMED — event missing from tamper-evident log");
                 }
-            }
+            });
 
             emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
             enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -2136,9 +2027,9 @@ async fn handle_sensor_fault_report(
         }
         HysteresisDecision::StreakBuilding { .. } | HysteresisDecision::WindowExpired { .. } => {}
         HysteresisDecision::NotApplicable => {
-            if let Ok(store) = svc.app.store.lock() {
+            svc.app.store.with(|store| {
                 let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
-            }
+            });
         }
     }
 
@@ -2166,32 +2057,28 @@ async fn handle_register_av_asset(
     let now = now_ms();
     let floor = req.confidence_floor.unwrap_or(0.70);
 
-    match svc.app.store.lock() {
-        Ok(mut store) => {
-            if let Err(e) = store.register_av_subsystem_meta(
-                &req.node_id, &req.subsystem_type, &req.hardware_id, floor, now,
-            ) {
-                tracing::warn!(
-                    error   = %e,
-                    node_id = %req.node_id,
-                    "Failed to register av_subsystem_meta"
-                );
-            }
-            let meta = json!({
-                "subsystem_type":   req.subsystem_type,
-                "hardware_id":      req.hardware_id,
-                "confidence_floor": floor,
-            });
-            if let Err(e) = store.save_posture_event_chained(
-                &req.node_id, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
-            ) {
-                tracing::error!(error=%e, node_id=%req.node_id,
-                    "AUDIT-CHAIN WRITE FAILED for AV_ASSET_REGISTERED — event missing from tamper-evident log");
-            }
+    svc.app.store.with(|store| {
+        if let Err(e) = store.register_av_subsystem_meta(
+            &req.node_id, &req.subsystem_type, &req.hardware_id, floor, now,
+        ) {
+            tracing::warn!(
+                error   = %e,
+                node_id = %req.node_id,
+                "Failed to register av_subsystem_meta"
+            );
         }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    }
+        let meta = json!({
+            "subsystem_type":   req.subsystem_type,
+            "hardware_id":      req.hardware_id,
+            "confidence_floor": floor,
+        });
+        if let Err(e) = store.save_posture_event_chained(
+            &req.node_id, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
+        ) {
+            tracing::error!(error=%e, node_id=%req.node_id,
+                "AUDIT-CHAIN WRITE FAILED for AV_ASSET_REGISTERED — event missing from tamper-evident log");
+        }
+    });
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
 }
@@ -2231,9 +2118,9 @@ async fn handle_register_fabric_asset(
     // #88: if this IS the configured local asset, override the Degraded seed
     // with fail-closed LockedOut (the feed lifts it); a no-op for peers.
     seed_local_asset_lockedout(&svc, &req.asset_id);
-    if let Ok(store) = svc.app.store.lock() {
+    svc.app.store.with(|store| {
         let _ = store.save_fabric_asset(&asset);
-    }
+    });
     (StatusCode::CREATED, Json(json!({"asset_id": req.asset_id, "registered": true}))).into_response()
 }
 
@@ -2340,13 +2227,13 @@ async fn handle_fabric_command(
                         vec![],
                         fabric_generation,
                     );
-                    if let Ok(mut store) = svc.app.store.lock() {
+                    svc.app.store.with(|store| {
                         let _ = store.save_posture_event_chained(
                             &asset_id, "FABRIC_COMMAND_DENIED",
                             &json!({"asset_id": asset_id, "action": action_str}).to_string(),
                             None, now,
                         );
-                    }
+                    });
                     Json(json!({
                         "asset_id": asset_id,
                         "action": action_str,
@@ -2377,13 +2264,13 @@ async fn handle_fabric_command(
                             vec![],
                             fabric_generation,
                         );
-                        if let Ok(mut store) = svc.app.store.lock() {
+                        svc.app.store.with(|store| {
                             let _ = store.save_posture_event_chained(
                                 &asset_id, "FABRIC_COMMAND_CLAMPED",
                                 &enforcement.to_string(),
                                 None, now,
                             );
-                        }
+                        });
                     }
 
                     Json(json!({
@@ -2439,27 +2326,23 @@ async fn verify_causal_chain(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
     let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.lock() {
-        Ok(store) => match store.verify_causal_chain_integrity(vk) {
-            Ok(r) => Json(json!({
-                "chain_intact": r.chain_intact,
-                "total_entries": r.total_entries,
-                "latest_hash": r.latest_hash,
-                "signing_enabled": r.signing_enabled,
-                "signed_entries": r.signed_entries,
-                "unsigned_entries": r.unsigned_entries,
-                "signature_valid": r.signature_valid,
-                "first_signed_at_ms": r.first_signed_at_ms,
-                "public_key_b64": r.public_key_b64,
-                "head_verified": r.head_verified,
-                "head_status": r.head_status,
-                "verified": r.chain_intact && r.signature_valid && r.head_verified,
-            })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "causal chain query failed" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.verify_causal_chain_integrity(vk)) {
+        Ok(r) => Json(json!({
+            "chain_intact": r.chain_intact,
+            "total_entries": r.total_entries,
+            "latest_hash": r.latest_hash,
+            "signing_enabled": r.signing_enabled,
+            "signed_entries": r.signed_entries,
+            "unsigned_entries": r.unsigned_entries,
+            "signature_valid": r.signature_valid,
+            "first_signed_at_ms": r.first_signed_at_ms,
+            "public_key_b64": r.public_key_b64,
+            "head_verified": r.head_verified,
+            "head_status": r.head_status,
+            "verified": r.chain_intact && r.signature_valid && r.head_verified,
+        })).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "causal chain query failed" }))).into_response(),
     }
 }
 
@@ -2671,15 +2554,16 @@ async fn main() {
     }
 
     {
-        let guard = app_state.store.lock()
-            .expect("verifier store lock poisoned during boot hydration");
-
-        for node in guard.load_nodes().expect("failed to load persisted nodes") {
+        let (nodes, dependencies) = app_state.store.with(|store| {
+            let nodes = store.load_nodes().expect("failed to load persisted nodes");
+            let dependencies = store.load_dependencies()
+                .expect("failed to load persisted dependencies");
+            (nodes, dependencies)
+        });
+        for node in nodes {
             app_state.nodes.insert(node.node_id.clone(), node);
         }
-        for (node_id, deps) in guard.load_dependencies()
-            .expect("failed to load persisted dependencies")
-        {
+        for (node_id, deps) in dependencies {
             app_state.dependency_graph.insert(node_id, deps);
         }
     }
@@ -2687,7 +2571,7 @@ async fn main() {
     let signing_key = audit_signing_key.clone();
     // #87: the causal log persists to the SAME store the rest of the service
     // uses, so forensic causal rows land in the production DB and chain there.
-    let causal_store = Arc::clone(&app_state.store);
+    let causal_store = app_state.store.clone();
     let svc_state = Arc::new(ServiceState {
         app: app_state,
         posture_cache: Arc::new(std::sync::RwLock::new(None)),
@@ -2706,22 +2590,23 @@ async fn main() {
     });
 
     {
-        let assets_loaded;
-        if let Ok(store) = svc_state.app.store.lock() {
-            if let Ok(assets) = store.load_fabric_assets() {
-                assets_loaded = assets.len();
+        // Load the assets under one acquisition; register them OUTSIDE the
+        // closure (registration borrows svc_state and calls back into the store
+        // via seed_local_asset_lockedout — keep it off the held guard).
+        let assets = svc_state.app.store.with(|store| store.load_fabric_assets().ok());
+        let assets_loaded = match assets {
+            Some(assets) => {
+                let n = assets.len();
                 for asset in assets {
                     svc_state.fabric_router.register_asset(&asset);
                     // #88: the local fed asset is fail-closed LockedOut (peers
                     // keep the Degraded seed); a no-op for every peer.
                     seed_local_asset_lockedout(&svc_state, &asset.asset_id);
                 }
-            } else {
-                assets_loaded = 0;
+                n
             }
-        } else {
-            assets_loaded = 0;
-        }
+            None => 0,
+        };
         tracing::info!(count = assets_loaded, "Loaded fabric assets from store");
     }
 
@@ -2752,7 +2637,7 @@ async fn main() {
     let effective_mode = match mode {
         VerifierOperationMode::PassiveStandby => VerifierOperationMode::PassiveStandby,
         VerifierOperationMode::Active => {
-            let arbitration = svc_state.app.store.lock().ok().and_then(|store| {
+            let arbitration = svc_state.app.store.with(|store| {
                 let (epoch, holder) = store.current_active_holder().ok()?;
                 let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
                 let now = now_ms();
@@ -2775,7 +2660,7 @@ async fn main() {
                     VerifierOperationMode::PassiveStandby
                 }
                 Some((epoch, _holder, _stale_or_self)) => {
-                    let claim = svc_state.app.store.lock().ok().and_then(|mut s| {
+                    let claim = svc_state.app.store.with(|s| {
                         s.try_claim_epoch(epoch, &my_id, now_ms()).ok().flatten()
                     });
                     match claim {
@@ -2852,30 +2737,20 @@ async fn main() {
     // catch a missing call sits behind the build_app extraction follow-up
     // (#72). Do not remove the log lines.
     if svc_state.app.is_active() {
-        match svc_state.app.store.lock() {
-            Ok(mut store) => match store.ensure_hash_v2_migration_anchor(now_ms()) {
-                Ok(()) => tracing::info!("audit: hash-v2 migration anchor ensured"),
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "audit: hash-v2 migration anchor FAILED at startup"
-                ),
-            },
-            Err(_) => tracing::error!(
-                "audit: hash-v2 migration anchor skipped — store lock poisoned at startup"
+        match svc_state.app.store.with(|store| store.ensure_hash_v2_migration_anchor(now_ms())) {
+            Ok(()) => tracing::info!("audit: hash-v2 migration anchor ensured"),
+            Err(e) => tracing::error!(
+                error = %e,
+                "audit: hash-v2 migration anchor FAILED at startup"
             ),
         }
         // Key-id backfill (#76): assign existing NULL-key_id rows the genesis
         // key's id so they verify after a future rotation. Idempotent; signed.
-        match svc_state.app.store.lock() {
-            Ok(mut store) => match store.ensure_key_id_backfill_migration(now_ms()) {
-                Ok(()) => tracing::info!("audit: key-id backfill migration ensured"),
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "audit: key-id backfill migration FAILED at startup"
-                ),
-            },
-            Err(_) => tracing::error!(
-                "audit: key-id backfill migration skipped — store lock poisoned at startup"
+        match svc_state.app.store.with(|store| store.ensure_key_id_backfill_migration(now_ms())) {
+            Ok(()) => tracing::info!("audit: key-id backfill migration ensured"),
+            Err(e) => tracing::error!(
+                error = %e,
+                "audit: key-id backfill migration FAILED at startup"
             ),
         }
         // Anchor-head backfill (#77): a chain written by a pre-#77 binary has no
@@ -2883,16 +2758,11 @@ async fn main() {
         // presents a head BEFORE serving /system/audit/verify (no false
         // HEAD_ABSENT). Idempotent. Log-and-continue: a missing head is itself
         // caught fail-closed at verify time (head_verified = false).
-        match svc_state.app.store.lock() {
-            Ok(mut store) => match store.ensure_audit_anchor_head(now_ms()) {
-                Ok(()) => tracing::info!("audit: anchor-head high-water mark ensured"),
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "audit: anchor-head high-water mark FAILED at startup"
-                ),
-            },
-            Err(_) => tracing::error!(
-                "audit: anchor-head high-water mark skipped — store lock poisoned at startup"
+        match svc_state.app.store.with(|store| store.ensure_audit_anchor_head(now_ms())) {
+            Ok(()) => tracing::info!("audit: anchor-head high-water mark ensured"),
+            Err(e) => tracing::error!(
+                error = %e,
+                "audit: anchor-head high-water mark FAILED at startup"
             ),
         }
     } else {
@@ -3030,7 +2900,7 @@ async fn main() {
         admin_token_present: std::env::var("KIRRA_ADMIN_TOKEN")
             .map(|v| !v.is_empty())
             .unwrap_or(false),
-        sqlite_wal: svc_state.app.store.lock().unwrap().is_wal_mode(),
+        sqlite_wal: svc_state.app.store.with(|store| store.is_wal_mode()),
         mode_active: svc_state.app.is_active(),
         watchdog_spawned,
         posture_engine_running: svc_state.posture_engine_tx.get().is_some(),
@@ -3065,7 +2935,7 @@ async fn main() {
         // Offload the WAL checkpoint (a `wal_checkpoint(TRUNCATE)` fsync — the
         // longest single store hold) so it runs on the blocking pool rather than the
         // runtime thread driving graceful shutdown.
-        match with_store_blocking(&shutdown_state, |store| store.durable_checkpoint()).await {
+        match shutdown_state.store.call(|store| store.durable_checkpoint()).await {
             Ok(Ok(())) => tracing::info!("audit: durable checkpoint flushed on shutdown"),
             Ok(Err(e)) => tracing::error!(error = %e, "audit: durable checkpoint FAILED on shutdown"),
             Err(_) => tracing::error!("audit: durable checkpoint skipped — store unavailable at shutdown"),
@@ -3106,41 +2976,38 @@ async fn console_html() -> impl IntoResponse {
 /// (`load_nodes`). QM read. `note` is the Untrusted reason carried on the node's
 /// trust state (the latest trust note); `null` for Trusted/Unknown.
 async fn console_fleet(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    let store = match svc.app.store.lock() {
-        Ok(s) => s,
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "store lock poisoned" }))).into_response()
-        }
-    };
-    let nodes = match store.load_nodes() {
-        Ok(n) => n,
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "load_nodes failed" }))).into_response()
-        }
-    };
-    let fleet: Vec<_> = nodes
-        .iter()
-        .map(|n| {
-            let (posture, note) = match &n.status {
-                NodeTrustState::Trusted => ("Trusted", None),
-                NodeTrustState::Untrusted(reason) => ("Untrusted", Some(reason.clone())),
-                NodeTrustState::Unknown => ("Unknown", None),
-            };
-            // Phase B: the latest clearance grant's delivery state (or null). The
-            // UI derives the lifecycle label (pending / delivered:Cleared /
-            // delivery-rejected:reason) from these raw columns — no invented state.
-            let clearance = store.latest_clearance_grant(&n.node_id).ok().flatten();
-            json!({
-                "node_id": n.node_id,
-                "posture": posture,
-                "note": note,
-                "last_seen_ms": n.last_trust_update_ms,
-                "clearance": clearance,
+    // load_nodes + the per-node clearance lookups run under ONE acquisition
+    // (Rule 5). The closure returns a Result; the error response is built outside.
+    let fleet = svc.app.store.with(|store| {
+        let nodes = store.load_nodes().map_err(|_| "load_nodes failed")?;
+        let fleet: Vec<_> = nodes
+            .iter()
+            .map(|n| {
+                let (posture, note) = match &n.status {
+                    NodeTrustState::Trusted => ("Trusted", None),
+                    NodeTrustState::Untrusted(reason) => ("Untrusted", Some(reason.clone())),
+                    NodeTrustState::Unknown => ("Unknown", None),
+                };
+                // Phase B: the latest clearance grant's delivery state (or null). The
+                // UI derives the lifecycle label (pending / delivered:Cleared /
+                // delivery-rejected:reason) from these raw columns — no invented state.
+                let clearance = store.latest_clearance_grant(&n.node_id).ok().flatten();
+                json!({
+                    "node_id": n.node_id,
+                    "posture": posture,
+                    "note": note,
+                    "last_seen_ms": n.last_trust_update_ms,
+                    "clearance": clearance,
+                })
             })
-        })
-        .collect();
+            .collect();
+        Ok::<_, &'static str>(fleet)
+    });
+    let fleet = match fleet {
+        Ok(f) => f,
+        Err(msg) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": msg }))).into_response(),
+    };
     Json(json!({ "fleet": fleet, "total": fleet.len() })).into_response()
 }
 
@@ -3165,14 +3032,10 @@ async fn console_audit(
     let limit = params.limit.unwrap_or(50).min(500);
     let offset = params.offset.unwrap_or(0);
     let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_audit_chain_page(limit, offset, vk) {
-            Ok(page) => Json(page).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "audit query failed" }))).into_response(),
-        },
+    match svc.app.store.with(|store| store.load_audit_chain_page(limit, offset, vk)) {
+        Ok(page) => Json(page).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+                   Json(json!({ "error": "audit query failed" }))).into_response(),
     }
 }
 
@@ -3190,17 +3053,11 @@ async fn console_audit(
 /// taxonomy enhancement. QM read.
 async fn console_escalations(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     let vk = svc.audit_verifying_key.as_ref();
-    let page = match svc.app.store.lock() {
-        Ok(store) => match store.load_audit_chain_page(1000, 0, vk) {
-            Ok(p) => p,
-            Err(_) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "audit query failed" }))).into_response()
-            }
-        },
+    let page = match svc.app.store.with(|store| store.load_audit_chain_page(1000, 0, vk)) {
+        Ok(p) => p,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "store lock poisoned" }))).into_response()
+                    Json(json!({ "error": "audit query failed" }))).into_response()
         }
     };
     let mut open = Vec::new();
@@ -3245,37 +3102,22 @@ async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> impl IntoRespo
     };
 
     // Two store reads under one lock acquisition: audit depth + HA heartbeat.
-    let (audit_entries, ha_heartbeat_age_ms) = match svc.app.store.lock() {
-        Ok(store) => {
-            let audit_entries = match store.audit_chain_len() {
-                Ok(n) => n,
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "audit query failed" })),
-                    )
-                        .into_response()
-                }
-            };
-            // Heartbeat absent → null (no primary has written yet).
-            let hb = match store.load_engine_state(HEARTBEAT_KEY) {
-                Ok(opt) => opt
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .map(|stored| now.saturating_sub(stored)),
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "engine state query failed" })),
-                    )
-                        .into_response()
-                }
-            };
-            (audit_entries, hb)
-        }
-        Err(_) => {
+    // The closure returns a Result; per-read error responses are built outside.
+    let probe = svc.app.store.with(|store| {
+        let audit_entries = store.audit_chain_len().map_err(|_| "audit query failed")?;
+        // Heartbeat absent → null (no primary has written yet).
+        let hb = store.load_engine_state(HEARTBEAT_KEY)
+            .map_err(|_| "engine state query failed")?
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|stored| now.saturating_sub(stored));
+        Ok::<_, &'static str>((audit_entries, hb))
+    });
+    let (audit_entries, ha_heartbeat_age_ms) = match probe {
+        Ok(pair) => pair,
+        Err(msg) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "store lock poisoned" })),
+                Json(json!({ "error": msg })),
             )
                 .into_response()
         }
@@ -3334,34 +3176,21 @@ async fn console_analytics(
     let since_ms = now.saturating_sub(window_ms);
     let bucket_span = (window_ms / BUCKETS).max(1);
 
-    let (events, by_node) = match svc.app.store.lock() {
-        Ok(store) => {
-            let events = match store.load_posture_events_since(since_ms) {
-                Ok(e) => e,
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "posture event query failed" })),
-                    )
-                        .into_response()
-                }
-            };
-            let by_node = match store.count_posture_events_by_node_since(since_ms) {
-                Ok(n) => n,
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "posture event query failed" })),
-                    )
-                        .into_response()
-                }
-            };
-            (events, by_node)
-        }
-        Err(_) => {
+    // Both reads share ONE acquisition (Rule 5); the closure returns a Result and
+    // the error response is produced outside (Rule 4).
+    let loaded = svc.app.store.with(|store| {
+        let events = store.load_posture_events_since(since_ms)
+            .map_err(|_| "posture event query failed")?;
+        let by_node = store.count_posture_events_by_node_since(since_ms)
+            .map_err(|_| "posture event query failed")?;
+        Ok::<_, &'static str>((events, by_node))
+    });
+    let (events, by_node) = match loaded {
+        Ok(pair) => pair,
+        Err(msg) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "store lock poisoned" })),
+                Json(json!({ "error": msg })),
             )
                 .into_response()
         }
@@ -3562,13 +3391,13 @@ fn audit_grant_rejection(
     operator_id: &str,
     now: u64,
 ) {
-    if let Ok(mut store) = app.store.lock() {
+    app.store.with(|store| {
         let _ = store.append_clearance_audit_event(
             "OperatorClearanceGrantRejected",
             &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id }).to_string(),
             now,
         );
-    }
+    });
 }
 
 /// #326 — the operator clearance-challenge map key. Length-prefixing the
@@ -3639,54 +3468,53 @@ async fn register_operator(
         }))).into_response(),
     };
     let now = now_ms();
-    match svc.app.store.lock() {
-        Ok(mut store) => {
-            // #327: detect a prior REVOKED row BEFORE registering — register_operator
-            // silently clears revoked_at, so reactivation would otherwise be
-            // invisible in the ledger. Record it as a distinct, attributed event.
-            let was_revoked = store
-                .load_operator(operator_id)
-                .ok()
-                .flatten()
-                .is_some_and(|o| o.revoked_at_ms.is_some());
-            if store.register_operator(operator_id, &req.ed25519_pubkey_pem, now).is_err() {
-                return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "persist failed" }))).into_response();
-            }
-            if was_revoked {
-                // A previously-revoked operator is now active again — the
-                // reactivating admin is attributed by token fingerprint (#327).
-                let _ = store.append_clearance_audit_event(
-                    "OperatorReactivated",
-                    &json!({
-                        "operator_id": operator_id,
-                        "operator_key_fingerprint": fingerprint,
-                        "reactivated_by_admin_fingerprint": admin_token_fingerprint(&headers),
-                    }).to_string(),
-                    now,
-                );
-                (StatusCode::CREATED, Json(json!({
-                    "operator_id": operator_id,
-                    "operator_key_fingerprint": fingerprint,
-                    "status": "reactivated",
-                }))).into_response()
-            } else {
-                let _ = store.append_clearance_audit_event(
-                    "OperatorRegistered",
-                    &json!({ "operator_id": operator_id, "operator_key_fingerprint": fingerprint })
-                        .to_string(),
-                    now,
-                );
-                (StatusCode::CREATED, Json(json!({
-                    "operator_id": operator_id,
-                    "operator_key_fingerprint": fingerprint,
-                    "status": "registered",
-                }))).into_response()
-            }
+    // The revoked-check + register + audit run under ONE acquisition (Rule 5).
+    // The closure returns the fully-built response (the early persist-failure
+    // path returns its 500 response from inside the closure — Rule 4).
+    svc.app.store.with(|store| {
+        // #327: detect a prior REVOKED row BEFORE registering — register_operator
+        // silently clears revoked_at, so reactivation would otherwise be
+        // invisible in the ledger. Record it as a distinct, attributed event.
+        let was_revoked = store
+            .load_operator(operator_id)
+            .ok()
+            .flatten()
+            .is_some_and(|o| o.revoked_at_ms.is_some());
+        if store.register_operator(operator_id, &req.ed25519_pubkey_pem, now).is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "persist failed" }))).into_response();
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    }
+        if was_revoked {
+            // A previously-revoked operator is now active again — the
+            // reactivating admin is attributed by token fingerprint (#327).
+            let _ = store.append_clearance_audit_event(
+                "OperatorReactivated",
+                &json!({
+                    "operator_id": operator_id,
+                    "operator_key_fingerprint": fingerprint,
+                    "reactivated_by_admin_fingerprint": admin_token_fingerprint(&headers),
+                }).to_string(),
+                now,
+            );
+            (StatusCode::CREATED, Json(json!({
+                "operator_id": operator_id,
+                "operator_key_fingerprint": fingerprint,
+                "status": "reactivated",
+            }))).into_response()
+        } else {
+            let _ = store.append_clearance_audit_event(
+                "OperatorRegistered",
+                &json!({ "operator_id": operator_id, "operator_key_fingerprint": fingerprint })
+                    .to_string(),
+                now,
+            );
+            (StatusCode::CREATED, Json(json!({
+                "operator_id": operator_id,
+                "operator_key_fingerprint": fingerprint,
+                "status": "registered",
+            }))).into_response()
+        }
+    })
 }
 
 /// POST /console/operators/{operator_id}/revoke — revoke an operator (#314).
@@ -3696,26 +3524,24 @@ async fn revoke_operator(
     Path(operator_id): Path<String>,
 ) -> impl IntoResponse {
     let now = now_ms();
-    match svc.app.store.lock() {
-        Ok(mut store) => match store.revoke_operator(&operator_id, now) {
-            Ok(true) => {
-                let _ = store.append_clearance_audit_event(
-                    "OperatorRevoked",
-                    &json!({ "operator_id": operator_id }).to_string(),
-                    now,
-                );
-                (StatusCode::OK, Json(json!({ "operator_id": operator_id, "status": "revoked" })))
-                    .into_response()
-            }
-            Ok(false) => (StatusCode::NOT_FOUND,
-                          Json(json!({ "error": "operator not found or already revoked" })))
-                .into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "persist failed" }))).into_response(),
-        },
+    // revoke + its audit event share one acquisition (Rule 5); the closure
+    // returns the built response.
+    svc.app.store.with(|store| match store.revoke_operator(&operator_id, now) {
+        Ok(true) => {
+            let _ = store.append_clearance_audit_event(
+                "OperatorRevoked",
+                &json!({ "operator_id": operator_id }).to_string(),
+                now,
+            );
+            (StatusCode::OK, Json(json!({ "operator_id": operator_id, "status": "revoked" })))
+                .into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND,
+                      Json(json!({ "error": "operator not found or already revoked" })))
+            .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    }
+                   Json(json!({ "error": "persist failed" }))).into_response(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -3747,15 +3573,12 @@ async fn clearance_challenge(
         return (StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": "operator_id and node_id are required" }))).into_response();
     }
-    let active = match svc.app.store.lock() {
-        Ok(store) => store
-            .load_operator(operator_id)
-            .ok()
-            .flatten()
-            .map(|o| o.is_active())
-            .unwrap_or(false),
-        Err(_) => false,
-    };
+    let active = svc.app.store.with(|store| store
+        .load_operator(operator_id)
+        .ok()
+        .flatten()
+        .map(|o| o.is_active())
+        .unwrap_or(false));
     // Hex string (not a u64) so the in-browser signing flow never loses precision.
     let nonce_hex = format!("{:016x}", kirra_verifier::verifier::generate_challenge_nonce());
     // #325: store a REAL challenge only for an active operator; everyone else gets a
@@ -3836,7 +3659,7 @@ async fn console_clearance_grant(
             }))).into_response();
         }
         // 1. Load operator — unknown / revoked → 403, audited.
-        let operator = match svc.app.store.lock().ok().and_then(|s| s.load_operator(&operator_id).ok().flatten()) {
+        let operator = match svc.app.store.with(|s| s.load_operator(&operator_id).ok().flatten()) {
             Some(op) if op.is_active() => op,
             Some(_) => {
                 audit_grant_rejection(&svc.app, "revoked_operator", &node_id, &operator_id, now);
@@ -3909,10 +3732,7 @@ async fn console_clearance_grant(
             "status": "rejected", "reason": "operator_id must be non-empty"
         }))).into_response();
     }
-    let registered = match svc.app.store.lock() {
-        Ok(store) => store.node_exists(&node_id).unwrap_or(false),
-        Err(_) => false,
-    };
+    let registered = svc.app.store.with(|store| store.node_exists(&node_id).unwrap_or(false));
     if !registered {
         audit_grant_rejection(&svc.app, "unregistered_node", &node_id, &operator_id, now);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
@@ -3921,26 +3741,22 @@ async fn console_clearance_grant(
     }
 
     // Record + sign — RECORD-ONLY. Delivery is Phase B; posture is untouched.
-    match svc.app.store.lock() {
-        Ok(mut store) => match store.save_clearance_grant_chained_with_auth(
-            &node_id, &operator_id, now, auth_method, fingerprint.as_deref(),
-        ) {
-            Ok(_id) => (StatusCode::OK, Json(json!({
-                "status": "recorded",
-                "delivery": "pending-phase-b",
-                "node_id": node_id,
-                "operator_id": operator_id,
-                "granted_at_ms": now,
-                "auth_method": auth_method,
-                "operator_key_fingerprint": fingerprint,
-                "note": "grant recorded and signed; the vehicle is NOT released — delivery to the node ClearanceLoop is Phase B",
-            }))).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "status": "error", "reason": "persist failed" }))).into_response(),
-        },
+    svc.app.store.with(|store| match store.save_clearance_grant_chained_with_auth(
+        &node_id, &operator_id, now, auth_method, fingerprint.as_deref(),
+    ) {
+        Ok(_id) => (StatusCode::OK, Json(json!({
+            "status": "recorded",
+            "delivery": "pending-phase-b",
+            "node_id": node_id,
+            "operator_id": operator_id,
+            "granted_at_ms": now,
+            "auth_method": auth_method,
+            "operator_key_fingerprint": fingerprint,
+            "note": "grant recorded and signed; the vehicle is NOT released — delivery to the node ClearanceLoop is Phase B",
+        }))).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "status": "error", "reason": "store lock poisoned" }))).into_response(),
-    }
+                   Json(json!({ "status": "error", "reason": "persist failed" }))).into_response(),
+    })
 }
 
 /// Assembles the complete production router from a fully-initialized
@@ -4884,9 +4700,7 @@ mod attestation_nonce_handler_tests {
         let svc = svc_with_pcr16_node(ak_pem, expected_pcr16);
         svc.app
             .store
-            .lock()
-            .unwrap()
-            .set_node_attestation_policy(NODE, true)
+            .with(|store| store.set_node_attestation_policy(NODE, true))
             .expect("set require_tpm_quote policy");
         svc
     }
@@ -5211,16 +5025,18 @@ mod dnp3_mandatory_audit_tests {
         }
     }
 
-    /// Poison the store mutex so every `store.lock()` returns `Err` — i.e. the
-    /// mandatory audit write cannot land.
+    /// Poison the underlying store mutex by panicking inside a `StoreHandle::with`
+    /// closure. NOTE (DB-actor migration phase 1): `StoreHandle` RECOVERS a poisoned
+    /// lock internally (`into_inner`), so this no longer makes subsequent store
+    /// access fail — it only exercises that the handle keeps working after a
+    /// panicking holder. The former fail-closed-on-poison replay arm is gone with
+    /// the bare-mutex; see the two tests below.
     fn poison_store(svc: &ServiceState) {
-        let store = Arc::clone(&svc.app.store);
+        let store = svc.app.store.clone();
         let _ = std::thread::spawn(move || {
-            let _g = store.lock().unwrap();
-            panic!("intentionally poisoning the store mutex for the audit-failure test");
+            store.with(|_s| panic!("intentionally poisoning the store mutex for the audit-failure test"));
         })
         .join();
-        assert!(svc.app.store.lock().is_err(), "store mutex should now be poisoned");
     }
 
     async fn post(svc: Arc<ServiceState>, msg: Dnp3Message) -> (StatusCode, serde_json::Value) {
@@ -5241,8 +5057,8 @@ mod dnp3_mandatory_audit_tests {
         assert_eq!(v["allowed"], true, "broadcast admitted in Nominal");
         assert_eq!(v["adapter_details"]["is_broadcast"], true);
         // The mandatory audit entry was written to the tamper-evident log.
-        let n = svc.app.store.lock().unwrap()
-            .count_recent_posture_events("dnp3_adapter", 0).unwrap();
+        let n = svc.app.store
+            .with(|store| store.count_recent_posture_events("dnp3_adapter", 0)).unwrap();
         assert!(n >= 1, "a broadcast must always produce an audit entry, got {n}");
     }
 
@@ -5256,28 +5072,30 @@ mod dnp3_mandatory_audit_tests {
     // write). The broadcast-IS-audited path (healthy store) is covered by
     // `test_dnp3_broadcast_always_audited` above.
 
+    // DB-actor migration phase 1: `StoreHandle` recovers a poisoned lock
+    // internally, so a one-off panicking holder no longer wedges the store. The
+    // replay gate therefore RUNS normally after a poison (rather than emitting the
+    // old `INDUSTRIAL_REPLAY_STORE_POISONED` fail-closed reason, which is gone with
+    // the bare mutex). These tests pin the new recovery behavior: a broadcast/
+    // unicast control still evaluates after a transient poison.
     #[tokio::test]
-    async fn test_poisoned_store_fail_closes_broadcast_at_replay_gate() {
+    async fn test_store_recovers_after_poison_broadcast_still_evaluates() {
         let svc = svc();
-        poison_store(&svc); // the replay gate cannot verify replay → fail-closed
+        poison_store(&svc); // the handle recovers the poison; the gate runs normally
         let (status, v) = post(Arc::clone(&svc), control_msg(DNP3_BROADCAST_ADDRESS)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["allowed"], false, "a poisoned store must block the command (fail-closed)");
-        assert_eq!(v["denial_reason"], "INDUSTRIAL_REPLAY_STORE_POISONED");
-        assert_eq!(v["replay_rejected"], true);
+        assert_eq!(v["allowed"], true, "a recovered store evaluates the command normally (Nominal)");
+        assert_eq!(v["adapter_details"]["is_broadcast"], true);
     }
 
     #[tokio::test]
-    async fn test_poisoned_store_fail_closes_unicast_too() {
-        // STRICTER than TR-012b's "unicast audit-failure is non-fatal": replay
-        // verification is a primary gate and fail-closes when the store is
-        // unavailable, so a unicast control is also blocked under a poisoned store.
+    async fn test_store_recovers_after_poison_unicast_still_evaluates() {
         let svc = svc();
         poison_store(&svc);
         let (status, v) = post(Arc::clone(&svc), control_msg(0x0005)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(v["allowed"], false, "fail-closed: unverifiable replay blocks even unicast");
-        assert_eq!(v["denial_reason"], "INDUSTRIAL_REPLAY_STORE_POISONED");
+        // Nominal posture admits the unicast control once the handle recovers.
+        assert_eq!(v["allowed"], true, "a recovered store evaluates the unicast command normally");
     }
 }
 
@@ -5564,8 +5382,7 @@ mod console_phase_a_tests {
 
         // Seed a real chained posture event, then re-query: flapping_top picks it
         // up and a Nominal transition lands in a bucket.
-        {
-            let mut store = svc.app.store.lock().unwrap();
+        svc.app.store.with(|store| {
             let posture_json =
                 serde_json::to_string(&kirra_verifier::verifier::FleetPosture::Nominal).unwrap();
             store
@@ -5577,7 +5394,7 @@ mod console_phase_a_tests {
                     now_ms(),
                 )
                 .expect("seed posture event");
-        }
+        });
         let (status, body) = get(svc, "/console/analytics?window_ms=86400000").await;
         assert_eq!(status, StatusCode::OK);
         let v = parse(&body);
@@ -5613,12 +5430,11 @@ mod console_phase_a_tests {
     fn valid_grant_recorded_in_chain_with_pending_marker() {
         let store = VerifierStore::new(":memory:").expect("store");
         let app = AppState::new(store, VerifierOperationMode::Active);
-        {
-            let mut s = app.store.lock().unwrap();
+        app.store.with(|s| {
             s.save_clearance_grant_chained("robot-01", "alice", 1_700_000_000_000)
                 .expect("record grant");
-        }
-        let page = app.store.lock().unwrap().load_audit_chain_page(50, 0, None).expect("page");
+        });
+        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).expect("page");
         let found = page.entries.iter().any(|e| {
             let v = serde_json::to_value(e).unwrap();
             v.get("event_type").and_then(|x| x.as_str()) == Some("OperatorClearanceGrantIssued")
@@ -5631,16 +5447,15 @@ mod console_phase_a_tests {
     fn rejected_attempt_is_audited() {
         let store = VerifierStore::new(":memory:").expect("store");
         let app = AppState::new(store, VerifierOperationMode::Active);
-        {
-            let mut s = app.store.lock().unwrap();
+        app.store.with(|s| {
             s.append_clearance_audit_event(
                 "OperatorClearanceGrantRejected",
                 r#"{"reason":"empty_operator_id","node_id":"robot-01"}"#,
                 1_700_000_000_000,
             )
             .expect("audit reject");
-        }
-        let page = app.store.lock().unwrap().load_audit_chain_page(50, 0, None).expect("page");
+        });
+        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).expect("page");
         assert!(
             page.entries.iter().any(|e| serde_json::to_value(e).unwrap()
                 .get("event_type").and_then(|x| x.as_str()) == Some("OperatorClearanceGrantRejected")),
@@ -5656,11 +5471,10 @@ mod console_phase_a_tests {
         seed_node_app(&app, "robot-01");
 
         let before = app.calculate_posture("robot-01");
-        {
-            let mut s = app.store.lock().unwrap();
+        app.store.with(|s| {
             s.save_clearance_grant_chained("robot-01", "alice", 1_700_000_000_000)
                 .expect("record grant");
-        }
+        });
         let after = app.calculate_posture("robot-01");
         assert_eq!(
             serde_json::to_string(&before).unwrap(),
@@ -5717,7 +5531,7 @@ mod console_phase_a_tests {
     }
 
     fn register_op(svc: &Arc<ServiceState>, operator_id: &str, pem: &str) {
-        svc.app.store.lock().unwrap().register_operator(operator_id, pem, 1).unwrap();
+        svc.app.store.with(|s| s.register_operator(operator_id, pem, 1)).unwrap();
     }
 
     fn parse_nonce(body: &str) -> String {
@@ -5757,12 +5571,12 @@ mod console_phase_a_tests {
     // ===================================================================
 
     fn audit_has(svc: &Arc<ServiceState>, event_type: &str) -> bool {
-        let page = svc.app.store.lock().unwrap().load_audit_chain_page(200, 0, None).unwrap();
+        let page = svc.app.store.with(|s| s.load_audit_chain_page(200, 0, None)).unwrap();
         page.entries.iter().any(|e| e.event_type == event_type)
     }
 
     fn chain_json(svc: &Arc<ServiceState>) -> String {
-        let page = svc.app.store.lock().unwrap().load_audit_chain_page(200, 0, None).unwrap();
+        let page = svc.app.store.with(|s| s.load_audit_chain_page(200, 0, None)).unwrap();
         serde_json::to_string(&page.entries).unwrap()
     }
 
@@ -5874,7 +5688,7 @@ mod console_phase_a_tests {
         assert!(!audit_has(&svc, "OperatorReactivated"), "a fresh registration is NOT a reactivation");
 
         // Revoke, then re-register → OperatorReactivated appears, attributed.
-        svc.app.store.lock().unwrap().revoke_operator("alice", 2).unwrap();
+        svc.app.store.with(|s| s.revoke_operator("alice", 2)).unwrap();
         let req2 = RegisterOperatorRequest { operator_id: "alice".into(), ed25519_pubkey_pem: pem };
         let r = register_operator(State(svc.clone()), headers, Json(req2)).await.into_response();
         assert_eq!(r.status(), StatusCode::CREATED);
@@ -5916,8 +5730,8 @@ mod console_phase_a_tests {
         assert!(ab.contains(&fp), "chain event carries the fingerprint (non-repudiation)");
 
         // THE ADDITIVE PROOF — Phase-B pickup is unchanged by the new columns.
-        let picked = svc.app.store.lock().unwrap()
-            .take_pending_clearance_grant("robot-01", 9_999_999_999_999).unwrap()
+        let picked = svc.app.store
+            .with(|s| s.take_pending_clearance_grant("robot-01", 9_999_999_999_999)).unwrap()
             .expect("Phase-B consumes the operator-signed grant row");
         assert_eq!(picked.operator_id, "alice");
     }
@@ -5982,7 +5796,7 @@ mod console_phase_a_tests {
         seed_node(&svc, "robot-01");
         let (sk, pem) = operator_keypair(11);
         register_op(&svc, "alice", &pem);
-        svc.app.store.lock().unwrap().revoke_operator("alice", 2).unwrap();
+        svc.app.store.with(|s| s.revoke_operator("alice", 2)).unwrap();
         let sig = sign_grant_b64(&sk, "alice", "robot-01", "00");
         let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":sig}).to_string();
         let (s, b) = post_json(svc.clone(), "/console/clearance-grants", body, None).await;
@@ -6013,13 +5827,12 @@ mod console_phase_a_tests {
     fn break_glass_auth_method_is_distinct_in_the_chain() {
         let store = VerifierStore::new(":memory:").expect("store");
         let app = AppState::new(store, VerifierOperationMode::Active);
-        {
-            let mut s = app.store.lock().unwrap();
+        app.store.with(|s| {
             s.save_clearance_grant_chained_with_auth(
                 "robot-01", "alice", 1_700_000_000_000, "supervisor-break-glass", None,
             ).unwrap();
-        }
-        let page = app.store.lock().unwrap().load_audit_chain_page(50, 0, None).unwrap();
+        });
+        let page = app.store.with(|s| s.load_audit_chain_page(50, 0, None)).unwrap();
         let blob = serde_json::to_string(&page.entries).unwrap();
         assert!(blob.contains("supervisor-break-glass"),
             "break-glass auth_method recorded distinctly in the signed chain");
@@ -6045,17 +5858,17 @@ mod console_phase_a_tests {
 // ---------------------------------------------------------------------------
 // Store offload helper (heavy-op spawn_blocking path).
 //
-// `with_store_blocking` moves the long-held SQLite ops (backup export,
+// `StoreHandle::call` moves the long-held SQLite ops (backup export,
 // audit-chain verify, federation commit) off the tokio worker pool. These tests
 // pin its contract: a closure runs to completion against the real store, a write
 // is visible to a subsequent offloaded read, and `&mut self` writes + `&self`
-// reads both work through the guard. Each runs on a multi-thread runtime so the
+// reads both work through the handle. Each runs on a multi-thread runtime so the
 // spawn_blocking offload is actually exercised.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod store_offload_tests {
-    use super::{with_store_blocking, StoreOffloadError};
     use std::sync::Arc;
+    use kirra_verifier::store_handle::StoreError;
     use kirra_verifier::verifier::{AppState, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
 
@@ -6068,13 +5881,13 @@ mod store_offload_tests {
     async fn offloaded_write_is_visible_to_an_offloaded_read() {
         let app = app();
 
-        let wrote = with_store_blocking(&app, |store| {
+        let wrote = app.store.call(|store| {
             store.save_engine_state("offload_probe", "42").is_ok()
         })
         .await;
         assert!(matches!(wrote, Ok(true)), "offloaded write must run to completion: {wrote:?}");
 
-        let read = with_store_blocking(&app, |store| {
+        let read = app.store.call(|store| {
             store.load_engine_state("offload_probe").ok().flatten()
         })
         .await;
@@ -6088,8 +5901,8 @@ mod store_offload_tests {
     async fn offloaded_closure_return_value_is_propagated() {
         let app = app();
         // A pure read that computes a value off-thread and returns it intact.
-        let n: Result<u64, StoreOffloadError> =
-            with_store_blocking(&app, |_store| 7u64 * 6).await;
+        let n: Result<u64, StoreError> =
+            app.store.call(|_store| 7u64 * 6).await;
         assert!(matches!(n, Ok(42)), "closure return value must propagate; got {n:?}");
     }
 }
@@ -6132,9 +5945,7 @@ mod federation_submit_e2e_tests {
         {
             let claimed = app
                 .store
-                .lock()
-                .unwrap()
-                .try_claim_epoch(0, "test-instance", 0)
+                .with(|store| store.try_claim_epoch(0, "test-instance", 0))
                 .unwrap()
                 .expect("claim initial epoch on fresh store");
             app.held_epoch.store(claimed, std::sync::atomic::Ordering::SeqCst);
@@ -6160,9 +5971,7 @@ mod federation_submit_e2e_tests {
         let pk_b64 = b64.encode(sk.verifying_key().to_bytes());
         svc.app
             .store
-            .lock()
-            .unwrap()
-            .save_trusted_federation_controller(controller, &pk_b64, now_ms())
+            .with(|store| store.save_trusted_federation_controller(controller, &pk_b64, now_ms()))
             .expect("register controller");
     }
 
@@ -6214,15 +6023,13 @@ mod federation_submit_e2e_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["accepted"], serde_json::json!(true), "valid report must be accepted: {body}");
 
-        let store = svc.app.store.lock().unwrap();
-        assert!(
-            !store.load_federated_reports_for_asset("lidar_front").unwrap().is_empty(),
-            "an accepted report must be persisted"
-        );
-        assert!(
-            store.has_seen_federation_nonce("nonce-aaaa").unwrap(),
-            "an accepted report must burn its nonce"
-        );
+        let (has_reports, burned) = svc.app.store.with(|store| {
+            let has_reports = !store.load_federated_reports_for_asset("lidar_front").unwrap().is_empty();
+            let burned = store.has_seen_federation_nonce("nonce-aaaa").unwrap();
+            (has_reports, burned)
+        });
+        assert!(has_reports, "an accepted report must be persisted");
+        assert!(burned, "an accepted report must burn its nonce");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6270,7 +6077,7 @@ mod federation_submit_e2e_tests {
         );
         // A signature-rejected report must NOT burn the nonce.
         assert!(
-            !svc.app.store.lock().unwrap().has_seen_federation_nonce("nonce-bad").unwrap(),
+            !svc.app.store.with(|store| store.has_seen_federation_nonce("nonce-bad")).unwrap(),
             "a rejected report must not burn its nonce"
         );
     }

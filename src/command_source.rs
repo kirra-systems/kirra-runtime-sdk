@@ -96,19 +96,15 @@ pub fn record_handoff(
         "reason":      reason,
         "timestamp":   ts,
     });
-    let outcome = match app.store.lock() {
-        Ok(mut store) => store.save_posture_event_chained(
+    let outcome = app.store.with(|store| {
+        store.save_posture_event_chained(
             COMMAND_SOURCE_NODE_ID,
             COMMAND_SOURCE_HANDOFF,
             &body.to_string(),
             Some(reason),
             ts,
-        ),
-        Err(_) => {
-            note_failure(app, "store mutex poisoned");
-            return;
-        }
-    };
+        )
+    });
     if let Err(e) = outcome {
         note_failure(app, &e.to_string());
     }
@@ -152,13 +148,15 @@ mod tests {
         );
         assert_eq!(write_failures(&app), 0, "the handoff must have been durably recorded");
 
-        let store = app.store.lock().unwrap();
-        let v = store.verify_audit_chain_full(Some(&vk)).expect("verify");
+        let (v, events) = app.store.with(|store| {
+            let v = store.verify_audit_chain_full(Some(&vk)).expect("verify");
+            let events = store.load_all_posture_events().expect("load");
+            (v, events)
+        });
         assert!(v.chain_intact, "handoff event must be hash-chained");
         assert!(v.signature_valid, "handoff event must verify under the signing key");
         assert!(v.signed_entries >= 1, "the handoff event must be signed, got {}", v.signed_entries);
 
-        let events = store.load_all_posture_events().expect("load");
         let h = &events
             .iter()
             .find(|e| e["event_type"] == COMMAND_SOURCE_HANDOFF)
@@ -181,8 +179,7 @@ mod tests {
             "source unattributable -> MRC safe-stop",
             2_000,
         );
-        let store = app.store.lock().unwrap();
-        let events = store.load_all_posture_events().expect("load");
+        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
         let h = &events
             .iter()
             .find(|e| e["event_type"] == COMMAND_SOURCE_HANDOFF)

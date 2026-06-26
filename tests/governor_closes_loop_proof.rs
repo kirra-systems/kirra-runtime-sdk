@@ -303,8 +303,7 @@ async fn axis1_governor_gates_violations_and_bounds_the_trajectory_vs_bypassed()
 // ===========================================================================
 
 fn register_av_infra(app: &Arc<AppState>) {
-    {
-        let store = app.store.lock().unwrap();
+    app.store.with(|store| {
         for (id, ty, hw) in [
             ("lidar_front", "Perception", "LIDAR-001"),
             ("camera_front", "Perception", "CAM-001"),
@@ -313,7 +312,7 @@ fn register_av_infra(app: &Arc<AppState>) {
         ] {
             let _ = store.register_av_subsystem_meta(id, ty, hw, 0.70, 0);
         }
-    }
+    });
     app.dependency_graph.insert(
         "perception_fusion".to_string(),
         vec!["lidar_front".to_string(), "camera_front".to_string()],

@@ -313,7 +313,7 @@ mod tests {
         // The money demo, as a test: seed → operator records a grant for
         // KIRRA-DEMO-03 → the Phase-B delivery (the example's call) clears a
         // pre-latched loop. Reuses the Phase-B harness shape.
-        use std::sync::{Arc, Mutex};
+        use kirra_verifier::store_handle::StoreHandle;
         use parko_core::{ClearanceLoop, ImpactCfg, ImpactEvidence};
         use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 
@@ -325,7 +325,7 @@ mod tests {
             .save_clearance_grant_chained("KIRRA-DEMO-03", "demo-operator", 1_700_000_000_500)
             .expect("record grant");
 
-        let store = Arc::new(Mutex::new(store));
+        let store = StoreHandle::new(store);
         // A loop driven into EscalationRaised through the REAL state machine.
         let mut clearance_loop = ClearanceLoop::new();
         let ev = ImpactEvidence { imu_accel_spike_mps2: 0.0, contact_sensor: true, vanished_object: false };

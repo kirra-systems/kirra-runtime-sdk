@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use crate::posture_cache::now_ms;
+use crate::store_handle::StoreHandle;
 use crate::verifier_store::VerifierStore;
 
 /// Max number of entries returned by a single causal-log export page (#87).
@@ -36,7 +36,7 @@ pub struct CausalLogEntry {
 /// (`caused_by`, `affects_assets`, `fabric_generation`) so edge tampering is
 /// detected. Reuses the audit-chain machinery rather than forking a weaker one.
 pub struct FabricCausalLog {
-    store: Arc<Mutex<VerifierStore>>,
+    store: StoreHandle,
     signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
@@ -55,10 +55,10 @@ fn generate_entry_id(asset_id: &str, event_type: &str, timestamp_ms: u64) -> Str
 }
 
 impl FabricCausalLog {
-    /// Build over a SHARED [`VerifierStore`] so causal rows land in the same DB
+    /// Build over a SHARED [`StoreHandle`] so causal rows land in the same DB
     /// the rest of the service uses. Entries are durably persisted + chained.
     pub fn new(
-        store: Arc<Mutex<VerifierStore>>,
+        store: StoreHandle,
         signing_key: Option<ed25519_dalek::SigningKey>,
     ) -> Self {
         Self { store, signing_key }
@@ -69,7 +69,7 @@ impl FabricCausalLog {
     pub fn new_in_memory(signing_key: Option<ed25519_dalek::SigningKey>) -> Self {
         let store = VerifierStore::new(":memory:").expect("in-memory verifier store");
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: StoreHandle::new(store),
             signing_key,
         }
     }
@@ -89,44 +89,35 @@ impl FabricCausalLog {
         // Persist to the hash-chained forensic ledger. A persistence failure
         // (lock poison or DB error) must NOT crash the SG-007 propagation path —
         // log it and still return the entry_id.
-        match self.store.lock() {
-            Ok(mut store) => {
-                if let Err(e) = store.append_causal_event(
-                    &crate::verifier_store::CausalEventInput {
-                        entry_id: &entry_id,
-                        asset_id,
-                        event_type,
-                        payload,
-                        caused_by: &caused_by,
-                        affects_assets: &affects_assets,
-                        fabric_generation,
-                        timestamp_ms,
-                    },
-                    self.signing_key.as_ref(),
-                ) {
-                    tracing::error!(
-                        error = %e,
-                        entry_id = %entry_id,
-                        "failed to persist causal-log entry (#87)"
-                    );
-                }
-            }
-            Err(_) => {
+        self.store.with(|store| {
+            if let Err(e) = store.append_causal_event(
+                &crate::verifier_store::CausalEventInput {
+                    entry_id: &entry_id,
+                    asset_id,
+                    event_type,
+                    payload,
+                    caused_by: &caused_by,
+                    affects_assets: &affects_assets,
+                    fabric_generation,
+                    timestamp_ms,
+                },
+                self.signing_key.as_ref(),
+            ) {
                 tracing::error!(
+                    error = %e,
                     entry_id = %entry_id,
-                    "causal-log store lock poisoned; entry not persisted (#87)"
+                    "failed to persist causal-log entry (#87)"
                 );
             }
-        }
+        });
 
         entry_id
     }
 
     pub fn causal_chain(&self, entry_id: &str) -> Vec<CausalLogEntry> {
-        let entries = match self.store.lock() {
-            Ok(store) => store.load_causal_entries().unwrap_or_default(),
-            Err(_) => return vec![],
-        };
+        let entries = self
+            .store
+            .with(|store| store.load_causal_entries().unwrap_or_default());
 
         // BFS/DFS over `caused_by`, dedup via visited set, sort by timestamp.
         let mut result = Vec::new();
@@ -165,19 +156,16 @@ impl FabricCausalLog {
         offset: u32,
     ) -> Vec<CausalLogEntry> {
         let limit = limit.min(CAUSAL_EXPORT_MAX_PAGE);
-        match self.store.lock() {
-            Ok(store) => store
+        self.store.with(|store| {
+            store
                 .load_causal_entries_in_range(from_ms, to_ms, limit, offset)
-                .unwrap_or_default(),
-            Err(_) => vec![],
-        }
+                .unwrap_or_default()
+        })
     }
 
     pub fn len(&self) -> usize {
         self.store
-            .lock()
-            .ok()
-            .and_then(|store| store.count_causal_entries().ok())
+            .with(|store| store.count_causal_entries().ok())
             .map(|n| n as usize)
             .unwrap_or(0)
     }
@@ -254,8 +242,7 @@ mod tests {
         for i in 0..6 {
             log.record("a", &format!("EVT_{i}"), "{}", vec![], vec![], i);
         }
-        let store = log.store.lock().unwrap();
-        let r = store.verify_causal_chain_integrity(None).unwrap();
+        let r = log.store.with(|store| store.verify_causal_chain_integrity(None)).unwrap();
         assert_eq!(r.total_entries, 6);
         assert!(r.chain_intact, "unsigned chain must be intact");
         assert!(r.head_verified, "head must verify: {}", r.head_status);
@@ -269,8 +256,7 @@ mod tests {
         let root = log.record("a", "ROOT", "{}", vec![], vec!["x".to_string()], 1);
         log.record("b", "CHILD", "{}", vec![root], vec![], 1);
 
-        let store = log.store.lock().unwrap();
-        let r = store.verify_causal_chain_integrity(Some(&vk)).unwrap();
+        let r = log.store.with(|store| store.verify_causal_chain_integrity(Some(&vk))).unwrap();
         assert!(r.chain_intact);
         assert!(r.signature_valid, "all signatures must verify");
         assert!(r.head_verified, "head must verify: {}", r.head_status);

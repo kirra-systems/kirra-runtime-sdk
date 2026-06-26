@@ -17,12 +17,12 @@
 //! which records the same transitions); only the `ImpactEvidence` that pre-latches
 //! it here is synthetic.
 
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
 use ed25519_dalek::SigningKey;
 
+use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{ClearanceLoop, ImpactCfg, ImpactEvidence};
 use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
@@ -65,7 +65,7 @@ fn main() {
             }
         }
     }
-    let store = Arc::new(Mutex::new(store));
+    let store = StoreHandle::new(store);
 
     // Pre-latch a real ClearanceLoop into EscalationRaised, mirroring the seeded
     // escalation (vanished-object trigger), via the real state machine.

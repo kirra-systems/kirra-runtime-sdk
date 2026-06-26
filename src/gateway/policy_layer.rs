@@ -384,24 +384,18 @@ pub async fn enforce_actuator_safety_envelope(
                 // entries still pass. Production main always installs the
                 // writer at startup; this branch is unreachable in deployment.
                 let event_json = serde_json::to_string(&job.payload).unwrap_or_default();
-                match svc.app.store.lock() {
-                    Ok(mut store) => {
-                        if let Err(e) = store.save_posture_event_chained(
-                            job.node_id,
-                            job.event_type,
-                            &event_json,
-                            Some(job.reason),
-                            job.created_at_ms as u64,
-                        ) {
-                            tracing::error!(error = %e, reason = %code,
-                                "AUDIT-CHAIN WRITE FAILED (fallback path) for kinematic DenyBreach");
-                        }
+                svc.app.store.with(|store| {
+                    if let Err(e) = store.save_posture_event_chained(
+                        job.node_id,
+                        job.event_type,
+                        &event_json,
+                        Some(job.reason),
+                        job.created_at_ms as u64,
+                    ) {
+                        tracing::error!(error = %e, reason = %code,
+                            "AUDIT-CHAIN WRITE FAILED (fallback path) for kinematic DenyBreach");
                     }
-                    Err(_) => {
-                        tracing::error!(reason = %code,
-                            "kinematic DenyBreach: store lock poisoned (fallback path) — audit write SKIPPED");
-                    }
-                }
+                });
             }
 
             Err(StatusCode::BAD_REQUEST)

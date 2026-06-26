@@ -147,15 +147,14 @@ async fn test_actuator_envelope_deny_breach_persists_audit_row() {
     let app_ref = Arc::clone(&svc.app);
 
     // Pre-condition: chain is empty.
-    let before = {
-        let store = app_ref.store.lock().expect("store lock");
+    let before = app_ref.store.with(|store| {
         store.load_audit_chain_page(100, 0, None)
             .expect("read page")
             .entries
             .into_iter()
             .filter(|e| e.event_type == "KINEMATIC_CONTRACT_VIOLATION")
             .count()
-    };
+    });
     assert_eq!(before, 0, "test setup: no KINEMATIC_CONTRACT_VIOLATION rows yet");
 
     // Submit a non-physical-dt command — Priority-1 InvalidTimeDelta triggers
@@ -175,15 +174,14 @@ async fn test_actuator_envelope_deny_breach_persists_audit_row() {
         "DenyBreach must return 400; got {status}");
 
     // Post-condition: exactly one new KINEMATIC_CONTRACT_VIOLATION row.
-    let after = {
-        let store = app_ref.store.lock().expect("store lock");
+    let after = app_ref.store.with(|store| {
         store.load_audit_chain_page(100, 0, None)
             .expect("read page")
             .entries
             .into_iter()
             .filter(|e| e.event_type == "KINEMATIC_CONTRACT_VIOLATION")
             .count()
-    };
+    });
     assert_eq!(after, 1,
         "DenyBreach must persist exactly one audit-chain row (persist-on-deny)");
 }

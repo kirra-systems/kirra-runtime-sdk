@@ -102,19 +102,15 @@ fn note_failure(app: &AppState, event_type: &str, why: &str) {
 /// Append one post-incident event to the signed, hash-chained audit log.
 /// Best-effort: a failure bumps the counter and logs; it never propagates.
 fn emit(app: &AppState, event_type: &str, body: &serde_json::Value, ts: u64) {
-    let outcome = match app.store.lock() {
-        Ok(mut store) => store.save_posture_event_chained(
+    let outcome = app.store.with(|store| {
+        store.save_posture_event_chained(
             POST_INCIDENT_NODE_ID,
             event_type,
             &body.to_string(),
             Some("post-incident forensic sequence (#104)"),
             ts,
-        ),
-        Err(_) => {
-            note_failure(app, event_type, "store mutex poisoned");
-            return;
-        }
-    };
+        )
+    });
     if let Err(e) = outcome {
         note_failure(app, event_type, &e.to_string());
     }
@@ -267,16 +263,17 @@ mod tests {
         // The incident is closed → no open state remains.
         assert!(app.current_incident.lock().unwrap().is_none());
 
-        let store = app.store.lock().unwrap();
-
-        // Signed + hash-linked under the signing key.
-        let v = store.verify_audit_chain_full(Some(&vk)).expect("verify");
+        let (v, events) = app.store.with(|store| {
+            // Signed + hash-linked under the signing key.
+            let v = store.verify_audit_chain_full(Some(&vk)).expect("verify");
+            let events = store.load_all_posture_events().expect("load");
+            (v, events)
+        });
         assert!(v.chain_intact, "post-incident events must be hash-chained");
         assert!(v.signature_valid, "post-incident events must verify under the signing key");
         assert!(v.signed_entries >= 3, "all three sequence events must be signed, got {}", v.signed_entries);
 
         // All three events carry the SAME correlation id.
-        let events = store.load_all_posture_events().expect("load");
         let opened = body_of(&events, POST_INCIDENT_SEQUENCE_OPENED);
         let event = body_of(&events, POST_INCIDENT_EVENT);
         let closed = body_of(&events, POST_INCIDENT_SEQUENCE_CLOSED);
@@ -300,8 +297,7 @@ mod tests {
         record_posture_transition(
             &app, Some(&FleetPosture::Nominal), &FleetPosture::Degraded, true, 1, 100);
         assert!(app.current_incident.lock().unwrap().is_none());
-        let store = app.store.lock().unwrap();
-        let events = store.load_all_posture_events().expect("load");
+        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
         assert!(
             !events.iter().any(|e| e["event_type"] == POST_INCIDENT_SEQUENCE_OPENED),
             "a non-lockout transition must not open a post-incident sequence"
@@ -314,11 +310,10 @@ mod tests {
         let (app, _vk) = app_with_key();
         record_posture_transition(
             &app, Some(&FleetPosture::LockedOut), &FleetPosture::LockedOut, false, 1, 100);
-        let store = app.store.lock().unwrap();
-        assert!(
-            store.load_all_posture_events().expect("load").is_empty(),
-            "is_transition=false must emit nothing"
-        );
+        let is_empty = app
+            .store
+            .with(|store| store.load_all_posture_events().expect("load").is_empty());
+        assert!(is_empty, "is_transition=false must emit nothing");
     }
 
     /// Each distinct incident gets a fresh correlation id.
@@ -334,8 +329,7 @@ mod tests {
         record_posture_transition(
             &app, Some(&FleetPosture::Nominal), &FleetPosture::LockedOut, true, 3, 300);
 
-        let store = app.store.lock().unwrap();
-        let events = store.load_all_posture_events().expect("load");
+        let events = app.store.with(|store| store.load_all_posture_events().expect("load"));
         let opens: Vec<String> = events
             .iter()
             .filter(|e| e["event_type"] == POST_INCIDENT_SEQUENCE_OPENED)

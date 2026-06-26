@@ -58,7 +58,7 @@
 // detection edges to the signed chain is a separate concern tracked with #309.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use parko_core::backend::InferenceBackend;
 use parko_core::safety::SafetyPosture;
@@ -70,8 +70,9 @@ use parko_core::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use kirra_verifier::verifier_store::VerifierStore;
 use parko_kirra::clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
+#[cfg(test)]
+use kirra_verifier::verifier_store::VerifierStore;
 
 use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
@@ -370,7 +371,7 @@ impl NodeClearance {
     /// The store-open + signing-key path is [`NodeClearance::open_signed`]; this
     /// is the seam tests use with an in-memory store.
     #[must_use]
-    pub fn from_store(store: Arc<Mutex<VerifierStore>>, node_id: impl Into<String>) -> Self {
+    pub fn from_store(store: kirra_verifier::store_handle::StoreHandle, node_id: impl Into<String>) -> Self {
         Self::new(ClearanceDelivery::new(store, node_id))
     }
 
@@ -747,10 +748,10 @@ mod tests {
         }
     }
 
-    fn store() -> Arc<Mutex<VerifierStore>> {
-        Arc::new(Mutex::new(
+    fn store() -> kirra_verifier::store_handle::StoreHandle {
+        kirra_verifier::store_handle::StoreHandle::new(
             VerifierStore::new(":memory:").expect("in-memory store"),
-        ))
+        )
     }
 
     /// Drive a `NodeClearance`'s loop into an immobilized state through the REAL
@@ -863,9 +864,7 @@ mod tests {
 
         // The operator records a grant through the (Phase-A) store path, dated now.
         let now = current_time_ms();
-        s.lock()
-            .unwrap()
-            .save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now)
+        s.with(|store| store.save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now))
             .expect("record grant");
 
         // ONE tick delivers it.
@@ -946,9 +945,7 @@ mod tests {
 
         // A grant exists, but for ANOTHER node.
         let now = current_time_ms();
-        s.lock()
-            .unwrap()
-            .save_clearance_grant_chained("KIRRA-DEMO-06", "mallory", now)
+        s.with(|store| store.save_clearance_grant_chained("KIRRA-DEMO-06", "mallory", now))
             .expect("record grant for a different node");
 
         let infer = build_loop(0.1, 0.2);
@@ -1097,9 +1094,7 @@ mod tests {
 
         // A grant is pending for the OLD escalation.
         let now = current_time_ms();
-        s.lock()
-            .unwrap()
-            .save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now)
+        s.with(|store| store.save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now))
             .expect("record grant");
 
         // Same tick: a NEW impact arrives (contact).
@@ -1151,9 +1146,7 @@ mod tests {
 
         // The operator records a grant.
         let now = current_time_ms();
-        s.lock()
-            .unwrap()
-            .save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now)
+        s.with(|store| store.save_clearance_grant_chained("KIRRA-DEMO-03", "alice", now))
             .expect("record grant");
 
         // Tick 3: delivery clears the loop; no new impact → veto lifts, motion resumes.

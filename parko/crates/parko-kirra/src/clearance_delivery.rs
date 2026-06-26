@@ -22,8 +22,7 @@
 //! and never retried — the operator re-issues through the console. Automatic retry
 //! of a dead grant would be a replay machine.
 
-use std::sync::{Arc, Mutex};
-
+use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{ClearanceLoop, OperatorClearanceGrant, DEFAULT_MAX_GRANT_AGE_MS};
 
@@ -45,13 +44,13 @@ pub enum DeliveryOutcome {
 /// Node-side clearance delivery. Holds the shared store handle + this node's id —
 /// the same shape as the `parko-kirra` audit sinks (the #247 crossing).
 pub struct ClearanceDelivery {
-    store: Arc<Mutex<VerifierStore>>,
+    store: StoreHandle,
     node_id: String,
     max_grant_age_ms: u64,
 }
 
 impl ClearanceDelivery {
-    pub fn new(store: Arc<Mutex<VerifierStore>>, node_id: impl Into<String>) -> Self {
+    pub fn new(store: StoreHandle, node_id: impl Into<String>) -> Self {
         Self {
             store,
             node_id: node_id.into(),
@@ -89,7 +88,7 @@ impl ClearanceDelivery {
         let mut store = VerifierStore::new(db_path)
             .map_err(|e| format!("could not open the co-located store '{db_path}': {e}"))?;
         store.set_signing_key(key);
-        Ok(Self::new(Arc::new(Mutex::new(store)), node_id))
+        Ok(Self::new(StoreHandle::new(store), node_id))
     }
 
     /// Override the grant-age ceiling (default [`DEFAULT_MAX_GRANT_AGE_MS`]).
@@ -112,16 +111,12 @@ impl ClearanceDelivery {
         now_ms: u64,
     ) -> DeliveryOutcome {
         // 1. ONE-SHOT CONSUME — the grant is now spent regardless of the verdict.
-        let row = {
-            let store = match self.store.lock() {
-                Ok(s) => s,
-                Err(_) => return DeliveryOutcome::StoreError,
-            };
-            match store.take_pending_clearance_grant(&self.node_id, now_ms) {
-                Ok(Some(r)) => r,
-                Ok(None) => return DeliveryOutcome::NoGrant,
-                Err(_) => return DeliveryOutcome::StoreError,
-            }
+        //    The closure returns the take result; the outer match maps it to the
+        //    early-return outcomes (Rule 4 — `return` cannot cross the closure).
+        let row = match self.store.with(|store| store.take_pending_clearance_grant(&self.node_id, now_ms)) {
+            Ok(Some(r)) => r,
+            Ok(None) => return DeliveryOutcome::NoGrant,
+            Err(_) => return DeliveryOutcome::StoreError,
         };
 
         // 2. CHECKPOINT 2 — the loop re-validates at DELIVERY time. `granted_at_ms`
@@ -135,11 +130,9 @@ impl ClearanceDelivery {
         let verdict = clearance_loop.try_clear(&grant, now_ms, self.max_grant_age_ms);
 
         // 3. Record the outcome (signed). Consumed either way — NO retry.
-        let mut store = match self.store.lock() {
-            Ok(s) => s,
-            Err(_) => return DeliveryOutcome::StoreError,
-        };
-        match verdict {
+        //    The closure builds and returns the outcome (poison is recovered by
+        //    the handle, so the former StoreError-on-poison arm is gone).
+        self.store.with(|store| match verdict {
             Ok(()) => {
                 let _ = store.record_grant_outcome(row.rowid, "Cleared", None, now_ms);
                 DeliveryOutcome::Cleared {
@@ -155,7 +148,7 @@ impl ClearanceDelivery {
                     grant_rowid: row.rowid,
                 }
             }
-        }
+        })
     }
 }
 
@@ -164,14 +157,12 @@ mod tests {
     use super::*;
     use parko_core::{ClearanceState, ImpactCfg, ImpactEvidence};
 
-    fn store() -> Arc<Mutex<VerifierStore>> {
-        Arc::new(Mutex::new(VerifierStore::new(":memory:").expect("in-memory store")))
+    fn store() -> StoreHandle {
+        StoreHandle::new(VerifierStore::new(":memory:").expect("in-memory store"))
     }
 
-    fn record_grant(s: &Arc<Mutex<VerifierStore>>, node: &str, op: &str, granted_at_ms: u64) {
-        s.lock()
-            .unwrap()
-            .save_clearance_grant_chained(node, op, granted_at_ms)
+    fn record_grant(s: &StoreHandle, node: &str, op: &str, granted_at_ms: u64) {
+        s.with(|store| store.save_clearance_grant_chained(node, op, granted_at_ms))
             .expect("record grant (Phase-A path)");
     }
 
@@ -189,8 +180,8 @@ mod tests {
         l
     }
 
-    fn audit_has(s: &Arc<Mutex<VerifierStore>>, event_type: &str) -> bool {
-        let page = s.lock().unwrap().load_audit_chain_page(200, 0, None).unwrap();
+    fn audit_has(s: &StoreHandle, event_type: &str) -> bool {
+        let page = s.with(|store| store.load_audit_chain_page(200, 0, None)).unwrap();
         page.entries.iter().any(|e| {
             serde_json::to_value(e)
                 .unwrap()
@@ -212,7 +203,7 @@ mod tests {
         assert_eq!(l.state(), ClearanceState::Normal, "loop cleared to Normal");
         assert!(audit_has(&s, "ClearanceDelivered"), "ClearanceDelivered audit present");
 
-        let st = s.lock().unwrap().latest_clearance_grant("robot-01").unwrap().unwrap();
+        let st = s.with(|store| store.latest_clearance_grant("robot-01")).unwrap().unwrap();
         assert_eq!(st.outcome.as_deref(), Some("Cleared"));
         assert!(st.consumed_at_ms.is_some(), "grant consumed");
     }
@@ -248,8 +239,8 @@ mod tests {
     fn one_shot_second_take_gets_none() {
         let s = store();
         record_grant(&s, "robot-01", "alice", 1_000);
-        let first = s.lock().unwrap().take_pending_clearance_grant("robot-01", 1_100).unwrap();
-        let second = s.lock().unwrap().take_pending_clearance_grant("robot-01", 1_101).unwrap();
+        let first = s.with(|store| store.take_pending_clearance_grant("robot-01", 1_100)).unwrap();
+        let second = s.with(|store| store.take_pending_clearance_grant("robot-01", 1_101)).unwrap();
         assert!(first.is_some(), "first take gets the grant");
         assert!(second.is_none(), "second take gets None — exactly-once consume");
     }
@@ -287,9 +278,7 @@ mod tests {
 
         // Record a grant directly through the same store handle, then deliver.
         d.store
-            .lock()
-            .unwrap()
-            .save_clearance_grant_chained("KIRRA-DEMO-03", "alice", 1_000)
+            .with(|store| store.save_clearance_grant_chained("KIRRA-DEMO-03", "alice", 1_000))
             .expect("record grant");
         let mut l = immobilized_loop();
         let out = d.poll_and_deliver(&mut l, 1_500);
@@ -307,7 +296,7 @@ mod tests {
         // carried an empty operator_id, the loop rejects it (malformed), the grant
         // is consumed, and it is audited. (We insert the degenerate row directly.)
         let s = store();
-        s.lock().unwrap().save_clearance_grant_chained("robot-01", "", 1_000).expect("record");
+        s.with(|store| store.save_clearance_grant_chained("robot-01", "", 1_000)).expect("record");
         let mut l = immobilized_loop();
         let d = ClearanceDelivery::new(s.clone(), "robot-01");
 
