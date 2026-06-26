@@ -784,6 +784,34 @@ impl VerifierStore {
         }
     }
 
+    /// Resolve an audit verifying key by its `key_id` fingerprint from the
+    /// durable `audit_key_ledger` (#329 residual — audit-key rotation/history).
+    ///
+    /// Returns the verifying key for the FIRST **self-attested** ledger row whose
+    /// `key_id` matches — i.e. a `genesis` / `rotation` / `reanchor` row whose
+    /// content-addressing holds and whose self-signature verifies
+    /// ([`ledger_row_is_self_attested`]). A forensic `backfill` row (empty
+    /// signature, lost-private-key history) is NOT trusted as a verification key
+    /// — `None`, never a key. This is what lets a ROTATED-OUT key still verify
+    /// the audit-chain rows it signed, across a key rotation.
+    ///
+    /// Fail-closed: an unknown fingerprint, a non-self-attested row, or a
+    /// malformed stored key all resolve to `None`. `Err` is reserved for an
+    /// actual store (SQL) failure.
+    pub fn resolve_audit_verifying_key(
+        &self,
+        key_id: &str,
+    ) -> Result<Option<ed25519_dalek::VerifyingKey>> {
+        for r in self.audit_key_ledger_rows()? {
+            if r.key_id == key_id && ledger_row_is_self_attested(&r) {
+                // `ledger_row_is_self_attested` already re-checked content-addressing
+                // (decoded key fingerprint == key_id) and the self-signature.
+                return Ok(audit_decode_vk(&r.pubkey_b64));
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve the durable genesis verifying key from the anchor + the ledger's
     /// genesis row. `None` when no anchor exists (pre-#165 chains).
     fn audit_genesis_vk(&self) -> Result<Option<ed25519_dalek::VerifyingKey>> {
