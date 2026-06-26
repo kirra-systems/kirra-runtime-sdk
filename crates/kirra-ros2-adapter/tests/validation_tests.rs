@@ -174,7 +174,15 @@ fn obj_at(x_m: f64, velocity_mps: f64, heading_rad: f64) -> PerceivedObject {
         pos: Point { x_m, y_m: 1.5 },
         velocity_mps,
         heading_rad,
-        vel: Point { x_m: 0.0, y_m: 0.0 },
+        // D/C-1: keep `vel` CONSISTENT with `velocity_mps`/`heading_rad` (as real
+        // ingest does: `velocity_mps = |vel|`). These scenarios use `heading_rad`
+        // as the motion direction, so the velocity vector is the speed rotated by
+        // it. The snapshot RSS now reads motion from `vel`, so leaving it zero
+        // would model a stationary object and contradict the test's intent.
+        vel: Point {
+            x_m: velocity_mps * heading_rad.cos(),
+            y_m: velocity_mps * heading_rad.sin(),
+        },
     }
 }
 
@@ -206,6 +214,62 @@ fn same_direction_lead_at_identical_gap_is_admitted() {
     assert!(
         matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a same-direction lead at the same gap is admitted (direction is the only change); got {verdict:?}"
+    );
+}
+
+#[test]
+fn snapshot_rss_uses_velocity_vector_not_orientation_dc1() {
+    // D/C-1: the snapshot RSS verdict must depend on the object's MOTION (the
+    // velocity vector `vel`), NOT its FACING (`heading_rad`). Two objects with the
+    // SAME velocity vector but different orientations must get the SAME verdict.
+    // Pre-fix the verdict changed with orientation, since lateral motion was read
+    // as `velocity_mps · sin(heading − ego_heading)`.
+    let trajectory = straight_trajectory(20, 3.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    let vel = Point { x_m: 0.5, y_m: -2.0 }; // mostly-lateral motion toward the ego lane
+    let pos = Point { x_m: 8.0, y_m: 3.0 };
+    let speed = vel.x_m.hypot(vel.y_m);
+    let facing_forward = PerceivedObject { id: 1, pos, velocity_mps: speed, heading_rad: 0.0, vel };
+    let facing_motion = PerceivedObject {
+        id: 1, pos, velocity_mps: speed, heading_rad: vel.y_m.atan2(vel.x_m), vel,
+    };
+
+    let v_forward = validate_trajectory_slow(
+        &trajectory, &corridor, std::slice::from_ref(&facing_forward), &cfg, None, FleetPosture::Nominal,
+    );
+    let v_motion = validate_trajectory_slow(
+        &trajectory, &corridor, std::slice::from_ref(&facing_motion), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        format!("{v_forward:?}"), format!("{v_motion:?}"),
+        "snapshot RSS must depend on the velocity vector, not orientation; got {v_forward:?} vs {v_motion:?}"
+    );
+}
+
+#[test]
+fn snapshot_rss_catches_a_forward_facing_lateral_cut_in_dc1() {
+    // An object FACING forward (heading 0) but MOVING laterally into the ego path
+    // must be refused. The orientation-based form read its lateral motion as ~0
+    // (sin(0) = 0) and could miss it; the vector form reads the true lateral
+    // component and catches the cut-in.
+    let ego = held_ego(10.0); // stopped ego at x=10, y=0, heading 0
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let obj = PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 13.0, y_m: 1.0 }, // dx 3 (in the conflict band), small lateral gap
+        velocity_mps: 2.5,
+        heading_rad: 0.0,                    // facing forward, but...
+        vel: Point { x_m: 0.0, y_m: -2.5 },  // ...moving laterally toward the ego
+    };
+    let verdict = validate_trajectory_slow(
+        &ego, &corridor, std::slice::from_ref(&obj), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        verdict, TrajectoryVerdict::MRCFallback,
+        "a forward-facing object cutting in laterally must be refused (D/C-1 vector motion); got {verdict:?}"
     );
 }
 

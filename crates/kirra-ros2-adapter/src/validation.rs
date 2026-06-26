@@ -386,8 +386,18 @@ pub fn validate_trajectory_slow_capped(
             // matters: an ONCOMING vehicle — velocity projects backward onto the ego's forward
             // axis — is a HEAD-ON closure needing the opposite-direction bound, the sum of both
             // stopping distances; a same-direction lead uses the rear-end bound, #408 Obs 3).
-            let obj_lon_v =
-                obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).cos();
+            // D/C-1 (motion-source consistency): project the object's VELOCITY
+            // VECTOR `vel` into the ego frame — the SAME source the predictive and
+            // redundancy passes use — instead of the SPEED MAGNITUDE along the
+            // object's ORIENTATION (`velocity_mps × cos(heading − ego_heading)`).
+            // At ingest `velocity_mps = |vel|` but `heading_rad` is the object's
+            // FACING direction, which diverges from its MOTION direction for a
+            // cut-in / slide / yaw-rate turn — so the old form had the snapshot RSS
+            // and the predictive RSS evaluating DIFFERENT motions for the same
+            // object. Reuses the ego-frame rotation already computed for dx/dy_ego;
+            // the longitudinal bound now takes the true longitudinal closing
+            // component (matching `predictive_rss_breach`), not the full speed.
+            let obj_lon_v = cos_h * obj.vel.x_m + sin_h * obj.vel.y_m;
             let lon_required = if obj_lon_v < 0.0 {
                 // Closing magnitudes; symmetric brake_min (both in their lanes).
                 opposite_direction_safe_distance(
@@ -401,7 +411,7 @@ pub fn validate_trajectory_slow_capped(
             } else {
                 longitudinal_safe_distance(
                     traj_point.velocity_mps,
-                    obj.velocity_mps,
+                    obj_lon_v,
                     RSS_REACTION_TIME_S,
                     config.max_accel_mps2,
                     config.max_decel_mps2,
@@ -431,8 +441,12 @@ pub fn validate_trajectory_slow_capped(
             // lateral velocity = the component along the pose normal — Phase 2A assumes 0 if
             // perception lacks per-axis vel; the ego's own lateral motion is carried by the
             // trajectory poses, so containment + the abreast term cover an ego swerve.)
-            let obj_lat_vel =
-                obj.velocity_mps * (obj.heading_rad - traj_point.pose.heading_rad).sin();
+            // D/C-1: lateral component of the SAME velocity vector (ego-frame
+            // normal), mirroring `predictive_rss_breach`'s `obj_lat_v`. A car still
+            // FACING forward but MOVING laterally (a cut-in) now registers lateral
+            // motion here — the orientation-based `sin(heading − ego)` form read it
+            // as ~0 and could miss the cut-in.
+            let obj_lat_vel = -sin_h * obj.vel.x_m + cos_h * obj.vel.y_m;
             let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
             if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M && (lon_unsafe || lateral_cut_in) {
                 let ego_lat_vel = 0.0; // straight-following assumption per §3
