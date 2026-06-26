@@ -842,6 +842,52 @@ fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
         "with no predicted modes the predictive pass is a no-op; got {verdict:?}");
 }
 
+#[test]
+fn predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3() {
+    // B3 (silent fail-open fix): a neighbor whose predicted mode is MALFORMED —
+    // every sample carries the SAME timestamp, so `dt <= 0` for every window and
+    // the multi-modal pass can evaluate NOTHING. Previously it fell through to
+    // "safe" (fail-OPEN): a producer emitting equal timestamps could silently
+    // neutralize the cut-in detector. The geometry is the lane-keeping neighbor
+    // that normally ACCEPTS (so neither the snapshot RSS — no objects passed — nor
+    // any other pass fires); the ONLY thing that can MRC here is the new
+    // fail-closed guard. It must now return MRCFallback.
+    let trajectory = straight_trajectory(20, 6.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let samples = [
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
+    ];
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "modes supplied but all unevaluable (equal timestamps) must fail closed; got {verdict:?}");
+}
+
+#[test]
+fn predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3() {
+    // B3: a non-empty mode set whose mode carries only a SINGLE sample — no
+    // inter-sample window at all (the degenerate sub-`dt` horizon the producer can
+    // emit). There is no motion to roll forward, so the pass evaluates nothing and
+    // must fail closed rather than Accept.
+    let trajectory = straight_trajectory(20, 6.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let samples = [PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 }];
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "a non-empty mode set with no evaluable window must fail closed; got {verdict:?}");
+}
+
 // ---------------------------------------------------------------------------
 // RSS conjunction (§4): a safe stationary queue is admitted; genuine danger
 // (driving in, or a lateral cut-in) is still rejected. A deterministic SWEEP —

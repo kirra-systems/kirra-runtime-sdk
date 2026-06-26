@@ -573,20 +573,26 @@ fn nearest_in_time(
 /// proximity) closes that gap. `max_lateral_accel_mps2` is the (posture-/perception-capped)
 /// per-pose contract's lateral-accel bound, so the predictive lateral check uses the SAME
 /// side-gap budget as the snapshot pass.
-// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in
+// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in,predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3,predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3
 fn predictive_rss_breach(
     trajectory: &[TrajectoryPoint],
     modes: &[PredictedMode<'_>],
     config: &VehicleConfig,
     max_lateral_accel_mps2: f64,
 ) -> bool {
+    // B3: track whether ANY sample window was actually evaluable. A non-monotonic
+    // `dt` or an out-of-span time match means "couldn't evaluate this sample" —
+    // distinct from the geometric gates below, which ARE evaluated determinations
+    // ("evaluated → not a threat"). If a non-empty mode set produces NOT ONE
+    // evaluable window, the cut-in detector checked nothing; see the fail-closed
+    // guard after the loop.
+    let mut evaluated_any = false;
     for mode in modes {
         for pair in mode.samples.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let dt = b.time_from_start_s - a.time_from_start_s;
             if dt <= 0.0 {
-                continue; // non-monotonic samples — skip (fail-open on malformed *input*,
-                          // the snapshot RSS still bounds the real object)
+                continue; // non-monotonic samples — unevaluable (see post-loop guard)
             }
             let ovx = (b.pos.x_m - a.pos.x_m) / dt;
             let ovy = (b.pos.y_m - a.pos.y_m) / dt;
@@ -596,6 +602,9 @@ fn predictive_rss_breach(
             else {
                 continue; // no ego pose within tolerance at this time — unevaluable
             };
+            // Past both unevaluable gates: this window WAS evaluated (whatever the
+            // geometric verdict below).
+            evaluated_any = true;
             let dx = a.pos.x_m - ego.pose.x_m;
             let dy = a.pos.y_m - ego.pose.y_m;
             let cos_h = ego.pose.heading_rad.cos();
@@ -663,6 +672,23 @@ fn predictive_rss_breach(
             }
         }
     }
+
+    // B3 (fail-closed): the caller already treats `predicted_modes == None` /
+    // an EMPTY slice as the legitimate "no prediction supplied" no-op. But a
+    // NON-EMPTY mode set that produced ZERO evaluable windows — every sample
+    // non-monotonic in time, or none within the ego trajectory's time span, or
+    // no inter-sample window at all (a sub-`dt` horizon) — means the multi-modal
+    // predictive pass, the ONLY layer catching a mid-band cut-in the snapshot
+    // filters out, evaluated nothing. Returning `false` here would be a SILENT
+    // FAIL-OPEN that a producer can trigger with equal timestamps or a too-short
+    // horizon. Fail closed instead: derate to the MRC floor (the caller maps
+    // `true` → `TrajectoryVerdict::MRCFallback`). Well-formed modes always have
+    // at least one evaluable window (the t≈0 sample matches the ego start pose),
+    // so the Nominal path is unaffected.
+    if !modes.is_empty() && !evaluated_any {
+        return true;
+    }
+
     false
 }
 
