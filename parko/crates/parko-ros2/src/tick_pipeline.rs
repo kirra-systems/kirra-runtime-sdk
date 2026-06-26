@@ -57,6 +57,11 @@ pub enum TickError {
     /// ego-relative corridor (or the corridor was absent/stale). The tick
     /// MRCs (stopped twist). Set by `containment_gate::apply_containment_gate`.
     ContainmentBreach,
+    /// ADR-0029 Phase 3b (object axis) — a perceived object made the proposed
+    /// command RSS-unsafe (the §4 conjunction), or object perception was
+    /// absent/stale. The tick MRCs (stopped twist). Set by
+    /// `taj_objects::apply_object_rss_gate`.
+    ObjectRssBreach,
 }
 
 /// What a single `run_pipeline_tick` produced. Always carries a safe
