@@ -439,8 +439,30 @@ impl AppState {
     }
 
     pub fn calculate_posture(&self, node_id: &str) -> FleetNodePosture {
+        let mut black: HashMap<String, Arc<FleetNodePosture>> = HashMap::new();
+        self.calculate_posture_memoized(node_id, &mut black)
+    }
+
+    /// As [`calculate_posture`], but reuses a CALLER-OWNED `black` memo across
+    /// many roots (review P3). A node's fully-evaluated posture is
+    /// root-INDEPENDENT (it is a property of the node + its dependency subgraph,
+    /// not of which root reached it), so the whole-fleet recalc can share ONE
+    /// memo: a node depended on by K others is traversed ONCE (the first root to
+    /// reach it) and then black-hit by the rest — turning the fleet recalc from
+    /// O(N·(N+E)) into ~O(N+E). The gray (cycle-detection) set is still FRESH per
+    /// call: it tracks the CURRENT root's active call stack, and the cycle /
+    /// depth sentinels are deliberately NOT memoized (never inserted into
+    /// `black`), so sharing `black` only ever reuses fully-resolved verdicts.
+    /// The memo stores `Arc<FleetNodePosture>` so a hit is an `Arc::clone`
+    /// (refcount bump) rather than a deep clone of the node id + `blocked_by`
+    /// vector (review P5, the contained part — full `Arc<str>` id interning is a
+    /// separate, larger migration).
+    pub fn calculate_posture_memoized(
+        &self,
+        node_id: &str,
+        black: &mut HashMap<String, Arc<FleetNodePosture>>,
+    ) -> FleetNodePosture {
         let mut gray: HashSet<String> = HashSet::new();
-        let mut black: HashMap<String, FleetNodePosture> = HashMap::new();
         // Recursion bound for the stack-overflow backstop below. The gray set
         // already makes a repeated node on the active path impossible without a
         // cycle, so the longest *acyclic* path is at most `nodes.len()` distinct
@@ -449,20 +471,22 @@ impl AppState {
         // rather than a (traversal-order-dependent) semantic verdict. Floored at
         // MAX_DEPENDENCY_DEPTH so a tiny fleet still carries the documented guard.
         let max_depth = self.nodes.len().max(MAX_DEPENDENCY_DEPTH);
-        self.recursive_calculate(node_id, &mut gray, &mut black, 0, max_depth)
+        let posture = self.recursive_calculate(node_id, &mut gray, black, 0, max_depth);
+        (*posture).clone()
     }
 
     fn recursive_calculate(
         &self,
         node_id: &str,
         gray: &mut HashSet<String>,
-        black: &mut HashMap<String, FleetNodePosture>,
+        black: &mut HashMap<String, Arc<FleetNodePosture>>,
         depth: usize,
         max_depth: usize,
-    ) -> FleetNodePosture {
-        // Black: node already fully evaluated in this pass — reuse without re-traversal.
+    ) -> Arc<FleetNodePosture> {
+        // Black: node already fully evaluated in this pass — reuse without
+        // re-traversal. `Arc::clone` is a refcount bump, not a deep copy (P5).
         if let Some(cached) = black.get(node_id) {
-            return cached.clone();
+            return Arc::clone(cached);
         }
 
         // Gray: node is currently on the active call stack — a back-edge, i.e. a
@@ -470,13 +494,15 @@ impl AppState {
         // fail-closed LockedOut (tagged CYCLE_DETECTED). Deterministic: any
         // traversal that re-enters the cycle hits a gray node regardless of the
         // entry path, so this is a true property of the graph, not the walk order.
+        // NOT memoized (not inserted into `black`) — a transient per-DFS sentinel,
+        // which is what makes sharing `black` across roots sound (P3).
         if gray.contains(node_id) {
-            return FleetNodePosture {
+            return Arc::new(FleetNodePosture {
                 node_id: node_id.to_string(),
                 local_status: NodeTrustState::Unknown,
                 propagated_status: FleetPosture::LockedOut,
                 blocked_by: vec!["CYCLE_DETECTED".to_string()],
-            };
+            });
         }
 
         // Depth backstop — a stack-overflow guard, NOT a semantic verdict. Because
@@ -491,12 +517,12 @@ impl AppState {
         // fleet's posture depended on dependency *insertion order* rather than the
         // graph's trust state. Bounding by node count removes that flip entirely.
         if depth >= max_depth {
-            return FleetNodePosture {
+            return Arc::new(FleetNodePosture {
                 node_id: node_id.to_string(),
                 local_status: NodeTrustState::Unknown,
                 propagated_status: FleetPosture::LockedOut,
                 blocked_by: vec!["MAX_DEPTH_EXCEEDED".to_string()],
-            };
+            });
         }
 
         gray.insert(node_id.to_string());
@@ -536,15 +562,15 @@ impl AppState {
             NodeTrustState::Trusted => FleetPosture::Nominal,
         };
 
-        let posture = FleetNodePosture {
+        let posture = Arc::new(FleetNodePosture {
             node_id: node_id.to_string(),
             local_status,
             propagated_status,
             blocked_by,
-        };
+        });
 
         gray.remove(node_id);
-        black.insert(node_id.to_string(), posture.clone());
+        black.insert(node_id.to_string(), Arc::clone(&posture));
 
         posture
     }
@@ -781,5 +807,99 @@ mod nonce_lifecycle_tests {
         app.issue_challenge("fresh", 2, later);
         assert!(!app.pending_challenges.contains_key("stale"), "expired entry pruned on issue");
         assert!(app.pending_challenges.contains_key("fresh"), "fresh entry retained");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P3/P5 — the shared `black` memo must produce results IDENTICAL to the
+// per-call memo for every node (critical-invariant #4: the gray/black traversal
+// is unchanged; only the memo's lifetime + storage type changed).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod shared_memo_equivalence_tests {
+    use super::*;
+    use crate::verifier_store::VerifierStore;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn app() -> AppState {
+        AppState::new(VerifierStore::new(":memory:").expect("in-memory store"), VerifierOperationMode::Active)
+    }
+
+    fn node(id: &str, status: NodeTrustState) -> RegisteredNode {
+        RegisteredNode {
+            node_id: id.to_string(),
+            status,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        }
+    }
+
+    /// Assert that, for every registered node, resolving with a FRESH per-call
+    /// memo equals resolving the whole fleet through ONE shared memo (in id-sorted
+    /// order). This pins the P3/P5 change as result-preserving.
+    fn assert_shared_equals_per_call(app: &AppState) {
+        let mut ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
+        ids.sort();
+        let mut shared: HashMap<String, Arc<FleetNodePosture>> = HashMap::new();
+        for id in &ids {
+            let per_call = app.calculate_posture(id);
+            let shared_res = app.calculate_posture_memoized(id, &mut shared);
+            // FleetNodePosture is not PartialEq; its Debug captures every field
+            // (node_id, local_status, propagated_status, blocked_by) faithfully.
+            assert_eq!(
+                format!("{per_call:?}"),
+                format!("{shared_res:?}"),
+                "shared-memo result for {id} must equal the per-call result"
+            );
+        }
+    }
+
+    #[test]
+    fn diamond_dag_with_a_faulted_shared_dep_is_memo_equivalent() {
+        // d -> {b, c} -> a ; plus c -> x (Untrusted). `a` is the SHARED dep that
+        // the shared memo evaluates once and reuses; `x`'s LockedOut propagates up
+        // through c and d. Both resolution strategies must agree on every node.
+        let app = app();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("c", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("d", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into()))).unwrap();
+        app.persist_and_insert_deps("b", vec!["a".into()]).unwrap();
+        app.persist_and_insert_deps("c", vec!["a".into(), "x".into()]).unwrap();
+        app.persist_and_insert_deps("d", vec!["b".into(), "c".into()]).unwrap();
+
+        // Spot-check the expected verdicts, then prove equivalence.
+        assert_eq!(app.calculate_posture("a").propagated_status, FleetPosture::Nominal);
+        assert_eq!(app.calculate_posture("x").propagated_status, FleetPosture::LockedOut);
+        assert_eq!(app.calculate_posture("c").propagated_status, FleetPosture::LockedOut,
+            "c depends on the faulted x → LockedOut");
+        assert_eq!(app.calculate_posture("d").propagated_status, FleetPosture::LockedOut,
+            "d inherits c's LockedOut");
+        assert_shared_equals_per_call(&app);
+    }
+
+    #[test]
+    fn cycle_is_memo_equivalent_and_not_poisoned_by_sharing() {
+        // a -> b -> a (a cycle) and an independent Trusted node t. The cycle
+        // sentinel (CYCLE_DETECTED) is NEVER memoized, so sharing the memo across
+        // roots must not leak it onto t — both strategies must agree.
+        let app = app();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("t", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_deps("a", vec!["b".into()]).unwrap();
+        app.persist_and_insert_deps("b", vec!["a".into()]).unwrap();
+
+        assert_eq!(app.calculate_posture("a").propagated_status, FleetPosture::LockedOut,
+            "a is on a cycle → LockedOut");
+        assert_eq!(app.calculate_posture("t").propagated_status, FleetPosture::Nominal,
+            "the independent node is unaffected by the cycle");
+        assert_shared_equals_per_call(&app);
     }
 }
