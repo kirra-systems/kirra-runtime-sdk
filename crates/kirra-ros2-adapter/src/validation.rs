@@ -262,6 +262,13 @@ pub fn validate_trajectory_slow_capped(
     let initial_steering_deg = current_steering_deg_from_odom(latest_odom, config);
     let mut clamp_seen = false;
     let mut prev_steering_deg = initial_steering_deg;
+    // ADR-0029: the angular channel's "current" yaw rate for the Degraded
+    // converge-to-stop-and-HOLD gate. Seeded from odometry (the vehicle's
+    // actual yaw rate), then carried forward per segment as the prior
+    // commanded ω — mirroring `prev_steering_deg`. `None` (no odom) → 0.0
+    // (assume stopped → a first-segment rotation reads as re-initiation,
+    // fail-closed). Only read under Degraded with a diff-drive `config.angular`.
+    let mut prev_omega = latest_odom.map(|o| o.yaw_rate_rads).unwrap_or(0.0);
     for i in 0..trajectory.len() - 1 {
         let cmd = pose_pair_to_command(
             &trajectory[i],
@@ -322,6 +329,22 @@ pub fn validate_trajectory_slow_capped(
                 if !omega.is_finite() || omega.abs() > ab.omega_max(v_seg, posture_factor) {
                     return TrajectoryVerdict::MRCFallback;
                 }
+                // Issue #70 / ADR-0029 — Degraded converge-to-stop-and-HOLD on
+                // the ANGULAR channel. The magnitude bound above only caps |ω|;
+                // it does NOT force the yaw axis to converge to zero and hold.
+                // Under Degraded the courier must decel-to-stop on BOTH axes
+                // (linear handled by `enforce_degraded_decel_to_stop`): no
+                // angular re-initiation from a stop, no reversal through a stop,
+                // non-increasing |ω|. A breach collapses to the MRC, exactly
+                // like the linear gate. Mirrors parko-kirra's
+                // `degraded_channel_violation` on the angular channel (cited
+                // copy). Nominal carries no gate; Ackermann (`angular = None`)
+                // never reaches this block → byte-identical.
+                // SAFETY: SG8 | REQ: courier-angular-degraded-stop-and-hold | TEST: courier_degraded_angular_reinitiation_from_stop_mrcs,courier_degraded_angular_speed_increase_mrcs,courier_degraded_angular_converging_to_stop_is_admitted,courier_degraded_angular_gate_is_degraded_only,ackermann_degraded_has_no_angular_stop_gate
+                if degraded && degraded_angular_violation(prev_omega, omega, ab.stop_epsilon_rad_s) {
+                    return TrajectoryVerdict::MRCFallback;
+                }
+                prev_omega = omega;
             }
         }
     }
@@ -750,6 +773,42 @@ fn current_steering_deg_from_odom(odom: Option<&EgoOdom>, config: &VehicleConfig
     }
 }
 
+/// Degraded converge-to-stop-and-HOLD gate for the ANGULAR channel (Issue #70 /
+/// ADR-0029) — the yaw-rate analog of the linear `enforce_degraded_decel_to_stop`,
+/// a cited copy of parko-kirra's `degraded_channel_violation` on its angular
+/// channel. Returns `true` when the proposed segment yaw rate `proposed`
+/// violates the decel-to-stop-and-HOLD invariant relative to the current yaw
+/// rate `current`, given the angular stop floor `eps` (`STOP_EPSILON_RAD_S`):
+///
+///   (a) no re-initiation from an angular stop/hold (`|current| ≤ eps` and
+///       `|proposed| > eps`);
+///   (b) no reversal through a stop while rotating (sign flip with both
+///       magnitudes above `eps`);
+///   (c) non-increasing magnitude (`|proposed| > |current|`).
+///
+/// Fails closed on non-finite input. The `1e-9` slack on (c) tolerates
+/// floating-point equality on a held-constant yaw rate.
+fn degraded_angular_violation(current: f64, proposed: f64, eps: f64) -> bool {
+    if !proposed.is_finite() || !current.is_finite() {
+        return true;
+    }
+    let cur = current.abs();
+    let prop = proposed.abs();
+    // (a) re-initiation from a stop / hold.
+    if cur <= eps && prop > eps {
+        return true;
+    }
+    // (b) reversal through a stop while moving.
+    if proposed.signum() != current.signum() && cur > eps && prop > eps {
+        return true;
+    }
+    // (c) non-increasing magnitude.
+    if prop > cur + 1e-9 {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
@@ -840,5 +899,57 @@ mod conversion_tests {
             })
             .collect();
         assert!(!outruns_assured_clear_distance(&stop, 20.0, 4.5));
+    }
+}
+
+#[cfg(test)]
+mod degraded_angular_gate_tests {
+    use super::degraded_angular_violation;
+
+    const EPS: f64 = 0.02; // STOP_EPSILON_RAD_S
+
+    #[test]
+    fn holding_at_zero_is_not_a_violation() {
+        assert!(!degraded_angular_violation(0.0, 0.0, EPS));
+        // Below the stop floor either way → still a hold.
+        assert!(!degraded_angular_violation(0.01, -0.01, EPS));
+    }
+
+    #[test]
+    fn reinitiation_from_stop_is_a_violation() {
+        // current ~stopped, proposed above the floor → re-initiation.
+        assert!(degraded_angular_violation(0.0, 0.3, EPS));
+        assert!(degraded_angular_violation(0.01, 0.3, EPS));
+        // Sign-independent.
+        assert!(degraded_angular_violation(0.0, -0.3, EPS));
+    }
+
+    #[test]
+    fn speed_increase_is_a_violation() {
+        assert!(degraded_angular_violation(0.10, 0.30, EPS));
+        assert!(degraded_angular_violation(-0.10, -0.30, EPS));
+    }
+
+    #[test]
+    fn reversal_through_a_stop_is_a_violation() {
+        // Both magnitudes above the floor but opposite sign → reversal.
+        assert!(degraded_angular_violation(0.20, -0.10, EPS));
+        assert!(degraded_angular_violation(-0.20, 0.10, EPS));
+    }
+
+    #[test]
+    fn converging_or_constant_is_admitted() {
+        assert!(!degraded_angular_violation(0.30, 0.20, EPS)); // decreasing
+        assert!(!degraded_angular_violation(0.30, 0.30, EPS)); // constant
+        assert!(!degraded_angular_violation(0.30, 0.0, EPS));  // decel to stop
+        // Decreasing magnitude on the negative side.
+        assert!(!degraded_angular_violation(-0.30, -0.10, EPS));
+    }
+
+    #[test]
+    fn non_finite_fails_closed() {
+        assert!(degraded_angular_violation(0.1, f64::NAN, EPS));
+        assert!(degraded_angular_violation(f64::NAN, 0.1, EPS));
+        assert!(degraded_angular_violation(0.1, f64::INFINITY, EPS));
     }
 }
