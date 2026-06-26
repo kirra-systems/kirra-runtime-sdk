@@ -819,7 +819,14 @@ fn pose_pair_to_command(
     current_steering_deg: f64,
 ) -> ProposedVehicleCommand {
     let delta_time_s = b.time_from_start_s - a.time_from_start_s;
-    let delta_heading = b.pose.heading_rad - a.pose.heading_rad;
+    // B9: normalize Δheading to [-π, π] before the bicycle-model `atan2`, mirroring
+    // the angular (ω) channel. A trajectory crossing the ±π wrap (e.g. heading
+    // +3.10 → −3.10 rad, a ~0.08 rad physical turn) yields a RAW delta of ~−2π,
+    // which the unwrapped form turned into a huge fictitious steering angle → a
+    // spurious `ClampSteering`. The shortest-arc delta is the real turn.
+    let raw_heading = b.pose.heading_rad - a.pose.heading_rad;
+    let delta_heading =
+        raw_heading - std::f64::consts::TAU * (raw_heading / std::f64::consts::TAU).round();
     // Average velocity over the segment; avoids dividing by ~0 when
     // velocity is small at one endpoint.
     let avg_velocity = 0.5 * (a.velocity_mps + b.velocity_mps);
@@ -939,6 +946,43 @@ mod conversion_tests {
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
         assert!(cmd.steering_angle_deg > 4.0 && cmd.steering_angle_deg < 7.0,
             "expected ~5.6° steering, got {}", cmd.steering_angle_deg);
+    }
+
+    #[test]
+    fn pose_pair_heading_wrap_is_the_short_arc_not_a_spurious_full_turn_b9() {
+        // B9: a heading crossing the ±π wrap (+3.10 → −3.10 rad) is a ~0.083 rad
+        // SHORT-ARC turn, not a ~2π one. The raw (unwrapped) delta of ~−6.2 rad fed
+        // into the bicycle-model `atan2` produced a huge fictitious steering (~−74°)
+        // → a spurious `ClampSteering`. Normalized, the steering is small and points
+        // the short-arc direction (positive here).
+        let cfg = VehicleConfig::default_urban();
+        let a = TrajectoryPoint {
+            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 3.10 },
+            velocity_mps: 10.0, time_from_start_s: 0.0,
+        };
+        let b = TrajectoryPoint {
+            pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: -3.10 },
+            velocity_mps: 10.0, time_from_start_s: 0.5,
+        };
+        let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
+        assert!(cmd.steering_angle_deg > 0.0 && cmd.steering_angle_deg < 10.0,
+            "a ±π wrap is a short arc, not a full turn; expected a small positive steering, got {}°",
+            cmd.steering_angle_deg);
+
+        // And it matches the EQUIVALENT non-wrapping small turn (0.0 → +0.083 rad).
+        let a2 = TrajectoryPoint {
+            pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+            velocity_mps: 10.0, time_from_start_s: 0.0,
+        };
+        let short = (-3.10_f64) - 3.10 + std::f64::consts::TAU; // the wrapped Δ ≈ 0.0832
+        let b2 = TrajectoryPoint {
+            pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: short },
+            velocity_mps: 10.0, time_from_start_s: 0.5,
+        };
+        let cmd2 = pose_pair_to_command(&a2, &b2, &cfg, 0.0);
+        assert!((cmd.steering_angle_deg - cmd2.steering_angle_deg).abs() < 1e-9,
+            "the wrap-crossing turn must equal the equivalent short-arc turn: {} vs {}",
+            cmd.steering_angle_deg, cmd2.steering_angle_deg);
     }
 
     #[test]
