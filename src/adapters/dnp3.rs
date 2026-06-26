@@ -119,6 +119,31 @@ impl Dnp3Adapter {
     }
 }
 
+impl crate::adapters::IndustrialAdapter for Dnp3Adapter {
+    type Message = Dnp3Message;
+    const PROTOCOL: &'static str = "dnp3";
+
+    fn verdict(msg: &Dnp3Message) -> crate::adapters::AdapterVerdict {
+        let e = Dnp3Adapter::evaluate(msg);
+        crate::adapters::AdapterVerdict {
+            command: e.command,
+            details: serde_json::json!({
+                "function_name": e.function_name,
+                "is_control": e.is_control,
+                "is_broadcast": e.is_broadcast,
+                "critical_infrastructure_relevant": e.critical_infrastructure_relevant,
+            }),
+            triggers_recalculation: false,
+        }
+    }
+
+    /// Analog Output (group 41) setpoints are bounded against the process-wide
+    /// envelope from `KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE`.
+    fn bound_magnitude(msg: &Dnp3Message) -> Result<(), &'static str> {
+        Dnp3Adapter::bound_analog_control(msg, global_analog_envelope().as_ref())
+    }
+}
+
 /// Faithfully decode a DNP3 group-41 (Analog Output Block) setpoint from its
 /// object `data`, per IEEE 1815 variations. Returns `None` (undecodable) when the
 /// variation is unknown or `data` is too short for the variation's value width —
