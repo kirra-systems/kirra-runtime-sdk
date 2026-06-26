@@ -37,11 +37,12 @@
 //     against the node's registered `expected_pcr16_digest_hex` (fail-closed:
 //     expected-but-absent or mismatched → `Pcr16Mismatch`). So
 //     `expected_pcr16_digest_hex` is no longer stored-but-unverified.
-//   - LIMIT (still a follow-up): this authenticates the node's SELF-REPORTED
-//     PCR16 under its AK; it is NOT a hardware TPM *quote* (TPMS_ATTEST, where
-//     the TPM itself signs the live PCR bank), so a node in control of its AK
-//     could still sign a false digest. Parsing a real TPM quote remains the
-//     deeper follow-up; this is documented rather than silently claimed.
+//   - LIMIT of THIS path: it authenticates the node's SELF-REPORTED PCR16 under
+//     its AK; it is NOT a hardware TPM *quote* (TPMS_ATTEST, where the TPM itself
+//     signs the live PCR bank), so a node in control of its AK could still sign a
+//     false digest. That deeper root is now CLOSED by `crate::tpm_quote`
+//     (`verify_tpm_quote`), enforced on `/attestation/verify` for a node whose
+//     `node_attestation_policy.require_tpm_quote` is set — see that module.
 //   - The verifier-side change is here; the NODE side must sign the payload
 //     with its AK private key, and real AK/PCR provisioning (TPM / secure
 //     element / KMS) is a DEPLOYMENT concern, not a source change.
