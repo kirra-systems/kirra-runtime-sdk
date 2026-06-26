@@ -31,11 +31,17 @@
 //     proof, or a bad signature is REJECTED. There is no accept-by-default.
 //
 // SCOPE / FOLLOW-UP (honest limits — needs human security review):
-//   - This binds the proof to (node_id, nonce) via an Ed25519 signature. It
-//     does NOT yet verify a TPM *quote* over `expected_pcr16_digest_hex`
-//     (measured-boot binding) — that requires parsing a TPMS_ATTEST quote and
-//     is tracked as a separate follow-up. PCR16 remains stored-but-unverified
-//     until then; this is documented rather than silently claimed.
+//   - The base proof binds (node_id, nonce) via an Ed25519 signature. The
+//     measured-boot follow-up (`verify_attestation_proof_with_pcr16`) now BINDS
+//     the node's presented PCR16 digest INTO that signature and ENFORCES it
+//     against the node's registered `expected_pcr16_digest_hex` (fail-closed:
+//     expected-but-absent or mismatched → `Pcr16Mismatch`). So
+//     `expected_pcr16_digest_hex` is no longer stored-but-unverified.
+//   - LIMIT (still a follow-up): this authenticates the node's SELF-REPORTED
+//     PCR16 under its AK; it is NOT a hardware TPM *quote* (TPMS_ATTEST, where
+//     the TPM itself signs the live PCR bank), so a node in control of its AK
+//     could still sign a false digest. Parsing a real TPM quote remains the
+//     deeper follow-up; this is documented rather than silently claimed.
 //   - The verifier-side change is here; the NODE side must sign the payload
 //     with its AK private key, and real AK/PCR provisioning (TPM / secure
 //     element / KMS) is a DEPLOYMENT concern, not a source change.
@@ -98,6 +104,12 @@ pub enum AttestationError {
     /// The signature did not verify against the registered key over the
     /// challenge payload for (node_id, nonce).
     SignatureInvalid,
+    /// The node has a registered `expected_pcr16_digest_hex` (measured-boot
+    /// expectation), but the AK-signed proof did NOT carry a matching presented
+    /// digest — either none was presented, or it did not equal the expectation.
+    /// Fail-closed: a node whose measured boot is unattested or differs from its
+    /// registration is refused, even with a valid (node_id, nonce) signature.
+    Pcr16Mismatch,
 }
 
 impl AttestationError {
@@ -109,6 +121,7 @@ impl AttestationError {
             Self::MalformedRegisteredKey => "registered attestation key is malformed",
             Self::MalformedProof => "attestation proof malformed",
             Self::SignatureInvalid => "attestation signature invalid",
+            Self::Pcr16Mismatch => "attestation pcr16 measured-boot mismatch",
         }
     }
 }
@@ -129,6 +142,44 @@ pub fn attestation_signing_payload(node_id: &str, nonce: u64) -> Vec<u8> {
     payload.extend_from_slice(id);
     payload.extend_from_slice(&nonce.to_le_bytes());
     payload
+}
+
+/// Domain-separated tag appended (with a length-prefixed digest) when a node
+/// BINDS a measured-boot PCR16 digest into its attestation proof. Distinct tag so
+/// a base (node_id, nonce) signature can never be confused with a PCR16-bound one.
+const PCR16_BINDING_DOMAIN: &[u8] = b"|kirra-attestation-pcr16-v1|";
+
+/// The signing payload for an attestation proof that optionally BINDS a
+/// measured-boot PCR16 digest.
+///
+/// - `presented_pcr16_digest_hex == None` → **byte-identical** to
+///   [`attestation_signing_payload`] (the v1 payload), so a node that does not
+///   present a digest, and every pre-PCR16 node, verify unchanged.
+/// - `Some(d)` → the v1 payload followed by the domain tag + a length-prefixed
+///   copy of `d`. The node MUST sign over this exact payload, so the presented
+///   digest is **authenticated by the AK** (not merely asserted alongside it).
+#[must_use]
+pub fn attestation_signing_payload_with_pcr16(
+    node_id: &str,
+    nonce: u64,
+    presented_pcr16_digest_hex: Option<&str>,
+) -> Vec<u8> {
+    let mut payload = attestation_signing_payload(node_id, nonce);
+    if let Some(d) = presented_pcr16_digest_hex {
+        let db = d.as_bytes();
+        payload.extend_from_slice(PCR16_BINDING_DOMAIN);
+        payload.extend_from_slice(&(db.len() as u64).to_le_bytes());
+        payload.extend_from_slice(db);
+    }
+    payload
+}
+
+/// Constant-shape equality for two hex digests (ASCII-case-insensitive, trimmed).
+/// The PCR16 expectation is non-secret (an admin-registered measured-boot value),
+/// so plain comparison is appropriate — the security comes from the AK signature
+/// that BINDS the presented digest, not from hiding the expectation.
+fn pcr16_digest_eq(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 /// Parse an Ed25519 public key from a PEM-encoded SubjectPublicKeyInfo.
@@ -224,6 +275,43 @@ pub fn verify_attestation_proof(
     nonce: u64,
     proof_hex: &str,
 ) -> Result<(), AttestationError> {
+    // Back-compat: no measured-boot expectation, no presented digest → the
+    // signed payload is byte-identical to v1 (see
+    // `attestation_signing_payload_with_pcr16`), so this is the unchanged #73 path.
+    verify_attestation_proof_with_pcr16(ak_public_pem, node_id, nonce, proof_hex, None, None)
+}
+
+/// Verify a node attestation proof WITH optional measured-boot (PCR16) binding
+/// (the #73 follow-up). Extends [`verify_attestation_proof`] with two parameters:
+///
+/// - `expected_pcr16_digest_hex` — the value the node REGISTERED (`RegisteredNode`),
+///   or `None` if the node carries no measured-boot expectation.
+/// - `presented_pcr16_digest_hex` — the digest the node sent on THIS attestation,
+///   or `None`.
+///
+/// Two enforcements on top of the base Ed25519 (node_id, nonce) proof:
+///   1. **Binding** — the presented digest is folded into the signed payload, so
+///      a node that presents a digest must SIGN over it with its AK; the digest is
+///      authenticated, not merely asserted next to the signature.
+///   2. **Expectation (fail-closed)** — when the node has a registered
+///      `expected_pcr16_digest_hex`, the proof MUST carry a presented digest equal
+///      to it, else `Pcr16Mismatch`. A node with no registered expectation is
+///      unaffected (back-compat).
+///
+/// SCOPE (honest): this binds + enforces the node's SELF-REPORTED PCR16 under its
+/// AK signature and the challenge nonce. It is NOT a hardware TPM *quote* (where
+/// the TPM itself signs the live PCR bank); a node in control of its AK could
+/// still sign a false digest. The full TPMS_ATTEST quote remains the deeper
+/// follow-up — but the registered expectation is no longer dead/unverified.
+// SAFETY: SG9 | REQ: attestation-pcr16-measured-boot-binding | TEST: pcr16_match_with_binding_verifies,pcr16_mismatch_is_rejected,pcr16_expected_but_none_presented_is_rejected,pcr16_digest_must_be_signed_not_just_asserted,pcr16_no_expectation_is_backcompat,pcr16_presented_without_expectation_is_bound
+pub fn verify_attestation_proof_with_pcr16(
+    ak_public_pem: Option<&str>,
+    node_id: &str,
+    nonce: u64,
+    proof_hex: &str,
+    expected_pcr16_digest_hex: Option<&str>,
+    presented_pcr16_digest_hex: Option<&str>,
+) -> Result<(), AttestationError> {
     // Fail closed: no per-node key registered → cannot prove node identity.
     let pem = ak_public_pem.ok_or(AttestationError::NoRegisteredKey)?;
     let verifying_key =
@@ -239,10 +327,24 @@ pub fn verify_attestation_proof(
         .map_err(|_| AttestationError::MalformedProof)?;
     let signature = Signature::from_bytes(&sig_array);
 
-    let payload = attestation_signing_payload(node_id, nonce);
+    // The signature must cover the presented digest (when one is presented), so a
+    // valid proof AUTHENTICATES the digest under the AK — not just the challenge.
+    let payload = attestation_signing_payload_with_pcr16(node_id, nonce, presented_pcr16_digest_hex);
     verifying_key
         .verify_strict(&payload, &signature)
-        .map_err(|_| AttestationError::SignatureInvalid)
+        .map_err(|_| AttestationError::SignatureInvalid)?;
+
+    // Measured-boot expectation: only enforced when the node registered one.
+    if let Some(expected) = expected_pcr16_digest_hex {
+        match presented_pcr16_digest_hex {
+            Some(presented) if pcr16_digest_eq(presented, expected) => {}
+            // Expected-but-absent OR mismatched → fail closed. (The signature
+            // already proved the presented digest is AK-authenticated; here we
+            // enforce it equals the registration.)
+            _ => return Err(AttestationError::Pcr16Mismatch),
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +401,107 @@ mod tests {
     fn sign_proof(sk: &SigningKey, node_id: &str, nonce: u64) -> String {
         let payload = attestation_signing_payload(node_id, nonce);
         hex::encode(sk.sign(&payload).to_bytes())
+    }
+
+    /// Sign a proof binding an optional presented PCR16 digest (the v1.1 payload).
+    fn sign_proof_with_pcr16(
+        sk: &SigningKey,
+        node_id: &str,
+        nonce: u64,
+        presented: Option<&str>,
+    ) -> String {
+        let payload = attestation_signing_payload_with_pcr16(node_id, nonce, presented);
+        hex::encode(sk.sign(&payload).to_bytes())
+    }
+
+    const PCR16_X: &str = "abababababababababababababababababababababababababababababababab12";
+    const PCR16_Y: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd34cd";
+
+    /// HAPPY PATH: registered expectation X, node presents X bound in the
+    /// signature → verifies.
+    #[test]
+    fn pcr16_match_with_binding_verifies() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_X));
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_X)),
+            Ok(())
+        );
+    }
+
+    /// MEASURED-BOOT MISMATCH: the node presents (and correctly signs) a digest Y
+    /// that does not equal the registered expectation X → fail closed.
+    #[test]
+    fn pcr16_mismatch_is_rejected() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_Y));
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_Y)),
+            Err(AttestationError::Pcr16Mismatch)
+        );
+    }
+
+    /// EXPECTED-BUT-ABSENT: a node registered with an expectation that presents NO
+    /// digest is refused, even though its base (node_id, nonce) signature is valid.
+    #[test]
+    fn pcr16_expected_but_none_presented_is_rejected() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 7); // valid v1 signature, no digest
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), None),
+            Err(AttestationError::Pcr16Mismatch)
+        );
+    }
+
+    /// SECURITY CORE: the presented digest must be SIGNED, not merely asserted.
+    /// Here the node signs only the base payload (no binding) but the request
+    /// asserts the correct digest X. Because the signature does not cover X, it
+    /// fails to verify against the bound payload → SignatureInvalid (not accepted).
+    #[test]
+    fn pcr16_digest_must_be_signed_not_just_asserted() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 7); // signs the BASE payload only
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, Some(PCR16_X), Some(PCR16_X)),
+            Err(AttestationError::SignatureInvalid)
+        );
+    }
+
+    /// BACK-COMPAT: no expectation + no presented digest → byte-identical to v1,
+    /// so a pre-PCR16 node verifies unchanged (and the 4-arg wrapper matches).
+    #[test]
+    fn pcr16_no_expectation_is_backcompat() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof(&sk, "node-a", 7);
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, None, None),
+            Ok(())
+        );
+        // The 4-arg path is exactly this case.
+        assert_eq!(verify_attestation_proof(Some(&pem), "node-a", 7, &proof), Ok(()));
+        // And the bound payload with no digest equals the v1 payload byte-for-byte.
+        assert_eq!(
+            attestation_signing_payload_with_pcr16("node-a", 7, None),
+            attestation_signing_payload("node-a", 7)
+        );
+    }
+
+    /// A node with NO registered expectation MAY still present a digest; it is
+    /// bound into the signature (authenticated) but not compared → verifies.
+    #[test]
+    fn pcr16_presented_without_expectation_is_bound() {
+        let sk = ephemeral_signing_key();
+        let pem = public_key_to_pem(&sk.verifying_key());
+        let proof = sign_proof_with_pcr16(&sk, "node-a", 7, Some(PCR16_X));
+        assert_eq!(
+            verify_attestation_proof_with_pcr16(Some(&pem), "node-a", 7, &proof, None, Some(PCR16_X)),
+            Ok(())
+        );
     }
 
     /// CRYPTO CORRECTNESS: a valid signature over the challenge verifies.
