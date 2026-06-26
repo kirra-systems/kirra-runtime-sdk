@@ -295,6 +295,18 @@ pub struct AppState {
     /// that were detected but could not be durably recorded (#245/#247 pattern).
     /// MUST be 0 in a healthy deployment; never gates the verdict path.
     pub command_source_write_failures: Arc<AtomicU64>,
+    /// A3 — operator-observable count of kinematic-DenyBreach AUDIT records that
+    /// were dropped because the bounded audit-writer channel was Full/Closed
+    /// (drop-on-full, INV-4: safety never waits). Drops were previously LOGGED
+    /// only; this counter makes the loss-rate observable (a non-zero / rising
+    /// value = the audit chain has sequence gaps — under-provisioned channel or a
+    /// dead writer). Never gates the verdict path.
+    pub audit_write_drops: Arc<AtomicU64>,
+    /// A3 — operator-observable count of learning-capture verdict records dropped
+    /// on a Full/Closed capture channel. Non-safety (capture is an off-verdict-path
+    /// side channel); surfaced so an integrator can see how much training data the
+    /// channel sizing is shedding.
+    pub capture_drops: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -329,6 +341,8 @@ impl AppState {
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
             command_source_write_failures: Arc::new(AtomicU64::new(0)),
+            audit_write_drops: Arc::new(AtomicU64::new(0)),
+            capture_drops: Arc::new(AtomicU64::new(0)),
         }
     }
 
