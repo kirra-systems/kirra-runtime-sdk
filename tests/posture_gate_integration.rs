@@ -271,3 +271,59 @@ async fn test_health_exempt_under_lockedout() {
          route may 404 if not mounted, which still proves the gate stepped aside"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 1b. Actuator-path LIVE epoch fence. The actuator command performs no durable
+// write (so no in-transaction epoch re-check is possible); it now reads the LIVE
+// durable epoch on the admit path instead of a ~2s-stale cached value. The owner
+// passes; a superseded primary is fenced 503 and self-demotes IMMEDIATELY —
+// closing the failover two-writer window the cached fence left open.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::Ordering;
+
+#[tokio::test]
+async fn test_actuator_live_epoch_fence_admits_the_owner() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let now = kirra_verifier::posture_cache::now_ms();
+    // Claim epoch 1 durably, and hold it in memory (this instance IS the owner).
+    let claimed = svc.app.store.with(|s| s.try_claim_epoch(0, "primary", now).unwrap());
+    assert_eq!(claimed, Some(1), "fresh in-memory store claims epoch 1 from genesis 0");
+    svc.app.held_epoch.store(1, Ordering::SeqCst);
+
+    let status = req_status(build_test_app(svc), "POST", "/actuator/motion/command").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the live epoch owner (held == durable) must pass the actuator fence; got {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_actuator_live_epoch_fence_rejects_a_superseded_primary() {
+    let svc = build_state_with_posture(FleetPosture::Nominal);
+    let now = kirra_verifier::posture_cache::now_ms();
+    // This instance claimed epoch 1 and holds it...
+    assert_eq!(svc.app.store.with(|s| s.try_claim_epoch(0, "old", now).unwrap()), Some(1));
+    svc.app.held_epoch.store(1, Ordering::SeqCst);
+    // ...then a NEW primary claims epoch 2 durably (failover). The old primary's
+    // in-memory held_epoch (1) is now stale; its cached_db_epoch hasn't caught up.
+    assert_eq!(svc.app.store.with(|s| s.try_claim_epoch(1, "new", now).unwrap()), Some(2));
+
+    assert!(svc.app.is_active(), "precondition: still Active before the fenced request");
+    let status = req_status(
+        build_test_app(Arc::clone(&svc)),
+        "POST",
+        "/actuator/motion/command",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a superseded primary's actuator command must be fenced 503 by the LIVE read; got {status}"
+    );
+    assert!(
+        !svc.app.is_active(),
+        "the fenced actuator request must self-demote the instance (mode_active → false)"
+    );
+}

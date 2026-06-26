@@ -494,42 +494,75 @@ pub async fn enforce_posture_routing(
     // commit is rejected (and the handler self-demotes) even if it passed this
     // gate. This gate remains the fast first-line fence; the in-transaction
     // re-check is the authoritative one.
-    let is_mutation = matches!(
-        cmd,
-        OperationalCommand::WriteState
-            | OperationalCommand::SystemMutation
-            // ActuatorMotion is a physical state write — it MUST still be fenced
-            // by the HA epoch guard even though the posture gate defers its
-            // Degraded verdict to the inner kinematic envelope (Option A).
-            | OperationalCommand::ActuatorMotion
-    );
-    if is_mutation {
-        let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-        // Pass B1 (S3 / #115): read the cached DB epoch atomically instead of
-        // taking `store.lock()` + `current_epoch()` per request. Cache is
-        // re-stamped by `perform_promotion` after a successful CAS and by the
-        // heartbeat writer on every HEARTBEAT_INTERVAL_MS tick — both with
-        // Release. Acquire here pairs with both Releases. A 0 value means
-        // "not yet observed" (cold start before the first heartbeat); fall
-        // through to the existing held==0 / non-Active checks for fail-closed.
-        // The gate + self-demote decision MUST stay on the request path,
-        // before any downstream hand-off.
-        let db = svc.app.cached_db_epoch.load(std::sync::atomic::Ordering::Acquire);
-        if db != 0 && held != 0 && held != db {
-            svc.app
-                .mode_active
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            tracing::error!(
-                method = %method,
-                path   = %path,
-                held   = held,
-                db     = db,
-                "FENCED — held epoch stale; self-demoting and rejecting mutation (HA split-brain prevention)"
-            );
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
+    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    match cmd {
+        // 1b — ACTUATOR PATH gets a LIVE epoch fence. Unlike the top-tier durable
+        // writes (federation / key-rotation), an actuator command performs NO
+        // durable write, so there is no transaction to hang an in-transaction
+        // `assert_epoch_held` re-check on — it relied SOLELY on the cached epoch,
+        // which the heartbeat re-stamps only every HEARTBEAT_INTERVAL_MS (~2 s).
+        // During failover the old primary could therefore keep admitting actuator
+        // commands for up to ~2 s after the new primary claimed the epoch (the
+        // review's highest-consequence two-writer residual). Read the LIVE durable
+        // epoch off the WAL read-replica instead (committed-snapshot visibility, so
+        // the new primary's epoch-CAS is seen immediately; `call_read` keeps it off
+        // the tokio worker per P1). This closes the window to ~one command. The
+        // kernel WCET path (`validate_vehicle_command`) is untouched — this read is
+        // on the HTTP gate, which already does serde + Tower work.
+        OperationalCommand::ActuatorMotion if held != 0 => {
+            match svc.app.store.call_read(|s| s.current_epoch()).await {
+                // Still the owner — admit (the downstream decel gate still runs).
+                Ok(Ok(durable)) if durable == held => {}
+                // Superseded: a newer primary owns the epoch. Self-demote + reject.
+                Ok(Ok(durable)) => {
+                    svc.app
+                        .mode_active
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        method = %method, path = %path, held = held, durable = durable,
+                        "FENCED (live) — actuator command on a superseded epoch; self-demoting and rejecting (HA split-brain prevention)"
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                // Could not read the live epoch (DB error / task failure / disk
+                // wedge). Cannot confirm ownership → fail closed (review item 1).
+                Ok(Err(_)) | Err(_) => {
+                    tracing::error!(
+                        method = %method, path = %path, held = held,
+                        "actuator epoch read failed — cannot confirm HA ownership; failing closed"
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+            }
         }
-        // cached_db_epoch == 0 -> fall through. Existing mode/posture
-        // checks below remain fail-closed for mutations on non-Active.
+        // Other mutations keep the fast CACHED epoch check (Pass B1): they ARE
+        // backstopped by the in-transaction `assert_epoch_held` on their durable
+        // write, so a stale cache here can at worst let one write REACH the durable
+        // layer, where it is rejected. `cached_db_epoch` is re-stamped by
+        // `perform_promotion` (post-CAS) and the heartbeat writer, both Release;
+        // Acquire here pairs with both. A 0 cache (cold start) falls through to the
+        // mode/posture checks below.
+        OperationalCommand::WriteState | OperationalCommand::SystemMutation => {
+            let db = svc.app.cached_db_epoch.load(std::sync::atomic::Ordering::Acquire);
+            if db != 0 && held != 0 && held != db {
+                svc.app
+                    .mode_active
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    method = %method,
+                    path   = %path,
+                    held   = held,
+                    db     = db,
+                    "FENCED — held epoch stale; self-demoting and rejecting mutation (HA split-brain prevention)"
+                );
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+        // ActuatorMotion with held == 0 (this instance never claimed an epoch —
+        // cold start / standby) falls through to the mode/posture checks below,
+        // which are fail-closed for mutations on a non-Active instance. Reads /
+        // Unknown are not epoch-fenced.
+        _ => {}
     }
 
     // Fail-closed snapshot: poisoned lock -> None -> block.
