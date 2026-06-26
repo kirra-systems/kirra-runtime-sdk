@@ -236,7 +236,20 @@ pub fn evaluate_unified_industrial_request(
             let msg: Dnp3Message = serde_json::from_value(req.message)
                 .map_err(|e| format!("MALFORMED_DNP3_MESSAGE: {e}"))?;
             let eval = Dnp3Adapter::evaluate(&msg);
-            let (allowed, denial_reason) = command_allowed_for_posture_pub(&eval.command, &posture);
+            let (mut allowed, mut denial_reason) = command_allowed_for_posture_pub(&eval.command, &posture);
+            // MAGNITUDE BOUND: a posture-admitted Analog Output (g41) control must
+            // also be within the configured envelope (fail-closed otherwise). Same
+            // bound the dedicated /industrial/dnp3/evaluate handler applies, so both
+            // DNP3 entry points enforce it identically.
+            if allowed {
+                if let Err(reason) = Dnp3Adapter::bound_analog_control(
+                    &msg,
+                    crate::adapters::dnp3::global_analog_envelope().as_ref(),
+                ) {
+                    allowed = false;
+                    denial_reason = Some(reason.to_string());
+                }
+            }
             Ok(UnifiedEvaluationResult {
                 protocol: "dnp3".to_string(),
                 command: eval.command,
@@ -472,5 +485,29 @@ mod unified_tests {
         // EtherNet/IP Get_Attribute_Single (0x0E) = ReadTelemetry → allowed even in Degraded
         let r = evaluate_unified_industrial_request(eip_request(), FleetPosture::Degraded).unwrap();
         assert!(r.allowed);
+    }
+
+    #[test]
+    fn test_dnp3_analog_control_magnitude_bound_is_wired_fail_closed() {
+        // A DNP3 Direct_Operate (0x05) carrying an Analog Output (g41) value is a
+        // posture-admissible SystemMutation under Nominal, but the magnitude bound
+        // must additionally gate it. The global envelope is unset in the test
+        // process → fail-closed: the analog control is DENIED. Proves the bound is
+        // wired into the unified path (not just the dedicated handler).
+        let req = UnifiedIndustrialRequest {
+            protocol: IndustrialProtocol::Dnp3,
+            message: serde_json::json!({
+                "source_address": 1, "dest_address": 0x0001, "function_code": 0x05,
+                "data_link_control": 0,
+                "objects": [{ "group": 41, "variation": 1, "data": 50i32.to_le_bytes().to_vec() }],
+                "source_node": "sub_01"
+            }),
+        };
+        let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
+        assert!(!r.allowed, "an unbounded analog control must be denied (fail-closed)");
+        assert_eq!(
+            r.denial_reason.as_deref(),
+            Some("DNP3_ANALOG_OUTPUT_ENVELOPE_UNCONFIGURED")
+        );
     }
 }

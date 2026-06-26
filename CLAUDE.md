@@ -405,6 +405,7 @@ proptest = "1"  # dev-dependency
 | `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |
 | `KIRRA_FABRIC_ASSET_ID` | No | — | Local fabric asset id fed by the verifier→fabric posture feed (#88). Unset/empty → feed inert (asset keeps its `Degraded` registration seed) |
+| `KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE` | No | — | DNP3 Analog Output (g41) magnitude envelope as `min:max` (e.g. `-100.0:100.0`). A control write (Operate/Direct_Operate) whose decoded setpoint is outside the envelope is denied. Unset/invalid → analog control writes are **denied (fail-closed)**; faithfully-undecodable g41 payloads are also refused (never fabricated) |
 
 **`kirra-ros2-adapter` slow-loop env gates** (consumed in `node.rs`, opt-in, default off →
 byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),

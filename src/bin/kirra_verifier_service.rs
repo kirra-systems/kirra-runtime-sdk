@@ -1560,6 +1560,21 @@ async fn evaluate_dnp3_adapter(
     let mut denial_reason = denial_reason;
     let mut status = StatusCode::OK;
 
+    // MAGNITUDE BOUND: a posture-admitted Analog Output (g41) control must also lie
+    // within the configured envelope — else REFUSE (fail-closed: also when no
+    // envelope is configured or the value is undecodable). Only applied on the
+    // posture-allowed path; a posture denial outranks and is reported as-is. The
+    // override-to-denied flows into the audit block below as an action-denied event.
+    if allowed {
+        if let Err(reason) = Dnp3Adapter::bound_analog_control(
+            &msg,
+            kirra_verifier::adapters::dnp3::global_analog_envelope().as_ref(),
+        ) {
+            allowed = false;
+            denial_reason = Some(reason.to_string());
+        }
+    }
+
     if eval.is_broadcast || eval.is_control || !allowed {
         let event_type = if eval.is_broadcast {
             "DNP3_BROADCAST_COMMAND"
@@ -2474,6 +2489,10 @@ async fn main() {
     // from KIRRA_CANOPEN_NODE_MAP; unset → empty map (every offline is then
     // unattributed, handled fail-closed in evaluate_canopen_adapter).
     kirra_verifier::adapters::canopen::init_node_map_from_env();
+
+    // DNP3 Analog Output magnitude envelope from KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE
+    // ("min:max"); unset/invalid → analog control writes are denied (fail-closed).
+    kirra_verifier::adapters::dnp3::init_analog_envelope_from_env();
 
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
