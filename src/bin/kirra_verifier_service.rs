@@ -34,11 +34,12 @@ use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage
 use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
 use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
 use kirra_verifier::federation::{
-    evaluate_federated_report,
-    verify_federated_report_signature,
-    FederatedTrustReport,
     RegisterFederationControllerRequest,
     ReportEvaluation,
+};
+use kirra_verifier::federation_reconciliation::{
+    authoritative_posture, evaluate_federated_report_v2,
+    verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
 use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor,
@@ -1617,11 +1618,16 @@ async fn register_node_identity(
 
 async fn submit_federated_report(
     State(svc): State<Arc<ServiceState>>,
-    Json(report): Json<FederatedTrustReport>,
+    // v2 wire: `source_generation` is optional, so a v1 report (no such field)
+    // deserializes to a V2 with `source_generation: None` and its signed payload
+    // is byte-identical to the v1 canonical payload — backward compatible. The
+    // generation, when present, is inside the signed payload (cannot be forged
+    // or stripped) and drives generation-ordered conflict resolution at read time.
+    Json(report): Json<FederatedTrustReportV2>,
 ) -> impl IntoResponse {
     let received_at_ms = now_ms();
 
-    let evaluation = evaluate_federated_report(&report, received_at_ms);
+    let evaluation = evaluate_federated_report_v2(&report, received_at_ms);
     if !evaluation.accepted {
         return Json(evaluation).into_response();
     }
@@ -1654,7 +1660,7 @@ async fn submit_federated_report(
                           Json(json!({ "error": "controller lookup failed" }))).into_response(),
     };
 
-    if !verify_federated_report_signature(&report, &pk_b64) {
+    if !verify_federated_report_signature_v2(&report, &pk_b64) {
         let event = json!({ "source_controller_id": report.source_controller_id,
                             "reason": "INVALID_FEDERATION_SIGNATURE" });
         let _ = store.save_posture_event_chained(
@@ -1686,7 +1692,7 @@ async fn submit_federated_report(
                           Json(json!({ "error": "nonce lookup failed" }))).into_response(),
     }
 
-    match store.save_federated_report_chained(&report, received_at_ms, held_epoch) {
+    match store.save_federated_report_chained(&report.as_v1(), report.source_generation, received_at_ms, held_epoch) {
         Ok(()) => Json(evaluation).into_response(),
         Err(DurableWriteError::NonceReplay) => {
             // H1: a replay raced past the `has_seen_federation_nonce` gate above and
@@ -1728,15 +1734,34 @@ async fn get_federated_reports(
     State(svc): State<Arc<ServiceState>>,
     Path(asset_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_federated_reports_for_asset(&asset_id) {
-            Ok(reports) => Json(json!({ "asset_id": asset_id, "reports": reports })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to load reports" }))).into_response(),
-        },
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    }
+    let store = match svc.app.store.lock() {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    };
+
+    let reports = match store.load_federated_reports_for_asset(&asset_id) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "failed to load reports" }))).into_response(),
+    };
+
+    // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
+    // reports into the single authoritative posture (higher generation wins;
+    // ties fall back to issued_at_ms, then fail closed to the more restrictive
+    // posture). `null` when no reports exist for the asset. This is a read-time
+    // view only — it does NOT feed the local posture engine that gates actuators.
+    let authoritative = match store.load_federated_report_v2s_for_asset(&asset_id) {
+        Ok(v2s) => authoritative_posture(&v2s),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "failed to reconcile reports" }))).into_response(),
+    };
+
+    Json(json!({
+        "asset_id": asset_id,
+        "reports": reports,
+        "authoritative_posture": authoritative,
+    })).into_response()
 }
 
 async fn handle_actuator_motion_command(
