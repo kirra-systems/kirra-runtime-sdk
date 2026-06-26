@@ -26,6 +26,33 @@ use crate::modbus_adapter::ModbusTcpAdapter;
 use crate::metrics::LockFreeMetricsAggregator;
 use crate::output::{save_brute_force_counter, load_brute_force_counter, save_replay_json, save_summary_json, ExecutiveSummary};
 
+/// Nominal control period (s) used for the FIRST governed frame on a fresh proxy
+/// connection sequence, which has no prior sample to measure a rate against.
+/// Matches the legacy fixed timestep, so first-frame behaviour is unchanged.
+const NOMINAL_CONTROL_PERIOD_S: f64 = 0.050;
+
+/// Upper bound (s) on the measured inter-frame dt fed to the scalar rate governor
+/// (B4). A long idle between frames would otherwise yield a large dt and hence a
+/// large permitted single step (`max_rate * dt`), letting a post-idle frame jump
+/// effectively unbounded and defeating the rate-of-change limit. Capping dt keeps
+/// the limiter protective across an idle gap.
+const MAX_GOVERNED_DT_S: f64 = 1.0;
+
+/// Real elapsed dt (s) since the previous governed frame, for the scalar rate
+/// governor (B4). The proxy previously fed a fabricated constant `0.050`, so the
+/// rate-of-change limiter measured fictional rates: a slow legitimate change read
+/// as a false breach, and a fast burst read as slower than reality (a missed
+/// breach). `elapsed = None` (first frame, no prior sample) → the nominal period;
+/// otherwise the true elapsed time, capped at `MAX_GOVERNED_DT_S`. A small real
+/// dt is kept as-is — a large step over a short interval correctly trips the rate
+/// clamp (conservative), and `evaluate` itself fail-closes a non-positive dt.
+fn governed_dt_secs(elapsed: Option<Duration>) -> f64 {
+    match elapsed {
+        None => NOMINAL_CONTROL_PERIOD_S,
+        Some(d) => d.as_secs_f64().min(MAX_GOVERNED_DT_S),
+    }
+}
+
 struct ThreadPoolGuard { counter: Arc<std::sync::atomic::AtomicU32>, aggregator: Arc<LockFreeMetricsAggregator> }
 impl ThreadPoolGuard {
     fn new(counter: Arc<std::sync::atomic::AtomicU32>, aggregator: Arc<LockFreeMetricsAggregator>) -> Self {
@@ -91,6 +118,10 @@ impl KirraLiveGateway {
         );
 
         let shared_governor = Arc::new(Mutex::new(initial_gov));
+        // B4: the instant of the last governed frame, shared across worker threads.
+        // The rate limiter's `last_validated_scalar` anchor is governor-global, so
+        // the dt measured against it must be too (not per-connection).
+        let last_governed_eval = Arc::new(Mutex::new(None::<Instant>));
         let flight_recorder = Arc::new(Mutex::new(CausalFlightRecorder::new()));
         let metrics = Arc::new(LockFreeMetricsAggregator::new());
         let active_workers = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -209,6 +240,7 @@ impl KirraLiveGateway {
             let mut mut_client = client;
             let plc_addr = format!("127.0.0.1:{}", self.plc_target_port);
             let gov_worker_clone = Arc::clone(&shared_governor);
+            let last_eval_clone = Arc::clone(&last_governed_eval);
             let recorder_worker_clone = Arc::clone(&flight_recorder);
             let metrics_clone = Arc::clone(&metrics);
             let workers_counter = Arc::clone(&active_workers);
@@ -233,7 +265,20 @@ impl KirraLiveGateway {
                     let out_bytes = match adapter_clone.decode_demand(raw_frame) {
                         Ok(demand) => {
                             let mut gov = gov_worker_clone.lock().unwrap();
-                            let intercept = gov.evaluate(demand, 0.050);
+                            // B4: feed the REAL elapsed dt since the previous governed
+                            // frame, not a fabricated constant. Measured under the
+                            // governor lock so it stays consistent with the shared
+                            // `last_validated_scalar` rate anchor; `saturating_*` so a
+                            // non-monotonic clock reads 0 (→ evaluate fail-closes) not a
+                            // negative dt.
+                            let now = Instant::now();
+                            let dt = {
+                                let mut last = last_eval_clone.lock().unwrap();
+                                let elapsed = last.map(|prev| now.saturating_duration_since(prev));
+                                *last = Some(now);
+                                governed_dt_secs(elapsed)
+                            };
+                            let intercept = gov.evaluate(demand, dt);
                             let processed = metrics_clone.total_processed_frames.fetch_add(1, Ordering::Relaxed) + 1;
                             metrics_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
 
@@ -343,5 +388,47 @@ impl KirraLiveGateway {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod governed_dt_tests {
+    use super::{governed_dt_secs, MAX_GOVERNED_DT_S, NOMINAL_CONTROL_PERIOD_S};
+    use std::time::Duration;
+
+    #[test]
+    fn first_frame_uses_nominal_period() {
+        // B4: no prior sample → nominal period (legacy first-frame behaviour), NOT
+        // a zero/garbage dt.
+        assert_eq!(governed_dt_secs(None), NOMINAL_CONTROL_PERIOD_S);
+    }
+
+    #[test]
+    fn normal_interval_is_passed_through_as_real_dt() {
+        // A genuine 200 ms gap is reported as 0.2 s — not the fabricated 0.050.
+        let dt = governed_dt_secs(Some(Duration::from_millis(200)));
+        assert!((dt - 0.200).abs() < 1e-9, "got {dt}");
+    }
+
+    #[test]
+    fn small_real_dt_is_kept_not_floored() {
+        // A fast 5 ms frame stays 0.005 s, so a large step over it correctly reads
+        // as a high rate (conservative) instead of being under-counted.
+        let dt = governed_dt_secs(Some(Duration::from_millis(5)));
+        assert!((dt - 0.005).abs() < 1e-9, "got {dt}");
+    }
+
+    #[test]
+    fn long_idle_is_capped_so_rate_limit_survives() {
+        // A 30 s idle must not grant an unbounded `max_rate * dt` single step.
+        let dt = governed_dt_secs(Some(Duration::from_secs(30)));
+        assert_eq!(dt, MAX_GOVERNED_DT_S);
+    }
+
+    #[test]
+    fn exactly_zero_elapsed_yields_zero_dt_for_evaluate_to_failclose() {
+        // A same-instant repeat → 0.0; `evaluate` fail-closes on dt <= 0 (Gov-M2),
+        // so this must NOT be silently bumped to a positive fabricated value.
+        assert_eq!(governed_dt_secs(Some(Duration::ZERO)), 0.0);
     }
 }
