@@ -21,9 +21,15 @@
 //!   over every mode, so one dangerous hypothesis is enough to refuse — the point of *multi-modal*
 //!   prediction. A negligible turn rate adds no CTRV mode (it would duplicate CV).
 
+use smallvec::SmallVec;
+
 use crate::corridor::Point;
 use crate::state::PerceivedObject;
 use crate::validation::{PredictedMode, PredictedSample};
+
+/// A predicted-sample run (§8). Inline up to 8 samples — a 3 s / 0.5 s horizon is
+/// 7, so the common case never heap-allocates; spills to the heap beyond that.
+type SampleVec = SmallVec<[PredictedSample; 8]>;
 
 /// Turn rate (rad/s) below which CTRV ≈ CV — no distinct CTRV mode is emitted (it would just
 /// duplicate the CV hypothesis and the worst-case is unchanged).
@@ -42,7 +48,7 @@ pub const CTRV_MAX_LATERAL_ACCEL_MPS2: f64 = 10.0;
 #[derive(Debug, Clone)]
 pub struct OwnedPredictedMode {
     pub object_id: u64,
-    pub samples: Vec<PredictedSample>,
+    pub samples: SampleVec,
 }
 
 impl OwnedPredictedMode {
@@ -60,7 +66,7 @@ fn step_count(horizon_s: f64, dt_s: f64) -> usize {
 
 /// Roll `obj` forward on CONSTANT VELOCITY (its reported velocity vector) — a straight-line
 /// hypothesis sampled at `dt_s` over `[0, horizon_s]`.
-fn cv_samples(obj: &PerceivedObject, horizon_s: f64, dt_s: f64) -> Vec<PredictedSample> {
+fn cv_samples(obj: &PerceivedObject, horizon_s: f64, dt_s: f64) -> SampleVec {
     let n = step_count(horizon_s, dt_s);
     (0..=n)
         .map(|i| {
@@ -76,12 +82,12 @@ fn cv_samples(obj: &PerceivedObject, horizon_s: f64, dt_s: f64) -> Vec<Predicted
 /// Roll `obj` forward on CONSTANT TURN RATE: travel at its current speed while the heading turns
 /// at `yaw_rate_rad_s`. The divergent hypothesis for a turning object (curves where CV goes
 /// straight). Euler-integrated at `dt_s`.
-fn ctrv_samples(obj: &PerceivedObject, yaw_rate_rad_s: f64, horizon_s: f64, dt_s: f64) -> Vec<PredictedSample> {
+fn ctrv_samples(obj: &PerceivedObject, yaw_rate_rad_s: f64, horizon_s: f64, dt_s: f64) -> SampleVec {
     let n = step_count(horizon_s, dt_s);
     let speed = obj.velocity_mps;
     let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
     let (mut x, mut y) = (obj.pos.x_m, obj.pos.y_m);
-    let mut out = Vec::with_capacity(n + 1);
+    let mut out = SampleVec::with_capacity(n + 1);
     out.push(PredictedSample { pos: Point { x_m: x, y_m: y }, time_from_start_s: 0.0 });
     for i in 1..=n {
         heading += yaw_rate_rad_s * dt_s;
@@ -123,7 +129,7 @@ fn point_on_polyline(poly: &[Point], dist_m: f64) -> Point {
 /// Roll an object along a geometric **lane-follow** `path` at `speed_mps` — the map-intention
 /// hypothesis: position after travelling `speed*t` along the path. A vehicle on a CURVING lane
 /// traces the curve (which CV/CTRV cannot), and one on a diverging lane stays clear.
-fn lane_follow_samples(path: &[Point], speed_mps: f64, horizon_s: f64, dt_s: f64) -> Vec<PredictedSample> {
+fn lane_follow_samples(path: &[Point], speed_mps: f64, horizon_s: f64, dt_s: f64) -> SampleVec {
     let n = step_count(horizon_s, dt_s);
     (0..=n)
         .map(|i| {
