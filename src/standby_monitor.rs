@@ -76,6 +76,37 @@ pub const PROMOTION_POLL_MS: u64 = 1_000;
 /// Set higher for flaky network/disk environments.
 pub const PROMOTION_TIMEOUT_MS: u64 = 10_000;
 
+/// Review item "1" — DISK-WEDGE SELF-DEMOTION. Number of CONSECUTIVE heartbeat
+/// ticks (write OR epoch read) that may fail before the Active primary
+/// self-demotes (mode_active → false) and stops heartbeating. A primary that
+/// cannot WRITE its heartbeat or READ its durable epoch can neither refresh the
+/// fence cache nor confirm it still owns the epoch — a fence-uncertainty that
+/// must fail CLOSED, because the standby will promote on heartbeat silence and a
+/// still-Active old primary would be a second writer.
+///
+/// Sized so the primary demotes BEFORE the standby promotes:
+/// `3 × HEARTBEAT_INTERVAL_MS` = 6 s < `PROMOTION_TIMEOUT_MS` (10 s), leaving a
+/// ~4 s margin so the two-writer windows never overlap. `> 1` so a single
+/// transient (a checkpoint `SQLITE_BUSY` the P2 `busy_timeout` didn't fully
+/// absorb) does not demote a healthy primary.
+pub const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 3;
+
+// Default-config safety check: the primary must self-demote strictly before the
+// standby's promotion timeout, or both could be Active at once.
+const _: () = assert!(
+    MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 * HEARTBEAT_INTERVAL_MS < PROMOTION_TIMEOUT_MS,
+    "primary must self-demote before the standby promotes (default config)"
+);
+
+/// Pure decision (review item "1"): does a run of `consecutive_failures` failed
+/// heartbeat ticks mean the primary should self-demote? Extracted so the
+/// disk-wedge threshold is unit-testable without driving the async loop + a
+/// failing store.
+#[must_use]
+pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+}
+
 /// SQLite key for the primary heartbeat timestamp.
 pub const HEARTBEAT_KEY: &str = "primary_heartbeat_ms";
 
@@ -193,6 +224,24 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             "Heartbeat writer started"
         );
 
+        // Review item "1": consecutive failed heartbeat ticks (write or epoch
+        // read). Reset to 0 on any healthy tick; at MAX_CONSECUTIVE_HEARTBEAT_
+        // FAILURES the primary self-demotes (disk-wedge / fence-uncertainty).
+        let mut consecutive_failures: u32 = 0;
+
+        // The store work runs under one acquisition; the closure returns an
+        // OUTCOME the outer loop acts on (the closure cannot `continue`/`break`
+        // the outer loop directly — Rule 4).
+        enum HeartbeatOutcome {
+            /// Fenced or promoted-over: the closure already set mode_active=false;
+            /// the loop breaks.
+            SelfDemoted,
+            /// The heartbeat write or the epoch read failed this tick.
+            Failed,
+            /// A clean tick: heartbeat written, epoch read and still owned.
+            Healthy,
+        }
+
         loop {
             tick.tick().await;
             // #80: this `now_ms()` is written as a freshness TOKEN, not a clock
@@ -201,15 +250,6 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             // OWN monotonic clock — see `HeartbeatFreshness`. Any value that
             // strictly changes each tick would do; `now_ms()` is convenient.
             let ts = now_ms();
-
-            // The store work runs under one acquisition; the closure returns
-            // a control signal that the outer loop acts on (the closure cannot
-            // `continue`/`break` the outer loop directly — Rule 4).
-            enum HeartbeatStep {
-                Continue,
-                Break,
-                Proceed,
-            }
             // P1: run the heartbeat write + epoch read OFF the tokio worker pool
             // (`call` → spawn_blocking) so the ~2 s fsync write can't pin a shared
             // worker and head-of-line-block request handlers / the fast loop. The
@@ -219,14 +259,14 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             // instance id (reused next tick) into it.
             let app_c = Arc::clone(&app);
             let id_c = id.clone();
-            let step = match app.store.call(move |store| {
+            let outcome = match app.store.call(move |store| {
                 if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
                     tracing::warn!(
                         error       = %e,
                         instance_id = %id_c,
                         "Heartbeat write failed"
                     );
-                    return HeartbeatStep::Continue;
+                    return HeartbeatOutcome::Failed;
                 }
 
                 let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id_c);
@@ -240,33 +280,33 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 // mutation gate would still let writes through until
                 // the next request-time epoch check).
                 let held = app_c.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-                match store.current_epoch() {
-                    Ok(db_epoch) => {
-                        // Pass B1 (S3 / #115): cache the freshly observed
-                        // DB epoch so the gate can read it lock-free.
-                        // Release pairs with the gate's Acquire load.
-                        // This runs every HEARTBEAT_INTERVAL_MS (~2000 ms)
-                        // and is the cache repopulation path that bounds
-                        // the gate's staleness.
-                        app_c.cached_db_epoch.store(
-                            db_epoch,
-                            std::sync::atomic::Ordering::Release,
-                        );
-                        if held != 0 && db_epoch != held {
-                            app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                            tracing::error!(
-                                instance_id = %id_c,
-                                held        = held,
-                                db_epoch    = db_epoch,
-                                "FENCED — durable epoch advanced past held value; self-demoting and stopping heartbeat"
-                            );
-                            return HeartbeatStep::Break;
-                        }
-                    }
+                let db_epoch = match store.current_epoch() {
+                    Ok(e) => e,
+                    // Review item "1": an unreadable epoch is a FAILED tick, not a
+                    // silent pass. The old code logged and fell through to
+                    // `Proceed`, so a primary whose disk wedged on the epoch read
+                    // kept running Active with a FROZEN `cached_db_epoch` — never
+                    // fenced. Count it; the consecutive-failure guard below demotes.
                     Err(e) => {
                         tracing::warn!(error = %e, instance_id = %id_c,
                             "Heartbeat writer: epoch read failed");
+                        return HeartbeatOutcome::Failed;
                     }
+                };
+                // Pass B1 (S3 / #115): cache the freshly observed DB epoch so the
+                // gate can read it lock-free. Release pairs with the gate's Acquire
+                // load. This runs every HEARTBEAT_INTERVAL_MS (~2000 ms) and is the
+                // cache repopulation path that bounds the gate's staleness.
+                app_c.cached_db_epoch.store(db_epoch, std::sync::atomic::Ordering::Release);
+                if held != 0 && db_epoch != held {
+                    app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        instance_id = %id_c,
+                        held        = held,
+                        db_epoch    = db_epoch,
+                        "FENCED — durable epoch advanced past held value; self-demoting and stopping heartbeat"
+                    );
+                    return HeartbeatOutcome::SelfDemoted;
                 }
 
                 if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
@@ -279,24 +319,40 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                         "Standby has promoted — primary self-demoting and stopping heartbeat. \
                          Restart this instance in PassiveStandby mode."
                     );
-                    return HeartbeatStep::Break;
+                    return HeartbeatOutcome::SelfDemoted;
                 }
 
-                HeartbeatStep::Proceed
+                HeartbeatOutcome::Healthy
             }).await {
-                Ok(s) => s,
-                // The spawn_blocking task panicked/was cancelled — anomalous but
-                // non-fatal to failover: skip this tick and retry on the next one
-                // (a genuinely dead writer is itself the designed promotion signal).
+                Ok(o) => o,
+                // The spawn_blocking task panicked/was cancelled — count it as a
+                // failed tick (it produced no heartbeat write / epoch confirmation),
+                // so a persistently broken writer trips the disk-wedge demotion.
                 Err(e) => {
-                    tracing::warn!(error = %e, instance_id = %id, "Heartbeat store task failed — skipping tick");
-                    HeartbeatStep::Continue
+                    tracing::warn!(error = %e, instance_id = %id, "Heartbeat store task failed");
+                    HeartbeatOutcome::Failed
                 }
             };
-            match step {
-                HeartbeatStep::Continue => continue,
-                HeartbeatStep::Break => break,
-                HeartbeatStep::Proceed => {}
+            match outcome {
+                HeartbeatOutcome::SelfDemoted => break,
+                HeartbeatOutcome::Healthy => consecutive_failures = 0,
+                HeartbeatOutcome::Failed => {
+                    consecutive_failures += 1;
+                    // Review item "1": after N consecutive failures the primary can
+                    // no longer confirm it owns the epoch and the standby is about
+                    // to promote on heartbeat silence. Self-demote (fail closed) so
+                    // the old primary stops being a writer before the new one starts.
+                    if should_self_demote_on_heartbeat_failures(consecutive_failures) {
+                        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                        tracing::error!(
+                            instance_id          = %id,
+                            consecutive_failures = consecutive_failures,
+                            max                  = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                            "DISK-WEDGE — consecutive heartbeat/epoch failures exceeded; self-demoting and stopping heartbeat (fence-uncertainty → fail closed)"
+                        );
+                        break;
+                    }
+                }
             }
         }
 }
@@ -763,6 +819,38 @@ mod standby_monitor_tests {
         let id1 = instance_id();
         let id2 = instance_id();
         assert_eq!(id1, id2, "instance_id must be stable within a process lifetime");
+    }
+
+    #[test]
+    fn test_disk_wedge_demotes_only_after_threshold() {
+        // Review item "1": a transient blip (below the threshold) must NOT demote a
+        // healthy primary; the run reaching MAX_CONSECUTIVE_HEARTBEAT_FAILURES must.
+        for n in 0..MAX_CONSECUTIVE_HEARTBEAT_FAILURES {
+            assert!(
+                !should_self_demote_on_heartbeat_failures(n),
+                "{n} consecutive failures (< {MAX_CONSECUTIVE_HEARTBEAT_FAILURES}) must NOT demote"
+            );
+        }
+        assert!(
+            should_self_demote_on_heartbeat_failures(MAX_CONSECUTIVE_HEARTBEAT_FAILURES),
+            "reaching the threshold must demote"
+        );
+        assert!(
+            should_self_demote_on_heartbeat_failures(MAX_CONSECUTIVE_HEARTBEAT_FAILURES + 5),
+            "staying failed must remain demoted"
+        );
+    }
+
+    #[test]
+    fn test_disk_wedge_demotion_precedes_standby_promotion() {
+        // The primary must self-demote strictly before the standby promotes on
+        // heartbeat silence, or both are Active at once (two writers). Verified at
+        // the default config (the const assert in the module guards this too).
+        let demote_at_ms = MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 * HEARTBEAT_INTERVAL_MS;
+        assert!(
+            demote_at_ms < PROMOTION_TIMEOUT_MS,
+            "self-demote at {demote_at_ms} ms must precede promotion at {PROMOTION_TIMEOUT_MS} ms"
+        );
     }
 }
 
