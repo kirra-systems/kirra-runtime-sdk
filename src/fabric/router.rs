@@ -127,7 +127,7 @@ impl FabricRouter {
             .ok_or_else(|| FabricError::AssetNotFound(asset_id.to_string()))?;
 
         let posture = self.asset_postures.get(asset_id)
-            .map(|p| p.posture.clone())
+            .map(|p| p.posture)
             .unwrap_or(FleetPosture::LockedOut);  // fail-closed if posture unknown
 
         Ok(governor.evaluate_command(cmd, &posture, effective_perception_cap))

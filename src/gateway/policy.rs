@@ -1,6 +1,6 @@
 // src/gateway/policy.rs
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationalCommand {
     /// Safe reads: telemetry, metrics, health probes. Allowed in all postures.
     ReadTelemetry,
@@ -344,13 +344,13 @@ mod tests {
             FleetPosture::LockedOut,
         ] {
             let cache = Some(CachedFleetPosture {
-                posture: posture.clone(),
+                posture,
                 generated_at_ms: now,
                 ttl_ms: POSTURE_CACHE_TTL_MS,
                 generation: 1,
             });
             assert!(
-                !should_route_command(&cache, now, cmd.clone()),
+                !should_route_command(&cache, now, cmd),
                 "Unknown write path must be denied under {posture:?} (fail-closed, no silent proceed)"
             );
         }

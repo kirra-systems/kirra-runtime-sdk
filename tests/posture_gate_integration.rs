@@ -133,7 +133,7 @@ async fn test_unknown_method_returns_503_under_any_posture() {
         FleetPosture::Degraded,
         FleetPosture::LockedOut,
     ] {
-        let svc = build_state_with_posture(posture.clone());
+        let svc = build_state_with_posture(posture);
         let status = req_status(build_test_app(svc), "PATCH", "/fleet/posture").await;
         assert_eq!(
             status,

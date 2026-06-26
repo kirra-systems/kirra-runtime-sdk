@@ -74,7 +74,7 @@ impl FederatedTrustReportV2 {
         FederatedTrustReport {
             source_controller_id: self.source_controller_id.clone(),
             asset_id: self.asset_id.clone(),
-            posture: self.posture.clone(),
+            posture: self.posture,
             issued_at_ms: self.issued_at_ms,
             expires_at_ms: self.expires_at_ms,
             nonce_hex: self.nonce_hex.clone(),
@@ -204,7 +204,7 @@ pub fn authoritative_posture<'a>(
         }
     }
 
-    Some(current.posture.clone())
+    Some(current.posture)
 }
 
 pub fn evaluate_federated_report_v2(

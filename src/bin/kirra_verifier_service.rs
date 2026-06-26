@@ -349,7 +349,7 @@ fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
             }
         };
         match guard.as_ref() {
-            Some(c) if !c.is_stale(now) => c.posture.clone(),
+            Some(c) if !c.is_stale(now) => c.posture,
             Some(_) => return, // stale → do not propagate a stale posture
             None => return,    // not yet computed
         }
@@ -374,7 +374,7 @@ fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
 
     let updated = AssetPosture {
         asset_id: asset_id.to_string(),
-        posture: fleet.clone(),
+        posture: fleet,
         generation: next_gen,
         computed_at_ms: now,
         contributing_nodes: vec![],
@@ -2095,7 +2095,7 @@ async fn handle_fabric_state(
         let gen = svc.fabric_router.fabric_state().fabric_generation + 1;
         svc.fabric_router.update_asset_posture(&asset_id, AssetPosture {
             asset_id: asset_id.clone(),
-            posture: new_posture.clone(),
+            posture: new_posture,
             generation: gen,
             computed_at_ms: now_ms(),
             contributing_nodes: vec![],

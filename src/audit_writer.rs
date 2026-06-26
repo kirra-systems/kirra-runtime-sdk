@@ -262,7 +262,7 @@ mod byte_identity_tests {
             DenyCode::InvalidTimeDelta,
             DenyCode::AssetLockedOut,
         ] {
-            assert_byte_identical(sample_cmd(), code, posture.clone());
+            assert_byte_identical(sample_cmd(), code, posture);
         }
     }
 

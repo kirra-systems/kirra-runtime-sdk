@@ -44,7 +44,7 @@ fn test_safety_goal_sg_006_unknown_command_denial() {
         // Cache generated at now_ms → not stale; isolates the Unknown
         // early-return from the staleness fail-closed path.
         let cache = Some(CachedFleetPosture::new_with_generation(
-            posture.clone(),
+            posture,
             0,
             now_ms,
         ));

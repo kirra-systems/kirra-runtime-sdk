@@ -86,7 +86,7 @@ pub fn resolve_posture_with_reason(
                     );
                     (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheStale))
                 } else {
-                    (cached.posture.clone(), None)
+                    (cached.posture, None)
                 }
             }
             None => {

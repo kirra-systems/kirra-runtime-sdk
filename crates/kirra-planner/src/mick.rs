@@ -972,7 +972,7 @@ impl WorldContext {
 
         WorldContext {
             ego_speed_mps: world.ego.linear_x_mps,
-            posture: posture_token(world.posture.clone()),
+            posture: posture_token(world.posture),
             goal_ahead_m,
             goal_left_m,
             may_change_left: crate::behavior::lateral_move_permitted(

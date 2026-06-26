@@ -70,7 +70,7 @@ const _: () = assert!(
 ///
 /// The middleware (`resolve_posture`) reads `generated_at_ms` and `ttl_ms`
 /// to evaluate staleness. It does not own either value.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CachedFleetPosture {
     /// The current aggregated system-wide posture derived from the DAG.
     pub posture: FleetPosture,

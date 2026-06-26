@@ -437,7 +437,7 @@ mod unified_tests {
     #[test]
     fn test_response_always_includes_posture_at_evaluation() {
         for posture in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
-            let r = evaluate_unified_industrial_request(eip_request(), posture.clone()).unwrap();
+            let r = evaluate_unified_industrial_request(eip_request(), posture).unwrap();
             assert!(!r.posture_at_evaluation.is_empty(), "posture_at_evaluation must always be set");
         }
     }

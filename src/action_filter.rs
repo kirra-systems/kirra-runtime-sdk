@@ -158,7 +158,7 @@ mod action_filter_tests {
     fn test_unknown_action_type_always_denied() {
         // Unknown action types must be denied in ALL posture states
         for posture in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
-            let d = evaluate_action_claim(unknown_claim(), posture.clone());
+            let d = evaluate_action_claim(unknown_claim(), posture);
             assert!(!d.allowed, "Unknown action must be denied in {posture:?}");
         }
     }

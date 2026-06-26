@@ -157,7 +157,7 @@ impl PostureTracker {
         if self.sticky_locked_out {
             return FleetPosture::LockedOut;
         }
-        match (self.last_event_ms, self.last_observation.clone()) {
+        match (self.last_event_ms, self.last_observation) {
             (None, _) => FleetPosture::Degraded,
             (Some(last), Some(observed)) => {
                 if now_ms.saturating_sub(last) > POSTURE_STALENESS_TIMEOUT_MS {

@@ -124,7 +124,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let previous_posture: Option<FleetPosture> = cache
         .read()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| c.posture.clone()));
+        .and_then(|g| g.as_ref().map(|c| c.posture));
 
     let is_transition = previous_posture
         .as_ref()
@@ -224,7 +224,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Step 6: Generation-monotonic cache replace.
     // Two recalcs can race (promotion path + Step-C worker), and a SLOWER
     // one carrying a LOWER generation must not clobber a newer posture.
-    let new_cached = CachedFleetPosture::new_with_generation(new_posture.clone(), generation, ts);
+    let new_cached = CachedFleetPosture::new_with_generation(new_posture, generation, ts);
     let cache_written = replace_cache_if_newer(cache, new_cached);
 
     // Step 7: Broadcast ONLY if we actually wrote a newer entry AND it's a
@@ -517,7 +517,7 @@ mod posture_engine_tests {
         fn snapshot(cache: &SharedPostureCache) -> (u64, FleetPosture) {
             let g = cache.read().unwrap();
             let entry = g.as_ref().expect("cache populated");
-            (entry.generation, entry.posture.clone())
+            (entry.generation, entry.posture)
         }
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
@@ -591,7 +591,7 @@ mod posture_engine_tests {
     }
 
     fn cache_posture(cache: &SharedPostureCache) -> Option<FleetPosture> {
-        cache.read().ok().and_then(|g| g.as_ref().map(|c| c.posture.clone()))
+        cache.read().ok().and_then(|g| g.as_ref().map(|c| c.posture))
     }
 
     fn empty_cache() -> SharedPostureCache {

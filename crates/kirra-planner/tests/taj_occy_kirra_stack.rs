@@ -98,7 +98,7 @@ fn run_stack(
         lane_change_to_m: None,
         no_overtake_ids: &[],
         drivable: None,
-        posture: posture.clone(),
+        posture,
         target_speed_mps: None,
         request_overtake: false,
         request_pull_over: false,
