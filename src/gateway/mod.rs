@@ -288,6 +288,13 @@ impl KirraLiveGateway {
                     if plc_socket.write_all(&out_bytes).is_err() { break; }
                     if Self::read_exact_frame(&mut plc_socket, 6, &mut plc_buf[0..6]).is_err() { break; }
                     let p_len = u16::from_be_bytes([plc_buf[4], plc_buf[5]]) as usize;
+                    // B2 (fail-closed): bound the PLC-declared length BEFORE slicing
+                    // `plc_buf[6..6+p_len]`. `plc_buf` is `[0u8; 512]`, so a length
+                    // `> 506` would index past the end → panic → (release `panic=abort`)
+                    // process kill from a single malformed/hostile PLC response. This
+                    // mirrors the identical client-request guard at line 227; without
+                    // it the response path was the one unbounded slice in the proxy.
+                    if p_len == 0 || p_len > 500 { break; }
                     if Self::read_exact_frame(&mut plc_socket, p_len, &mut plc_buf[6..6+p_len]).is_err() { break; }
                     if mut_client.write_all(&plc_buf[0..6+p_len]).is_err() { break; }
                 }
