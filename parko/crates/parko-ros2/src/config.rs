@@ -107,6 +107,15 @@ pub struct ParkoNodeConfig {
     /// Phase 3b — maximum corridor age (ms) for the gate's health check
     /// (`Corridor::max_age_ms`). A stale corridor fails closed (MRC).
     pub corridor_max_age_ms: u64,
+
+    /// ADR-0029 Phase 3b (object axis) — enable the RSS object-avoidance gate
+    /// (`taj_objects::apply_object_rss_gate`). When `true` AND lidar +
+    /// `platform_profile` are configured, the node also feeds Taj's perceived
+    /// OBJECTS through `compute_scene_rss` each tick (an object in the path → MRC;
+    /// absent/stale object perception → fail-closed MRC). Reuses the lidar feed
+    /// and `corridor_max_age_ms` as the object-perception staleness budget.
+    /// **Default `false`** → byte-identical to the corridor-only Phase 3b.
+    pub object_rss_enabled: bool,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -141,6 +150,9 @@ impl Default for ParkoNodeConfig {
             lidar_topic: None,
             corridor_min_confidence: 0.5,
             corridor_max_age_ms: 500,
+            // ADR-0029 Phase 3b (object axis): object RSS gate off by default.
+            // Opt-in; byte-identical to corridor-only Phase 3b when disabled.
+            object_rss_enabled: false,
         }
     }
 }

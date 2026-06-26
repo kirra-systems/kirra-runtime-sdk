@@ -39,6 +39,7 @@ pub mod posture_state;
 pub mod radar_shim;
 pub mod sensor_mapping;
 pub mod taj_corridor;
+pub mod taj_objects;
 pub mod tick_pipeline;
 
 // Re-export the PostureTracker so parko-ros2 consumers can refer to

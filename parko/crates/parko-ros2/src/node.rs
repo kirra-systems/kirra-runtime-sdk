@@ -36,7 +36,8 @@ use crate::config::ParkoNodeConfig;
 use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S};
 use crate::imu_shim::imu_msg_to_sample;
 use crate::sensor_mapping::{ImuSample, SensorInputMapping};
-use crate::taj_corridor::{corridor_from_scan, laserscan_msg_to_taj, CorridorSnapshot};
+use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
+use crate::taj_objects::{apply_object_rss_gate, courier_rss_params, ObjectSnapshot};
 use crate::tick_pipeline::{current_time_ms, TickError};
 use parko_kirra::clearance_delivery::DeliveryOutcome;
 
@@ -177,30 +178,55 @@ where
     // the governed command against it. A missing/stale/low-confidence corridor
     // fails closed INSIDE the gate (MRC). Opt-in: no lidar_topic → no gate.
     let latest_corridor: Arc<StdMutex<Option<CorridorSnapshot>>> = Arc::new(StdMutex::new(None));
+    // ADR-0029 Phase 3b (object axis): the latest perceived-object snapshot, fed
+    // from the SAME lidar/Taj task as the corridor. Armed only when the operator
+    // opts in (`object_rss_enabled`) AND lidar + footprint are present.
+    let latest_objects: Arc<StdMutex<Option<ObjectSnapshot>>> = Arc::new(StdMutex::new(None));
     let gate_footprint = config.platform_profile.as_ref().map(|p| p.footprint());
     match (&config.lidar_topic, gate_footprint.is_some()) {
         (Some(topic), true) => {
             let scan_stream = node
                 .subscribe::<r2r::sensor_msgs::msg::LaserScan>(topic, r2r::QosProfile::default())?;
             let cell = Arc::clone(&latest_corridor);
-            let taj = kirra_taj::TajPhaseA::new(kirra_taj::TajConfig::default());
+            let obj_cell = Arc::clone(&latest_objects);
+            let store_objects = config.object_rss_enabled;
+            // The TEMPORAL tracker (not the single-frame `TajPhaseA`): `track`
+            // wraps `phase_a.process`, so the CORRIDOR is byte-identical, but it
+            // also associates objects frame-to-frame and estimates each object's
+            // ground velocity — what the RSS object gate needs to bound MOVING
+            // objects (a first-sighting object is velocity-0 → treated static,
+            // conservative). Single drain owner → the `&mut self` needs no lock.
+            let mut taj = kirra_taj::TajTracker::new(kirra_taj::TajConfig::default());
             tokio::spawn(async move {
                 use futures::StreamExt;
                 let mut s = scan_stream;
                 while let Some(msg) = s.next().await {
                     let scan = laserscan_msg_to_taj(&msg);
-                    let snap = corridor_from_scan(&taj, &scan, current_time_ms());
+                    // ONE Phase-A pass (inside `track`) feeds both seams: the
+                    // corridor (with ego rear cover) and — when armed — the
+                    // velocity-carrying perceived objects.
+                    let perception = taj.track(&scan, current_time_ms());
+                    let snap = CorridorSnapshot::from_taj(&perception.corridor)
+                        .with_ego_rear_cover(EGO_REAR_COVER_M);
                     if let Ok(mut g) = cell.lock() {
                         *g = Some(snap);
                     }
+                    if store_objects {
+                        let obj_snap =
+                            ObjectSnapshot::from_objects(&perception.objects, perception.stamp_ms);
+                        if let Ok(mut g) = obj_cell.lock() {
+                            *g = Some(obj_snap);
+                        }
+                    }
                 }
                 tracing::warn!(
-                    "parko-ros2: lidar stream closed — containment corridor now unfed; a stale \
-                     corridor fails closed (MRC) inside the gate"
+                    "parko-ros2: lidar stream closed — containment corridor + object perception now \
+                     unfed; a stale corridor/object snapshot fails closed (MRC) inside the gates"
                 );
             });
-            tracing::info!(topic = %topic,
-                "parko-ros2: SG2 containment gate ARMED (lidar → Taj Phase-A corridor)");
+            tracing::info!(topic = %topic, object_rss = config.object_rss_enabled,
+                "parko-ros2: SG2 containment gate ARMED (lidar → Taj Phase-A corridor); \
+                 SG1 object-RSS gate armed iff object_rss");
         }
         (Some(_), false) => tracing::warn!(
             "parko-ros2: lidar_topic set but no platform_profile (no footprint) — SG2 containment \
@@ -221,6 +247,15 @@ where
     let drain_contact = Arc::clone(&contact_state);
     let drain_corridor = Arc::clone(&latest_corridor);
     let drain_footprint = gate_footprint;
+    // Object-RSS gate: armed (Some params) only when opted in AND lidar +
+    // footprint are configured — otherwise the slot would never be fed and the
+    // gate would MRC forever. `None` → byte-identical (gate skipped).
+    let drain_objects = Arc::clone(&latest_objects);
+    let drain_object_params = config
+        .platform_profile
+        .as_ref()
+        .filter(|_| config.object_rss_enabled && config.lidar_topic.is_some())
+        .map(courier_rss_params);
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
@@ -295,6 +330,21 @@ where
                 _ => outcome,
             };
 
+            // ADR-0029 Phase 3b (object axis): bound the governed command against
+            // Taj's perceived objects via RSS. Armed only when `drain_object_params`
+            // is set; a missing/stale object snapshot fails closed (MRC) INSIDE the
+            // gate. No params → skipped (byte-identical).
+            let outcome = match &drain_object_params {
+                Some(params) => apply_object_rss_gate(
+                    outcome,
+                    drain_objects.lock().ok().and_then(|g| g.clone()).as_ref(),
+                    params,
+                    drain_config.corridor_max_age_ms,
+                    current_time_ms(),
+                ),
+                None => outcome,
+            };
+
             // Surface the per-tick clearance delivery (a console-recorded grant
             // arriving on this node's own tick). A `NoGrant` no-op is silent.
             match &cleared.delivery {
@@ -327,6 +377,10 @@ where
                         tracing::warn!(frame_id,
                             "parko-ros2: SG2 containment breach (command lookahead left the \
                              ego corridor, or the corridor was stale/low-confidence); publishing MRC"),
+                    TickError::ObjectRssBreach =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: SG1 object-RSS breach (a perceived object made the command \
+                             unsafe, or object perception was absent/stale); publishing MRC"),
                 }
             }
 
