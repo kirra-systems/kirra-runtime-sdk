@@ -168,6 +168,14 @@ pub fn spawn_telemetry_watchdog_with_clock(
             let clock = Arc::clone(&clock);
             async move {
                 let mut sweep_interval = interval(Duration::from_millis(AV_WATCHDOG_SWEEP_MS));
+                // If the runtime starves this task and several sweep windows are
+                // missed, do NOT fire a back-to-back burst of catch-up sweeps
+                // (the default Burst behavior): a watchdog wants evenly-spaced
+                // sweeps, and a burst neither shortens the detection-latency bound
+                // nor helps — it just thrashes. Delay re-paces from the actual
+                // wake time. Each sweep is idempotent and uses the clock for
+                // staleness, so skipping missed ticks is correct.
+                sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut last_node_refresh_ms: u64 = 0;
                 let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
                 loop {

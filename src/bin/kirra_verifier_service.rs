@@ -99,6 +99,11 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
 /// real environment/store/wiring; consumed by `check_startup_invariants`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StartupContext {
+    /// The hardware root of trust is healthy (`StartupSentinel::verify_hardware_root()
+    /// == Trusted`). Fail-closed: an unavailable/unresponsive TPM aborts startup.
+    /// SS-001 lists this as a startup entry invariant; this is its enforcement
+    /// point. Without the `tpm` feature the sentinel returns `Trusted` (no-op pass).
+    pub hardware_root_trusted: bool,
     /// `KIRRA_ADMIN_TOKEN` is present and non-empty (CRITICAL INVARIANT #6).
     pub admin_token_present: bool,
     /// The SQLite store reports `journal_mode = wal` (CRITICAL INVARIANT #12
@@ -117,6 +122,7 @@ pub(crate) struct StartupContext {
 /// The first violated startup invariant, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupInvariant {
+    HardwareRootUntrusted,
     AdminTokenMissing,
     SqliteNotWal,
     WatchdogNotSpawned,
@@ -126,6 +132,7 @@ pub(crate) enum StartupInvariant {
 impl std::fmt::Display for StartupInvariant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
+            Self::HardwareRootUntrusted => "hardware root of trust unavailable/unresponsive (TPM)",
             Self::AdminTokenMissing => "KIRRA_ADMIN_TOKEN absent or empty",
             Self::SqliteNotWal => "SQLite store is not in WAL journal mode",
             Self::WatchdogNotSpawned => "telemetry watchdog not spawned (Active path)",
@@ -143,6 +150,11 @@ impl std::fmt::Display for StartupInvariant {
 //
 // Verifies: SG-008
 pub(crate) fn check_startup_invariants(ctx: &StartupContext) -> Result<(), StartupInvariant> {
+    // Hardware root of trust first — it is the most fundamental precondition
+    // (SS-001 entry invariant). Fail-closed before anything else is trusted.
+    if !ctx.hardware_root_trusted {
+        return Err(StartupInvariant::HardwareRootUntrusted);
+    }
     if !ctx.admin_token_present {
         return Err(StartupInvariant::AdminTokenMissing);
     }
@@ -2794,6 +2806,11 @@ async fn main() {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(
                 kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
             ));
+            // Coalesce missed refresh windows instead of bursting catch-up
+            // recalcs after runtime starvation (the trigger only re-stamps the
+            // cache; bursts add no freshness and the posture worker already
+            // coalesces). Delay re-paces from the actual wake time.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // First tick fires immediately; skip it (the synchronous
             // initial recalc above already covered cold start).
             tick.tick().await;
@@ -2841,6 +2858,10 @@ async fn main() {
     // strictly AFTER this check, so "the listener never binds before invariants
     // pass" holds by construction.
     let startup_ctx = StartupContext {
+        hardware_root_trusted: matches!(
+            kirra_verifier::startup_sentinel::StartupSentinel::verify_hardware_root(),
+            kirra_verifier::startup_sentinel::StartupTrustState::Trusted
+        ),
         admin_token_present: std::env::var("KIRRA_ADMIN_TOKEN")
             .map(|v| !v.is_empty())
             .unwrap_or(false),
@@ -3919,6 +3940,7 @@ mod sg_008_cert_tests {
     /// All invariants satisfied on the Active path.
     fn all_ok_active() -> StartupContext {
         StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
             mode_active: true,
@@ -3933,6 +3955,18 @@ mod sg_008_cert_tests {
             check_startup_invariants(&all_ok_active()),
             Ok(()),
             "SG-008: startup must succeed when all invariants hold"
+        );
+    }
+
+    #[test]
+    fn test_startup_aborts_when_hardware_root_untrusted() {
+        // SS-001 entry invariant: an unavailable/unresponsive hardware root of
+        // trust must abort startup before the listener binds (fail-closed).
+        let ctx = StartupContext { hardware_root_trusted: false, ..all_ok_active() };
+        assert_eq!(
+            check_startup_invariants(&ctx),
+            Err(StartupInvariant::HardwareRootUntrusted),
+            "SG-008: startup must fail closed when the hardware root of trust is untrusted"
         );
     }
 
@@ -3982,6 +4016,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_standby_ok_without_watchdog_or_posture_engine() {
         let ctx = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
             mode_active: false,
@@ -3998,6 +4033,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_standby_still_requires_admin_token_and_wal() {
         let no_token = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: true,
             mode_active: false,
@@ -4022,6 +4058,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_invariant_check_order_is_stable() {
         let ctx = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: false,
             mode_active: true,
@@ -4031,7 +4068,7 @@ mod sg_008_cert_tests {
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::AdminTokenMissing),
-            "SG-008: the admin-token invariant must be reported first when several are violated"
+            "SG-008: with a trusted hardware root, the admin-token invariant is reported first when several are violated"
         );
     }
 }
