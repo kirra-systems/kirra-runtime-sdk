@@ -21,7 +21,13 @@ pub static POSTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
 pub fn init_generation_from_store(app: &Arc<AppState>) {
     let last = app.store.with(|store| store.load_last_generation().unwrap_or(0));
     if last > 0 {
-        POSTURE_GENERATION.store(last + 1, Ordering::SeqCst);
+        // B6: `fetch_max`, not `store`. If any recalc already advanced the counter
+        // past `last + 1` before this init runs (e.g. a cold-start recalc), a bare
+        // `store` would move the generation BACKWARDS — violating the strict-
+        // monotonicity invariant that federation peers rely on for report ordering.
+        // `fetch_max` only ever raises it, so the counter is monotone regardless of
+        // init/recalc ordering.
+        POSTURE_GENERATION.fetch_max(last + 1, Ordering::SeqCst);
     }
 }
 
@@ -74,9 +80,19 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let ts = now_ms();
 
     // Step 1: Traverse the full DAG for every registered node.
-    let node_postures: Vec<FleetNodePosture> = app.nodes
+    //
+    // B1 (deadlock hazard): snapshot the node ids FIRST, releasing the
+    // `app.nodes` shard guards, THEN traverse. The previous form held a
+    // `nodes.iter()` shard read-guard across each `calculate_posture()` call,
+    // which re-locks `app.nodes` / `app.dependency_graph` inside
+    // `recursive_calculate`. A re-entrant `get()` on the SAME shard while a writer
+    // is queued on it can self-deadlock (DashMap's per-shard RwLock is
+    // writer-preferring) and hang the safety engine. Collecting the keys to an
+    // owned Vec drops every iterator guard before any traversal begins.
+    let node_ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
+    let node_postures: Vec<FleetNodePosture> = node_ids
         .iter()
-        .map(|entry| app.calculate_posture(entry.key()))
+        .map(|id| app.calculate_posture(id))
         .collect();
 
     // Step 2: Derive aggregate posture — pure function, no I/O.
@@ -727,5 +743,71 @@ mod posture_engine_tests {
             events.iter().any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
             "the flood escalation must emit the existing posture-transition audit event"
         );
+    }
+
+    #[test]
+    fn test_init_generation_never_moves_counter_backwards() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        // B6 regression: simulate a recalc having already advanced the live counter
+        // well past any persisted value. (`fetch_max` here so this test is robust to
+        // the shared global being concurrently bumped by other tests in the binary.)
+        let high = POSTURE_GENERATION.load(Ordering::SeqCst) + 1_000;
+        POSTURE_GENERATION.fetch_max(high, Ordering::SeqCst);
+        let before = POSTURE_GENERATION.load(Ordering::SeqCst);
+
+        // Persist a LOWER last-generation, then init from it.
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        app.store.with(|s| s.save_last_generation(5).unwrap());
+
+        init_generation_from_store(&app);
+
+        // With the old `store(last + 1)` this would have dropped the counter to 6;
+        // `fetch_max(6)` cannot lower a counter already at/above `before`.
+        assert!(
+            POSTURE_GENERATION.load(Ordering::SeqCst) >= before,
+            "init_generation_from_store must never move the generation counter backwards"
+        );
+    }
+
+    #[test]
+    fn test_recalc_over_shared_dependency_dag_completes() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, NodeTrustState, RegisteredNode, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Diamond DAG: d -> {b, c} -> a. `a` is a SHARED dependency of b and c —
+        // the case the B1 snapshot must traverse without holding a `nodes` shard
+        // guard across the re-entrant `calculate_posture` gets. All trusted.
+        for id in ["a", "b", "c", "d"] {
+            app.persist_and_insert_node(RegisteredNode {
+                node_id: id.to_string(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms: 1,
+                last_trust_update_ms: 1,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
+            })
+            .unwrap();
+        }
+        app.persist_and_insert_deps("b", vec!["a".to_string()]).unwrap();
+        app.persist_and_insert_deps("c", vec!["a".to_string()]).unwrap();
+        app.persist_and_insert_deps("d", vec!["b".to_string(), "c".to_string()])
+            .unwrap();
+
+        // The recalc must COMPLETE (the snapshot path holds no shard guard across
+        // the re-entrant gets) and, all-trusted, derive Nominal.
+        recalculate_and_broadcast(&app, &cache);
+        let guard = cache.read().unwrap();
+        assert_eq!(guard.as_ref().unwrap().posture, FleetPosture::Nominal);
     }
 }
