@@ -535,10 +535,11 @@ enum FedCommitOutcome {
 
 async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     let exported_at_ms = now_ms();
-    // Three full-table loads (nodes + dependencies + all posture events) under one
-    // lock — the heaviest read. Run it off the worker pool so a large dump cannot
-    // pin a tokio worker (and hold the store mutex on it) for its whole duration.
-    let result = svc.app.store.call(move |store| {
+    // Three full-table loads (nodes + dependencies + all posture events) — the
+    // heaviest read. `call_read` runs it off the worker pool AND against a
+    // read-only replica connection, so a large dump neither pins a tokio worker
+    // nor contends the writer mutex (a concurrent write proceeds unblocked).
+    let result = svc.app.store.call_read(move |store| {
         let nodes = store.load_nodes().ok()?;
         let dependencies = store.load_dependencies().ok()?;
         let posture_events = store.load_all_posture_events().ok()?;
@@ -924,7 +925,7 @@ async fn get_node_history(
     State(svc): State<Arc<ServiceState>>,
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.store.with(|store| store.load_node_history(&node_id)) {
+    match svc.app.store.with_read(|store| store.load_node_history(&node_id)) {
         Ok(history) => Json(json!({ "node_id": node_id, "history": history })).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to load history" }))).into_response(),
@@ -936,7 +937,7 @@ async fn get_node_flap_status(
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
     let five_minutes_ago = now_ms().saturating_sub(300_000);
-    match svc.app.store.with(|store| store.count_recent_posture_events(&node_id, five_minutes_ago)) {
+    match svc.app.store.with_read(|store| store.count_recent_posture_events(&node_id, five_minutes_ago)) {
         Ok(count) => {
             let status = FlapStatus {
                 node_id: node_id.clone(),
@@ -954,10 +955,11 @@ async fn verify_audit_chain(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
     // `VerifyingKey` is `Copy`; copy it into the blocking task. A full-chain scan
-    // with a per-row Ed25519 verification is the heaviest read-side op — run it off
-    // the worker pool so it can't pin a tokio worker (and hold the store mutex).
+    // with a per-row Ed25519 verification is the heaviest read-side op — `call_read`
+    // runs it off the worker pool AND on a read-only replica, so it neither pins a
+    // tokio worker nor contends the writer mutex.
     let vk = svc.audit_verifying_key;
-    let result = svc.app.store.call(move |store| {
+    let result = svc.app.store.call_read(move |store| {
         store.verify_audit_chain_full(vk.as_ref())
     })
     .await;
@@ -999,7 +1001,7 @@ async fn handle_audit_export(
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
     let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.with(|store| store.load_audit_chain_page(limit, offset, vk)) {
+    match svc.app.store.with_read(|store| store.load_audit_chain_page(limit, offset, vk)) {
         Ok(page) => Json(page).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "export query failed" }))).into_response(),
@@ -1806,7 +1808,7 @@ async fn get_federated_reports(
 ) -> impl IntoResponse {
     // Both reads share ONE acquisition (Rule 5). The closure returns a Result so
     // the per-read error responses are produced OUTSIDE the closure (Rule 4).
-    let loaded = svc.app.store.with(|store| {
+    let loaded = svc.app.store.with_read(|store| {
         let reports = store.load_federated_reports_for_asset(&asset_id)
             .map_err(|_| "failed to load reports")?;
         // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
