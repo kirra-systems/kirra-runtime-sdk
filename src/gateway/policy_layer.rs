@@ -268,7 +268,7 @@ pub async fn enforce_actuator_safety_envelope(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             now_ms(),
             &verdict,
-            posture.clone(),
+            posture,
             &proposed_cmd,
             svc.perception_monitor_enabled,
         );
@@ -530,11 +530,11 @@ pub async fn enforce_posture_routing(
 
     // Fail-closed snapshot: poisoned lock -> None -> block.
     let snapshot: Option<CachedFleetPosture> = match svc.posture_cache.read() {
-        Ok(g) => g.clone(),
+        Ok(g) => *g,
         Err(_) => None,
     };
 
-    if !should_route_command(&snapshot, posture_now_ms(), cmd.clone()) {
+    if !should_route_command(&snapshot, posture_now_ms(), cmd) {
         tracing::warn!(
             method = %method,
             path = %path,

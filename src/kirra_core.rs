@@ -158,7 +158,7 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
             return GovernorInterceptResult {
                 sanitized_scalar: self.contract.fallback(),
                 asset_in_safe_control_state: false,
-                mitigation_narrative: "NONFINITE_INPUT_REJECTED_FAILSAFE".to_string(),
+                mitigation_narrative: std::borrow::Cow::Borrowed("NONFINITE_INPUT_REJECTED_FAILSAFE"),
                 was_unsafe_attempt: true,
                 was_rate_breached: false,
             };
@@ -175,7 +175,7 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
             return GovernorInterceptResult {
                 sanitized_scalar: self.contract.fallback(),
                 asset_in_safe_control_state: false,
-                mitigation_narrative: "INVALID_TIME_DELTA_REJECTED_FAILSAFE".to_string(),
+                mitigation_narrative: std::borrow::Cow::Borrowed("INVALID_TIME_DELTA_REJECTED_FAILSAFE"),
                 was_unsafe_attempt: true,
                 was_rate_breached: false,
             };
@@ -211,10 +211,11 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
 
         let core_bounded_demand = proposed_demand.clamp(self.contract.min_bound(), self.contract.max_bound());
 
-        let (sanitized_scalar, narrative) = match active_action {
+        use std::borrow::Cow;
+        let (sanitized_scalar, narrative): (f64, Cow<'static, str>) = match active_action {
             BehavioralAction::ExecuteUnrestricted => {
                 if is_out_of_envelope {
-                    (core_bounded_demand, "ENVELOPE_CLAMP_TAKES_PRIORITY".to_string())
+                    (core_bounded_demand, Cow::Borrowed("ENVELOPE_CLAMP_TAKES_PRIORITY"))
                 } else if is_rate_breached {
                     let step_direction = (proposed_demand - self.last_validated_scalar).signum();
                     // Gov-M1 (invariant #8 — envelope ALWAYS wins over rate): re-clamp
@@ -227,20 +228,20 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                     let rate_clamped_value = (self.last_validated_scalar
                         + (self.contract.max_rate() * dt * step_direction))
                         .clamp(self.contract.min_bound(), self.contract.max_bound());
-                    (rate_clamped_value, format!("RATE_CLAMP_ENFORCED: Max {} GPM/s", self.contract.max_rate()))
+                    (rate_clamped_value, Cow::Owned(format!("RATE_CLAMP_ENFORCED: Max {} GPM/s", self.contract.max_rate())))
                 } else {
-                    (proposed_demand, "PASSTHROUGH_UNRESTRICTED_NORMAL".to_string())
+                    (proposed_demand, Cow::Borrowed("PASSTHROUGH_UNRESTRICTED_NORMAL"))
                 }
             }
             BehavioralAction::ApplyVelocityCap => {
                 let clamped_value = core_bounded_demand.clamp(self.constraint_cap_min, self.constraint_cap_max);
-                (clamped_value, format!("DEGRADED_POSTURE_CLAMP: Bounded inside [{} - {}]", self.constraint_cap_min, self.constraint_cap_max))
+                (clamped_value, Cow::Owned(format!("DEGRADED_POSTURE_CLAMP: Bounded inside [{} - {}]", self.constraint_cap_min, self.constraint_cap_max)))
             }
             BehavioralAction::ForceStationaryHold => {
-                (self.last_validated_scalar, format!("SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {:.1}", self.last_validated_scalar))
+                (self.last_validated_scalar, Cow::Owned(format!("SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {:.1}", self.last_validated_scalar)))
             }
             BehavioralAction::ExecutePassiveFailsafeLock => {
-                (self.contract.fallback(), "CRITICAL_LOCKOUT: Active fallback state commanded".to_string())
+                (self.contract.fallback(), Cow::Borrowed("CRITICAL_LOCKOUT: Active fallback state commanded"))
             }
         };
 

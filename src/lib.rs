@@ -82,7 +82,11 @@ pub enum TrustMode {
 pub struct GovernorInterceptResult {
     pub sanitized_scalar: f64,
     pub asset_in_safe_control_state: bool,
-    pub mitigation_narrative: String,
+    /// `Cow` so the common/failsafe branches carry a `&'static str` discriminant
+    /// with ZERO allocation (the FFI scalar path discards this every tick), while
+    /// the off-nominal clamp branches still embed their numeric detail via an owned
+    /// `format!` — preserving the exact audit-narrative content.
+    pub mitigation_narrative: std::borrow::Cow<'static, str>,
     pub was_unsafe_attempt: bool,
     pub was_rate_breached: bool,
 }

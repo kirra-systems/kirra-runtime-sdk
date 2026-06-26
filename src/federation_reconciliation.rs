@@ -74,7 +74,7 @@ impl FederatedTrustReportV2 {
         FederatedTrustReport {
             source_controller_id: self.source_controller_id.clone(),
             asset_id: self.asset_id.clone(),
-            posture: self.posture.clone(),
+            posture: self.posture,
             issued_at_ms: self.issued_at_ms,
             expires_at_ms: self.expires_at_ms,
             nonce_hex: self.nonce_hex.clone(),
@@ -110,7 +110,7 @@ pub fn verify_federated_report_signature_v2(
     public_key_b64: &str,
 ) -> bool {
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use ed25519_dalek::{Signature, VerifyingKey};
 
     let Ok(pk_bytes)  = b64.decode(public_key_b64)          else { return false; };
     let Ok(sig_bytes) = b64.decode(&report.signature_b64)   else { return false; };
@@ -121,7 +121,9 @@ pub fn verify_federated_report_signature_v2(
     let Ok(key) = VerifyingKey::from_bytes(&pk_array) else { return false; };
     let sig     = Signature::from_bytes(&sig_array);
 
-    key.verify(canonical_federation_payload_v2(report).as_bytes(), &sig).is_ok()
+    // verify_strict rejects malleable / non-canonical signatures, consistent
+    // with the v1 path and the rest of the crate's crypto. Fail-closed.
+    key.verify_strict(canonical_federation_payload_v2(report).as_bytes(), &sig).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +204,7 @@ pub fn authoritative_posture<'a>(
         }
     }
 
-    Some(current.posture.clone())
+    Some(current.posture)
 }
 
 pub fn evaluate_federated_report_v2(

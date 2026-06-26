@@ -1234,7 +1234,7 @@ fn sample_profile(profile: &[f64], s: f64) -> f64 {
 impl Planner for GeometricPlanner {
     fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
         // LockedOut → the planner may only ever propose safe-stop.
-        let mode = planner_mode(input.posture.clone());
+        let mode = planner_mode(input.posture);
         if mode == PlannerMode::MrcOnly {
             return PlanOutput::safe_stop(input.ego.pose);
         }

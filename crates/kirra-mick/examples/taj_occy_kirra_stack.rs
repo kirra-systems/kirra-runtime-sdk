@@ -102,7 +102,7 @@ fn run_stack(
         objects: &perception.objects,
         controls: &[], lane_boundaries: &[], motion: &[], predicted_paths: &[],
         cedes_to_ego_ids: &[], lane_change_to_m: None, no_overtake_ids: &[], drivable: None,
-        posture: posture.clone(), target_speed_mps: None,
+        posture, target_speed_mps: None,
         request_overtake: false, request_pull_over: false, lane_graph: None, signal_states: &[],
     };
     let mut occy = GeometricPlanner::new(GeometricPlannerConfig { cruise_speed_mps: 4.0, ..Default::default() });

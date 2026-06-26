@@ -112,7 +112,7 @@ pub enum NodeTrustState {
 /// The fleet's safety posture — the spine the whole governor hangs on. `Nominal` →
 /// full operation; `Degraded` → controlled decel-to-stop-and-hold envelope; `LockedOut`
 /// → MRC, human reset required.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FleetPosture {
     Nominal,
     Degraded,

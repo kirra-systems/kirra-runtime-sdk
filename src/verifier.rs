@@ -426,7 +426,15 @@ impl AppState {
     pub fn calculate_posture(&self, node_id: &str) -> FleetNodePosture {
         let mut gray: HashSet<String> = HashSet::new();
         let mut black: HashMap<String, FleetNodePosture> = HashMap::new();
-        self.recursive_calculate(node_id, &mut gray, &mut black, 0)
+        // Recursion bound for the stack-overflow backstop below. The gray set
+        // already makes a repeated node on the active path impossible without a
+        // cycle, so the longest *acyclic* path is at most `nodes.len()` distinct
+        // nodes. A bound of at least that therefore CANNOT fire on a valid
+        // acyclic graph — making the depth check a pure stack-safety guard
+        // rather than a (traversal-order-dependent) semantic verdict. Floored at
+        // MAX_DEPENDENCY_DEPTH so a tiny fleet still carries the documented guard.
+        let max_depth = self.nodes.len().max(MAX_DEPENDENCY_DEPTH);
+        self.recursive_calculate(node_id, &mut gray, &mut black, 0, max_depth)
     }
 
     fn recursive_calculate(
@@ -435,20 +443,44 @@ impl AppState {
         gray: &mut HashSet<String>,
         black: &mut HashMap<String, FleetNodePosture>,
         depth: usize,
+        max_depth: usize,
     ) -> FleetNodePosture {
         // Black: node already fully evaluated in this pass — reuse without re-traversal.
         if let Some(cached) = black.get(node_id) {
             return cached.clone();
         }
 
-        // Gray: node is currently on the active call stack — back-edge (cycle).
-        // Depth limit guards against stack overflow on very deep acyclic graphs.
-        if gray.contains(node_id) || depth >= MAX_DEPENDENCY_DEPTH {
+        // Gray: node is currently on the active call stack — a back-edge, i.e. a
+        // genuine cycle. A circular dependency has no well-defined posture →
+        // fail-closed LockedOut (tagged CYCLE_DETECTED). Deterministic: any
+        // traversal that re-enters the cycle hits a gray node regardless of the
+        // entry path, so this is a true property of the graph, not the walk order.
+        if gray.contains(node_id) {
             return FleetNodePosture {
                 node_id: node_id.to_string(),
                 local_status: NodeTrustState::Unknown,
                 propagated_status: FleetPosture::LockedOut,
-                blocked_by: vec!["INVALID_GRAPH_CONFIG".to_string()],
+                blocked_by: vec!["CYCLE_DETECTED".to_string()],
+            };
+        }
+
+        // Depth backstop — a stack-overflow guard, NOT a semantic verdict. Because
+        // the gray set bounds any acyclic path to `nodes.len()` distinct nodes and
+        // `max_depth >= nodes.len()`, this branch is unreachable on a valid acyclic
+        // graph (a cycle is always caught above first). It exists only so a
+        // pathological graph degrades to fail-closed LockedOut instead of
+        // overflowing the stack. The prior `depth >= MAX_DEPENDENCY_DEPTH` fixed cap
+        // conflated this with graph validity: because the sentinel was not memoized,
+        // a node reachable both within and beyond 10 hops resolved to LockedOut or
+        // Nominal depending on which path the DFS reached it by FIRST — so the whole
+        // fleet's posture depended on dependency *insertion order* rather than the
+        // graph's trust state. Bounding by node count removes that flip entirely.
+        if depth >= max_depth {
+            return FleetNodePosture {
+                node_id: node_id.to_string(),
+                local_status: NodeTrustState::Unknown,
+                propagated_status: FleetPosture::LockedOut,
+                blocked_by: vec!["MAX_DEPTH_EXCEEDED".to_string()],
             };
         }
 
@@ -468,7 +500,7 @@ impl AppState {
         let mut has_locked_out_dep = false;
 
         for dep_id in &deps {
-            let dep_posture = self.recursive_calculate(dep_id, gray, black, depth + 1);
+            let dep_posture = self.recursive_calculate(dep_id, gray, black, depth + 1, max_depth);
             match &dep_posture.propagated_status {
                 FleetPosture::LockedOut => {
                     blocked_by.push(dep_id.clone());

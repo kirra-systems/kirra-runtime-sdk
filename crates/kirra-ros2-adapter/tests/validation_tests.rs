@@ -686,6 +686,36 @@ fn predictive_rss_catches_a_predicted_cut_in() {
         "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
 }
 
+#[test]
+fn predictive_rss_catches_a_mid_band_lateral_cut_in() {
+    // REGRESSION (predictive lateral gap): a cut-in that lives in the MID lateral band —
+    // RSS_LONGITUDINAL_OVERLAP_M (2.5 m) ≤ |dy| ≤ rss_lateral_alignment_tolerance_m (4.0 m
+    // urban) — at a longitudinally SAFE distance. It is laterally clear of the overlap band,
+    // so the longitudinal-only predictive pass admitted it; but it is CLOSING LATERALLY into
+    // the ego's path, which the lateral side-RSS conjunction must refuse. The object moves
+    // purely laterally (x fixed) so the longitudinal check alone never fires — isolating the
+    // lateral branch as the sole reason for the MRC.
+    let ego = held_ego(10.0); // ego held (stopped) at x=10, y=0
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    // x fixed at 13 (dx_ego = 3 m, longitudinally safe for a stopped ego, < 8 m conflict
+    // band); y sweeps 4.0 → 0.0 at ~2 m/s — crossing the 2.5–4.0 m mid-band while closing.
+    let samples = [
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 4.0 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 3.0 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 1.0 }, time_from_start_s: 1.5 },
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 0.0 }, time_from_start_s: 2.0 },
+    ];
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), FrameTrust::Trusted,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "a mid-band predicted lateral cut-in at a safe longitudinal distance must be refused; got {verdict:?}");
+}
+
 // ---- The PRODUCER: derive modes from live objects (gap #3 made live) ----
 //
 // The tests above hand-build modes; these prove `predicted_modes_from_objects` turns LIVE

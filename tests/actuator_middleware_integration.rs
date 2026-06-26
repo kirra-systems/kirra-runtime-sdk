@@ -58,7 +58,7 @@ fn build_state_empty_cache() -> Arc<ServiceState> {
 fn resolve_posture_from_state(state: &ServiceState) -> FleetPosture {
     match state.posture_cache.read() {
         Ok(guard) => match guard.as_ref() {
-            Some(cached) => cached.posture.clone(),
+            Some(cached) => cached.posture,
             None => FleetPosture::LockedOut,
         },
         Err(_) => FleetPosture::LockedOut,

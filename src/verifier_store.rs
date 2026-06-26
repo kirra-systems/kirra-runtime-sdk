@@ -459,6 +459,15 @@ impl VerifierStore {
             )",
             [],
         )?;
+        // History/flapping/analytics reads filter by node_id and order by
+        // created_at_ms; without these the per-node and time-window queries are
+        // full-table scans + filesorts.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_posture_events_node_time
+                ON posture_events(node_id, created_at_ms);
+             CREATE INDEX IF NOT EXISTS idx_posture_events_time
+                ON posture_events(created_at_ms);",
+        )?;
 
         // Operator clearance grants (#103 SG6 / operator-console Phase A).
         // RECORD-ONLY: a row here is a recorded + audit-chained supervisor grant;
@@ -1233,18 +1242,24 @@ impl VerifierStore {
     }
 
     pub fn save_dependencies(&self, node_id: &str, deps: &[String]) -> Result<()> {
-        self.conn.execute(
+        // Atomic replace: the DELETE and the re-INSERTs must commit together, or
+        // a mid-loop failure leaves a torn dependency set (some edges dropped,
+        // not all re-added) — a corrupt DAG for the next posture calculation.
+        // unchecked_transaction works on &self (matches the other writers here).
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM dependencies WHERE node_id = ?1",
             params![node_id],
         )?;
-
-        for dep in deps {
-            self.conn.execute(
+        {
+            let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO dependencies (node_id, dep_id) VALUES (?1, ?2)",
-                params![node_id, dep],
             )?;
+            for dep in deps {
+                stmt.execute(params![node_id, dep])?;
+            }
         }
-
+        tx.commit()?;
         Ok(())
     }
 
@@ -1482,10 +1497,25 @@ impl VerifierStore {
                 posture_json         TEXT NOT NULL,
                 issued_at_ms         INTEGER NOT NULL,
                 expires_at_ms        INTEGER NOT NULL,
-                received_at_ms       INTEGER NOT NULL
+                received_at_ms       INTEGER NOT NULL,
+                -- v2 generation-ordered reconciliation: the source controller's
+                -- posture-engine generation at issue time, when supplied. NULL = a
+                -- v1 report (no generation) → falls back to timestamp ordering.
+                -- Inside the signed payload, so it cannot be forged or stripped.
+                source_generation    INTEGER
             )",
             [],
         )?;
+        // Additive, idempotent — upgrade a pre-v2 federated_trust_reports table.
+        // Mirrors the clearance_grants ADD-COLUMN convention above.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE federated_trust_reports ADD COLUMN source_generation INTEGER",
+            [],
+        ) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS trusted_federation_controllers (
                 controller_id    TEXT PRIMARY KEY,
@@ -1501,6 +1531,15 @@ impl VerifierStore {
                 seen_at_ms           INTEGER NOT NULL
             )",
             [],
+        )?;
+        // Per-asset report lookups order by received_at_ms; the nonce retention
+        // sweep deletes by seen_at_ms on every federation accept. Both scan
+        // unindexed columns without these.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_federated_reports_asset
+                ON federated_trust_reports(asset_id, received_at_ms);
+             CREATE INDEX IF NOT EXISTS idx_federation_nonces_seen
+                ON federation_report_nonces(seen_at_ms);",
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS attestation_identity_registry (
@@ -1818,6 +1857,7 @@ impl VerifierStore {
     pub fn save_federated_report_chained(
         &mut self,
         report: &FederatedTrustReport,
+        source_generation: Option<u64>,
         received_at_ms: u64,
         held_epoch: u64,
     ) -> std::result::Result<(), DurableWriteError> {
@@ -1842,11 +1882,12 @@ impl VerifierStore {
 
         tx.execute(
             "INSERT INTO federated_trust_reports
-             (source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, received_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, received_at_ms, source_generation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 report.source_controller_id, report.asset_id, posture_json,
                 report.issued_at_ms as i64, report.expires_at_ms as i64, received_at_ms as i64,
+                source_generation.map(|g| g as i64),
             ],
         )?;
 
@@ -1977,7 +2018,7 @@ impl VerifierStore {
         asset_id: &str,
     ) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation
              FROM federated_trust_reports
              WHERE asset_id = ?1
              ORDER BY received_at_ms DESC",
@@ -1988,15 +2029,66 @@ impl VerifierStore {
             let posture_json: String = row.get(2)?;
             let issued: i64 = row.get(3)?;
             let expires: i64 = row.get(4)?;
+            let generation: Option<i64> = row.get(5)?;
             Ok(serde_json::json!({
                 "source_controller_id": source,
                 "asset_id": aid,
                 "posture": posture_json,
                 "issued_at_ms": issued as u64,
                 "expires_at_ms": expires as u64,
+                "source_generation": generation.map(|g| g as u64),
             }))
         })?;
         rows.collect()
+    }
+
+    /// Typed loader for generation-ordered reconciliation (#329 v2 wiring). Returns
+    /// the stored reports for an asset as [`FederatedTrustReportV2`] so the caller can
+    /// run `authoritative_posture`. `nonce_hex` / `signature_b64` are NOT persisted in
+    /// this table (they are consumed/verified at ingest), so they are left empty here —
+    /// the reconciliation API (`reconcile_reports` / `authoritative_posture`) reads only
+    /// `asset_id`, `posture`, `source_generation`, and `issued_at_ms`. A row whose
+    /// `posture_json` fails to deserialize is fail-closed-skipped (never silently
+    /// treated as Nominal). Ordered newest-first, matching `load_federated_reports_for_asset`.
+    pub fn load_federated_report_v2s_for_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<crate::federation_reconciliation::FederatedTrustReportV2>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_controller_id, asset_id, posture_json, issued_at_ms, expires_at_ms, source_generation
+             FROM federated_trust_reports
+             WHERE asset_id = ?1
+             ORDER BY received_at_ms DESC",
+        )?;
+        let rows = stmt.query_map(params![asset_id], |row| {
+            let source: String = row.get(0)?;
+            let aid: String = row.get(1)?;
+            let posture_json: String = row.get(2)?;
+            let issued: i64 = row.get(3)?;
+            let expires: i64 = row.get(4)?;
+            let generation: Option<i64> = row.get(5)?;
+            Ok((source, aid, posture_json, issued as u64, expires as u64, generation.map(|g| g as u64)))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (source, aid, posture_json, issued, expires, generation) = row?;
+            // Fail-closed: a corrupt posture is skipped, never coerced to Nominal.
+            let Ok(posture) = serde_json::from_str::<crate::verifier::FleetPosture>(&posture_json) else {
+                continue;
+            };
+            out.push(crate::federation_reconciliation::FederatedTrustReportV2 {
+                source_controller_id: source,
+                asset_id: aid,
+                posture,
+                issued_at_ms: issued,
+                expires_at_ms: expires,
+                nonce_hex: String::new(),
+                signature_b64: String::new(),
+                source_generation: generation,
+            });
+        }
+        Ok(out)
     }
 
     /// Reconstruct the audit-chain keyring (key_id → VerifyingKey) by replaying
@@ -2774,9 +2866,16 @@ impl VerifierStore {
     }
 
     pub fn save_last_generation(&self, generation: u64) -> Result<()> {
+        // Monotonic max-write: never persist a generation lower than the one
+        // already stored. Concurrent recalculations each claim a generation
+        // then race to persist; a blind INSERT OR REPLACE let a slower thread
+        // overwrite a higher value with its lower one, regressing the
+        // cross-restart monotonicity that federation peers depend on.
         self.conn.execute(
-            "INSERT OR REPLACE INTO posture_engine_state (key, value)
-             VALUES ('last_generation', ?1)",
+            "INSERT INTO posture_engine_state (key, value)
+             VALUES ('last_generation', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1
+             WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
             params![generation.to_string()],
         )?;
         Ok(())
@@ -4299,7 +4398,7 @@ mod durability_tests {
         assert!(s.durable_conn.is_none(), ":memory: must fall back to the main conn");
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
         // #79: held == durable epoch (1) → the fence admits the legitimate write.
-        s.save_federated_report_chained(&report("aa"), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("aa"), None, 2_000, 1).unwrap();
         assert!(s.has_seen_federation_nonce("aa").unwrap());
     }
 
@@ -4311,9 +4410,9 @@ mod durability_tests {
     fn duplicate_nonce_chain_returns_nonce_replay_and_rolls_back() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("dup"), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("dup"), None, 2_000, 1).unwrap();
 
-        let second = s.save_federated_report_chained(&report("dup"), 2_001, 1);
+        let second = s.save_federated_report_chained(&report("dup"), None, 2_001, 1);
         assert!(
             matches!(second, Err(DurableWriteError::NonceReplay)),
             "a duplicate nonce must surface as NonceReplay, got {second:?}"
@@ -4333,11 +4432,11 @@ mod durability_tests {
     fn aged_nonces_are_pruned_on_accept() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
-        s.save_federated_report_chained(&report("old"), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("old"), None, 2_000, 1).unwrap();
         assert!(s.has_seen_federation_nonce("old").unwrap());
 
         // A later accept whose received_at is past the retention horizon over "old".
-        s.save_federated_report_chained(&report("new"), 2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1, 1).unwrap();
+        s.save_federated_report_chained(&report("new"), None, 2_000 + FEDERATION_NONCE_RETENTION_MS as u64 + 1, 1).unwrap();
         assert!(!s.has_seen_federation_nonce("old").unwrap(),
             "an aged nonce must be pruned once an accept lands past the retention horizon");
         assert!(s.has_seen_federation_nonce("new").unwrap(), "the fresh nonce stays");
@@ -4370,7 +4469,7 @@ mod durability_tests {
         {
             let mut s = VerifierStore::new(db.path()).unwrap();
             let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
-            s.save_federated_report_chained(&report("deadbeef"), 2_000, held).unwrap();
+            s.save_federated_report_chained(&report("deadbeef"), None, 2_000, held).unwrap();
             assert!(s.has_seen_federation_nonce("deadbeef").unwrap(), "burned before reopen");
         } // drop → simulate process loss.
         let s2 = VerifierStore::new(db.path()).unwrap();
@@ -4912,7 +5011,7 @@ mod epoch_fence_79_tests {
         assert_eq!(s.current_epoch().unwrap(), 2);
 
         let err = s
-            .save_federated_report_chained(&report("cafe"), 9_000, held)
+            .save_federated_report_chained(&report("cafe"), None, 9_000, held)
             .unwrap_err();
         match err {
             DurableWriteError::Fenced(FenceError::EpochSuperseded { held: h, durable: d }) => {
@@ -4939,7 +5038,7 @@ mod epoch_fence_79_tests {
     fn legitimate_federation_write_commits_when_held_matches_durable() {
         let mut s = VerifierStore::new(":memory:").unwrap();
         let held = claimed(&mut s);
-        s.save_federated_report_chained(&report("beef"), 9_000, held)
+        s.save_federated_report_chained(&report("beef"), None, 9_000, held)
             .unwrap();
         assert!(
             s.has_seen_federation_nonce("beef").unwrap(),
@@ -4956,7 +5055,7 @@ mod epoch_fence_79_tests {
         s.conn.execute("DELETE FROM ha_state WHERE id = 1", []).unwrap();
 
         let err = s
-            .save_federated_report_chained(&report("f00d"), 9_000, held)
+            .save_federated_report_chained(&report("f00d"), None, 9_000, held)
             .unwrap_err();
         assert!(
             matches!(err, DurableWriteError::Fenced(FenceError::EpochUnreadable)),
@@ -4973,7 +5072,7 @@ mod epoch_fence_79_tests {
         assert_eq!(s.current_epoch().unwrap(), 0, "genesis durable epoch is 0");
 
         let err = s
-            .save_federated_report_chained(&report("0000"), 9_000, 0)
+            .save_federated_report_chained(&report("0000"), None, 9_000, 0)
             .unwrap_err();
         assert!(
             matches!(
@@ -5394,5 +5493,89 @@ mod causal_chain_87_tests {
         // WAL sidecar files.
         let _ = std::fs::remove_file(format!("{path_str}-wal"));
         let _ = std::fs::remove_file(format!("{path_str}-shm"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #329 v2 — generation-ordered federation reconciliation, store round-trip.
+//
+// Proves the persistence half of the v2 wiring: source_generation survives a
+// save → load_v2 round-trip, and the typed loader feeds authoritative_posture so
+// the higher-generation report wins even when it is the LESS severe posture
+// (generation, not severity, is the primary tie-breaker). A v1 report (no
+// generation) round-trips as NULL and falls back to timestamp ordering.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod federation_v2_wiring_tests {
+    use super::*;
+    use crate::federation_reconciliation::authoritative_posture;
+    use crate::verifier::FleetPosture;
+
+    fn rep(nonce: &str, asset: &str, posture: FleetPosture, issued_at_ms: u64) -> FederatedTrustReport {
+        FederatedTrustReport {
+            source_controller_id: "ctrl-A".to_string(),
+            asset_id: asset.to_string(),
+            posture,
+            issued_at_ms,
+            expires_at_ms: issued_at_ms + 30_000,
+            nonce_hex: nonce.to_string(),
+            signature_b64: "sig".to_string(),
+        }
+    }
+
+    fn claimed(s: &mut VerifierStore) -> u64 {
+        s.try_claim_epoch(0, "self", 0).unwrap().expect("first epoch claim wins")
+    }
+
+    #[test]
+    fn generation_round_trips_and_drives_authoritative_posture() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = claimed(&mut s);
+
+        // Two reports for the same asset: a LATER-issued Nominal at a LOW generation,
+        // and an EARLIER-issued Degraded at a HIGH generation. Pure timestamp ordering
+        // would pick the Nominal; generation ordering must pick the Degraded.
+        s.save_federated_report_chained(
+            &rep("a1", "lidar_front", FleetPosture::Nominal, 2_000), Some(100), 2_100, held,
+        ).unwrap();
+        s.save_federated_report_chained(
+            &rep("b2", "lidar_front", FleetPosture::Degraded, 1_000), Some(412), 1_100, held,
+        ).unwrap();
+
+        let v2s = s.load_federated_report_v2s_for_asset("lidar_front").unwrap();
+        assert_eq!(v2s.len(), 2, "both reports must be loaded");
+        assert!(v2s.iter().any(|r| r.source_generation == Some(100)));
+        assert!(v2s.iter().any(|r| r.source_generation == Some(412)));
+
+        // Higher generation (412 → Degraded) is authoritative over the newer-but-lower
+        // generation (100 → Nominal).
+        assert_eq!(
+            authoritative_posture(&v2s), Some(FleetPosture::Degraded),
+            "the higher-generation report must win regardless of issue time/severity",
+        );
+
+        // The JSON loader also surfaces the generation for API consumers.
+        let json_rows = s.load_federated_reports_for_asset("lidar_front").unwrap();
+        assert!(json_rows.iter().any(|v| v["source_generation"] == serde_json::json!(412)));
+    }
+
+    #[test]
+    fn v1_report_round_trips_as_null_generation() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        let held = claimed(&mut s);
+
+        // A v1 report (no generation) persists with NULL source_generation.
+        s.save_federated_report_chained(
+            &rep("c3", "camera_front", FleetPosture::LockedOut, 1_000), None, 1_100, held,
+        ).unwrap();
+
+        let v2s = s.load_federated_report_v2s_for_asset("camera_front").unwrap();
+        assert_eq!(v2s.len(), 1);
+        assert_eq!(v2s[0].source_generation, None, "a v1 report must load as None generation");
+        assert_eq!(authoritative_posture(&v2s), Some(FleetPosture::LockedOut));
+
+        let json_rows = s.load_federated_reports_for_asset("camera_front").unwrap();
+        assert_eq!(json_rows[0]["source_generation"], serde_json::Value::Null,
+            "a v1 report's generation must serialize as null");
     }
 }

@@ -79,7 +79,7 @@ fn read_fleet_posture(cache: &SharedPostureCache) -> FleetPosture {
         .read()
         .unwrap()
         .as_ref()
-        .map(|c| c.posture.clone())
+        .map(|c| c.posture)
         .unwrap_or(FleetPosture::Nominal)
 }
 

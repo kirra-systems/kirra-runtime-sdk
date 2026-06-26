@@ -28,7 +28,13 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     let length_match = a.len() == b.len();
     let length_mask = if length_match { 0u8 } else { 0xFFu8 };
 
-    for i in 0..64 {
+    // Cover the FULL length of both inputs (minimum 64 to preserve the prior
+    // floor on work). A fixed 64-iteration loop silently ignored bytes past
+    // index 64, so two distinct secrets sharing a 64-byte prefix compared equal
+    // — a fail-open for any token longer than 64 bytes (KIRRA_ADMIN_TOKEN has no
+    // length bound). The length_mask still forces a reject on a length mismatch.
+    let span = a.len().max(b.len()).max(64);
+    for i in 0..span {
         let byte_a = if i < a.len() { unsafe { std::ptr::read_volatile(&a[i]) } } else { 0u8 };
         let byte_b = if i < b.len() { unsafe { std::ptr::read_volatile(&b[i]) } } else { 0u8 };
         bitwise_accumulator.fetch_or(byte_a ^ byte_b, Ordering::SeqCst);
@@ -148,5 +154,20 @@ mod sg_015_admin_token_tests {
     fn test_correct_token_allows() {
         assert!(admin_token_ok(Some("s3cret-admin-token"), Some("s3cret-admin-token")),
             "the exact configured token must authorize");
+    }
+
+    #[test]
+    fn test_long_tokens_sharing_64_byte_prefix_are_distinguished() {
+        // Regression: a fixed 64-iteration loop ignored bytes past index 64, so
+        // two distinct >64-byte secrets sharing a 64-byte prefix compared equal.
+        use super::constant_time_compare;
+        let prefix = "A".repeat(64);
+        let a = format!("{prefix}aaaaaaaaaa");
+        let b = format!("{prefix}bbbbbbbbbb");
+        assert_eq!(a.len(), b.len(), "same length isolates the prefix-only bug");
+        assert!(!constant_time_compare(a.as_bytes(), b.as_bytes()),
+            "tokens differing only past byte 64 must NOT compare equal");
+        assert!(constant_time_compare(a.as_bytes(), a.as_bytes()),
+            "an identical >64-byte token must still compare equal");
     }
 }

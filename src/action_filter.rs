@@ -39,7 +39,7 @@ impl<C: SafetyContract> ActionFilter<C> {
                 FilterOutput {
                     resolution,
                     sanitized_action: AgentAction::MoveLinear { velocity: intercept.sanitized_scalar },
-                    narrative: intercept.mitigation_narrative,
+                    narrative: intercept.mitigation_narrative.into_owned(),
                 }
             }
             AgentAction::Rotate { angular_velocity } => {
@@ -158,7 +158,7 @@ mod action_filter_tests {
     fn test_unknown_action_type_always_denied() {
         // Unknown action types must be denied in ALL posture states
         for posture in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
-            let d = evaluate_action_claim(unknown_claim(), posture.clone());
+            let d = evaluate_action_claim(unknown_claim(), posture);
             assert!(!d.allowed, "Unknown action must be denied in {posture:?}");
         }
     }

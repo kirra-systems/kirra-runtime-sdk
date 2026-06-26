@@ -34,11 +34,12 @@ use kirra_verifier::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage
 use kirra_verifier::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
 use kirra_verifier::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
 use kirra_verifier::federation::{
-    evaluate_federated_report,
-    verify_federated_report_signature,
-    FederatedTrustReport,
     RegisterFederationControllerRequest,
     ReportEvaluation,
+};
+use kirra_verifier::federation_reconciliation::{
+    authoritative_posture, evaluate_federated_report_v2,
+    verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
 use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor,
@@ -98,6 +99,11 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
 /// real environment/store/wiring; consumed by `check_startup_invariants`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StartupContext {
+    /// The hardware root of trust is healthy (`StartupSentinel::verify_hardware_root()
+    /// == Trusted`). Fail-closed: an unavailable/unresponsive TPM aborts startup.
+    /// SS-001 lists this as a startup entry invariant; this is its enforcement
+    /// point. Without the `tpm` feature the sentinel returns `Trusted` (no-op pass).
+    pub hardware_root_trusted: bool,
     /// `KIRRA_ADMIN_TOKEN` is present and non-empty (CRITICAL INVARIANT #6).
     pub admin_token_present: bool,
     /// The SQLite store reports `journal_mode = wal` (CRITICAL INVARIANT #12
@@ -116,6 +122,7 @@ pub(crate) struct StartupContext {
 /// The first violated startup invariant, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupInvariant {
+    HardwareRootUntrusted,
     AdminTokenMissing,
     SqliteNotWal,
     WatchdogNotSpawned,
@@ -125,6 +132,7 @@ pub(crate) enum StartupInvariant {
 impl std::fmt::Display for StartupInvariant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
+            Self::HardwareRootUntrusted => "hardware root of trust unavailable/unresponsive (TPM)",
             Self::AdminTokenMissing => "KIRRA_ADMIN_TOKEN absent or empty",
             Self::SqliteNotWal => "SQLite store is not in WAL journal mode",
             Self::WatchdogNotSpawned => "telemetry watchdog not spawned (Active path)",
@@ -142,6 +150,11 @@ impl std::fmt::Display for StartupInvariant {
 //
 // Verifies: SG-008
 pub(crate) fn check_startup_invariants(ctx: &StartupContext) -> Result<(), StartupInvariant> {
+    // Hardware root of trust first — it is the most fundamental precondition
+    // (SS-001 entry invariant). Fail-closed before anything else is trusted.
+    if !ctx.hardware_root_trusted {
+        return Err(StartupInvariant::HardwareRootUntrusted);
+    }
     if !ctx.admin_token_present {
         return Err(StartupInvariant::AdminTokenMissing);
     }
@@ -336,7 +349,7 @@ fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
             }
         };
         match guard.as_ref() {
-            Some(c) if !c.is_stale(now) => c.posture.clone(),
+            Some(c) if !c.is_stale(now) => c.posture,
             Some(_) => return, // stale → do not propagate a stale posture
             None => return,    // not yet computed
         }
@@ -361,7 +374,7 @@ fn sync_local_asset_posture(svc: &ServiceState, asset_id: &str) {
 
     let updated = AssetPosture {
         asset_id: asset_id.to_string(),
-        posture: fleet.clone(),
+        posture: fleet,
         generation: next_gen,
         computed_at_ms: now,
         contributing_nodes: vec![],
@@ -1617,11 +1630,16 @@ async fn register_node_identity(
 
 async fn submit_federated_report(
     State(svc): State<Arc<ServiceState>>,
-    Json(report): Json<FederatedTrustReport>,
+    // v2 wire: `source_generation` is optional, so a v1 report (no such field)
+    // deserializes to a V2 with `source_generation: None` and its signed payload
+    // is byte-identical to the v1 canonical payload — backward compatible. The
+    // generation, when present, is inside the signed payload (cannot be forged
+    // or stripped) and drives generation-ordered conflict resolution at read time.
+    Json(report): Json<FederatedTrustReportV2>,
 ) -> impl IntoResponse {
     let received_at_ms = now_ms();
 
-    let evaluation = evaluate_federated_report(&report, received_at_ms);
+    let evaluation = evaluate_federated_report_v2(&report, received_at_ms);
     if !evaluation.accepted {
         return Json(evaluation).into_response();
     }
@@ -1654,7 +1672,7 @@ async fn submit_federated_report(
                           Json(json!({ "error": "controller lookup failed" }))).into_response(),
     };
 
-    if !verify_federated_report_signature(&report, &pk_b64) {
+    if !verify_federated_report_signature_v2(&report, &pk_b64) {
         let event = json!({ "source_controller_id": report.source_controller_id,
                             "reason": "INVALID_FEDERATION_SIGNATURE" });
         let _ = store.save_posture_event_chained(
@@ -1686,7 +1704,7 @@ async fn submit_federated_report(
                           Json(json!({ "error": "nonce lookup failed" }))).into_response(),
     }
 
-    match store.save_federated_report_chained(&report, received_at_ms, held_epoch) {
+    match store.save_federated_report_chained(&report.as_v1(), report.source_generation, received_at_ms, held_epoch) {
         Ok(()) => Json(evaluation).into_response(),
         Err(DurableWriteError::NonceReplay) => {
             // H1: a replay raced past the `has_seen_federation_nonce` gate above and
@@ -1728,15 +1746,34 @@ async fn get_federated_reports(
     State(svc): State<Arc<ServiceState>>,
     Path(asset_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => match store.load_federated_reports_for_asset(&asset_id) {
-            Ok(reports) => Json(json!({ "asset_id": asset_id, "reports": reports })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                       Json(json!({ "error": "failed to load reports" }))).into_response(),
-        },
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
-    }
+    let store = match svc.app.store.lock() {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    };
+
+    let reports = match store.load_federated_reports_for_asset(&asset_id) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "failed to load reports" }))).into_response(),
+    };
+
+    // #329 v2 — generation-ordered conflict resolution. Reconcile the stored
+    // reports into the single authoritative posture (higher generation wins;
+    // ties fall back to issued_at_ms, then fail closed to the more restrictive
+    // posture). `null` when no reports exist for the asset. This is a read-time
+    // view only — it does NOT feed the local posture engine that gates actuators.
+    let authoritative = match store.load_federated_report_v2s_for_asset(&asset_id) {
+        Ok(v2s) => authoritative_posture(&v2s),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "failed to reconcile reports" }))).into_response(),
+    };
+
+    Json(json!({
+        "asset_id": asset_id,
+        "reports": reports,
+        "authoritative_posture": authoritative,
+    })).into_response()
 }
 
 async fn handle_actuator_motion_command(
@@ -2058,7 +2095,7 @@ async fn handle_fabric_state(
         let gen = svc.fabric_router.fabric_state().fabric_generation + 1;
         svc.fabric_router.update_asset_posture(&asset_id, AssetPosture {
             asset_id: asset_id.clone(),
-            posture: new_posture.clone(),
+            posture: new_posture,
             generation: gen,
             computed_at_ms: now_ms(),
             contributing_nodes: vec![],
@@ -2769,6 +2806,11 @@ async fn main() {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(
                 kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
             ));
+            // Coalesce missed refresh windows instead of bursting catch-up
+            // recalcs after runtime starvation (the trigger only re-stamps the
+            // cache; bursts add no freshness and the posture worker already
+            // coalesces). Delay re-paces from the actual wake time.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // First tick fires immediately; skip it (the synchronous
             // initial recalc above already covered cold start).
             tick.tick().await;
@@ -2816,6 +2858,10 @@ async fn main() {
     // strictly AFTER this check, so "the listener never binds before invariants
     // pass" holds by construction.
     let startup_ctx = StartupContext {
+        hardware_root_trusted: matches!(
+            kirra_verifier::startup_sentinel::StartupSentinel::verify_hardware_root(),
+            kirra_verifier::startup_sentinel::StartupTrustState::Trusted
+        ),
         admin_token_present: std::env::var("KIRRA_ADMIN_TOKEN")
             .map(|v| !v.is_empty())
             .unwrap_or(false),
@@ -3894,6 +3940,7 @@ mod sg_008_cert_tests {
     /// All invariants satisfied on the Active path.
     fn all_ok_active() -> StartupContext {
         StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
             mode_active: true,
@@ -3908,6 +3955,18 @@ mod sg_008_cert_tests {
             check_startup_invariants(&all_ok_active()),
             Ok(()),
             "SG-008: startup must succeed when all invariants hold"
+        );
+    }
+
+    #[test]
+    fn test_startup_aborts_when_hardware_root_untrusted() {
+        // SS-001 entry invariant: an unavailable/unresponsive hardware root of
+        // trust must abort startup before the listener binds (fail-closed).
+        let ctx = StartupContext { hardware_root_trusted: false, ..all_ok_active() };
+        assert_eq!(
+            check_startup_invariants(&ctx),
+            Err(StartupInvariant::HardwareRootUntrusted),
+            "SG-008: startup must fail closed when the hardware root of trust is untrusted"
         );
     }
 
@@ -3957,6 +4016,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_standby_ok_without_watchdog_or_posture_engine() {
         let ctx = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: true,
             sqlite_wal: true,
             mode_active: false,
@@ -3973,6 +4033,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_standby_still_requires_admin_token_and_wal() {
         let no_token = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: true,
             mode_active: false,
@@ -3997,6 +4058,7 @@ mod sg_008_cert_tests {
     #[test]
     fn test_invariant_check_order_is_stable() {
         let ctx = StartupContext {
+            hardware_root_trusted: true,
             admin_token_present: false,
             sqlite_wal: false,
             mode_active: true,
@@ -4006,7 +4068,7 @@ mod sg_008_cert_tests {
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::AdminTokenMissing),
-            "SG-008: the admin-token invariant must be reported first when several are violated"
+            "SG-008: with a trusted hardware root, the admin-token invariant is reported first when several are violated"
         );
     }
 }
