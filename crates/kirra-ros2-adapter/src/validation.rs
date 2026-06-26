@@ -530,11 +530,31 @@ fn outruns_assured_clear_distance(
     false
 }
 
-/// The trajectory pose closest in TIME to `t` (the ego's where-am-I-when index).
-fn nearest_in_time(trajectory: &[TrajectoryPoint], t: f64) -> Option<&TrajectoryPoint> {
-    trajectory
+/// Max time gap (s) between a predicted object sample and the ego pose it is
+/// matched to. Beyond this, the ego's planned trajectory does not actually cover
+/// that time (it is shorter than the prediction horizon, or the sample is past
+/// the last pose), so the "time-matched ego pose" would be a near pose standing
+/// in for a far-future object — a meaningless comparison. One predicted step.
+const PREDICTIVE_TIME_MATCH_TOLERANCE_S: f64 = 0.5;
+
+/// The trajectory pose closest in TIME to `t` (the ego's where-am-I-when index),
+/// but ONLY if that pose is within `tolerance_s` of `t`. Returns `None` when the
+/// nearest pose is further away — i.e. the ego trajectory does not span time `t`
+/// — so the caller skips the sample instead of matching a far-future object to a
+/// near ego pose (the snapshot RSS still bounds the real object).
+fn nearest_in_time(
+    trajectory: &[TrajectoryPoint],
+    t: f64,
+    tolerance_s: f64,
+) -> Option<&TrajectoryPoint> {
+    let nearest = trajectory
         .iter()
-        .min_by(|a, b| (a.time_from_start_s - t).abs().total_cmp(&(b.time_from_start_s - t).abs()))
+        .min_by(|a, b| (a.time_from_start_s - t).abs().total_cmp(&(b.time_from_start_s - t).abs()))?;
+    if (nearest.time_from_start_s - t).abs() <= tolerance_s {
+        Some(nearest)
+    } else {
+        None
+    }
 }
 
 /// True if any predicted mode brings an object into an RSS shortfall with the
@@ -571,7 +591,11 @@ fn predictive_rss_breach(
             let ovx = (b.pos.x_m - a.pos.x_m) / dt;
             let ovy = (b.pos.y_m - a.pos.y_m) / dt;
 
-            let Some(ego) = nearest_in_time(trajectory, a.time_from_start_s) else { continue };
+            let Some(ego) =
+                nearest_in_time(trajectory, a.time_from_start_s, PREDICTIVE_TIME_MATCH_TOLERANCE_S)
+            else {
+                continue; // no ego pose within tolerance at this time — unevaluable
+            };
             let dx = a.pos.x_m - ego.pose.x_m;
             let dy = a.pos.y_m - ego.pose.y_m;
             let cos_h = ego.pose.heading_rad.cos();
@@ -889,6 +913,37 @@ mod conversion_tests {
         let cmd = pose_pair_to_command(&a, &b, &cfg, 0.0);
         assert!(cmd.steering_angle_deg > 4.0 && cmd.steering_angle_deg < 7.0,
             "expected ~5.6° steering, got {}", cmd.steering_angle_deg);
+    }
+
+    #[test]
+    fn nearest_in_time_rejects_a_time_beyond_the_trajectory_span() {
+        // A trajectory spanning [0.0, 1.0] s.
+        let traj: Vec<TrajectoryPoint> = (0..=10)
+            .map(|i| TrajectoryPoint {
+                pose: AdapterPose { x_m: i as f64, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 10.0,
+                time_from_start_s: i as f64 * 0.1,
+            })
+            .collect();
+
+        // A time WITHIN the span matches the closest pose.
+        let m = nearest_in_time(&traj, 0.55, PREDICTIVE_TIME_MATCH_TOLERANCE_S)
+            .expect("an in-span time matches");
+        assert!((m.time_from_start_s - 0.5).abs() < 1e-9 || (m.time_from_start_s - 0.6).abs() < 1e-9);
+
+        // A time just past the last pose, but within tolerance, still matches it.
+        assert!(
+            nearest_in_time(&traj, 1.4, PREDICTIVE_TIME_MATCH_TOLERANCE_S).is_some(),
+            "t=1.4 is within 0.5 s of the last pose (1.0) → matched"
+        );
+
+        // A FAR-future time (a predicted object beyond the ego's planned horizon)
+        // has NO ego pose within tolerance → None, so the predictive pass skips it
+        // rather than matching it to the near last pose (A1).
+        assert!(
+            nearest_in_time(&traj, 2.5, PREDICTIVE_TIME_MATCH_TOLERANCE_S).is_none(),
+            "t=2.5 is >0.5 s past the last pose (1.0) → unevaluable, must be None"
+        );
     }
 
     // ----- RSS Rule 4: assured-clear-distance speed bound ------------------
