@@ -116,6 +116,10 @@ pub struct CourierAngularBound {
     pub mrc_posture_factor: f64,
     /// Angular stop epsilon, rad/s (converge-to-zero). Cited copy of `STOP_EPSILON_RAD_S`.
     pub stop_epsilon_rad_s: f64,
+    /// Rollover safety factor `k_roll ∈ (0,1]` (ADR-0029 §3.2). Scales the rollover
+    /// term to a defensible fraction of the optimistic rigid threshold:
+    /// `ω_rollover = k_roll · g·t/(2·h·v)`. Cited copy of parko `PlatformParams::k_roll`.
+    pub k_roll: f64,
 }
 
 impl CourierAngularBound {
@@ -133,6 +137,7 @@ impl CourierAngularBound {
             ftti_s:             0.10,
             mrc_posture_factor: 0.5,
             stop_epsilon_rad_s: 0.02,
+            k_roll:             0.6,
         }
     }
 
@@ -144,7 +149,7 @@ impl CourierAngularBound {
     pub fn omega_max(&self, linear_velocity_mps: f64, posture_factor: f64) -> f64 {
         let v = linear_velocity_mps.abs();
         let omega_rollover = if v >= ROLLOVER_MIN_LINEAR_VELOCITY_MPS {
-            ANGULAR_GRAVITY_MPS2 * self.track_width_m / (2.0 * self.cog_height_m * v)
+            self.k_roll * ANGULAR_GRAVITY_MPS2 * self.track_width_m / (2.0 * self.cog_height_m * v)
         } else {
             f64::INFINITY
         };
@@ -549,13 +554,14 @@ mod tests {
         assert_eq!(ab.ftti_s, 0.10);
         assert_eq!(ab.mrc_posture_factor, 0.5);
         assert_eq!(ab.stop_epsilon_rad_s, 0.02);
+        assert_eq!(ab.k_roll, 0.6, "rollover safety factor must equal parko's k_roll (§3.2)");
         assert_eq!(ROLLOVER_MIN_LINEAR_VELOCITY_MPS, 0.05);
         // ω_max(0) = min(∞, sweep 0.25/0.30, ftti 0.087/0.10) ≈ 0.833 rad/s,
         // matching parko's reference ω_max(0) ≈ 0.833.
         let w0 = ab.omega_max(0.0, 1.0);
         assert!((w0 - 0.8333).abs() < 1e-3, "ω_max(0) must equal parko's 0.833 rad/s; got {w0}");
-        // Below the courier's speed range sweep binds (rollover only tightens
-        // past ~7.4 m/s): ω_max is flat at 0.833 across creep speeds...
+        // Below the courier's speed range sweep binds (with k_roll=0.6 the rollover
+        // term only tightens past ~4.4 m/s): ω_max is flat at 0.833 across creep speeds...
         assert_eq!(ab.omega_max(2.0, 1.0), w0, "at courier speeds sweep binds, not rollover");
         // ...but the rollover term IS correct — at a high v it binds below sweep.
         assert!(ab.omega_max(10.0, 1.0) < w0, "rollover must bind at high v");
