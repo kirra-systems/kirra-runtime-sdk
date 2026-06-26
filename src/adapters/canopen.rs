@@ -85,6 +85,35 @@ impl CanOpenAdapter {
     }
 }
 
+impl crate::adapters::IndustrialAdapter for CanOpenAdapter {
+    type Message = CanOpenMessage;
+    const PROTOCOL: &'static str = "canopen";
+
+    fn verdict(msg: &CanOpenMessage) -> crate::adapters::AdapterVerdict {
+        let e = CanOpenAdapter::evaluate(msg);
+        crate::adapters::AdapterVerdict {
+            command: e.command,
+            details: serde_json::json!({
+                "message_type": format!("{:?}", e.message_type),
+                "node_id": e.node_id,
+                "is_emergency": e.is_emergency,
+                "emergency_code": e.emergency_code,
+            }),
+            triggers_recalculation: e.triggers_recalculation,
+        }
+    }
+
+    // POSTURE-ONLY (no override): a CANopen PDO carries raw process data and an
+    // SDO download's command byte self-describes only the value WIDTH (1/2/4
+    // bytes) — never its TYPE (signed/unsigned, int/float) or scaling, which are
+    // defined by the node's object dictionary, NOT the frame. Numerically
+    // bounding a width-N byte run without that per-object type would FABRICATE the
+    // value's interpretation (#85). So CANopen stays bounded by posture only until
+    // a per-(node,index,subindex) object-dictionary type+envelope config exists
+    // (tracked follow-up). Contrast DNP3 group-41, whose variation byte DOES carry
+    // the type (i16/i32/f32/f64) — which is why only DNP3 overrides this today.
+}
+
 /// Env var carrying the CANopen-node-id → fleet-node-id map (#84).
 /// Format: comma-separated `canid:fleet_node_id` pairs, e.g.
 /// `5:robot-01,6:robot-02`. The map is CONFIG-sourced — there is no

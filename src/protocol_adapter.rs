@@ -111,9 +111,9 @@ pub fn evaluate_industrial_event(event: IndustrialEvent, posture: FleetPosture) 
 // Unified industrial request / evaluation
 // ---------------------------------------------------------------------------
 
-use crate::adapters::ethernet_ip::{EtherNetIpAdapter, EtherNetIpMessage};
-use crate::adapters::canopen::{CanOpenAdapter, CanOpenMessage};
-use crate::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
+use crate::adapters::ethernet_ip::EtherNetIpAdapter;
+use crate::adapters::canopen::CanOpenAdapter;
+use crate::adapters::dnp3::Dnp3Adapter;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UnifiedIndustrialRequest {
@@ -197,82 +197,46 @@ pub fn evaluate_unified_industrial_request(
             })
         }
 
-        IndustrialProtocol::EthernetIp => {
-            let msg: EtherNetIpMessage = serde_json::from_value(req.message)
-                .map_err(|e| format!("MALFORMED_ETHERNET_IP_MESSAGE: {e}"))?;
-            let eval = EtherNetIpAdapter::evaluate(&msg);
-            let (allowed, denial_reason) = command_allowed_for_posture_pub(&eval.command, &posture);
-            Ok(UnifiedEvaluationResult {
-                protocol: "ethernet_ip".to_string(),
-                command: eval.command,
-                allowed,
-                denial_reason,
-                posture_at_evaluation: posture_str,
-                adapter_details: serde_json::json!({
-                    "service_name": eval.service_name,
-                    "is_write": eval.is_write,
-                    "target_description": eval.target_description,
-                    "safety_relevant": eval.safety_relevant,
-                }),
-                triggers_recalculation: false,
-            })
-        }
+        // The three binary-frame protocols share ONE generic dispatch: classify,
+        // posture-gate, then magnitude-bound (DNP3 enforces its g41 envelope; the
+        // others are posture-only pending per-target type config — see their
+        // `bound_magnitude`). `dispatch_adapter` formats its own posture string.
+        IndustrialProtocol::EthernetIp => dispatch_adapter::<EtherNetIpAdapter>(req.message, posture),
+        IndustrialProtocol::CanOpen => dispatch_adapter::<CanOpenAdapter>(req.message, posture),
+        IndustrialProtocol::Dnp3 => dispatch_adapter::<Dnp3Adapter>(req.message, posture),
+    }
+}
 
-        IndustrialProtocol::CanOpen => {
-            let msg: CanOpenMessage = serde_json::from_value(req.message)
-                .map_err(|e| format!("MALFORMED_CANOPEN_MESSAGE: {e}"))?;
-            let eval = CanOpenAdapter::evaluate(&msg);
-            let (allowed, denial_reason) = command_allowed_for_posture_pub(&eval.command, &posture);
-            Ok(UnifiedEvaluationResult {
-                protocol: "canopen".to_string(),
-                command: eval.command,
-                allowed,
-                denial_reason,
-                posture_at_evaluation: posture_str,
-                adapter_details: serde_json::json!({
-                    "message_type": format!("{:?}", eval.message_type),
-                    "node_id": eval.node_id,
-                    "is_emergency": eval.is_emergency,
-                    "emergency_code": eval.emergency_code,
-                }),
-                triggers_recalculation: eval.triggers_recalculation,
-            })
-        }
-
-        IndustrialProtocol::Dnp3 => {
-            let msg: Dnp3Message = serde_json::from_value(req.message)
-                .map_err(|e| format!("MALFORMED_DNP3_MESSAGE: {e}"))?;
-            let eval = Dnp3Adapter::evaluate(&msg);
-            let (mut allowed, mut denial_reason) = command_allowed_for_posture_pub(&eval.command, &posture);
-            // MAGNITUDE BOUND: a posture-admitted Analog Output (g41) control must
-            // also be within the configured envelope (fail-closed otherwise). Same
-            // bound the dedicated /industrial/dnp3/evaluate handler applies, so both
-            // DNP3 entry points enforce it identically.
-            if allowed {
-                if let Err(reason) = Dnp3Adapter::bound_analog_control(
-                    &msg,
-                    crate::adapters::dnp3::global_analog_envelope().as_ref(),
-                ) {
-                    allowed = false;
-                    denial_reason = Some(reason.to_string());
-                }
-            }
-            Ok(UnifiedEvaluationResult {
-                protocol: "dnp3".to_string(),
-                command: eval.command,
-                allowed,
-                denial_reason,
-                posture_at_evaluation: posture_str,
-                adapter_details: serde_json::json!({
-                    "function_name": eval.function_name,
-                    "is_control": eval.is_control,
-                    "is_broadcast": eval.is_broadcast,
-                    "critical_infrastructure_relevant": eval.critical_infrastructure_relevant,
-                }),
-                triggers_recalculation: false,
-            })
+/// Generic dispatch for every binary-frame industrial adapter (DNP3 / CANopen /
+/// EtherNet-IP). Deserialize the protocol message, classify it into a
+/// posture-gated command, then — only for a posture-ADMITTED command — apply the
+/// adapter's magnitude bound (fail-closed on a breach). Collapses three
+/// formerly-duplicated arms into one path and routes the magnitude bound
+/// uniformly through `IndustrialAdapter::bound_magnitude`.
+fn dispatch_adapter<A: crate::adapters::IndustrialAdapter>(
+    message: serde_json::Value,
+    posture: FleetPosture,
+) -> Result<UnifiedEvaluationResult, String> {
+    let msg: A::Message = serde_json::from_value(message)
+        .map_err(|e| format!("MALFORMED_{}_MESSAGE: {e}", A::PROTOCOL.to_uppercase()))?;
+    let verdict = A::verdict(&msg);
+    let (mut allowed, mut denial_reason) =
+        command_allowed_for_posture_pub(&verdict.command, &posture);
+    if allowed {
+        if let Err(reason) = A::bound_magnitude(&msg) {
+            allowed = false;
+            denial_reason = Some(reason.to_string());
         }
     }
+    Ok(UnifiedEvaluationResult {
+        protocol: A::PROTOCOL.to_string(),
+        command: verdict.command,
+        allowed,
+        denial_reason,
+        posture_at_evaluation: format!("{:?}", posture),
+        adapter_details: verdict.details,
+        triggers_recalculation: verdict.triggers_recalculation,
+    })
 }
 
 pub fn command_allowed_for_posture_pub(

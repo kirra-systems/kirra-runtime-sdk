@@ -57,6 +57,33 @@ impl EtherNetIpAdapter {
     }
 }
 
+impl crate::adapters::IndustrialAdapter for EtherNetIpAdapter {
+    type Message = EtherNetIpMessage;
+    const PROTOCOL: &'static str = "ethernet_ip";
+
+    fn verdict(msg: &EtherNetIpMessage) -> crate::adapters::AdapterVerdict {
+        let e = EtherNetIpAdapter::evaluate(msg);
+        crate::adapters::AdapterVerdict {
+            command: e.command,
+            details: serde_json::json!({
+                "service_name": e.service_name,
+                "is_write": e.is_write,
+                "target_description": e.target_description,
+                "safety_relevant": e.safety_relevant,
+            }),
+            triggers_recalculation: false,
+        }
+    }
+
+    // POSTURE-ONLY (no override): a CIP write (Set_Attribute_Single / Write_Tag)
+    // carries `data` whose DATA TYPE — and thus value width, signedness, and
+    // scaling — is defined by the target attribute in the device's EDS/object
+    // model, NOT in the frame. Decoding a scalar magnitude from `data` without
+    // that per-attribute type config would be FABRICATION (#85), so EtherNet-IP
+    // stays bounded by posture/classification only until a per-target CIP type
+    // map exists (tracked follow-up). The trait's fail-closed default applies.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
