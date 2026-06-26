@@ -162,16 +162,20 @@ with `ω_rollover(v) = +∞` whenever `v < ROLLOVER_MIN_LINEAR_VELOCITY_MPS`
   permits lateral accelerations up to a ceiling that a compliant
   platform has *already exceeded its real tip threshold* below — so the
   rigid-body rollover bound is **optimistic (permissive), not
-  conservative.** Mitigation: apply a **rollover safety factor**
-  `k_roll ∈ (0, 1]` so the enforced ceiling is `k_roll · a_tip_rigid`
-  (a NHTSA-style dynamic correction; `k_roll ≈ 0.6–0.7` is a common
-  starting point pending the tilt-table validation in §8). **Scope of
-  impact:** this affects ONLY platforms whose operating envelope reaches
-  the rollover-binding regime (`v` above the §6 crossover). For the
-  deployed sidewalk courier, sweep binds with a ~4.9× margin below that
-  crossover (§6), so the courier bound is **unaffected** by this
-  correction — but `k_roll` MUST be applied before any higher-speed
-  platform relies on the rollover term. Tracked in §11.
+  conservative.** Mitigation **(IMPLEMENTED)**: a **rollover safety
+  factor** `k_roll ∈ (0, 1]` now scales the rollover term, so the
+  enforced ceiling is `ω_rollover(v) = k_roll · g·t/(2·h·v)` (a
+  NHTSA-style dynamic correction). It is a field on `PlatformParams`
+  (parko) and `CourierAngularBound` (the SDK cited copy), default
+  **`0.6`** — a pre-validation starting point; calibrate per platform
+  from the tilt-table test in §8. `k_roll = 1.0` recovers the rigid
+  (uncorrected) bound. **Scope of impact:** this affects ONLY platforms
+  whose operating envelope reaches the rollover-binding regime (`v` above
+  the §6 crossover). For the deployed sidewalk courier, sweep binds with
+  a ~3× margin below the (now k_roll-tightened) crossover (§6.1), so the
+  courier's enforced bound is **unchanged** by the factor — but it
+  tightens the high-speed tail for any platform that reaches it. Tracked
+  in §11.
 - **3.3 Constant surface friction.** Loss of traction (`μ` drop)
   produces sideslip, not rollover, but it also caps the lateral
   acceleration the platform can build up. The rollover threshold is
@@ -218,21 +222,29 @@ change to the table below is a change to the deployed courier bound:
 | `theta_max_rad`     | 0.087 (≈ 5°) | Sensor FoV + policy validity heuristic |
 | `ftti_s`            | 0.10 | parko inference-loop tick budget |
 | `mrc_posture_factor`| 0.5  | (this doc, §3.5 — pending review) |
+| `k_roll`            | 0.6  | rollover dynamic-correction factor (§3.2; pre-validation starting point — calibrate via §8 tilt-table) |
 
 ### 4.1 ω_max(v) — Nominal posture
+
+`ω_rollover(v) = k_roll · g·t/(2·h·v)` with `k_roll = 0.6` (§3.2):
 
 | v (m/s) | ω_rollover (rad/s) | ω_sweep (rad/s) | ω_ftti (rad/s) | **ω_max(v)** | Binding |
 |---|---|---|---|---|---|
 | 0.00 | — (masked) | 0.833 | 0.870 | **0.833** | sweep |
-| 0.10 | 61.3       | 0.833 | 0.870 | **0.833** | sweep |
-| 1.00 | 6.13       | 0.833 | 0.870 | **0.833** | sweep |
-| 5.00 | 1.23       | 0.833 | 0.870 | **0.833** | sweep |
-| 7.50 | 0.817      | 0.833 | 0.870 | **0.817** | rollover |
-| 10.00| 0.613      | 0.833 | 0.870 | **0.613** | rollover |
+| 0.10 | 36.8       | 0.833 | 0.870 | **0.833** | sweep |
+| 1.00 | 3.68       | 0.833 | 0.870 | **0.833** | sweep |
+| 4.42 | 0.833      | 0.833 | 0.870 | **0.833** | crossover |
+| 5.00 | 0.735      | 0.833 | 0.870 | **0.735** | rollover |
+| 7.50 | 0.490      | 0.833 | 0.870 | **0.490** | rollover |
+| 10.00| 0.368      | 0.833 | 0.870 | **0.368** | rollover |
 
-For this platform, **sweep binds across the practical operating
-range** (v ≤ ~7 m/s). Rollover only starts binding at extreme speeds
-(7+ m/s), well past the urban-service-robot operating envelope.
+With the `k_roll = 0.6` dynamic correction, **sweep binds across the
+courier operating range** (v ≤ ~4.4 m/s); rollover takes over above the
+crossover `v× = k_roll·g·t·r_extent/(2·h·v_edge) ≈ 4.42 m/s` (§6.1). The
+courier ODD ceiling (~1.5 m/s) sits ~3× below the crossover, so sweep is
+the live bound for the courier; the correction tightens the high-speed
+tail for any platform that reaches it. (Before the §3.2 correction the
+uncorrected crossover was ~7.36 m/s and the high-v rows were ~1.7× higher.)
 
 ### 4.2 ω_max(v) — MRC posture (derate by 0.5)
 
@@ -294,7 +306,7 @@ by `±ε`. No input is amplified.
 
 | Constraint | `ω =` | +1 (looser when ↑) | −1 (tighter when ↑) |
 |---|---|---|---|
-| rollover | `g·t / (2·h·v)` | `t` | `h`, `v` |
+| rollover | `k_roll·g·t / (2·h·v)` | `k_roll`, `t` | `h`, `v` |
 | sweep    | `v_edge / r_extent` | `v_edge` | `r_extent` |
 | ftti     | `θ_max / τ` | `θ_max` | `τ` |
 
@@ -305,20 +317,22 @@ The bound is `min(rollover, sweep, ftti)`, so **only the inputs of the
 Rollover overtakes sweep (becomes the min) when
 
 ```
-g·t / (2·h·v) < v_edge / r_extent
-⇒ v > v× = g·t·r_extent / (2·h·v_edge)
+k_roll·g·t / (2·h·v) < v_edge / r_extent
+⇒ v > v× = k_roll·g·t·r_extent / (2·h·v_edge)
 ```
 
-For the deployed courier (`urban_service_robot_reference`):
+For the deployed courier (`urban_service_robot_reference`, `k_roll = 0.6`):
 
 ```
-v× = 9.81·0.50·0.30 / (2·0.40·0.25) = 7.36 m/s
+v× = 0.6·9.81·0.50·0.30 / (2·0.40·0.25) = 4.42 m/s
 ```
 
-The courier ODD ceiling is ~1.5 m/s — a **~4.9× margin** below the
-rollover crossover — so **sweep binds across the entire courier
-envelope** (and FTTI, 0.87 rad/s, never binds either since sweep 0.833 <
-0.870 for all `v`).
+The courier ODD ceiling is ~1.5 m/s — a **~3× margin** below the
+(k_roll-tightened) rollover crossover — so **sweep binds across the
+entire courier envelope** (and FTTI, 0.87 rad/s, never binds either
+since sweep 0.833 < 0.870 for all `v`). The §3.2 rollover correction
+moved the crossover in from ~7.36 m/s to ~4.42 m/s; the courier still
+sits comfortably below it.
 
 **Consequence — the courier bound de-risks to two well-known inputs.**
 Because sweep is the sole binding constraint in the courier ODD, the
@@ -384,7 +398,7 @@ safety claim.**
 | Constraint | Validation method | Acceptance criterion |
 |---|---|---|
 | sweep (H-ANG-2) | Measure the platform's true bounding-circle radius incl. payload at full articulation; command an in-place spin at the enforced `ω_max(0)` and measure the outer-edge tangential speed with a tracking marker. | Measured edge speed ≤ `v_edge_safe` (0.25 m/s courier). Equivalently `r_extent_configured ≥ r_extent_measured`. **First priority (§6.2).** |
-| rollover (H-ANG-1) | Tilt-table to find the static tip angle → derive `a_tip_real`; OR steady-state circular drive at increasing `a_lat` until measured load transfer reaches the tip onset. | `a_tip_real ≥ a_tip_rigid` (else set `k_roll = a_tip_real / a_tip_rigid` and re-enforce `k_roll·a_tip_rigid`, §3.2). Only required if the platform's ODD reaches `v×` (§6.1). |
+| rollover (H-ANG-1) | Tilt-table to find the static tip angle → derive `a_tip_real`; OR steady-state circular drive at increasing `a_lat` until measured load transfer reaches the tip onset. | The model already enforces `k_roll·a_tip_rigid` (default `k_roll = 0.6`, §3.2). Calibration must confirm `k_roll ≤ a_tip_real / a_tip_rigid` — i.e. the default 0.6 is conservative for this platform; tighten it if the measured ratio is lower. Only required if the platform's ODD reaches `v×` (§6.1). |
 | ftti (H-ANG-3) | Measure the end-to-end perception→policy validity horizon (sensor FoV / tracker latency); confirm `θ_max` ≤ the heading change the pipeline can still reason about. | `θ_max ≤ FoV-derived heading-validity limit` at the measured FTTI. |
 | MRC derate (§3.5) | Confirm the Degraded posture's contracted envelope is reached on a real posture transition; review whether `θ_max` needs a steeper derate than `v_edge` under sensor degradation. | Degraded `ω_max` ≤ 0.5× Nominal at the same `v` (already unit-tested); the split is a review decision, not a measurement. |
 
@@ -436,12 +450,14 @@ this plan covers the *physical correspondence* the math assumes.
 
 ## 11. Open items
 
-1. **Rollover safety factor `k_roll`** *(new — §3.2 correction)*. The
-   rigid-body rollover threshold is optimistic for a compliant platform;
-   a dynamic-correction factor `k_roll ∈ (0,1]` (≈0.6–0.7 starting
-   point) must be applied before any platform relies on the rollover
-   term. Moot for the courier (sweep binds, §6.1); blocking for
-   higher-speed platforms. Validation method in §8.
+1. **Rollover safety factor `k_roll`** *(§3.2 correction — IMPLEMENTED;
+   calibration pending)*. The dynamic-correction factor `k_roll ∈ (0,1]`
+   is now a `PlatformParams` / `CourierAngularBound` field, default
+   `0.6`, scaling the rollover term `k_roll·g·t/(2·h·v)`. Remaining work:
+   replace the `0.6` starting point with a tilt-table-measured value per
+   platform (§8). Moot for the courier's enforced bound (sweep binds,
+   §6.1); the factor tightens the high-speed tail for any platform that
+   reaches the rollover regime.
 2. **`r_extent` under-measurement** *(new — §6.2)*. The one parameter
    whose under-measurement makes the courier bound permissive. Measure
    to the outermost point incl. payload, round up, characterise with a
@@ -469,7 +485,7 @@ this plan covers the *physical correspondence* the math assumes.
 | Field | Value |
 |---|---|
 | Issue | #136 |
-| Status | **DRAFT — pending formal safety-engineer review** (evidence strengthened pre-review: §6 sensitivity, §7 hazard/SOTIF traceability, §8 V&V plan added; §3.2 rollover-conservatism error corrected) |
+| Status | **DRAFT — pending formal safety-engineer review** (evidence strengthened pre-review: §6 sensitivity, §7 hazard/SOTIF traceability, §8 V&V plan added; §3.2 rollover-conservatism error corrected AND fixed — `k_roll` rollover safety factor now implemented, default 0.6, calibration pending §8) |
 | Author | engineering analysis (#136); pre-review hardening (ADR-0029 follow-up) |
 | Review status | not yet reviewed — DRAFT banner stands until a human safety engineer signs off |
 | Cross-refs | KIRRA-OCCY-SPEED-001 (linear analog), KIRRA-OCCY-OPTIONB-001, ADR-0029 (courier angular-channel seam — this is the deployed courier profile) |
