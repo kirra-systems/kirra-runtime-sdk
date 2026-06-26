@@ -947,3 +947,120 @@ fn ackermann_trajectory_has_no_angular_channel() {
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "robotaxi (angular None) must NOT angular-MRC — byte-identical to pre-ADR-0029; got {verdict:?}");
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0029 — Degraded converge-to-stop-and-HOLD on the ANGULAR channel.
+//
+// The magnitude bound only caps |ω|; under Degraded the courier must also
+// converge the yaw axis to zero and hold (no re-initiation from a stop, no
+// speed increase), the angular analog of the linear `enforce_degraded_decel_to_stop`.
+// All ω values below sit UNDER the Degraded magnitude ceiling
+// ω_max(0, 0.5) ≈ 0.417 rad/s, so the magnitude check passes and it is the
+// stop-and-HOLD gate (not the ceiling) under test.
+// ---------------------------------------------------------------------------
+
+/// In-place rotation with a per-segment yaw-rate sequence (fixed position,
+/// v=0). `omegas[i]` is the yaw rate of segment i (`Δheading_i = omegas[i]·dt`).
+fn in_place_rotation_seq(omegas: &[f64], dt: f64) -> Vec<TrajectoryPoint> {
+    let mut heading = 0.0_f64;
+    let mut pts = vec![TrajectoryPoint {
+        pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+        velocity_mps: 0.0,
+        time_from_start_s: 0.0,
+    }];
+    for (i, &w) in omegas.iter().enumerate() {
+        heading += w * dt;
+        pts.push(TrajectoryPoint {
+            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: heading },
+            velocity_mps: 0.0,
+            time_from_start_s: ((i + 1) as f64) * dt,
+        });
+    }
+    pts
+}
+
+/// Ego odometry snapshot carrying a current yaw rate (linear stopped).
+fn odom_yaw(yaw_rate_rads: f64) -> kirra_ros2_adapter::state::EgoOdom {
+    kirra_ros2_adapter::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
+}
+
+#[test]
+fn courier_degraded_angular_reinitiation_from_stop_mrcs() {
+    // Stopped courier (odom yaw = 0) + a Degraded trajectory that BEGINS an
+    // in-place rotation at ω=0.3 (< the 0.417 Degraded ceiling, so the
+    // magnitude bound passes). The stop-and-HOLD gate must refuse the
+    // re-initiation from a stop → MRC.
+    let traj = in_place_rotation(6, 0.3, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(
+        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Degraded,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "Degraded must refuse angular re-initiation from a stop (HOLD); got {verdict:?}");
+}
+
+#[test]
+fn courier_degraded_angular_speed_increase_mrcs() {
+    // Already rotating slowly (odom yaw = 0.1) + a Degraded trajectory that
+    // SPEEDS UP to ω=0.3 (still < the 0.417 ceiling). Non-increasing-|ω| is
+    // violated → MRC.
+    let traj = in_place_rotation(6, 0.3, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(
+        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.1)), FleetPosture::Degraded,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "Degraded must refuse an angular speed increase; got {verdict:?}");
+}
+
+#[test]
+fn courier_degraded_angular_converging_to_stop_is_admitted() {
+    // The complement: a Degraded yaw trajectory that converges to zero
+    // (ω: 0.3 → 0.2 → 0.1 → 0.0), seeded from a matching odom yaw = 0.3, all
+    // under the ceiling. Non-increasing throughout → admitted (Accept/Clamp),
+    // never MRC. Proves the gate does not over-reject a proper angular
+    // decel-to-stop.
+    let traj = in_place_rotation_seq(&[0.3, 0.2, 0.1, 0.0], 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(
+        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.3)), FleetPosture::Degraded,
+    );
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "a converging-to-stop yaw trajectory must be admitted under Degraded; got {verdict:?}");
+}
+
+#[test]
+fn courier_degraded_angular_gate_is_degraded_only() {
+    // FROZEN: the SAME re-initiation-from-stop trajectory under NOMINAL is
+    // admitted — the stop-and-HOLD gate is Degraded-only (ω=0.3 < the Nominal
+    // 0.833 ceiling, so the magnitude bound also passes). Nominal behaviour is
+    // unchanged by this gate.
+    let traj = in_place_rotation(6, 0.3, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::courier();
+    let verdict = validate_trajectory_slow(
+        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Nominal,
+    );
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "the angular stop-and-HOLD gate must not fire under Nominal; got {verdict:?}");
+}
+
+#[test]
+fn ackermann_degraded_has_no_angular_stop_gate() {
+    // FROZEN: the robotaxi profile (angular = None) under Degraded with the
+    // same re-initiation trajectory carries NO angular stop gate — the block is
+    // skipped entirely (v=0 in-place rotation, so the linear gate admits it
+    // too). Byte-identical to pre-ADR-0029 on the AV path.
+    let traj = in_place_rotation(6, 0.3, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    assert!(cfg.angular.is_none());
+    let verdict = validate_trajectory_slow(
+        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Degraded,
+    );
+    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
+        "robotaxi (angular None) must carry no angular stop gate; got {verdict:?}");
+}
