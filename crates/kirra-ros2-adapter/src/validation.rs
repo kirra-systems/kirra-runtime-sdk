@@ -460,7 +460,9 @@ pub fn validate_trajectory_slow_capped(
     // longitudinal-overlap gating, so a mode that stays in its own lane is skipped
     // (this generalizes §4, it does not regress it). Absent input → no-op.
     if let Some(modes) = predicted_modes {
-        if predictive_rss_breach(trajectory, modes, config) {
+        // Pass the SAME (posture-/perception-capped) lateral-accel budget the
+        // snapshot lateral branch uses, so both passes agree on the side gap.
+        if predictive_rss_breach(trajectory, modes, config, kinematics.max_lateral_accel_mps2) {
             return TrajectoryVerdict::MRCFallback;
         }
     }
@@ -535,16 +537,28 @@ fn nearest_in_time(trajectory: &[TrajectoryPoint], t: f64) -> Option<&Trajectory
         .min_by(|a, b| (a.time_from_start_s - t).abs().total_cmp(&(b.time_from_start_s - t).abs()))
 }
 
-/// True if any predicted mode brings an object into a longitudinal RSS shortfall with
-/// the time-matched ego pose. Mirrors the snapshot RSS pass (same `dx_ego`/`dy_ego`
-/// ego-frame projection, same §4 lateral-alignment + longitudinal-overlap gating, same
-/// same-/opposite-direction primitive), but evaluates the object at its PREDICTED
-/// position+velocity (derived from the inter-sample motion) rather than its snapshot.
-// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance
+/// True if any predicted mode brings an object into an RSS shortfall with the
+/// time-matched ego pose. Mirrors the snapshot RSS pass in full (same `dx_ego`/`dy_ego`
+/// ego-frame projection, same §4 lateral-alignment gating, same same-/opposite-direction
+/// longitudinal primitive, AND the same lateral side-RSS conjunction partner), but
+/// evaluates the object at its PREDICTED position+velocity (derived from the inter-sample
+/// motion) rather than its snapshot.
+///
+/// The lateral branch is the load-bearing reason this pass exists: a predicted cut-in /
+/// turn-in that rolls the object into the ego's path in the mid lateral band
+/// (`RSS_LONGITUDINAL_OVERLAP_M` ≤ |dy| ≤ `rss_lateral_alignment_tolerance_m`) is laterally
+/// clear at the snapshot AND outside the longitudinal-overlap band, so neither the snapshot
+/// nor a longitudinal-only predictive pass would catch it. The lateral conjunction (fire on
+/// ABREAST `lon_unsafe` OR closing-laterally `lateral_cut_in`, gated on longitudinal
+/// proximity) closes that gap. `max_lateral_accel_mps2` is the (posture-/perception-capped)
+/// per-pose contract's lateral-accel bound, so the predictive lateral check uses the SAME
+/// side-gap budget as the snapshot pass.
+// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in
 fn predictive_rss_breach(
     trajectory: &[TrajectoryPoint],
     modes: &[PredictedMode<'_>],
     config: &VehicleConfig,
+    max_lateral_accel_mps2: f64,
 ) -> bool {
     for mode in modes {
         for pair in mode.samples.windows(2) {
@@ -571,28 +585,55 @@ fn predictive_rss_breach(
             if dy_ego.abs() > config.rss_lateral_alignment_tolerance_m {
                 continue; // predicted to be in another corridor — containment covers it
             }
-            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M {
-                let obj_lon_v = ovx * cos_h + ovy * sin_h; // predicted closing component
-                let lon_required = if obj_lon_v < 0.0 {
-                    opposite_direction_safe_distance(
-                        ego.velocity_mps,
-                        obj_lon_v.abs(),
-                        RSS_REACTION_TIME_S,
-                        config.max_accel_mps2,
-                        config.max_decel_mps2,
-                        config.max_decel_mps2,
-                    )
-                } else {
-                    longitudinal_safe_distance(
-                        ego.velocity_mps,
-                        obj_lon_v,
-                        RSS_REACTION_TIME_S,
-                        config.max_accel_mps2,
-                        config.max_decel_mps2,
-                        config.max_decel_mps2,
-                    )
-                };
-                if dx_ego < lon_required {
+
+            // Longitudinal primitive — computed ONCE and used by both axes' gates
+            // (mirrors the snapshot pass). Direction-aware: an oncoming predicted
+            // closure (negative projected velocity) needs the opposite-direction
+            // (sum-of-stopping-distances) bound, otherwise the rear-end bound.
+            let obj_lon_v = ovx * cos_h + ovy * sin_h; // predicted closing component
+            let lon_required = if obj_lon_v < 0.0 {
+                opposite_direction_safe_distance(
+                    ego.velocity_mps,
+                    obj_lon_v.abs(),
+                    RSS_REACTION_TIME_S,
+                    config.max_accel_mps2,
+                    config.max_decel_mps2,
+                    config.max_decel_mps2,
+                )
+            } else {
+                longitudinal_safe_distance(
+                    ego.velocity_mps,
+                    obj_lon_v,
+                    RSS_REACTION_TIME_S,
+                    config.max_accel_mps2,
+                    config.max_decel_mps2,
+                    config.max_decel_mps2,
+                )
+            };
+            let lon_unsafe = dx_ego < lon_required;
+
+            // Longitudinal RSS — gated on lateral footprint overlap (same as snapshot).
+            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M && lon_unsafe {
+                return true;
+            }
+
+            // Lateral RSS — the §4 CONJUNCTION partner, mirroring the snapshot
+            // lateral branch. The object's predicted lateral velocity is the
+            // inter-sample motion projected onto the ego pose normal (same rotation
+            // as `dy_ego`). Fire on ABREAST (`lon_unsafe`) OR a predicted lateral
+            // closure (`lateral_cut_in`), gated on longitudinal proximity. This is
+            // the branch that catches a mid-band cut-in the longitudinal-overlap
+            // gate skips.
+            let obj_lat_v = -ovx * sin_h + ovy * cos_h;
+            let lateral_cut_in = obj_lat_v.abs() > RSS_LATERAL_MOTION_EPS_MPS;
+            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M && (lon_unsafe || lateral_cut_in) {
+                let lat_required = lateral_safe_distance(
+                    0.0, // straight-following assumption per §3 (ego lateral vel)
+                    obj_lat_v,
+                    max_lateral_accel_mps2,
+                    RSS_REACTION_TIME_S,
+                );
+                if dy_ego.abs() < lat_required {
                     return true;
                 }
             }
