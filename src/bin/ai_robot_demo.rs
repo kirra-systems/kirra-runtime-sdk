@@ -3,7 +3,7 @@
 
 use kirra_verifier::kinematics_contract::KinematicContract;
 use kirra_verifier::robotics_alignment::AlignmentBridge;
-use kirra_verifier::dds_bridge::DdsPublisherBridge;
+use kirra_verifier::dds_bridge::{DdsPublisherBridge, DdsQosProfile};
 
 fn main() {
     let contract = KinematicContract {
@@ -13,6 +13,10 @@ fn main() {
         fallback_linear_speed: 0.0,
     };
     let bridge = AlignmentBridge::new(contract);
+
+    // Actuator topics publish under the frozen critical QoS profile; the publish
+    // seam enforces Volatile + latest-wins + bounded-lifespan fail-closed.
+    let actuator_qos = DdsQosProfile::critical_actuator_profile();
 
     let intents = [
         r#"{"action": "MOVE", "velocity": 1.0}"#,
@@ -25,10 +29,12 @@ fn main() {
         println!("Intent: {}", intent);
         match bridge.align_and_serialize_intent(intent) {
             Ok((output, frame)) => {
-                let dds_payload = DdsPublisherBridge::wrap_cdr_encapsulation(&frame);
                 println!("  Resolution: {:?}", output.resolution);
                 println!("  Narrative:  {}", output.narrative);
-                println!("  DDS Frame:  {}", hex::encode(&dds_payload));
+                match DdsPublisherBridge::publish_actuator_command(&frame, &actuator_qos) {
+                    Ok(dds_payload) => println!("  DDS Frame:  {}", hex::encode(&dds_payload)),
+                    Err(v) => println!("  DDS REFUSED: {v}"),
+                }
             }
             Err(e) => println!("  Parse error: {}", e),
         }
