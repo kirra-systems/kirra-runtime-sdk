@@ -110,12 +110,15 @@ fn wall_clock_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Same as `wall_clock_ms` but with a name that's less likely to collide
-/// inside a closure body that already has a `wall_clock_ms` shadow. The
-/// stamping tasks call this on every received message; it's hot enough
-/// that the call is inlined.
+/// MONOTONIC freshness clock (B4) — the staleness / age clock for the adapter's
+/// subscription stamps, `AcceptedTrajectory::promoted_at_ms`, and the slow/fast
+/// loop freshness comparisons. Delegates to the shared `state::monotonic_now_ms`
+/// so EVERY freshness timestamp in the adapter shares ONE non-decreasing epoch;
+/// a forward wall-clock / NTP step can no longer inflate an age and spuriously
+/// trip staleness → fleet-wide MRC. Wall time (`wall_clock_ms`) is reserved for
+/// audit/correlation record timestamps ONLY. Hot path — inlined.
 #[inline]
-fn now_ms_wall() -> u64 { wall_clock_ms() }
+fn now_ms_fresh() -> u64 { crate::state::monotonic_now_ms() }
 
 /// Trajectory ingress payload. The subscription callback (Phase 2B —
 /// when Lanelet2 wiring lands) deserializes
@@ -288,7 +291,7 @@ pub async fn run_adapter(
         let mut s = traj_stream;
         let mut traj_seq: u64 = 0;
         while let Some(msg) = s.next().await {
-            let now = now_ms_wall();
+            let now = now_ms_fresh();
             // Phase I observability (integration-harness §I.1a): a per-callback
             // entry event PROVES delivery (vs staleness) for the A-vs-B split.
             tracing::info!(
@@ -334,7 +337,7 @@ pub async fn run_adapter(
     tokio::spawn(async move {
         let mut s = obj_stream;
         while let Some(msg) = s.next().await {
-            let now = now_ms_wall();
+            let now = now_ms_fresh();
             tracing::info!(
                 target: "kirra::ingress",
                 topic = "objects",
@@ -358,7 +361,7 @@ pub async fn run_adapter(
         tokio::spawn(async move {
             let mut s = obj_b_stream;
             while let Some(msg) = s.next().await {
-                let now = now_ms_wall();
+                let now = now_ms_fresh();
                 tracing::info!(
                     target: "kirra::ingress",
                     topic = "objects_secondary",
@@ -376,7 +379,7 @@ pub async fn run_adapter(
     tokio::spawn(async move {
         let mut s = odom_stream;
         while let Some(msg) = s.next().await {
-            let now = now_ms_wall();
+            let now = now_ms_fresh();
             tracing::info!(
                 target: "kirra::ingress",
                 topic = "odometry",
@@ -453,20 +456,20 @@ pub async fn run_adapter(
             // the cap ages with the object stream and `resolve_perception_cap`
             // fails closed (state-3 MRC) when objects go silent. If objects are
             // stale/never-seen, sweep an MRC-floor cap proactively.
-            let now_wall = now_ms_wall();
+            let now_mono = now_ms_fresh();
             let objects_ms =
                 slow_state.last_objects_ms.load(std::sync::atomic::Ordering::Relaxed);
             let objects_fresh = objects_ms != 0
-                && now_wall.saturating_sub(objects_ms) <= subscription_staleness_timeout_ms();
+                && now_mono.saturating_sub(objects_ms) <= subscription_staleness_timeout_ms();
             if objects_fresh {
                 publish_perception_tick(&perception_publisher, &objects, objects_ms);
             } else {
-                perception_publisher.sweep_staleness(now_wall);
+                perception_publisher.sweep_staleness(now_mono);
             }
             let effective_perception_cap = resolve_perception_cap(
                 perception_derate_enabled(),
                 &perception_cache,
-                now_wall,
+                now_mono,
             );
 
             // Perception-divergence assurance monitor (True-Redundancy analog, gap #2b) — now
@@ -480,7 +483,7 @@ pub async fn run_adapter(
             let objects_b_ms =
                 slow_state.last_objects_b_ms.load(std::sync::atomic::Ordering::Relaxed);
             let objects_b_fresh = objects_b_ms != 0
-                && now_wall.saturating_sub(objects_b_ms) <= subscription_staleness_timeout_ms();
+                && now_mono.saturating_sub(objects_b_ms) <= subscription_staleness_timeout_ms();
             let redundancy_cap = resolve_redundancy_cap(
                 perception_redundancy_enabled(),
                 &objects,
@@ -498,8 +501,8 @@ pub async fn run_adapter(
             // then LockedOut — so the whole stack degrades, not just this tick's speed. A
             // momentary blip leaves posture unchanged (the cap handled it); escalation-only, so
             // it can never relax the verifier-sourced base posture.
-            divergence_escalator.observe(redundancy_cap == Some(0.0), now_wall);
-            let posture = posture.escalate(divergence_escalator.recommended_posture(now_wall));
+            divergence_escalator.observe(redundancy_cap == Some(0.0), now_mono);
+            let posture = posture.escalate(divergence_escalator.recommended_posture(now_mono));
 
             // Multi-modal predictive RSS (gap #3) — roll the live objects into PredictedMode
             // hypotheses for the checker's predictive pass. The tracker's per-object yaw estimate
@@ -511,7 +514,7 @@ pub async fn run_adapter(
             let object_yaw_ms =
                 slow_state.last_object_yaw_ms.load(std::sync::atomic::Ordering::Relaxed);
             let object_yaw_fresh = object_yaw_ms != 0
-                && now_wall.saturating_sub(object_yaw_ms) <= subscription_staleness_timeout_ms();
+                && now_mono.saturating_sub(object_yaw_ms) <= subscription_staleness_timeout_ms();
             let predicted_owned = slow_loop_modes(
                 &objects,
                 &object_yaw_rates,
@@ -544,18 +547,20 @@ pub async fn run_adapter(
                 // prior behaviour); once a source reports, the gate is live (a poor / non-finite
                 // ε derates the 0.40 m → 0.75 m margin or refuses, a silent source fails closed),
                 // and a sustained fault also escalates fleet posture → LockedOut (S-FI1d).
-                slow_state.snapshot_frame_trust(now_wall),
+                slow_state.snapshot_frame_trust(now_mono),
             );
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            // B4: the trajectory's `promoted_at_ms` (the fast loop's `is_stale`
+            // anchor) uses the MONOTONIC freshness clock — the SAME `now_mono` the
+            // slow-loop freshness checks use and the same clock the fast loop's
+            // staleness reads — so a forward wall-clock step can never make a fresh
+            // trajectory look stale. (The capture record below keeps a separate
+            // wall timestamp for human/audit correlation.)
             slow_state.update_trajectory(
                 traj.asset_id.clone(),
                 traj.trajectory_id,
                 traj.points.clone(),
                 verdict,
-                now_ms,
+                now_mono,
             );
             let elapsed_us = start.elapsed().as_micros();
             // Phase I observability (integration-harness §I.1b): carry posture +
@@ -563,7 +568,7 @@ pub async fn run_adapter(
             // stale inputs (Branch B) is distinguishable from non-delivery
             // (Branch A) directly from the logs. A never-seen slot (last_*_ms == 0)
             // reports u64::MAX rather than a misleadingly-huge "age since epoch".
-            let now_fresh = now_ms_wall();
+            let now_fresh = now_ms_fresh();
             let age_of =
                 |t: u64| if t == 0 { u64::MAX } else { now_fresh.saturating_sub(t) };
             let traj_age_ms =
@@ -623,7 +628,9 @@ pub async fn run_adapter(
                 };
                 let rec = record_from_trajectory_verdict(
                     capture_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    now_ms,
+                    // Audit/correlation timestamp — wall-clock (human-readable),
+                    // NOT the staleness clock. Computed only when capture is on.
+                    wall_clock_ms(),
                     decision,
                     posture,
                     ext,
@@ -668,7 +675,10 @@ pub async fn run_adapter(
         let mut rx = control_rx;
         while let Some(in_cmd) = rx.recv().await {
             let start = std::time::Instant::now();
-            let now_ms = wall_clock_ms();
+            // B4: freshness clock is MONOTONIC — must match the subscription
+            // stamps + `promoted_at_ms` so `any_subscription_stale` / `is_stale`
+            // measure a true elapsed age, immune to a wall-clock step.
+            let now_ms = now_ms_fresh();
             let cmd = IncomingControl {
                 velocity_mps: in_cmd.linear_velocity_mps,
                 steering_rad: in_cmd.steering_angle_rad,
