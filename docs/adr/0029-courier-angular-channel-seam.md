@@ -120,6 +120,28 @@ holds a cited copy of its parameters and `omega_max(v)` derivation, tagged with 
 Phase 1 is the concrete next code step. Phase 2 is the deployment it unblocks; both share the same
 cited-copy angular numbers, so they cannot diverge silently.
 
+**Phase 3 — live SG2 containment on the parko-ros2 node (ego-frame). Phase 3a LANDED; 3b pending.**
+- **The finding.** The parko node's tick is sensor→inference→**twist**: it emits ONE `(v, ω)` command per
+  tick (not a planned trajectory) and ingests only opaque inference tensors — no map, odometry, or corridor.
+  The SDK adapter's map-anchored containment (Lanelet2 + localization) does not transplant.
+- **The design (ego-frame).** A lidar-derived corridor is **already ego-relative**, so containment is
+  checked in the EGO frame with **no global localization**: (1) project a short diff-drive (unicycle)
+  lookahead of the proposed command forward from the ego origin `(0,0,0)` over `CONTAINMENT_HORIZON_S`
+  (~0.5 s held); (2) check that lookahead's footprint against an ego-relative `Corridor` via the generic
+  S-PK1c seam `validate_trajectory_containment`. Frame trust is `Trusted` — an ego-relative corridor carries
+  no localization lateral-error term, so the baseline 0.40 m SG2 margin applies and corridor HEALTH is the
+  `Corridor`'s own confidence/age gate. This sidesteps the missing odometry + frame-integrity inputs.
+- **Phase 3a (LANDED, testable):** `parko-ros2/src/containment_gate.rs` — the pure projection +
+  `command_stays_in_corridor` gate + the composable `apply_containment_gate(TickOutcome, …)` node seam
+  (the governed command is carried by the `OutgoingTwist`, so the gate checks exactly what would be
+  published). **Opt-in + fail-closed:** no corridor snapshot → skipped, byte-identical; a non-finite command
+  or an absent/stale/unhealthy corridor → `MRCFallback` (stopped twist + `TickError::ContainmentBreach`).
+  Unit-tested in parko's stable lane (in/out-of-corridor, stale, non-finite, stationary, the platform-seam
+  equivalence, and the TickOutcome composition).
+- **Phase 3b (pending, ros2-gated):** subscribe lidar → run `kirra-taj` (`process(scan) → TajPerception {
+  corridor }`) → feed the live ego-relative `TajCorridor` snapshot into `apply_containment_gate` each tick.
+  The real perception integration; not unit-testable without ROS, exactly as Phase 2's node-binary swap.
+
 ## Consequences
 
 - The courier checker becomes **honest on the angular axis**: an in-place rotation is bounded by a

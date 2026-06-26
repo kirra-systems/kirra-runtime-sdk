@@ -53,6 +53,10 @@ pub enum TickError {
     /// `InferenceLoop::tick` returned `Err`. The string is the
     /// underlying error message; logged + audited.
     InferenceError(String),
+    /// ADR-0029 Phase 3a — the governed command's lookahead left the
+    /// ego-relative corridor (or the corridor was absent/stale). The tick
+    /// MRCs (stopped twist). Set by `containment_gate::apply_containment_gate`.
+    ContainmentBreach,
 }
 
 /// What a single `run_pipeline_tick` produced. Always carries a safe

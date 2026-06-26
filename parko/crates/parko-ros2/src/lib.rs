@@ -29,6 +29,7 @@ pub mod clearance_gate;
 pub mod command_mapping;
 pub mod comparator_adapter;
 pub mod config;
+pub mod containment_gate;
 pub mod image_shim;
 pub mod pointcloud2_shim;
 pub mod imu_shim;
@@ -52,6 +53,10 @@ pub use crate::command_mapping::{enforce_outgoing_twist, OutgoingTwist};
 pub use crate::comparator_adapter::ComparatorAsGovernor;
 pub use crate::config::ParkoNodeConfig;
 pub use crate::platform_profile::CourierPlatformProfile;
+pub use crate::containment_gate::{
+    apply_containment_gate, command_stays_in_corridor, command_stays_in_corridor_default,
+    CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S,
+};
 pub use crate::sensor_mapping::{
     CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
     CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping,
