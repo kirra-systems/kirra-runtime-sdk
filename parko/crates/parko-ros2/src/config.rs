@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use crate::platform_profile::CourierPlatformProfile;
+
 /// Configuration for the Parko ROS 2 node. Constructed by the binary
 /// from env vars / CLI; passed by `Arc<ParkoNodeConfig>` to the drain
 /// tasks so they can read it without lock contention.
@@ -82,6 +84,16 @@ pub struct ParkoNodeConfig {
     /// effect when no `imu_topic` is set (an UNCONFIGURED IMU is reduced coverage,
     /// never a forced stop — the watchdog is not armed).
     pub imu_staleness_window_ms: u64,
+
+    /// ADR-0029 Phase 2 — the differential-drive courier deployment profile.
+    /// `Some(profile)` parameterizes the live governor with the courier's SOTIF
+    /// angular envelope ([`CourierPlatformProfile::angular_governor`]) instead of
+    /// the `KirraGovernor::new()` conservative default, and supplies the courier
+    /// footprint to the [`DiffDrivePlatform`](parko_kirra::platform::DiffDrivePlatform)
+    /// checker. **Default `None`** → the node keeps building `KirraGovernor::new()`
+    /// (conservative default), byte-identical to pre-Phase-2 behaviour. Opt-in,
+    /// fail-safe: an uncharacterized deployment still gets the tighter generic bound.
+    pub platform_profile: Option<CourierPlatformProfile>,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -109,6 +121,9 @@ impl Default for ParkoNodeConfig {
             // SG6 (#324) IMU staleness window (VALIDATION-PENDING; only armed when
             // an imu_topic is configured).
             imu_staleness_window_ms: 500,
+            // ADR-0029 Phase 2: no platform profile by default → conservative
+            // default angular bound (byte-identical to pre-Phase-2). Opt-in.
+            platform_profile: None,
         }
     }
 }
@@ -187,6 +202,30 @@ mod tests {
         let cfg = ParkoNodeConfig { spike_threshold_mps2: 22.5, ..ParkoNodeConfig::default() };
         assert!((cfg.impact_cfg().spike_threshold_mps2 - 22.5).abs() < 1e-9,
             "impact_cfg() must carry the deployment-tuned threshold");
+    }
+
+    #[test]
+    fn default_has_no_platform_profile_preserving_conservative_bound() {
+        // ADR-0029 Phase 2 is opt-in: the default config carries no courier
+        // profile, so the node keeps building KirraGovernor::new() (the
+        // conservative-default angular bound) — byte-identical to pre-Phase-2.
+        let cfg = ParkoNodeConfig::default();
+        assert!(
+            cfg.platform_profile.is_none(),
+            "platform_profile must default to None (opt-in, fail-safe)"
+        );
+    }
+
+    #[test]
+    fn a_courier_profile_can_be_configured() {
+        let cfg = ParkoNodeConfig {
+            platform_profile: Some(CourierPlatformProfile::courier_reference()),
+            ..ParkoNodeConfig::default()
+        };
+        assert_eq!(
+            cfg.platform_profile,
+            Some(CourierPlatformProfile::courier_reference())
+        );
     }
 
     #[test]
