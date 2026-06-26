@@ -2479,6 +2479,12 @@ async fn main() {
     // declared type and bounded (fail-closed on breach/undecodable).
     kirra_verifier::adapters::canopen::init_sdo_bounds_from_env();
 
+    // CIP per-attribute magnitude bounds from KIRRA_CIP_ATTR_BOUNDS
+    // ("class:instance:attr=type:min:max", …) + KIRRA_CIP_STRICT_BOUNDS. Unset →
+    // CIP writes are posture-only; a configured Set_Attribute_Single target is
+    // faithfully decoded by its declared type and bounded (fail-closed on breach).
+    kirra_verifier::adapters::ethernet_ip::init_cip_bounds_from_env();
+
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
             .filter(|s| !s.is_empty())
