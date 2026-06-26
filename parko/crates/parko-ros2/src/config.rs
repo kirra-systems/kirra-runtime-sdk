@@ -94,6 +94,19 @@ pub struct ParkoNodeConfig {
     /// (conservative default), byte-identical to pre-Phase-2 behaviour. Opt-in,
     /// fail-safe: an uncharacterized deployment still gets the tighter generic bound.
     pub platform_profile: Option<CourierPlatformProfile>,
+
+    /// ADR-0029 Phase 3b — lidar topic for the live SG2 containment gate. `Some`
+    /// wires a `sensor_msgs/LaserScan` subscription → Taj Phase-A → an ego-relative
+    /// corridor fed to `apply_containment_gate` each tick. The gate is armed only
+    /// when BOTH this and `platform_profile` (for the footprint) are set. **Default
+    /// `None`** → no containment gate, byte-identical to pre-Phase-3.
+    pub lidar_topic: Option<String>,
+    /// Phase 3b — minimum corridor confidence for the gate's health check
+    /// (`Corridor::min_confidence`). A live corridor below this fails closed (MRC).
+    pub corridor_min_confidence: f32,
+    /// Phase 3b — maximum corridor age (ms) for the gate's health check
+    /// (`Corridor::max_age_ms`). A stale corridor fails closed (MRC).
+    pub corridor_max_age_ms: u64,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -124,6 +137,10 @@ impl Default for ParkoNodeConfig {
             // ADR-0029 Phase 2: no platform profile by default → conservative
             // default angular bound (byte-identical to pre-Phase-2). Opt-in.
             platform_profile: None,
+            // ADR-0029 Phase 3b: no lidar/containment gate by default. Opt-in.
+            lidar_topic: None,
+            corridor_min_confidence: 0.5,
+            corridor_max_age_ms: 500,
         }
     }
 }
@@ -214,6 +231,17 @@ mod tests {
             cfg.platform_profile.is_none(),
             "platform_profile must default to None (opt-in, fail-safe)"
         );
+    }
+
+    #[test]
+    fn default_has_no_lidar_containment_gate() {
+        // ADR-0029 Phase 3b is opt-in: no lidar topic by default → the
+        // containment gate is not armed (byte-identical to pre-Phase-3). The
+        // health thresholds default to the kernel slow-loop values.
+        let cfg = ParkoNodeConfig::default();
+        assert!(cfg.lidar_topic.is_none(), "lidar/containment gate must be opt-in");
+        assert!((cfg.corridor_min_confidence - 0.5).abs() < 1e-9);
+        assert_eq!(cfg.corridor_max_age_ms, 500);
     }
 
     #[test]
