@@ -1928,15 +1928,17 @@ async fn handle_actuator_motion_command(
         "delta_time_s":                 cmd.delta_time_s,
         "admitted_at_ms":               now,
     });
-    svc.app.store.with(|store| {
+    // P1: durable audit write off the worker pool (materialize the payload first).
+    let audit_str = audit.to_string();
+    let _ = svc.app.store.call(move |store| {
         if let Err(e) = store.save_posture_event_chained(
             "actuator_motion", "MOTION_COMMAND_ADMITTED",
-            &audit.to_string(), None, now,
+            &audit_str, None, now,
         ) {
             tracing::error!(error=%e,
                 "AUDIT-CHAIN WRITE FAILED for MOTION_COMMAND_ADMITTED — event missing from tamper-evident log");
         }
-    });
+    }).await;
 
     // Response speaks the ROS interceptor's schema (action / enforced_*) AND
     // the legacy keys (now accurate). See `EnforcementOutcome::response_body`.
@@ -1999,15 +2001,18 @@ async fn handle_sensor_fault_report(
             "hardware_fault_detected": req.hardware_fault_detected,
             "reason":                  reason,
         });
-        svc.app.store.with(|store| {
+        // P1: durable audit write off the worker pool (own the node id + payload).
+        let event_str = event.to_string();
+        let node_id_c = req.source_node_id.clone();
+        let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
-                &req.source_node_id, "SENSOR_HEALTH_REPORT_FAULT",
-                &event.to_string(), None, now,
+                &node_id_c, "SENSOR_HEALTH_REPORT_FAULT",
+                &event_str, None, now,
             ) {
-                tracing::error!(error=%e, node_id=%req.source_node_id,
+                tracing::error!(error=%e, node_id=%node_id_c,
                     "AUDIT-CHAIN WRITE FAILED for SENSOR_HEALTH_REPORT_FAULT — event missing from tamper-evident log");
             }
-        });
+        }).await;
 
         emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
         enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -2067,20 +2072,24 @@ async fn handle_sensor_fault_report(
                         Json(json!({ "error": "failed to persist node state" }))).into_response();
             }
 
-            svc.app.store.with(|store| {
-                let _ = store.reset_recovery_streak(&req.source_node_id, now);
+            // P1: the recovery-streak reset + its audit write run as ONE off-worker
+            // closure (same single-acquisition grouping as before, just off the pool).
+            let node_id_c = req.source_node_id.clone();
+            let streak_v = *streak;
+            let _ = svc.app.store.call(move |store| {
+                let _ = store.reset_recovery_streak(&node_id_c, now);
                 let event = json!({
-                    "source_node_id": req.source_node_id,
-                    "streak":         streak,
+                    "source_node_id": node_id_c.as_str(),
+                    "streak":         streak_v,
                 });
                 if let Err(e) = store.save_posture_event_chained(
-                    &req.source_node_id, "SENSOR_RECOVERY_CONFIRMED",
+                    &node_id_c, "SENSOR_RECOVERY_CONFIRMED",
                     &event.to_string(), None, now,
                 ) {
-                    tracing::error!(error=%e, node_id=%req.source_node_id,
+                    tracing::error!(error=%e, node_id=%node_id_c,
                         "AUDIT-CHAIN WRITE FAILED for SENSOR_RECOVERY_CONFIRMED — event missing from tamper-evident log");
                 }
-            });
+            }).await;
 
             emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
             enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -2120,28 +2129,33 @@ async fn handle_register_av_asset(
     let now = now_ms();
     let floor = req.confidence_floor.unwrap_or(0.70);
 
-    svc.app.store.with(|store| {
+    // P1: registration + its audit write run as ONE off-worker closure (own the
+    // request fields; node id is reused in the response).
+    let node_id_c = req.node_id.clone();
+    let subsystem_type_c = req.subsystem_type.clone();
+    let hardware_id_c = req.hardware_id.clone();
+    let _ = svc.app.store.call(move |store| {
         if let Err(e) = store.register_av_subsystem_meta(
-            &req.node_id, &req.subsystem_type, &req.hardware_id, floor, now,
+            &node_id_c, &subsystem_type_c, &hardware_id_c, floor, now,
         ) {
             tracing::warn!(
                 error   = %e,
-                node_id = %req.node_id,
+                node_id = %node_id_c,
                 "Failed to register av_subsystem_meta"
             );
         }
         let meta = json!({
-            "subsystem_type":   req.subsystem_type,
-            "hardware_id":      req.hardware_id,
+            "subsystem_type":   subsystem_type_c.as_str(),
+            "hardware_id":      hardware_id_c.as_str(),
             "confidence_floor": floor,
         });
         if let Err(e) = store.save_posture_event_chained(
-            &req.node_id, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
+            &node_id_c, "AV_ASSET_REGISTERED", &meta.to_string(), None, now,
         ) {
-            tracing::error!(error=%e, node_id=%req.node_id,
+            tracing::error!(error=%e, node_id=%node_id_c,
                 "AUDIT-CHAIN WRITE FAILED for AV_ASSET_REGISTERED — event missing from tamper-evident log");
         }
-    });
+    }).await;
 
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
 }
@@ -2290,13 +2304,18 @@ async fn handle_fabric_command(
                         vec![],
                         fabric_generation,
                     );
-                    svc.app.store.with(|store| {
+                    // P1: durable audit write off the worker pool (own the asset id,
+                    // materialize the payload).
+                    let asset_id_owned = asset_id.to_string();
+                    let denied_payload =
+                        json!({"asset_id": asset_id, "action": action_str}).to_string();
+                    let _ = svc.app.store.call(move |store| {
                         let _ = store.save_posture_event_chained(
-                            &asset_id, "FABRIC_COMMAND_DENIED",
-                            &json!({"asset_id": asset_id, "action": action_str}).to_string(),
+                            &asset_id_owned, "FABRIC_COMMAND_DENIED",
+                            &denied_payload,
                             None, now,
                         );
-                    });
+                    }).await;
                     Json(json!({
                         "asset_id": asset_id,
                         "action": action_str,
@@ -2327,13 +2346,16 @@ async fn handle_fabric_command(
                             vec![],
                             fabric_generation,
                         );
-                        svc.app.store.with(|store| {
+                        // P1: durable audit write off the worker pool.
+                        let asset_id_owned = asset_id.to_string();
+                        let enforcement_str = enforcement.to_string();
+                        let _ = svc.app.store.call(move |store| {
                             let _ = store.save_posture_event_chained(
-                                &asset_id, "FABRIC_COMMAND_CLAMPED",
-                                &enforcement.to_string(),
+                                &asset_id_owned, "FABRIC_COMMAND_CLAMPED",
+                                &enforcement_str,
                                 None, now,
                             );
-                        });
+                        }).await;
                     }
 
                     Json(json!({
@@ -6246,5 +6268,57 @@ mod industrial_replay_handler_tests {
         assert_eq!(post(svc.clone(), read_msg("plc-a"), 100, now).await["allowed"], true);
         // plc-b starts fresh; its seq 1 is admitted despite plc-a sitting at 100.
         assert_eq!(post(svc.clone(), read_msg("plc-b"), 1, now).await["allowed"], true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P1 CI GUARD — the per-command audit-chain write must never run sync on a worker
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod store_offload_guard {
+    //! Locks in the review-P1 offload: `save_posture_event_chained` is the hottest
+    //! durable (fsync) write in the service. Running it synchronously on a tokio
+    //! worker via `store.with(..)` head-of-line-blocks every other request handler
+    //! and the fast loop behind one fsync. Every site must instead go through
+    //! `StoreHandle::call(..)` (spawn_blocking). This guard scans the binary source
+    //! and fails if any production `save_posture_event_chained` is reached through a
+    //! synchronous `.store.with(` rather than `.store.call(` — so a future edit
+    //! cannot silently reintroduce a worker-pinning audit write.
+
+    #[test]
+    fn audit_chain_write_is_never_on_a_sync_worker() {
+        // Embeds a compile-time snapshot of this very file (path is relative to it).
+        let src = include_str!("kirra_verifier_service.rs");
+
+        let mut nearest_access = ""; // "with" (sync) | "call" (off-worker)
+        let mut in_test = false; // all handlers precede the first test module here
+        let mut violations: Vec<usize> = Vec::new();
+
+        for (idx, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                in_test = true;
+            }
+            // Track the nearest ENCLOSING store access (last one seen wins; the
+            // production sites place the access immediately above the write).
+            if line.contains(".store.call(") || line.contains(".store.call_read(") {
+                nearest_access = "call";
+            } else if line.contains(".store.with(") || line.contains(".store.with_read(") {
+                nearest_access = "with";
+            }
+            if !in_test
+                && line.contains("save_posture_event_chained")
+                && nearest_access == "with"
+            {
+                violations.push(idx + 1);
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "P1 VIOLATION: `save_posture_event_chained` (the per-command audit-chain fsync) \
+             reached via a SYNCHRONOUS `store.with(` at line(s) {violations:?} — a durable write \
+             on a tokio worker head-of-line-blocks the whole service. Offload it via \
+             `svc.app.store.call(move |store| ...).await` instead.",
+        );
     }
 }
