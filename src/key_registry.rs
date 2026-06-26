@@ -22,13 +22,17 @@
 //! Decision + rationale: `docs/adr/0008-key-registry.md` (ADR-0008).
 //!
 //! ## Named residuals (ADR-0008, honest limits)
-//! - **The audit signing key is resolvable READ-ONLY (#329 residual, Phase A.1).**
-//!   [`KeyRole::AuditSigning`] resolves the chain's verifying key from the store's
-//!   in-memory signer, keyed by the key's `verifying_key_id` fingerprint (the same id
-//!   the audit chain stamps in its `key_id` column) — so a chain row's `key_id` can be
-//!   resolved to a key through the registry. **Rotation + persisted key history remain
-//!   deferred:** the registry knows only the ONE current in-memory key, so a request
-//!   for any fingerprint other than the live signer's is `None`.
+//! - **The audit signing key resolves the live signer AND rotated-out keys
+//!   (#329 residual CLOSED).** [`KeyRole::AuditSigning`] resolves by the key's
+//!   `verifying_key_id` fingerprint (the same id the audit chain stamps in its
+//!   `key_id` column): first the ONE current in-memory signer (the hot path), then
+//!   the durable `audit_key_ledger` ([`VerifierStore::resolve_audit_verifying_key`])
+//!   — so a key that has been ROTATED OUT is still resolvable and the audit-chain
+//!   rows it signed stay verifiable across a rotation. Fail-closed: a fingerprint in
+//!   neither the live signer nor a **self-attested** ledger row (`genesis` /
+//!   `rotation` / `reanchor`) is `None`; a forensic `backfill` row (empty signature)
+//!   is never trusted as a verification key. (The earlier limit — "only the live
+//!   in-memory key resolves" — is removed.)
 //! - **Encoding migration is deferred.** This normalizes at the *read* boundary
 //!   (PEM/b64 → bytes); it does NOT rewrite the stores to one on-disk format. One
 //!   abstraction now; one on-disk encoding is named future work.
@@ -55,10 +59,11 @@ pub enum KeyRole {
     /// `public_key_b64` from `trusted_federation_controllers` — the same registry as
     /// [`KeyRole::FederationController`]; the role marks fleet-grant intent.
     FleetGrant,
-    /// The store's in-memory audit signing key (read-only, #329 residual). The
-    /// `principal_id` is the key's `verifying_key_id` fingerprint (as stamped in the
-    /// audit chain's `key_id`); resolves ONLY the single live signer — there is no
-    /// rotation/history, so any other fingerprint is `None`.
+    /// An audit verifying key, by its `verifying_key_id` fingerprint (as stamped in
+    /// the audit chain's `key_id`). Resolves the live in-memory signer first, then
+    /// falls back to the durable `audit_key_ledger` so a ROTATED-OUT key still
+    /// resolves (#329 residual closed). A forensic `backfill` ledger row is not
+    /// trusted; any unknown fingerprint is `None`.
     AuditSigning,
 }
 
@@ -99,15 +104,21 @@ impl<'a> KeyRegistry<'a> {
                 Some(op) if op.revoked_at_ms.is_none() => pem_to_key_bytes(&op.pubkey_pem),
                 _ => None,
             },
-            KeyRole::AuditSigning => self.store.audit_verifying_key().and_then(|vk| {
-                // Resolve ONLY when the requested fingerprint matches the live signer
-                // (no key history) — fail-closed for any other id.
-                if crate::audit_chain::verifying_key_id(&vk) == principal_id {
+            KeyRole::AuditSigning => match self.store.audit_verifying_key() {
+                // The live in-memory signer (the hot path).
+                Some(vk) if crate::audit_chain::verifying_key_id(&vk) == principal_id => {
                     Some(vk.to_bytes())
-                } else {
-                    None
                 }
-            }),
+                // #329 residual CLOSED: fall back to the durable `audit_key_ledger`,
+                // so a ROTATED-OUT audit key whose `key_id` is recorded there is still
+                // resolvable — audit-chain rows it signed remain verifiable across a key
+                // rotation. Fail-closed: a fingerprint in neither the live signer nor a
+                // self-attested ledger row resolves to `None`.
+                _ => self
+                    .store
+                    .resolve_audit_verifying_key(principal_id)?
+                    .map(|vk| vk.to_bytes()),
+            },
         };
         Ok(bytes)
     }
@@ -316,11 +327,13 @@ mod tests {
             Some(vk.to_bytes()),
             "the live audit key resolves by its verifying_key_id"
         );
-        // Any other fingerprint → None (no rotation / no key history — the residual).
+        // A fingerprint that is neither the live signer NOR in the audit_key_ledger
+        // (this store has no rotations) → None. Fail-closed. (The rotated-out-key
+        // resolution is exercised in `audit_signing_key_resolves_a_rotated_out_key_from_the_ledger`.)
         assert_eq!(
             reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning).unwrap(),
             None,
-            "only the single live signer resolves — rotation/history still deferred"
+            "a fingerprint in neither the live signer nor the ledger → None"
         );
 
         // verify_for over the audit key: good sig true; wrong fingerprint false.
@@ -328,5 +341,54 @@ mod tests {
         let sig = B64.encode(sk.sign(payload).to_bytes());
         assert!(reg.verify_for(&fp, KeyRole::AuditSigning, payload, &sig), "audit-key signature verifies");
         assert!(!reg.verify_for("wrong-fp", KeyRole::AuditSigning, payload, &sig), "wrong fingerprint → false");
+    }
+
+    /// #329 residual CLOSED: after a key rotation, a ROTATED-OUT audit key still
+    /// resolves — from the durable `audit_key_ledger`, not just the live in-memory
+    /// signer — so the audit-chain rows it signed remain verifiable across the
+    /// rotation. (Before, only the single live signer resolved.)
+    #[test]
+    fn audit_signing_key_resolves_a_rotated_out_key_from_the_ledger() {
+        let a = keypair(20).0;
+        let b = keypair(21).0;
+        let c = keypair(22).0;
+        let mut store = store();
+        let kid = |k: &SigningKey| crate::audit_chain::verifying_key_id(&k.verifying_key());
+
+        // Bootstrap genesis A (live), then rotate A→B→C. The live signer is now C;
+        // A and B are RETIRED but recorded as self-attested ledger rows.
+        store.admit_signing_key(a.clone(), true, None, 1_000).expect("admit genesis A");
+        let held = store.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
+        store.record_key_rotation(b.clone(), "scheduled", 2_000, held).expect("rotate A→B");
+        store.record_key_rotation(c.clone(), "scheduled", 3_000, held).expect("rotate B→C");
+
+        let reg = KeyRegistry::new(&store);
+
+        // The LIVE key resolves via the in-memory signer (the hot path).
+        assert_eq!(
+            reg.resolve_ed25519_pubkey(&kid(&c), KeyRole::AuditSigning).unwrap(),
+            Some(c.verifying_key().to_bytes()),
+            "the live signer resolves"
+        );
+        // The ROTATED-OUT key B resolves from the LEDGER — the residual being closed.
+        assert_eq!(
+            reg.resolve_ed25519_pubkey(&kid(&b), KeyRole::AuditSigning).unwrap(),
+            Some(b.verifying_key().to_bytes()),
+            "a rotated-out key resolves from the audit_key_ledger (residual closed)"
+        );
+        // A fingerprint in neither the live signer nor the ledger → None (fail-closed).
+        assert_eq!(
+            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning).unwrap(),
+            None,
+            "an unknown fingerprint resolves to None"
+        );
+
+        // verify_for over a payload signed by the now-rotated-out key B still verifies.
+        let payload = b"an-audit-event-signed-by-the-now-rotated-out-key";
+        let sig = B64.encode(b.sign(payload).to_bytes());
+        assert!(
+            reg.verify_for(&kid(&b), KeyRole::AuditSigning, payload, &sig),
+            "a rotated-out key still verifies the audit rows it signed"
+        );
     }
 }
