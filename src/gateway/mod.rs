@@ -268,7 +268,7 @@ impl KirraLiveGateway {
                                     state: system_state_enum,
                                     mode: gov.trust_mode(),
                                     score: gov.trust_engine.current_score,
-                                    narrative: intercept.mitigation_narrative.clone(),
+                                    narrative: intercept.mitigation_narrative.to_string(),
                                 });
                                 flush_payload = Some(rec.clone());
                             }

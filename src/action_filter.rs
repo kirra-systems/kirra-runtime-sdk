@@ -39,7 +39,7 @@ impl<C: SafetyContract> ActionFilter<C> {
                 FilterOutput {
                     resolution,
                     sanitized_action: AgentAction::MoveLinear { velocity: intercept.sanitized_scalar },
-                    narrative: intercept.mitigation_narrative,
+                    narrative: intercept.mitigation_narrative.into_owned(),
                 }
             }
             AgentAction::Rotate { angular_velocity } => {
