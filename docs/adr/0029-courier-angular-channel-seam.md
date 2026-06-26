@@ -94,11 +94,28 @@ holds a cited copy of its parameters and `omega_max(v)` derivation, tagged with 
   rotation at an excessive `ω` → refused (today's bug); a `default_urban` trajectory verdict
   **byte-identical** to before (frozen proof). SAFETY tag + regenerate the traceability matrix.
 
-**Phase 2 — the live diff-drive deployment (converts AOU-PLATFORM-GEOMETRY-001 DEPLOYMENT-PENDING).**
+**Phase 2 — the live diff-drive deployment (converts AOU-PLATFORM-GEOMETRY-001 DEPLOYMENT-PENDING). LANDED.**
 - Wire the ROS node so the Rosmaster's `(v, ω)` `cmd_vel` is bounded by parko's `DiffDrivePlatform`
   as the **live per-command checker** (the angular model of record) and by `validate_platform_containment`
   for SG2 (already proven), supplied the courier footprint/limits. This is the production node S-PK1
   named as pending; it lives in the ROS runtime and is not unit-testable in CI without ROS.
+- **Realization** (`parko/crates/parko-ros2`): a new `CourierPlatformProfile` (`platform_profile.rs`)
+  holds the courier's footprint + the SOTIF angular `PlatformParams` and builds the courier-parameterized
+  `KirraGovernor` (`with_platform_params`) and the `DiffDrivePlatform<KirraGovernor>` checker. The finding
+  Phase 2 surfaced: the angular bound was **already enforced live** (`KirraGovernor::nominal_angular_clamp`
+  → `omega_max(v)`), but the stock node built `KirraGovernor::new()` = `PlatformParams::conservative_default()`
+  (ω_max(0) ≈ 0.20 rad/s) — a generic bound for an *uncharacterized* platform. The profile parameterizes
+  the live governor (BOTH comparator arms, so they agree by construction) with the courier's
+  `urban_service_robot_reference()` envelope (ω_max(0) ≈ 0.833 rad/s). `ParkoNodeConfig::platform_profile`
+  is `Option<…>`, **default `None`** → the node keeps the conservative default, byte-identical to
+  pre-Phase-2 (fail-safe: an unprofiled deployment gets the *tighter* generic bound). The pure profile +
+  config are unit-tested in parko's stable lane (in-place-rotation admit/clamp at the courier bound, the
+  SG2 containment seam, the profile-vs-default envelope gap); only the ~10-line node-binary governor swap
+  is `required-features = ["ros2"]` and built by the ROS CI lane.
+- **Cited-copy correspondence:** in `parko/` we are the **model of record** — the profile uses parko's own
+  `urban_service_robot_reference()` directly (no copy). The SDK `VehicleConfig::courier()` holds the cited
+  COPY (Phase 1), gated by `courier_angular_bound_matches_parko_record`; the 0.6 × 0.9 m footprint matches
+  both sides.
 
 Phase 1 is the concrete next code step. Phase 2 is the deployment it unblocks; both share the same
 cited-copy angular numbers, so they cannot diverge silently.
@@ -120,6 +137,7 @@ cited-copy angular numbers, so they cannot diverge silently.
 
 ## Status
 
-**Proposed — for owner sign-off** (merge ratifies, as with ADR-0011..0028). Records the angular-channel
-seam, the finding, and the phased plan before code touches the safety enforcement path, so the build
-rests on a written design. Phase 1 implementation (the SDK angular bound) follows on greenlight.
+**Accepted — ratified on merge** (as with ADR-0011..0028). Records the angular-channel seam, the finding,
+and the phased plan. **Phase 1** (the SDK angular bound) landed in #563. **Phase 2** (the live parko-ros2
+`CourierPlatformProfile` + `DiffDrivePlatform` checker) is realized here; the ros2-gated node-binary swap
+is the deployment step built by the ROS CI lane.

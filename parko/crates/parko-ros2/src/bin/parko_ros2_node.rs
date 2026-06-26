@@ -34,6 +34,7 @@ use parko_ros2::{
     comparator_adapter::ComparatorAsGovernor,
     config::ParkoNodeConfig,
     node::run_node,
+    platform_profile::CourierPlatformProfile,
     sensor_mapping::VectorMapping,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -201,6 +202,7 @@ fn build_loop<B>(
     backend: Arc<B>,
     model_path: &str,
     tick_period_s: f64,
+    platform_profile: Option<&CourierPlatformProfile>,
 ) -> Arc<Mutex<InferenceLoop<B>>>
 where
     B: InferenceBackend + 'static,
@@ -244,11 +246,25 @@ where
     // structurally diverse DiverseKirraGovernor shadow, so the comparator can
     // catch implementation-level systematic faults, not just random ones. Every
     // divergence is routed to the selected sink (durable+signed if configured).
-    let comparator = GovernorComparator::with_sink(
-        KirraGovernor::new(),
-        DiverseKirraGovernor::new(),
-        build_divergence_sink(),
-    );
+    //
+    // ADR-0029 Phase 2: when a courier platform profile is configured, BOTH
+    // comparator arms take the courier's SOTIF angular params — so they agree
+    // by construction (a mismatched shadow would spuriously diverge on in-place
+    // rotation between the two bounds and escalate the posture). With no
+    // profile, both keep KirraGovernor/DiverseKirraGovernor `::new()` — the
+    // conservative default, byte-identical to pre-Phase-2.
+    let comparator = match platform_profile {
+        Some(profile) => GovernorComparator::with_sink(
+            profile.angular_governor(),
+            DiverseKirraGovernor::new().with_platform_params(profile.angular_params.clone()),
+            build_divergence_sink(),
+        ),
+        None => GovernorComparator::with_sink(
+            KirraGovernor::new(),
+            DiverseKirraGovernor::new(),
+            build_divergence_sink(),
+        ),
+    };
     let infer = InferenceLoop::new(backend, model, actuator_tx)
         .with_governor(ComparatorAsGovernor(comparator))
         .with_tick_period(tick_period_s);
@@ -341,7 +357,12 @@ async fn main() {
             );
             std::process::exit(2);
         });
-    let infer = build_loop(backend, &model_path, config.tick_period_s);
+    let infer = build_loop(
+        backend,
+        &model_path,
+        config.tick_period_s,
+        config.platform_profile.as_ref(),
+    );
 
     // M2 posture: static, defaults to Nominal. M1b's `PostureTracker`
     // is the reusable mechanism for live posture; the node task
