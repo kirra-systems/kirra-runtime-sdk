@@ -2058,6 +2058,7 @@ dependencies = [
  "r2r",
  "reqwest",
  "serde_json",
+ "smallvec",
  "tokio",
  "tracing",
  "tracing-subscriber",

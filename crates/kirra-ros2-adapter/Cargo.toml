@@ -75,6 +75,10 @@ dashmap = "6"
 # compiled with a sourced ROS distro in CI; under `ros2` the heavy tree is expected.)
 tokio = { version = "1", features = ["full"], optional = true }
 tracing = "0.1"
+# §8: stack-resident predicted-sample buffers — a slow-loop mode's sample run is
+# small (~7 at a 3 s / 0.5 s horizon), so it lives inline instead of a per-mode
+# heap Vec. Pure-Rust, no_std-capable, async/ROS-free.
+smallvec = "1"
 
 # Lean foundation — the corridor seam (`Point`/`CorridorSource`/`MockCorridorSource`)
 # and the trajectory/perception data types (`Pose`/`TrajectoryPoint`/`TrajectoryVerdict`/

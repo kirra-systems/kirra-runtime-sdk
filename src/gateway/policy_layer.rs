@@ -220,6 +220,12 @@ pub async fn enforce_actuator_safety_envelope(
     let proposed_cmd: ProposedVehicleCommand =
         serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    // §7: read the clock ONCE per request and thread it — the perception-cap
+    // staleness read, the capture record, and the audit record all want "now" and
+    // are microseconds apart, so a single `SystemTime::now()` syscall is both
+    // cheaper and more consistent than the three separate reads this path used.
+    let now = now_ms();
+
     // Issue #70: Nominal runs the full envelope; Degraded runs the
     // decel-to-stop-and-HOLD gate (non-increasing speed + no re-initiation)
     // over the MRC envelope. LockedOut was already short-circuited above.
@@ -234,7 +240,7 @@ pub async fn enforce_actuator_safety_envelope(
             let eff_cap = resolve_perception_cap(
                 svc.perception_monitor_enabled,
                 &svc.perception_cap,
-                now_ms(),
+                now,
             );
             let contract = apply_perception_cap(
                 &VehicleKinematicsContract::nominal_reference_profile(),
@@ -266,7 +272,7 @@ pub async fn enforce_actuator_safety_envelope(
             svc.app
                 .capture_decision_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            now_ms(),
+            now,
             &verdict,
             posture,
             &proposed_cmd,
@@ -359,7 +365,7 @@ pub async fn enforce_actuator_safety_envelope(
                     },
                     violation: code.reason(),
                 },
-                created_at_ms: now_ms() as i64,
+                created_at_ms: now as i64,
                 node_id: "actuator_safety_envelope",
                 reason: "Proposed vehicle command violates non-physical invariants",
             };
