@@ -435,6 +435,13 @@ struct VerifyAttestationRequest {
     node_id: String,
     nonce: u64,
     proof_hex: String,
+    /// Measured-boot PCR16 digest the node presents on THIS attestation (hex).
+    /// Bound into the AK-signed proof. Required (and matched against the
+    /// registered `expected_pcr16_digest_hex`) for a node enrolled with a
+    /// measured-boot expectation; `None`/absent for a node with no expectation
+    /// (back-compat). See `attestation::verify_attestation_proof_with_pcr16`.
+    #[serde(default)]
+    presented_pcr16_digest_hex: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -578,25 +585,34 @@ async fn verify_attestation(
     // anyone with the admin token could attest any node. Fail-closed: a node
     // with no registered AK, a malformed key, a malformed proof, or a bad
     // signature is rejected here, before the nonce is consumed or any trust
-    // state is written. PCR16 (measured-boot) quote verification is a
-    // documented follow-up; see src/attestation.rs.
-    let ak_public_pem = match svc.app.nodes.get(&req.node_id) {
-        Some(node) => node.ak_public_pem.clone(),
+    // state is written. PCR16 (measured-boot) binding: when the node registered an
+    // `expected_pcr16_digest_hex`, the proof must carry a matching digest BOUND
+    // into the AK signature (`verify_attestation_proof_with_pcr16`); a node with no
+    // expectation is unaffected. (A hardware TPM *quote* remains the deeper
+    // follow-up; see src/attestation.rs.)
+    let (ak_public_pem, expected_pcr16) = match svc.app.nodes.get(&req.node_id) {
+        Some(node) => (node.ak_public_pem.clone(), node.expected_pcr16_digest_hex.clone()),
         None => return (StatusCode::NOT_FOUND,
                         Json(json!({ "error": "node not registered" }))).into_response(),
     };
 
-    if let Err(reason) = kirra_verifier::attestation::verify_attestation_proof(
+    if let Err(reason) = kirra_verifier::attestation::verify_attestation_proof_with_pcr16(
         ak_public_pem.as_deref(),
         &req.node_id,
         req.nonce,
         &req.proof_hex,
+        expected_pcr16.as_deref(),
+        req.presented_pcr16_digest_hex.as_deref(),
     ) {
-        // No registered key is a precondition failure (403); a present-but-
-        // failing proof is an authentication failure (401). Either way the
-        // attestation is REFUSED — never accepted by default.
+        // No registered key is a precondition failure (403); a measured-boot
+        // mismatch is a forbidden boot state (403); a present-but-failing
+        // signature is an authentication failure (401). Either way the
+        // attestation is REFUSED — never accepted by default, and the nonce is
+        // NOT consumed (this is before `consume_challenge`), so a node can retry
+        // with a corrected measured boot.
+        use kirra_verifier::attestation::AttestationError;
         let status = match reason {
-            kirra_verifier::attestation::AttestationError::NoRegisteredKey => {
+            AttestationError::NoRegisteredKey | AttestationError::Pcr16Mismatch => {
                 StatusCode::FORBIDDEN
             }
             _ => StatusCode::UNAUTHORIZED,
@@ -4447,6 +4463,79 @@ mod attestation_nonce_handler_tests {
         }))
         .expect("build request");
         verify_attestation(State(svc), Json(req)).await.into_response().status()
+    }
+
+    // ---- PCR16 measured-boot binding (attestation follow-up) --------------
+
+    /// `svc_with_registered_node`, but the node is enrolled with an expected
+    /// measured-boot PCR16 digest.
+    fn svc_with_pcr16_node(ak_pem: String, expected_pcr16: &str) -> Arc<ServiceState> {
+        let svc = svc_with_registered_node(ak_pem);
+        let existing = svc.app.nodes.get(NODE).map(|n| n.clone()).unwrap();
+        svc.app
+            .persist_and_insert_node(RegisteredNode {
+                expected_pcr16_digest_hex: Some(expected_pcr16.to_string()),
+                ..existing
+            })
+            .expect("re-register with expected PCR16");
+        svc
+    }
+
+    fn sign_proof_with_pcr16(sk: &SigningKey, node_id: &str, nonce: u64, presented: Option<&str>) -> String {
+        let payload = kirra_verifier::attestation::attestation_signing_payload_with_pcr16(
+            node_id, nonce, presented,
+        );
+        hex::encode(sk.sign(&payload).to_bytes())
+    }
+
+    async fn verify_with_pcr16(
+        svc: Arc<ServiceState>,
+        nonce: u64,
+        proof_hex: String,
+        presented: Option<&str>,
+    ) -> StatusCode {
+        let req: VerifyAttestationRequest = serde_json::from_value(serde_json::json!({
+            "node_id": NODE, "nonce": nonce, "proof_hex": proof_hex,
+            "presented_pcr16_digest_hex": presented,
+        }))
+        .expect("build request");
+        verify_attestation(State(svc), Json(req)).await.into_response().status()
+    }
+
+    /// A node enrolled with an expected PCR16 attests ONLY with a matching digest
+    /// bound into the AK signature; an absent or mismatched digest is refused
+    /// (403) and — critically — does NOT burn the nonce (verify-then-consume), so
+    /// the node can retry after a corrected measured boot.
+    #[tokio::test]
+    async fn attestation_pcr16_match_succeeds_absent_and_mismatch_are_refused() {
+        const X: &str = "abababababababababababababababababababababababababababababababab12";
+        const Y: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd34cd";
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = svc_with_pcr16_node(public_key_to_pem(&node_key.verifying_key()), X);
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        // (a) Expected PCR16 but the node presents none → 403, nonce preserved.
+        let absent = verify(Arc::clone(&svc), nonce, sign_proof(&node_key, NODE, nonce)).await;
+        assert_eq!(absent, StatusCode::FORBIDDEN, "expected PCR16, none presented → 403");
+        assert!(svc.app.pending_challenges.contains_key(NODE), "a PCR16 refusal must not burn the nonce");
+
+        // (b) A wrong digest Y (correctly signed) ≠ the expectation X → 403, preserved.
+        let wrong = verify_with_pcr16(
+            Arc::clone(&svc), nonce, sign_proof_with_pcr16(&node_key, NODE, nonce, Some(Y)), Some(Y),
+        ).await;
+        assert_eq!(wrong, StatusCode::FORBIDDEN, "mismatched PCR16 → 403");
+        assert!(svc.app.pending_challenges.contains_key(NODE), "still not burned");
+
+        // (c) The correct digest X bound into the signature → 200 OK, Trusted.
+        let ok = verify_with_pcr16(
+            Arc::clone(&svc), nonce, sign_proof_with_pcr16(&node_key, NODE, nonce, Some(X)), Some(X),
+        ).await;
+        assert_eq!(ok, StatusCode::OK, "matching bound PCR16 attests");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            "node becomes Trusted after a valid PCR16-bound proof"
+        );
     }
 
     #[tokio::test]
