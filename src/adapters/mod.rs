@@ -198,10 +198,11 @@ mod adapter_trait_tests {
     }
 
     #[test]
-    fn ethernet_ip_write_is_posture_only_bound_default_ok() {
-        // A CIP Set_Attribute_Single write classifies as WriteState, but its value
-        // TYPE is in device config, not the frame — so bound_magnitude is the
-        // fail-closed default no-op (posture-only; never fabricates a magnitude).
+    fn ethernet_ip_write_is_posture_only_when_unconfigured() {
+        // A CIP Set_Attribute_Single write classifies as WriteState. With no
+        // KIRRA_CIP_ATTR_BOUNDS config for this target (the test env), the bound
+        // override returns Ok (posture-only) — a configured target would be
+        // faithfully decoded by its declared type and bounded instead.
         let msg = EtherNetIpMessage {
             command_code: 0x65,
             session_handle: 1,

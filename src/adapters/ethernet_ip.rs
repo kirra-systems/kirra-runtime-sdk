@@ -75,13 +75,241 @@ impl crate::adapters::IndustrialAdapter for EtherNetIpAdapter {
         }
     }
 
-    // POSTURE-ONLY (no override): a CIP write (Set_Attribute_Single / Write_Tag)
-    // carries `data` whose DATA TYPE — and thus value width, signedness, and
-    // scaling — is defined by the target attribute in the device's EDS/object
-    // model, NOT in the frame. Decoding a scalar magnitude from `data` without
-    // that per-attribute type config would be FABRICATION (#85), so EtherNet-IP
-    // stays bounded by posture/classification only until a per-target CIP type
-    // map exists (tracked follow-up). The trait's fail-closed default applies.
+    /// A CIP `Set_Attribute_Single` write to a CONFIGURED `(class, instance,
+    /// attribute)` target is faithfully decoded BY THE CONFIGURED TYPE (the CIP
+    /// attribute's data type — the frame carries only bytes, never type, #85) and
+    /// bounded. Unconfigured targets stay posture-only unless strict mode is on.
+    fn bound_magnitude(msg: &EtherNetIpMessage) -> Result<(), &'static str> {
+        EtherNetIpAdapter::bound_cip_write(msg, global_cip_bounds())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CIP attribute-write magnitude bounding (#85: faithful, config-typed)
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use crate::adapters::BoundSpec;
+
+/// CIP service code for `Set_Attribute_Single` — the write whose `data` is the
+/// bare attribute value (no embedded CIP type header), so it is faithfully
+/// decodable against a per-attribute type config.
+const CIP_SET_ATTRIBUTE_SINGLE: u8 = 0x10;
+
+/// Env var carrying per-attribute CIP write bounds. Format: comma-separated
+/// `class:instance:attr=type:min:max`, e.g. `0x0A:1:3=i16:-500:500`. `class`,
+/// `instance`, `attr` are `u16` (decimal or `0x`-hex); `type` ∈
+/// {i8,u8,i16,u16,i32,u32,f32,f64}. Unset → CIP writes are posture-only. A
+/// malformed entry is SKIPPED, never fabricated.
+pub const CIP_ATTR_BOUNDS_ENV: &str = "KIRRA_CIP_ATTR_BOUNDS";
+
+/// When `1`/`true`, a CIP `Set_Attribute_Single` to a target with NO configured
+/// bound is DENIED (high-assurance mode) instead of falling through to
+/// posture-only. Reads / other services are unaffected.
+pub const CIP_STRICT_BOUNDS_ENV: &str = "KIRRA_CIP_STRICT_BOUNDS";
+
+/// Per-`(class, instance, attribute)` CIP write bounds + the strict-mode flag.
+#[derive(Debug, Clone, Default)]
+pub struct CipAttrBounds {
+    map: HashMap<(u16, u16, u16), BoundSpec>,
+    strict: bool,
+}
+
+impl CipAttrBounds {
+    /// Parse the env spec. Malformed entries are skipped (never fabricated).
+    pub fn parse(spec: &str, strict: bool) -> Self {
+        let mut map = HashMap::new();
+        for entry in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((target, bound)) = entry.split_once('=') else {
+                continue;
+            };
+            let mut t = target.splitn(3, ':');
+            let (Some(c), Some(i), Some(a)) = (t.next(), t.next(), t.next()) else {
+                continue;
+            };
+            let (Some(class), Some(instance), Some(attr)) =
+                (parse_u16_radix(c), parse_u16_radix(i), parse_u16_radix(a))
+            else {
+                continue;
+            };
+            let Some(b) = BoundSpec::parse(bound) else {
+                continue;
+            };
+            map.insert((class, instance, attr), b);
+        }
+        Self { map, strict }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// Parse a `u16` in decimal or `0x`-hex.
+fn parse_u16_radix(s: &str) -> Option<u16> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u16>().ok()
+    }
+}
+
+impl EtherNetIpAdapter {
+    /// MAGNITUDE BOUND — a CIP `Set_Attribute_Single` (0x10) write to a CONFIGURED
+    /// `(class, instance, attribute)` target must carry a value within the declared
+    /// envelope, decoded BY THE CONFIGURED TYPE (the CIP attribute's data type;
+    /// the frame carries only bytes, #85). Fail-closed:
+    ///   - a non-`Set_Attribute_Single` service → `Ok` (no faithfully-located scalar:
+    ///     reads carry none; `Write_Tag`/`Execute_Service` embed a CIP type/count
+    ///     header this simplified model does not separate, so they stay posture-only),
+    ///   - a write to an UNCONFIGURED target → `Ok` unless strict mode (then denied),
+    ///   - value bytes too short for the type → `Err`,
+    ///   - value outside `[min, max]` → `Err`.
+    pub fn bound_cip_write(
+        msg: &EtherNetIpMessage,
+        bounds: &CipAttrBounds,
+    ) -> Result<(), &'static str> {
+        // Only Set_Attribute_Single carries the bare attribute value in `data`.
+        if msg.service_code != CIP_SET_ATTRIBUTE_SINGLE {
+            return Ok(());
+        }
+        let key = (msg.class_id, msg.instance_id, msg.attribute_id);
+        let Some(spec) = bounds.map.get(&key) else {
+            return if bounds.strict {
+                Err("CIP_UNCONFIGURED_TARGET_STRICT")
+            } else {
+                Ok(())
+            };
+        };
+        spec.check(
+            &msg.data,
+            "CIP_VALUE_UNDECODABLE",
+            "CIP_VALUE_NONFINITE",
+            "CIP_VALUE_ENVELOPE_BREACH",
+        )
+    }
+}
+
+static GLOBAL_CIP_BOUNDS: OnceLock<CipAttrBounds> = OnceLock::new();
+
+/// Read `KIRRA_CIP_ATTR_BOUNDS` (+ `KIRRA_CIP_STRICT_BOUNDS`) once into the
+/// process-wide bounds, at startup. Mirrors the CANopen / DNP3 inits — kept out
+/// of `AppState`/`ServiceState`. Idempotent.
+pub fn init_cip_bounds_from_env() {
+    let _ = GLOBAL_CIP_BOUNDS.set(load_cip_bounds_from_env());
+}
+
+/// The process-wide CIP attribute bounds, lazily loaded on first use if
+/// `init_cip_bounds_from_env` was never called.
+pub fn global_cip_bounds() -> &'static CipAttrBounds {
+    GLOBAL_CIP_BOUNDS.get_or_init(load_cip_bounds_from_env)
+}
+
+fn load_cip_bounds_from_env() -> CipAttrBounds {
+    let spec = std::env::var(CIP_ATTR_BOUNDS_ENV).unwrap_or_default();
+    let strict = std::env::var(CIP_STRICT_BOUNDS_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    CipAttrBounds::parse(&spec, strict)
+}
+
+#[cfg(test)]
+mod cip_bounds_tests {
+    use super::*;
+
+    /// A CIP write to (class, instance, attr) carrying `value` as the attribute data.
+    fn cip_write(service: u8, class: u16, instance: u16, attr: u16, value: &[u8]) -> EtherNetIpMessage {
+        EtherNetIpMessage {
+            command_code: 0x0065,
+            session_handle: 1,
+            status: 0,
+            service_code: service,
+            class_id: class,
+            instance_id: instance,
+            attribute_id: attr,
+            data: value.to_vec(),
+            source_node: "plc_01".into(),
+        }
+    }
+
+    fn bounds(spec: &str, strict: bool) -> CipAttrBounds {
+        CipAttrBounds::parse(spec, strict)
+    }
+
+    #[test]
+    fn config_parses_decimal_and_hex_targets() {
+        let b = bounds("0x0A:1:3=i16:-500:500, 100:2:4=u8:0:100", false);
+        assert!(b.map.contains_key(&(0x0A, 1, 3)));
+        assert!(b.map.contains_key(&(100, 2, 4)));
+    }
+
+    #[test]
+    fn in_range_set_attribute_is_admitted() {
+        let b = bounds("0x0A:1:3=i16:-500:500", false);
+        let msg = cip_write(0x10, 0x0A, 1, 3, &100i16.to_le_bytes());
+        assert_eq!(EtherNetIpAdapter::bound_cip_write(&msg, &b), Ok(()));
+    }
+
+    #[test]
+    fn out_of_range_set_attribute_is_denied() {
+        let b = bounds("0x0A:1:3=i16:-500:500", false);
+        let msg = cip_write(0x10, 0x0A, 1, 3, &5000i16.to_le_bytes());
+        assert_eq!(
+            EtherNetIpAdapter::bound_cip_write(&msg, &b),
+            Err("CIP_VALUE_ENVELOPE_BREACH")
+        );
+    }
+
+    #[test]
+    fn signedness_is_decided_by_the_configured_type() {
+        // -200 (i16 LE) is in [-500,500]; the same bytes as u16 are 65336 (breach).
+        let b_i16 = bounds("0x0A:1:3=i16:-500:500", false);
+        let b_u16 = bounds("0x0A:1:3=u16:0:500", false);
+        let msg = cip_write(0x10, 0x0A, 1, 3, &(-200i16).to_le_bytes());
+        assert_eq!(EtherNetIpAdapter::bound_cip_write(&msg, &b_i16), Ok(()));
+        assert_eq!(
+            EtherNetIpAdapter::bound_cip_write(&msg, &b_u16),
+            Err("CIP_VALUE_ENVELOPE_BREACH")
+        );
+    }
+
+    #[test]
+    fn truncated_value_for_configured_type_is_undecodable() {
+        let b = bounds("0x0A:1:3=i32:-1:1", false);
+        // Only 2 bytes for a configured 4-byte i32.
+        let msg = cip_write(0x10, 0x0A, 1, 3, &[0x01, 0x00]);
+        assert_eq!(
+            EtherNetIpAdapter::bound_cip_write(&msg, &b),
+            Err("CIP_VALUE_UNDECODABLE")
+        );
+    }
+
+    #[test]
+    fn unconfigured_target_is_posture_only_unless_strict() {
+        let lax = bounds("0x0A:1:3=i16:-500:500", false);
+        let strict = bounds("0x0A:1:3=i16:-500:500", true);
+        // Different attribute → unconfigured.
+        let msg = cip_write(0x10, 0x0A, 1, 9, &100i16.to_le_bytes());
+        assert_eq!(EtherNetIpAdapter::bound_cip_write(&msg, &lax), Ok(()));
+        assert_eq!(
+            EtherNetIpAdapter::bound_cip_write(&msg, &strict),
+            Err("CIP_UNCONFIGURED_TARGET_STRICT")
+        );
+    }
+
+    #[test]
+    fn non_set_attribute_services_are_not_bounded() {
+        // Strict mode, configured target — but a READ (Get_Attribute_Single) and a
+        // Write_Tag carry no faithfully-located scalar here, so both pass.
+        let b = bounds("0x0A:1:3=i16:-500:500", true);
+        let read = cip_write(0x0E, 0x0A, 1, 3, &9999i16.to_le_bytes());
+        assert_eq!(EtherNetIpAdapter::bound_cip_write(&read, &b), Ok(()));
+        let write_tag = cip_write(0x4D, 0x0A, 1, 3, &9999i16.to_le_bytes());
+        assert_eq!(EtherNetIpAdapter::bound_cip_write(&write_tag, &b), Ok(()));
+    }
 }
 
 #[cfg(test)]
