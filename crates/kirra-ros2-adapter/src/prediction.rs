@@ -29,6 +29,14 @@ use crate::validation::{PredictedMode, PredictedSample};
 /// duplicate the CV hypothesis and the worst-case is unchanged).
 pub const CTRV_YAW_EPS_RAD_S: f64 = 0.02;
 
+/// Plausibility ceiling on a turning object's lateral acceleration (m/s² ≈ 1 g). A CTRV
+/// hypothesis implies a lateral accel of `speed·|yaw|` (= v²/R); a value beyond this is
+/// PHYSICALLY IMPOSSIBLE for a road vehicle (tyre grip ≈ 1 g), so such a yaw is tracker NOISE,
+/// not a real turn. Emitting its (sharp-curve) CTRV mode would only manufacture a spurious
+/// breach → spurious MRC, so the yaw is rejected and the object degrades to CV-only. A genuine
+/// sharp turn happens at LOW speed (small `speed·yaw`) and is never rejected.
+pub const CTRV_MAX_LATERAL_ACCEL_MPS2: f64 = 10.0;
+
 /// An owned predicted mode (owns its samples, unlike the borrowed [`PredictedMode`] the checker
 /// consumes). Build the borrowed view with [`as_mode`](Self::as_mode) at the call site.
 #[derive(Debug, Clone)]
@@ -148,7 +156,15 @@ pub fn predicted_modes_from_objects(
     for obj in objects {
         modes.push(OwnedPredictedMode { object_id: obj.id, samples: cv_samples(obj, horizon_s, dt) });
         if let Some(&(_, yaw)) = yaw_rates.iter().find(|(id, _)| *id == obj.id) {
-            if yaw.abs() > CTRV_YAW_EPS_RAD_S {
+            // A distinct CTRV mode only when the yaw is BOTH non-negligible AND
+            // CONSISTENT with the object's speed: `speed·|yaw|` (the implied
+            // lateral accel) within a physical cornering ceiling. A yaw beyond it
+            // is tracker noise — its sharp-curve CTRV would manufacture a spurious
+            // breach — so the object degrades to CV-only (A2).
+            let implied_lateral_accel = obj.velocity_mps * yaw.abs();
+            if yaw.abs() > CTRV_YAW_EPS_RAD_S
+                && implied_lateral_accel <= CTRV_MAX_LATERAL_ACCEL_MPS2
+            {
                 modes.push(OwnedPredictedMode { object_id: obj.id, samples: ctrv_samples(obj, yaw, horizon_s, dt) });
             }
         }
@@ -225,6 +241,23 @@ mod tests {
         let o = obj(1, 10.0, 0.0, 3.0, 0.0);
         let modes = predicted_modes_from_objects(&[o], &[(1, 0.005)], &[], 2.0, 0.5);
         assert_eq!(modes.len(), 1, "sub-epsilon yaw → no duplicate CTRV mode");
+    }
+
+    #[test]
+    fn an_implausible_yaw_for_the_speed_is_rejected_as_noise() {
+        // 20 m/s with a 1.0 rad/s turn → implied lateral accel 20 m/s² (>1 g):
+        // physically impossible for a road vehicle, so the yaw is tracker noise
+        // and its CTRV mode is NOT emitted (CV-only) — no spurious sharp-curve
+        // breach (A2).
+        let fast = obj(1, 10.0, 0.0, 20.0, 0.0);
+        let modes = predicted_modes_from_objects(&[fast], &[(1, 1.0)], &[], 2.0, 0.5);
+        assert_eq!(modes.len(), 1, "implausible speed·yaw → CV-only, CTRV rejected");
+
+        // The SAME turn rate at a LOW speed (2 m/s → 2 m/s² lateral) is a genuine
+        // tight turn and IS emitted — the check filters noise, not real maneuvers.
+        let slow = obj(2, 10.0, 0.0, 2.0, 0.0);
+        let modes = predicted_modes_from_objects(&[slow], &[(2, 1.0)], &[], 2.0, 0.5);
+        assert_eq!(modes.len(), 2, "plausible low-speed sharp turn → CV + CTRV");
     }
 
     #[test]
