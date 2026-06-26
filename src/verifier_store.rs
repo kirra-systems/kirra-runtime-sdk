@@ -547,6 +547,19 @@ impl VerifierStore {
             [],
         )?;
 
+        // Per-source monotonic sequence high-water mark for industrial-message
+        // replay protection (IEC 62443). One row per `source_id`; a message whose
+        // sequence is <= the stored high-water mark is a replay/regress and is
+        // rejected. Durable (survives restart) so a replay cannot ride a restart.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS industrial_message_seq (
+                source_id     TEXT    PRIMARY KEY,
+                last_sequence INTEGER NOT NULL,
+                last_seen_ms  INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
         // HA fencing token (durable epoch). Singleton row (CHECK id = 1).
         // The `epoch` column is the source of truth for "which generation of
         // Active currently owns writes." Promotion bumps it via a conditional
@@ -1984,6 +1997,36 @@ impl VerifierStore {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Per-source monotonic sequence gate for industrial-message replay protection.
+    ///
+    /// Returns `Ok(true)` when `sequence` is STRICTLY greater than the last-seen
+    /// high-water mark for `source_id` — the message is fresh-in-order and the
+    /// high-water mark is advanced to it — or `Ok(false)` when `sequence <=` the
+    /// stored mark (a replay or out-of-order regress → the caller must reject; the
+    /// mark is NOT advanced). The first message from a new source establishes the
+    /// baseline (any sequence accepted once).
+    ///
+    /// The check-and-advance is a single atomic `INSERT … ON CONFLICT … DO UPDATE …
+    /// WHERE ? > last_sequence`: under the store mutex, two concurrent ingests of the
+    /// same captured sequence cannot both win (the conditional UPDATE makes it a true
+    /// compare-and-set, like the federation nonce burn / HA epoch CAS). Durable, so a
+    /// replay cannot ride a restart.
+    pub fn industrial_seq_check_and_advance(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO industrial_message_seq (source_id, last_sequence, last_seen_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(source_id) DO UPDATE SET last_sequence = ?2, last_seen_ms = ?3
+             WHERE ?2 > industrial_message_seq.last_sequence",
+            params![source_id, sequence as i64, now_ms as i64],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Atomically *burn* a nonce: claim it on first use, reject it on replay.
@@ -5577,5 +5620,63 @@ mod federation_v2_wiring_tests {
         let json_rows = s.load_federated_reports_for_asset("camera_front").unwrap();
         assert_eq!(json_rows[0]["source_generation"], serde_json::Value::Null,
             "a v1 report's generation must serialize as null");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Industrial-message replay protection — per-source monotonic sequence gate.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod industrial_seq_tests {
+    use super::VerifierStore;
+
+    #[test]
+    fn first_message_from_a_source_is_accepted_then_monotonic() {
+        let s = VerifierStore::new(":memory:").unwrap();
+        // First message establishes the baseline.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 10, 1_000), Ok(true));
+        // Strictly-greater advances.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 11, 1_001), Ok(true));
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 50, 1_002), Ok(true));
+        // Equal = replay; lower = regress — both rejected, mark NOT advanced.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 50, 1_003), Ok(false), "equal seq is a replay");
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 20, 1_004), Ok(false), "lower seq is a regress");
+        // After rejects, the mark is still 50 → 51 advances.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 51, 1_005), Ok(true));
+    }
+
+    #[test]
+    fn sources_are_independent() {
+        let s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 100, 1_000), Ok(true));
+        // A different source starts fresh at its own baseline.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-b", 1, 1_001), Ok(true));
+        assert_eq!(s.industrial_seq_check_and_advance("plc-b", 2, 1_002), Ok(true));
+        // plc-a's mark (100) is unaffected by plc-b.
+        assert_eq!(s.industrial_seq_check_and_advance("plc-a", 100, 1_003), Ok(false));
+    }
+
+    #[test]
+    fn replayed_sequence_stays_rejected_across_reopen() {
+        // Durability: a per-source mark persists, so a replay cannot ride a restart.
+        let path = format!(
+            "{}/kirra_seq_{}.sqlite",
+            std::env::temp_dir().display(),
+            std::process::id()
+        );
+        {
+            let s = VerifierStore::new(&path).unwrap();
+            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 42, 1_000), Ok(true));
+        }
+        {
+            let s = VerifierStore::new(&path).unwrap();
+            // 42 was already seen before the reopen → still a replay.
+            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 42, 2_000), Ok(false),
+                "a replay must stay rejected across restart");
+            assert_eq!(s.industrial_seq_check_and_advance("plc-a", 43, 2_001), Ok(true));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
     }
 }

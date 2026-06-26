@@ -119,6 +119,13 @@ use crate::adapters::dnp3::{Dnp3Adapter, Dnp3Message};
 pub struct UnifiedIndustrialRequest {
     pub protocol: IndustrialProtocol,
     pub message: serde_json::Value,
+    /// Per-source replay key (e.g. the gateway/RTU id). Required for the
+    /// handler-layer replay gate; unused by the pure `evaluate_*` logic.
+    pub source_id: String,
+    /// Monotonic per-source sequence (replay/regress gate).
+    pub sequence: u64,
+    /// Message timestamp (ms since epoch) for the freshness window.
+    pub timestamp_ms: u64,
 }
 
 #[derive(Debug)]
@@ -286,6 +293,53 @@ pub fn command_allowed_for_posture_pub(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Industrial-message replay / freshness protection (IEC 62443)
+// ---------------------------------------------------------------------------
+
+/// Max age (and max future skew) of an industrial message's `timestamp_ms`
+/// relative to the local clock. Mirrors the federation replay window: a message
+/// outside this window is rejected even if its sequence is in order, bounding the
+/// delayed-delivery replay surface. The per-source monotonic `sequence` gate
+/// (`VerifierStore::industrial_seq_check_and_advance`) is the within-window
+/// replay defense; this is the freshness half.
+pub const INDUSTRIAL_FRESHNESS_WINDOW_MS: u64 = 5_000;
+
+/// Pure freshness classification for an industrial message. Returns `Some(reason)`
+/// when the message is too old or too far in the future (fail-closed), else `None`.
+/// Uses `saturating_sub` so a backward/forward clock step can never underflow.
+pub fn classify_industrial_freshness(
+    timestamp_ms: u64,
+    now_ms: u64,
+    window_ms: u64,
+) -> Option<&'static str> {
+    if now_ms.saturating_sub(timestamp_ms) > window_ms {
+        return Some("INDUSTRIAL_MESSAGE_STALE");
+    }
+    if timestamp_ms.saturating_sub(now_ms) > window_ms {
+        return Some("INDUSTRIAL_MESSAGE_FUTURE_DATED");
+    }
+    None
+}
+
+#[cfg(test)]
+mod industrial_freshness_tests {
+    use super::{classify_industrial_freshness, INDUSTRIAL_FRESHNESS_WINDOW_MS as W};
+
+    #[test]
+    fn fresh_message_passes() {
+        assert_eq!(classify_industrial_freshness(1_000, 1_000, W), None);
+        assert_eq!(classify_industrial_freshness(1_000, 1_000 + W, W), None, "exactly at the window edge is fresh");
+        assert_eq!(classify_industrial_freshness(1_000 + W, 1_000, W), None, "edge future is fresh");
+    }
+
+    #[test]
+    fn stale_and_future_are_rejected() {
+        assert_eq!(classify_industrial_freshness(1_000, 1_000 + W + 1, W), Some("INDUSTRIAL_MESSAGE_STALE"));
+        assert_eq!(classify_industrial_freshness(1_000 + W + 1, 1_000, W), Some("INDUSTRIAL_MESSAGE_FUTURE_DATED"));
+    }
+}
+
 #[cfg(test)]
 mod no_fabricated_velocity_tests {
     use super::*;
@@ -386,6 +440,7 @@ mod unified_tests {
                 "data": [],
                 "source_node": "plc_01"
             }),
+            source_id: "plc_01".to_string(), sequence: 1, timestamp_ms: 0,
         }
     }
 
@@ -398,6 +453,7 @@ mod unified_tests {
                 "data": data,
                 "source_node": "can_01"
             }),
+            source_id: "can_01".to_string(), sequence: 1, timestamp_ms: 0,
         }
     }
 
@@ -412,6 +468,7 @@ mod unified_tests {
                 "objects": [],
                 "source_node": "sub_01"
             }),
+            source_id: "sub_01".to_string(), sequence: 1, timestamp_ms: 0,
         }
     }
 
@@ -460,6 +517,7 @@ mod unified_tests {
         let req = UnifiedIndustrialRequest {
             protocol: IndustrialProtocol::EthernetIp,
             message: serde_json::json!({"bad": "data"}),
+            source_id: "x".to_string(), sequence: 1, timestamp_ms: 0,
         };
         let result = evaluate_unified_industrial_request(req, FleetPosture::Nominal);
         assert!(result.is_err());
@@ -502,6 +560,7 @@ mod unified_tests {
                 "objects": [{ "group": 41, "variation": 1, "data": 50i32.to_le_bytes().to_vec() }],
                 "source_node": "sub_01"
             }),
+            source_id: "sub_01".to_string(), sequence: 1, timestamp_ms: 0,
         };
         let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
         assert!(!r.allowed, "an unbounded analog control must be denied (fail-closed)");
