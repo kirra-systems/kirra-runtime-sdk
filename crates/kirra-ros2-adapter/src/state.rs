@@ -278,12 +278,20 @@ pub struct AdaptorState {
     pub last_frame_integrity_ms: Arc<AtomicU64>,
 }
 
+/// Process-monotonic millisecond clock for ALL freshness / staleness / window
+/// math in the adapter (subscription stamps, `AcceptedTrajectory::promoted_at_ms`,
+/// PostureTracker windows). Anchored at first use; only DIFFERENCES are
+/// meaningful — which is all freshness needs (`now - stamp`). Unlike `SystemTime`
+/// (wall-clock), a forward NTP / clock STEP cannot inflate an age and spuriously
+/// trip staleness → fleet-wide MRC (review B4): `Instant` is guaranteed
+/// non-decreasing. Wall-clock time is reserved for audit/correlation record
+/// timestamps only (AOU-TIMESYNC-001), NEVER for staleness.
 #[inline]
-fn now_ms_wall() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+pub fn monotonic_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 impl AdaptorState {
@@ -370,7 +378,7 @@ impl AdaptorState {
     /// the guard so subsequent reads return the new value rather than
     /// inheriting the poison.
     pub fn update_posture(&self, posture: FleetPosture) {
-        let now = now_ms_wall();
+        let now = monotonic_now_ms();
         match self.posture_tracker.write() {
             Ok(mut guard) => guard.observe(now, posture),
             Err(poisoned) => poisoned.into_inner().observe(now, posture),
@@ -378,11 +386,12 @@ impl AdaptorState {
     }
 
     /// Reads the effective fleet posture from the tracker at the current
-    /// wall-clock instant. Fail-closed: a poisoned lock returns
+    /// MONOTONIC instant (B4: the tracker's event-aging windows must not be
+    /// inflated by a wall-clock step). Fail-closed: a poisoned lock returns
     /// `Degraded` rather than `Nominal` so a panic in the writer can
     /// never widen the envelope.
     pub fn current_posture(&self) -> FleetPosture {
-        let now = now_ms_wall();
+        let now = monotonic_now_ms();
         match self.posture_tracker.read() {
             Ok(guard) => guard.current_posture(now),
             // Defensive — if the lock is poisoned and we can't read it,
@@ -639,6 +648,27 @@ impl AdaptorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monotonic_now_ms_never_decreases() {
+        // The freshness clock must be non-decreasing across calls (B4): an age
+        // `now - stamp` can then never go NEGATIVE-then-saturate or inflate from a
+        // wall-clock step. `Instant` guarantees monotonicity; this pins it.
+        let a = monotonic_now_ms();
+        let b = monotonic_now_ms();
+        let c = monotonic_now_ms();
+        assert!(b >= a, "monotonic clock went backwards: {b} < {a}");
+        assert!(c >= b, "monotonic clock went backwards: {c} < {b}");
+    }
+
+    #[test]
+    fn monotonic_age_is_bounded_and_non_inflating() {
+        // A stamp taken now, checked an instant later, yields a small age — never
+        // a huge "age since wall epoch". This is the property staleness relies on.
+        let stamp = monotonic_now_ms();
+        let age = monotonic_now_ms().saturating_sub(stamp);
+        assert!(age < 60_000, "an immediate re-check must not look stale (age={age}ms)");
+    }
 
     fn pt(x: f64, y: f64, v: f64, t: f64) -> TrajectoryPoint {
         TrajectoryPoint {
