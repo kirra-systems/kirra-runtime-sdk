@@ -130,15 +130,38 @@ pub struct KirraKernelGovernor<C: SafetyContract> {
     pub constraint_cap_max: f64,
 }
 
+/// Order- and NaN-tolerant clamp (B5). `f64::clamp` PANICS when `lo > hi` or
+/// either bound is NaN — and under release `panic = "abort"` that panic is a
+/// governor process kill. This normalizes the bound order and ignores a single
+/// NaN bound, so a misconfigured/inverted cap or contract bound degrades to a
+/// valid clamp instead of aborting the safety governor. (With both bounds NaN
+/// the value passes through unclamped, but the demand is already envelope-bounded
+/// upstream and the construction-time normalization keeps the stored cap finite.)
+#[inline]
+fn safe_clamp(value: f64, lo: f64, hi: f64) -> f64 {
+    value.max(lo.min(hi)).min(lo.max(hi))
+}
+
 impl<C: SafetyContract> KirraKernelGovernor<C> {
     pub fn new(contract: C, initial_scalar: f64, cap_min: f64, cap_max: f64) -> Self {
+        // B5: a misconfigured cap — an inverted pair (`cap_min > cap_max`, e.g. a
+        // sign typo) or a non-finite bound — would make the Degraded
+        // `ApplyVelocityCap` clamp in `evaluate()` panic, and under release
+        // `panic = "abort"` that kills the governor process. Normalize at
+        // construction so the STORED cap is always a valid ordered range: swap an
+        // inverted pair (recovers the likely intent), and let a single NaN collapse
+        // to its finite partner via `min`/`max`. `safe_clamp` at the use sites is
+        // the runtime backstop for any residual (e.g. both-NaN) case. A startup
+        // sentinel remains the right place to FAIL-FAST on such a config.
+        let constraint_cap_min = cap_min.min(cap_max);
+        let constraint_cap_max = cap_min.max(cap_max);
         Self {
             contract,
             trust_engine: RuntimeTrustEngine::new(),
             last_validated_scalar: initial_scalar,
             continuous_rate_breach_ticks: 0,
-            constraint_cap_min: cap_min,
-            constraint_cap_max: cap_max,
+            constraint_cap_min,
+            constraint_cap_max,
         }
     }
 }
@@ -209,7 +232,7 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
         if is_out_of_envelope { cumulative_penalty += 30; }
         if self.continuous_rate_breach_ticks > 5 { cumulative_penalty += 15; }
 
-        let core_bounded_demand = proposed_demand.clamp(self.contract.min_bound(), self.contract.max_bound());
+        let core_bounded_demand = safe_clamp(proposed_demand, self.contract.min_bound(), self.contract.max_bound());
 
         let (sanitized_scalar, mitigation): (f64, MitigationCode) = match active_action {
             BehavioralAction::ExecuteUnrestricted => {
@@ -224,16 +247,18 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                     // envelope when the constructor caps are wider than the bounds; the
                     // unconditional clamp guarantees the emitted scalar is in-envelope,
                     // matching the AV path's `validate_vehicle_command`.
-                    let rate_clamped_value = (self.last_validated_scalar
-                        + (self.contract.max_rate() * dt * step_direction))
-                        .clamp(self.contract.min_bound(), self.contract.max_bound());
+                    let rate_clamped_value = safe_clamp(
+                        self.last_validated_scalar + (self.contract.max_rate() * dt * step_direction),
+                        self.contract.min_bound(),
+                        self.contract.max_bound(),
+                    );
                     (rate_clamped_value, MitigationCode::RateClampEnforced { max_rate: self.contract.max_rate() })
                 } else {
                     (proposed_demand, MitigationCode::PassthroughUnrestrictedNormal)
                 }
             }
             BehavioralAction::ApplyVelocityCap => {
-                let clamped_value = core_bounded_demand.clamp(self.constraint_cap_min, self.constraint_cap_max);
+                let clamped_value = safe_clamp(core_bounded_demand, self.constraint_cap_min, self.constraint_cap_max);
                 (clamped_value, MitigationCode::DegradedPostureClamp { cap_min: self.constraint_cap_min, cap_max: self.constraint_cap_max })
             }
             BehavioralAction::ForceStationaryHold => {
@@ -409,5 +434,51 @@ mod governor_nonfinite_tests {
             "rate-clamped output {} must be inside the hard envelope [-2, 2] (invariant #8)",
             out.sanitized_scalar
         );
+    }
+
+    fn contract() -> KinematicContract {
+        KinematicContract {
+            max_linear_velocity: 2.0,
+            max_angular_velocity: 1.0,
+            max_linear_acceleration: 10.0,
+            fallback_linear_speed: 0.0,
+        }
+    }
+
+    #[test]
+    fn inverted_cap_is_normalized_not_paniced_b5() {
+        // B5: a sign-typo'd cap (cap_min > cap_max) previously made the Degraded
+        // `ApplyVelocityCap` `f64::clamp` panic — and under release `panic =
+        // "abort"` that kills the governor. Construction must normalize the pair to
+        // a valid ordered range instead of aborting.
+        let g = KirraKernelGovernor::new(contract(), 0.0, 2.0, -2.0);
+        assert!(
+            g.constraint_cap_min <= g.constraint_cap_max,
+            "an inverted cap must be normalized to an ordered range"
+        );
+        assert_eq!((g.constraint_cap_min, g.constraint_cap_max), (-2.0, 2.0));
+    }
+
+    #[test]
+    fn safe_clamp_is_order_and_nan_tolerant_b5() {
+        use super::safe_clamp;
+        // Inverted bounds behave as a valid clamp; never panics.
+        assert_eq!(safe_clamp(5.0, 2.0, -2.0), 2.0);
+        assert_eq!(safe_clamp(-5.0, 2.0, -2.0), -2.0);
+        assert_eq!(safe_clamp(0.5, -2.0, 2.0), 0.5);
+        // A single NaN bound collapses to the finite partner (no panic).
+        assert_eq!(safe_clamp(5.0, f64::NAN, 2.0), 2.0);
+        assert_eq!(safe_clamp(-5.0, -2.0, f64::NAN), -2.0);
+        // Both-NaN passes the (already envelope-bounded) value through, no panic.
+        assert!(safe_clamp(1.5, f64::NAN, f64::NAN).is_finite());
+    }
+
+    #[test]
+    fn evaluate_with_inverted_cap_never_panics_b5() {
+        // End-to-end: a governor built with an inverted cap must `evaluate()`
+        // without aborting and still return a finite scalar.
+        let mut g = KirraKernelGovernor::new(contract(), 0.0, 2.0, -2.0);
+        let out = g.evaluate(1.0, 0.05);
+        assert!(out.sanitized_scalar.is_finite());
     }
 }
