@@ -79,17 +79,126 @@ pub enum TrustMode {
     LockedOut,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GovernorInterceptResult {
     pub sanitized_scalar: f64,
     pub asset_in_safe_control_state: bool,
-    /// `Cow` so the common/failsafe branches carry a `&'static str` discriminant
-    /// with ZERO allocation (the FFI scalar path discards this every tick), while
-    /// the off-nominal clamp branches still embed their numeric detail via an owned
-    /// `format!` — preserving the exact audit-narrative content.
-    pub mitigation_narrative: std::borrow::Cow<'static, str>,
+    /// Structured, `Copy` mitigation code (§8). Replaces the prior per-tick
+    /// `Cow<'static, str>` narrative: EVERY branch — including the three
+    /// off-nominal clamps that used to `format!` a `String` on each `evaluate`
+    /// — now carries only a tag + the numeric detail as `f64` fields, so the
+    /// governor's hot scalar/FFI path (which discards the narrative every tick)
+    /// is ZERO-ALLOC for all verdicts. The human/audit string is formatted
+    /// LAZILY at the record/log sink via `Display`.
+    pub mitigation: MitigationCode,
     pub was_unsafe_attempt: bool,
     pub was_rate_breached: bool,
+}
+
+/// The reason a governor verdict mitigated (clamped / held / failsafed) a
+/// proposed scalar. `Copy + 'static` — carries no heap allocation on the hot
+/// per-tick path. `Display` reproduces the exact prior narrative string for the
+/// audit/log sink, formatting any numeric detail lazily only when recorded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MitigationCode {
+    /// Non-finite (`NaN`/`Inf`) input rejected; fallback commanded.
+    NonfiniteInputRejectedFailsafe,
+    /// Non-positive timestep rejected; fallback commanded.
+    InvalidTimeDeltaRejectedFailsafe,
+    /// Out-of-envelope demand clamped to the hard bound (envelope wins, INV-8).
+    EnvelopeClampTakesPriority,
+    /// Rate-of-change clamped to the contract maximum.
+    RateClampEnforced { max_rate: f64 },
+    /// In-envelope, in-rate demand passed through unchanged.
+    PassthroughUnrestrictedNormal,
+    /// Degraded posture: demand bounded inside the reduced operating cap.
+    DegradedPostureClamp { cap_min: f64, cap_max: f64 },
+    /// Shadow mode: the last validated scalar is held (no new motion authored).
+    ShadowModeHoldEnforced { retained: f64 },
+    /// LockedOut: the contract fallback state is commanded.
+    CriticalLockoutFallback,
+}
+
+impl std::fmt::Display for MitigationCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MitigationCode::NonfiniteInputRejectedFailsafe => {
+                f.write_str("NONFINITE_INPUT_REJECTED_FAILSAFE")
+            }
+            MitigationCode::InvalidTimeDeltaRejectedFailsafe => {
+                f.write_str("INVALID_TIME_DELTA_REJECTED_FAILSAFE")
+            }
+            MitigationCode::EnvelopeClampTakesPriority => f.write_str("ENVELOPE_CLAMP_TAKES_PRIORITY"),
+            MitigationCode::RateClampEnforced { max_rate } => {
+                write!(f, "RATE_CLAMP_ENFORCED: Max {max_rate} GPM/s")
+            }
+            MitigationCode::PassthroughUnrestrictedNormal => {
+                f.write_str("PASSTHROUGH_UNRESTRICTED_NORMAL")
+            }
+            MitigationCode::DegradedPostureClamp { cap_min, cap_max } => {
+                write!(f, "DEGRADED_POSTURE_CLAMP: Bounded inside [{cap_min} - {cap_max}]")
+            }
+            MitigationCode::ShadowModeHoldEnforced { retained } => {
+                write!(f, "SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {retained:.1}")
+            }
+            MitigationCode::CriticalLockoutFallback => {
+                f.write_str("CRITICAL_LOCKOUT: Active fallback state commanded")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mitigation_code_tests {
+    use super::MitigationCode;
+
+    /// `Display` must reproduce the EXACT prior narrative strings — these are
+    /// recorded into the audit/governor-verdict narrative, so a change here is a
+    /// content change. Numeric detail formats lazily (and only when recorded).
+    #[test]
+    fn display_reproduces_the_exact_prior_narratives() {
+        assert_eq!(
+            MitigationCode::NonfiniteInputRejectedFailsafe.to_string(),
+            "NONFINITE_INPUT_REJECTED_FAILSAFE"
+        );
+        assert_eq!(
+            MitigationCode::InvalidTimeDeltaRejectedFailsafe.to_string(),
+            "INVALID_TIME_DELTA_REJECTED_FAILSAFE"
+        );
+        assert_eq!(
+            MitigationCode::EnvelopeClampTakesPriority.to_string(),
+            "ENVELOPE_CLAMP_TAKES_PRIORITY"
+        );
+        assert_eq!(
+            MitigationCode::RateClampEnforced { max_rate: 1.5 }.to_string(),
+            "RATE_CLAMP_ENFORCED: Max 1.5 GPM/s"
+        );
+        assert_eq!(
+            MitigationCode::PassthroughUnrestrictedNormal.to_string(),
+            "PASSTHROUGH_UNRESTRICTED_NORMAL"
+        );
+        assert_eq!(
+            MitigationCode::DegradedPostureClamp { cap_min: 0.0, cap_max: 5.0 }.to_string(),
+            "DEGRADED_POSTURE_CLAMP: Bounded inside [0 - 5]"
+        );
+        assert_eq!(
+            MitigationCode::ShadowModeHoldEnforced { retained: 2.0 }.to_string(),
+            "SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: 2.0"
+        );
+        assert_eq!(
+            MitigationCode::CriticalLockoutFallback.to_string(),
+            "CRITICAL_LOCKOUT: Active fallback state commanded"
+        );
+    }
+
+    #[test]
+    fn mitigation_code_is_copy_and_zero_alloc_on_the_hot_path() {
+        // A trivially-copyable tag: the governor's per-tick result carries this by
+        // value with no heap allocation (the whole point of §8).
+        let c = MitigationCode::RateClampEnforced { max_rate: 3.25 };
+        let copied = c; // Copy, not move
+        assert_eq!(c, copied);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
