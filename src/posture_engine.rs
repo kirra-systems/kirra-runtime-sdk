@@ -90,9 +90,16 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // writer-preferring) and hang the safety engine. Collecting the keys to an
     // owned Vec drops every iterator guard before any traversal begins.
     let node_ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
+    // P3: ONE shared `black` memo across the whole-fleet traversal. Each node's
+    // fully-evaluated posture is root-independent, so a node depended on by K
+    // others is traversed once and black-hit by the rest — O(N·(N+E)) → ~O(N+E).
+    // (The per-call gray cycle-detection set stays fresh inside
+    // `calculate_posture_memoized`.)
+    let mut black: std::collections::HashMap<String, std::sync::Arc<FleetNodePosture>> =
+        std::collections::HashMap::new();
     let node_postures: Vec<FleetNodePosture> = node_ids
         .iter()
-        .map(|id| app.calculate_posture(id))
+        .map(|id| app.calculate_posture_memoized(id, &mut black))
         .collect();
 
     // Step 2: Derive aggregate posture — pure function, no I/O.
