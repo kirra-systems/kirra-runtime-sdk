@@ -762,14 +762,16 @@ async fn verify_attestation(
 
     let posture = svc.app.calculate_posture(&req.node_id);
     if let Ok(posture_json) = serde_json::to_string(&posture) {
-        svc.app.store.with(|store| {
+        // P1: durable audit write off the worker pool. Own the node id (reused below).
+        let node_id_c = req.node_id.clone();
+        let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
-                &req.node_id, "ATTESTATION_TRUSTED", &posture_json, None, now,
+                &node_id_c, "ATTESTATION_TRUSTED", &posture_json, None, now,
             ) {
-                tracing::error!(error=%e, node_id=%req.node_id,
+                tracing::error!(error=%e, node_id=%node_id_c,
                     "AUDIT-CHAIN WRITE FAILED for ATTESTATION_TRUSTED — event missing from tamper-evident log");
             }
-        });
+        }).await;
     }
     emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.node_id.clone()));
     enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
@@ -906,14 +908,17 @@ async fn register_dependencies(
     let posture = svc.app.calculate_posture(&req.node_id);
     let now = now_ms();
     if let Ok(posture_json) = serde_json::to_string(&posture) {
-        svc.app.store.with(|store| {
+        // P1: durable audit write off the worker pool. Own the node id (reused in
+        // the response); the posture json is owned and moves in.
+        let node_id_c = req.node_id.clone();
+        let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
-                &req.node_id, "DEPENDENCY_UPDATED", &posture_json, None, now,
+                &node_id_c, "DEPENDENCY_UPDATED", &posture_json, None, now,
             ) {
-                tracing::error!(error=%e, node_id=%req.node_id,
+                tracing::error!(error=%e, node_id=%node_id_c,
                     "AUDIT-CHAIN WRITE FAILED for DEPENDENCY_UPDATED — event missing from tamper-evident log");
             }
-        });
+        }).await;
     }
     emit_posture_event(&svc.app, "DEPENDENCY_GRAPH_MUTATED", Some(req.node_id.clone()));
     enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged);
@@ -1079,13 +1084,17 @@ async fn evaluate_action_filter(
     let claim = match body {
         Ok(Json(c)) => c,
         Err(rejection) => {
-            svc.app.store.with(|store| {
+            // P1: durable audit write off the worker pool. Materialize the payload
+            // first (rejection is reused for the response detail below).
+            let now = now_ms();
+            let payload = json!({ "error": rejection.body_text() }).to_string();
+            let _ = svc.app.store.call(move |store| {
                 let _ = store.save_posture_event_chained(
                     "action_filter", "ACTION_FILTER_MALFORMED_REQUEST",
-                    &json!({ "error": rejection.body_text() }).to_string(),
-                    Some("malformed request body"), now_ms(),
+                    &payload,
+                    Some("malformed request body"), now,
                 );
-            });
+            }).await;
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "MALFORMED_REQUEST",
                 "detail": rejection.body_text(),
@@ -1121,12 +1130,16 @@ async fn evaluate_action_filter(
         "posture": posture_str,
         "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
     });
-    svc.app.store.with(|store| {
+    // P1: durable audit write off the worker pool. `audit_event_type` is
+    // `&'static str` and the event string is owned, so both move into the closure.
+    let now = now_ms();
+    let event_str = event.to_string();
+    let _ = svc.app.store.call(move |store| {
         let _ = store.save_posture_event_chained(
             "action_filter", audit_event_type,
-            &event.to_string(), None, now_ms(),
+            &event_str, None, now,
         );
-    });
+    }).await;
 
     tracing::info!(
         action_type = %claim.action_type,
@@ -1165,7 +1178,7 @@ struct ReplayGuarded<T> {
 /// advance, so a stale/future message never burns sequence space. A rejection is
 /// audit-chained. `source_id` should be caller-namespaced (e.g. `"dnp3:plc-01"`) so
 /// the same source string under different protocols does not collide.
-fn enforce_industrial_replay(
+async fn enforce_industrial_replay(
     svc: &ServiceState,
     protocol: &str,
     source_id: &str,
@@ -1179,11 +1192,19 @@ fn enforce_industrial_replay(
         kirra_verifier::protocol_adapter::INDUSTRIAL_FRESHNESS_WINDOW_MS,
     );
     // The seq check-and-advance and the rejection audit write share ONE store
-    // acquisition (Rule 5: keep the read-then-write atomic).
-    svc.app.store.with(|store| {
+    // acquisition (Rule 5: keep the read-then-write atomic). P1: run that whole
+    // group OFF the worker pool (`call` → spawn_blocking) — it fires on EVERY
+    // industrial command (the seq advance is itself a write), so it's the hottest
+    // durable path among the SCADA handlers. The single-acquisition atomicity is
+    // preserved (the entire closure runs under one writer lock on the blocking
+    // thread). Own the borrowed protocol/source strings into the closure; a task
+    // failure → fail-closed reject (store unavailable).
+    let protocol_owned = protocol.to_string();
+    let source_owned = source_id.to_string();
+    match svc.app.store.call(move |store| {
         let reason = match fresh {
             Some(r) => Some(r),
-            None => match store.industrial_seq_check_and_advance(source_id, sequence, now) {
+            None => match store.industrial_seq_check_and_advance(&source_owned, sequence, now) {
                 Ok(true) => None,
                 Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
                 Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
@@ -1191,7 +1212,7 @@ fn enforce_industrial_replay(
         };
         if let Some(r) = reason {
             let payload = json!({
-                "protocol": protocol, "source_id": source_id,
+                "protocol": protocol_owned, "source_id": source_owned,
                 "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
             });
             let _ = store.save_posture_event_chained(
@@ -1200,7 +1221,10 @@ fn enforce_industrial_replay(
             );
         }
         reason
-    })
+    }).await {
+        Ok(reason) => reason,
+        Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
+    }
 }
 
 /// Standard rejection response for a replay/freshness denial (200 + allowed:false,
@@ -1234,7 +1258,7 @@ async fn evaluate_industrial_adapter(
     // Replay/freshness gate (IEC 62443) — reject a stale/replayed message before
     // evaluation. Key the per-source sequence by protocol:source_id.
     let replay_key = format!("{protocol_name}:{}", req.source_id);
-    if let Some(reason) = enforce_industrial_replay(&svc, &protocol_name, &replay_key, req.sequence, req.timestamp_ms) {
+    if let Some(reason) = enforce_industrial_replay(&svc, &protocol_name, &replay_key, req.sequence, req.timestamp_ms).await {
         return industrial_replay_rejection(&protocol_name, reason);
     }
 
@@ -1266,9 +1290,14 @@ async fn evaluate_industrial_adapter(
                 } else {
                     "INDUSTRIAL_ACTION_DENIED"
                 };
-                let audit_ok = svc.app.store.with(|store| match store.save_posture_event_chained(
+                // P1: durable audit-chain write off the worker pool. Materialize
+                // the payload string first (move-able); a task failure → `false`
+                // (fail-closed), identical to the DB-error arm.
+                let now = now_ms();
+                let audit_str = audit.to_string();
+                let audit_ok = svc.app.store.call(move |store| match store.save_posture_event_chained(
                     "industrial_adapter", event_type,
-                    &audit.to_string(), None, now_ms(),
+                    &audit_str, None, now,
                 ) {
                     Ok(()) => true,
                     Err(e) => {
@@ -1276,6 +1305,10 @@ async fn evaluate_industrial_adapter(
                             "AUDIT-CHAIN WRITE FAILED for industrial adapter event — event missing from tamper-evident log");
                         false
                     }
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!(error = %e, event_type = event_type,
+                        "AUDIT-CHAIN WRITE TASK FAILED for industrial adapter event — treating as unwritten (fail-closed)");
+                    false
                 });
 
                 // TR-012a: a broadcast whose mandatory audit could not be
@@ -1328,7 +1361,7 @@ async fn evaluate_ethernet_ip_adapter(
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("ethernet_ip:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms) {
+    if let Some(reason) = enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms).await {
         return industrial_replay_rejection("ethernet_ip", reason);
     }
 
@@ -1340,22 +1373,26 @@ async fn evaluate_ethernet_ip_adapter(
     let audit_ref = now_ms().to_string();
 
     if !allowed {
-        svc.app.store.with(|store| {
+        // P1: durable audit write off the worker pool. Materialize the payload
+        // string first so the closure owns it (`eval`/`denial_reason` are reused
+        // in the response below).
+        let now = now_ms();
+        let payload = json!({
+            "service_name": eval.service_name,
+            "safety_relevant": eval.safety_relevant,
+            "posture": posture_str,
+            "denial_reason": denial_reason,
+            "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
+        }).to_string();
+        let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
                 "ethernet_ip_adapter", "INDUSTRIAL_ACTION_DENIED",
-                &json!({
-                    "service_name": eval.service_name,
-                    "safety_relevant": eval.safety_relevant,
-                    "posture": posture_str,
-                    "denial_reason": denial_reason,
-                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-                }).to_string(),
-                None, now_ms(),
+                &payload, None, now,
             ) {
                 tracing::error!(error = %e, event_type = "INDUSTRIAL_ACTION_DENIED",
                     "AUDIT-CHAIN WRITE FAILED for ethernet_ip adapter event — event missing from tamper-evident log");
             }
-        });
+        }).await;
     }
 
     Json(json!({
@@ -1391,7 +1428,7 @@ async fn evaluate_canopen_adapter(
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("canopen:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms) {
+    if let Some(reason) = enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms).await {
         return industrial_replay_rejection("canopen", reason);
     }
 
@@ -1470,34 +1507,38 @@ async fn evaluate_canopen_adapter(
     }
 
     if !allowed || eval.triggers_recalculation {
-        svc.app.store.with(|store| {
-            let event_type = if eval.triggers_recalculation {
-                if attributed_fleet_node.is_some() {
-                    "CANOPEN_NMT_NODE_OFFLINE"
-                } else {
-                    "CANOPEN_NMT_OFFLINE_UNATTRIBUTED"
-                }
+        // P1: durable audit write off the worker pool. `event_type` (&'static str)
+        // and the payload string are materialized first so the closure owns them
+        // (`eval` is reused in the response below).
+        let now = now_ms();
+        let event_type = if eval.triggers_recalculation {
+            if attributed_fleet_node.is_some() {
+                "CANOPEN_NMT_NODE_OFFLINE"
             } else {
-                "INDUSTRIAL_ACTION_DENIED"
-            };
+                "CANOPEN_NMT_OFFLINE_UNATTRIBUTED"
+            }
+        } else {
+            "INDUSTRIAL_ACTION_DENIED"
+        };
+        let payload = json!({
+            "node_id": eval.node_id,
+            "fleet_node_id": attributed_fleet_node.clone(),
+            "node_offline_attributed": attributed_fleet_node.is_some(),
+            "message_type": format!("{:?}", eval.message_type),
+            "is_emergency": eval.is_emergency,
+            "triggers_recalculation": eval.triggers_recalculation,
+            "posture": posture_str,
+            "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
+        }).to_string();
+        let _ = svc.app.store.call(move |store| {
             if let Err(e) = store.save_posture_event_chained(
                 "canopen_adapter", event_type,
-                &json!({
-                    "node_id": eval.node_id,
-                    "fleet_node_id": attributed_fleet_node.clone(),
-                    "node_offline_attributed": attributed_fleet_node.is_some(),
-                    "message_type": format!("{:?}", eval.message_type),
-                    "is_emergency": eval.is_emergency,
-                    "triggers_recalculation": eval.triggers_recalculation,
-                    "posture": posture_str,
-                    "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
-                }).to_string(),
-                None, now_ms(),
+                &payload, None, now,
             ) {
                 tracing::error!(error = %e, event_type = event_type,
                     "AUDIT-CHAIN WRITE FAILED for canopen adapter event — event missing from tamper-evident log");
             }
-        });
+        }).await;
     }
 
     Json(json!({
@@ -1539,7 +1580,7 @@ async fn evaluate_dnp3_adapter(
 
     // Replay/freshness gate before evaluation.
     let replay_key = format!("dnp3:{}", msg.source_node);
-    if let Some(reason) = enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms) {
+    if let Some(reason) = enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms).await {
         return industrial_replay_rejection("dnp3", reason);
     }
 
@@ -1600,8 +1641,14 @@ async fn evaluate_dnp3_adapter(
             "lockout_reason": lockout_reason.as_ref().map(|r| r.to_string()),
         })
         .to_string();
-        let audit_ok = svc.app.store.with(|store| match store.save_posture_event_chained(
-            "dnp3_adapter", event_type, &audit_payload, None, now_ms(),
+        // P1: the per-command audit-chain write (durable fsync) runs off the
+        // worker pool. `event_type` is `&'static str` and the payload is owned, so
+        // both move into the closure cleanly. A task failure → `false` (fail-closed:
+        // audit unconfirmed), identical to the DB-error arm below.
+        let now = now_ms();
+        let audit_payload_owned = audit_payload;
+        let audit_ok = svc.app.store.call(move |store| match store.save_posture_event_chained(
+            "dnp3_adapter", event_type, &audit_payload_owned, None, now,
         ) {
             Ok(()) => true,
             Err(e) => {
@@ -1609,6 +1656,10 @@ async fn evaluate_dnp3_adapter(
                     "AUDIT-CHAIN WRITE FAILED for dnp3 adapter event — event missing from tamper-evident log");
                 false
             }
+        }).await.unwrap_or_else(|e| {
+            tracing::error!(error = %e, event_type = event_type,
+                "AUDIT-CHAIN WRITE TASK FAILED for dnp3 adapter event — treating as unwritten (fail-closed)");
+            false
         });
 
         // TR-012a: a BROADCAST whose mandatory audit could not be written is
@@ -1646,12 +1697,19 @@ async fn register_federation_controller(
         return (StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "controller_id and public_key_b64 are required" }))).into_response();
     }
-    match svc.app.store.with(|store| store.save_trusted_federation_controller(
-        &req.controller_id, &req.public_key_b64, now_ms(),
-    )) {
-        Ok(()) => (StatusCode::CREATED,
+    // P1: durable write off the worker pool (`call` → spawn_blocking). Own the
+    // captured request fields (still needed for the response). `call` wraps the
+    // closure's own `Result` in an outer `Result<_, StoreError>`, so a DB error
+    // OR a task failure both map to 500 (fail-closed, unchanged from `with`).
+    let now = now_ms();
+    let controller_id = req.controller_id.clone();
+    let public_key_b64 = req.public_key_b64.clone();
+    match svc.app.store.call(move |store| store.save_trusted_federation_controller(
+        &controller_id, &public_key_b64, now,
+    )).await {
+        Ok(Ok(())) => (StatusCode::CREATED,
                    Json(json!({ "controller_id": req.controller_id, "registered": true }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to register controller" }))).into_response(),
     }
 }
@@ -1670,17 +1728,20 @@ async fn register_node_identity(
         return (StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "node_id and ak_public_fingerprint_hex are required" }))).into_response();
     }
+    // P1: durable identity write off the worker pool. Own the request fields.
     let now = now_ms();
-    let registered = svc.app.store.with(|store| store.register_attestation_identity(
-        &req.node_id, &req.ak_public_fingerprint_hex, "admin", now,
-    ));
+    let node_id_c = req.node_id.clone();
+    let fingerprint = req.ak_public_fingerprint_hex.clone();
+    let registered = svc.app.store.call(move |store| store.register_attestation_identity(
+        &node_id_c, &fingerprint, "admin", now,
+    )).await;
     match registered {
-        Ok(()) => {
+        Ok(Ok(())) => {
             emit_posture_event(&svc.app, "NODE_IDENTITY_PROVISIONED", Some(req.node_id.clone()));
             (StatusCode::CREATED,
              Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to register identity" }))).into_response(),
     }
 }
