@@ -143,6 +143,8 @@ fn sdk_courier_bound_matches_parko_source() {
         "ftti_s drifted from parko");
     assert_eq!(sdk.mrc_posture_factor, field(body, "mrc_posture_factor"),
         "mrc_posture_factor drifted from parko");
+    assert_eq!(sdk.k_roll, field(body, "k_roll"),
+        "k_roll (rollover safety factor) drifted from parko's urban_service_robot_reference()");
 
     // Consts cited from parko.
     assert_eq!(sdk.stop_epsilon_rad_s, konst(&lib_src, "STOP_EPSILON_RAD_S"),

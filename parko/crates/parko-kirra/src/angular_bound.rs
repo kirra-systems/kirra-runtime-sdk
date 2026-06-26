@@ -81,6 +81,19 @@ pub struct PlatformParams {
     /// + heading-change budgets shrink. Range (0, 1]. Default 0.5
     /// (half the contact velocity, half the heading budget).
     pub mrc_posture_factor: f64,
+    /// **Rollover safety factor** `k_roll ∈ (0, 1]` (issue #136, ADR-0029
+    /// §3.2 correction). The rigid-body tip threshold `a_tip = g·t/(2·h)`
+    /// is an UPPER bound on the true tip-over threshold — a compliant
+    /// platform (suspension travel, tyre/payload compliance) tips at a
+    /// LOWER lateral acceleration, so enforcing up to the rigid `a_tip`
+    /// is optimistic. `k_roll` scales the rollover term down to a
+    /// defensible fraction of the rigid threshold (a NHTSA-style dynamic
+    /// correction to the static stability factor):
+    /// `ω_rollover(v) = k_roll · g·t/(2·h·v)`. Default `0.6` — a
+    /// pre-validation starting point; calibrate per platform from the
+    /// tilt-table test in `ANGULAR_VELOCITY_SOTIF.md` §8. `1.0` recovers
+    /// the rigid (uncorrected) bound.
+    pub k_roll: f64,
 }
 
 /// **Below this linear velocity, the rollover constraint is treated
@@ -127,6 +140,7 @@ impl PlatformParams {
             theta_max_rad:   0.05,
             ftti_s:          0.10,
             mrc_posture_factor: 0.5,
+            k_roll:          0.6,  // rollover dynamic-correction starting point (§3.2)
         }
     }
 
@@ -154,6 +168,7 @@ impl PlatformParams {
             theta_max_rad:   0.087, // 5°
             ftti_s:          0.10,
             mrc_posture_factor: 0.5,
+            k_roll:          0.6,  // rollover dynamic-correction starting point (§3.2)
         }
     }
 
@@ -171,6 +186,9 @@ impl PlatformParams {
         if self.ftti_s          <= 0.0 { return Err("ftti_s must be > 0".into()); }
         if !(0.0 < self.mrc_posture_factor && self.mrc_posture_factor <= 1.0) {
             return Err("mrc_posture_factor must be in (0, 1]".into());
+        }
+        if !(0.0 < self.k_roll && self.k_roll <= 1.0) {
+            return Err("k_roll must be in (0, 1]".into());
         }
         Ok(())
     }
@@ -227,8 +245,11 @@ impl AngularVelocityBound {
                 let v = linear_velocity_mps.abs();
                 // (a) Rollover — only when |v| is above the floor.
                 let omega_rollover = if v >= ROLLOVER_MIN_LINEAR_VELOCITY_MPS {
-                    // ω_rollover(v) = g · t / (2 · h · v)
-                    GRAVITY_MPS2 * params.track_width_m
+                    // ω_rollover(v) = k_roll · g · t / (2 · h · v).
+                    // k_roll (≤ 1) is the §3.2 dynamic-correction factor: the rigid
+                    // a_tip = g·t/(2h) is OPTIMISTIC for a compliant platform, so we
+                    // enforce a defensible fraction of it.
+                    params.k_roll * GRAVITY_MPS2 * params.track_width_m
                         / (2.0 * params.cog_height_m * v)
                 } else {
                     f64::INFINITY
@@ -348,12 +369,43 @@ mod tests {
             ..ref_platform()
         };
         let bound = AngularVelocityBound::nominal(p.clone());
-        // At v = 10 m/s: rollover = 9.81·0.5/(2·0.4·10) ≈ 0.613 rad/s.
+        // At v = 10 m/s: rollover = k_roll·9.81·0.5/(2·0.4·10) = 0.6·0.613 ≈ 0.368 rad/s.
         let omega = bound.omega_max(10.0);
-        let rollover = GRAVITY_MPS2 * p.track_width_m
+        let rollover = p.k_roll * GRAVITY_MPS2 * p.track_width_m
             / (2.0 * p.cog_height_m * 10.0);
         assert!((omega - rollover).abs() < 1e-9,
-            "at v=10 m/s rollover must bind; expected {rollover}, got {omega}");
+            "at v=10 m/s rollover must bind (k_roll-corrected); expected {rollover}, got {omega}");
+    }
+
+    #[test]
+    fn k_roll_scales_the_rollover_term_only() {
+        // In a rollover-binding regime, halving-ish k_roll scales ω_max
+        // proportionally; k_roll = 1.0 recovers the rigid (uncorrected) bound.
+        // Easy sweep/ftti so rollover is the sole binding constraint at high v.
+        let base = PlatformParams {
+            v_edge_safe_mps: 10.0, robot_extent_m: 0.1, theta_max_rad: 1.0, ftti_s: 0.1,
+            ..ref_platform()
+        };
+        let rigid = AngularVelocityBound::nominal(PlatformParams { k_roll: 1.0, ..base.clone() });
+        let corrected = AngularVelocityBound::nominal(PlatformParams { k_roll: 0.6, ..base.clone() });
+        let (r, c) = (rigid.omega_max(10.0), corrected.omega_max(10.0));
+        assert!((c - 0.6 * r).abs() < 1e-9,
+            "k_roll must scale the rollover bound: expected {} got {c}", 0.6 * r);
+        assert!(c < r, "the corrected bound must be tighter than the rigid one");
+
+        // k_roll must NOT touch the sweep/ftti regime (v=0, rollover masked).
+        let s_rigid = AngularVelocityBound::nominal(PlatformParams { k_roll: 1.0, ..ref_platform() });
+        let s_corr  = AngularVelocityBound::nominal(PlatformParams { k_roll: 0.6, ..ref_platform() });
+        assert_eq!(s_rigid.omega_max(0.0), s_corr.omega_max(0.0),
+            "k_roll must not change the in-place (sweep-bound) regime");
+    }
+
+    #[test]
+    fn platform_params_validate_rejects_out_of_range_k_roll() {
+        let mut p = ref_platform(); p.k_roll = 0.0;
+        assert!(p.validate().is_err());
+        let mut p = ref_platform(); p.k_roll = 1.5;
+        assert!(p.validate().is_err());
     }
 
     #[test]
@@ -449,8 +501,9 @@ mod tests {
             0.005_f64..1.5,  // theta_max_rad
             0.01_f64..1.0,   // ftti_s
             0.05_f64..1.0,   // mrc_posture_factor (in (0,1])
+            0.05_f64..1.0,   // k_roll (in (0,1])
         )
-            .prop_map(|(t, h, r, ve, th, ftti, pf)| PlatformParams {
+            .prop_map(|(t, h, r, ve, th, ftti, pf, kr)| PlatformParams {
                 track_width_m: t,
                 cog_height_m: h,
                 robot_extent_m: r,
@@ -458,6 +511,7 @@ mod tests {
                 theta_max_rad: th,
                 ftti_s: ftti,
                 mrc_posture_factor: pf,
+                k_roll: kr,
             })
     }
 
