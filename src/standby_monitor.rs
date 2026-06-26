@@ -210,17 +210,26 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 Break,
                 Proceed,
             }
-            let step = app.store.with(|store| {
+            // P1: run the heartbeat write + epoch read OFF the tokio worker pool
+            // (`call` → spawn_blocking) so the ~2 s fsync write can't pin a shared
+            // worker and head-of-line-block request handlers / the fast loop. The
+            // whole closure still runs under ONE writer-lock acquisition on the
+            // blocking thread, so the write-then-epoch-read group stays atomic. The
+            // closure must own its captures; clone the Arc (for the atomics) and the
+            // instance id (reused next tick) into it.
+            let app_c = Arc::clone(&app);
+            let id_c = id.clone();
+            let step = match app.store.call(move |store| {
                 if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
                     tracing::warn!(
                         error       = %e,
-                        instance_id = %id,
+                        instance_id = %id_c,
                         "Heartbeat write failed"
                     );
                     return HeartbeatStep::Continue;
                 }
 
-                let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id);
+                let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id_c);
 
                 // Proactive epoch-fence check: if the durable epoch has
                 // advanced past our held value, another instance has
@@ -230,7 +239,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 // heartbeat loop but left mode_active = true (the
                 // mutation gate would still let writes through until
                 // the next request-time epoch check).
-                let held = app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                let held = app_c.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
                 match store.current_epoch() {
                     Ok(db_epoch) => {
                         // Pass B1 (S3 / #115): cache the freshly observed
@@ -239,14 +248,14 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                         // This runs every HEARTBEAT_INTERVAL_MS (~2000 ms)
                         // and is the cache repopulation path that bounds
                         // the gate's staleness.
-                        app.cached_db_epoch.store(
+                        app_c.cached_db_epoch.store(
                             db_epoch,
                             std::sync::atomic::Ordering::Release,
                         );
                         if held != 0 && db_epoch != held {
-                            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                            app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
                             tracing::error!(
-                                instance_id = %id,
+                                instance_id = %id_c,
                                 held        = held,
                                 db_epoch    = db_epoch,
                                 "FENCED — durable epoch advanced past held value; self-demoting and stopping heartbeat"
@@ -255,7 +264,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, instance_id = %id,
+                        tracing::warn!(error = %e, instance_id = %id_c,
                             "Heartbeat writer: epoch read failed");
                     }
                 }
@@ -263,10 +272,10 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
                     // Mirror the epoch path: tear down the local Active
                     // flag too, not just the heartbeat loop.
-                    app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(
                         promoted_by = %promoted_by,
-                        instance_id = %id,
+                        instance_id = %id_c,
                         "Standby has promoted — primary self-demoting and stopping heartbeat. \
                          Restart this instance in PassiveStandby mode."
                     );
@@ -274,7 +283,16 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 }
 
                 HeartbeatStep::Proceed
-            });
+            }).await {
+                Ok(s) => s,
+                // The spawn_blocking task panicked/was cancelled — anomalous but
+                // non-fatal to failover: skip this tick and retry on the next one
+                // (a genuinely dead writer is itself the designed promotion signal).
+                Err(e) => {
+                    tracing::warn!(error = %e, instance_id = %id, "Heartbeat store task failed — skipping tick");
+                    HeartbeatStep::Continue
+                }
+            };
             match step {
                 HeartbeatStep::Continue => continue,
                 HeartbeatStep::Break => break,
