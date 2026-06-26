@@ -138,9 +138,17 @@ cited-copy angular numbers, so they cannot diverge silently.
   or an absent/stale/unhealthy corridor → `MRCFallback` (stopped twist + `TickError::ContainmentBreach`).
   Unit-tested in parko's stable lane (in/out-of-corridor, stale, non-finite, stationary, the platform-seam
   equivalence, and the TickOutcome composition).
-- **Phase 3b (pending, ros2-gated):** subscribe lidar → run `kirra-taj` (`process(scan) → TajPerception {
-  corridor }`) → feed the live ego-relative `TajCorridor` snapshot into `apply_containment_gate` each tick.
-  The real perception integration; not unit-testable without ROS, exactly as Phase 2's node-binary swap.
+- **Phase 3b (LANDED — in-process Taj):** `parko-ros2/src/taj_corridor.rs` runs `kirra-taj` Phase-A
+  (`process(scan) → TajPerception { corridor }`, lean — kirra-core only) on a `sensor_msgs/LaserScan` and
+  snapshots the ego-relative `TajCorridor` into a kernel `Corridor` (`corridor::Point → containment::Point`),
+  extended backward (`EGO_REAR_COVER_M`) to cover the ego's own footprint behind the origin. `node.rs`
+  (ros2-gated) subscribes the lidar topic, runs Taj in a background task, and the drain loop feeds the latest
+  corridor into `apply_containment_gate` each tick. **Opt-in:** armed only when BOTH `lidar_topic` and
+  `platform_profile` (for the footprint) are set; a missing/stale/low-confidence corridor fails closed (MRC)
+  inside the gate. The scan→Taj conversion CORE (`taj_scan_from_raw` / `LaserScanRawFields`) is r2r-free and
+  unit-tested (mirrors the `imu_shim` pure-core + thin-r2r-adapter split); the synthetic-scan → corridor →
+  gate path is sim-tested end-to-end (Taj Phase-A is model-free geometry). Only the lidar subscription +
+  drain wiring is `#[cfg(feature = "ros2")]`, compiled by the ROS CI lane (as with Phase 2's node swap).
 
 ## Consequences
 

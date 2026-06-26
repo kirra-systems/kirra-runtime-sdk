@@ -65,6 +65,10 @@ parko-kirra = { path = "../parko-kirra" }
 # The lean foundation (de-monolith Stage 5): FleetPosture + the shared PostureTracker
 # state machine the node reads posture through — serde-only, no heavy tree.
 kirra-core = { path = "../../../crates/kirra-core" }
+# Taj Phase-A perception (ADR-0029 Phase 3b): LaserScan → ego-relative drivable
+# corridor for the live SG2 containment gate. Lean — depends on kirra-core only
+# (no ros2/tokio tree); Phase A is pure geometry, sim-testable with synthetic scans.
+kirra-taj = { path = "../../../crates/kirra-taj" }
 # Kept for the SQLite `VerifierStore` the clearance gate persists through (heavy,
 # verifier-tier; see clearance_gate) — not on the governor hot path.
 kirra-verifier = { path = "../../.." }

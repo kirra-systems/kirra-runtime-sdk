@@ -33,8 +33,10 @@ use crate::clearance_gate::{
 };
 use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
+use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S};
 use crate::imu_shim::imu_msg_to_sample;
 use crate::sensor_mapping::{ImuSample, SensorInputMapping};
+use crate::taj_corridor::{corridor_from_scan, laserscan_msg_to_taj, CorridorSnapshot};
 use crate::tick_pipeline::{current_time_ms, TickError};
 use parko_kirra::clearance_delivery::DeliveryOutcome;
 
@@ -168,6 +170,48 @@ where
         );
     }
 
+    // --- ADR-0029 Phase 3b: live SG2 containment (lidar → Taj corridor) ---
+    // Armed only when BOTH a lidar topic and a platform_profile (for the
+    // footprint) are configured. A background task runs Taj Phase-A on each
+    // scan and stores the latest ego-relative corridor; the drain loop gates
+    // the governed command against it. A missing/stale/low-confidence corridor
+    // fails closed INSIDE the gate (MRC). Opt-in: no lidar_topic → no gate.
+    let latest_corridor: Arc<StdMutex<Option<CorridorSnapshot>>> = Arc::new(StdMutex::new(None));
+    let gate_footprint = config.platform_profile.as_ref().map(|p| p.footprint());
+    match (&config.lidar_topic, gate_footprint.is_some()) {
+        (Some(topic), true) => {
+            let scan_stream = node
+                .subscribe::<r2r::sensor_msgs::msg::LaserScan>(topic, r2r::QosProfile::default())?;
+            let cell = Arc::clone(&latest_corridor);
+            let taj = kirra_taj::TajPhaseA::new(kirra_taj::TajConfig::default());
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                let mut s = scan_stream;
+                while let Some(msg) = s.next().await {
+                    let scan = laserscan_msg_to_taj(&msg);
+                    let snap = corridor_from_scan(&taj, &scan, current_time_ms());
+                    if let Ok(mut g) = cell.lock() {
+                        *g = Some(snap);
+                    }
+                }
+                tracing::warn!(
+                    "parko-ros2: lidar stream closed — containment corridor now unfed; a stale \
+                     corridor fails closed (MRC) inside the gate"
+                );
+            });
+            tracing::info!(topic = %topic,
+                "parko-ros2: SG2 containment gate ARMED (lidar → Taj Phase-A corridor)");
+        }
+        (Some(_), false) => tracing::warn!(
+            "parko-ros2: lidar_topic set but no platform_profile (no footprint) — SG2 containment \
+             gate NOT armed"
+        ),
+        (None, _) => tracing::info!(
+            "parko-ros2: SG2 containment gate not configured (no lidar_topic) — REDUCED coverage; \
+             the drivable-space check is inactive"
+        ),
+    }
+
     // --- Drain task: consume the sensor stream, tick, publish ---------
     let drain_config  = Arc::clone(&config);
     let drain_infer   = Arc::clone(&infer);
@@ -175,6 +219,8 @@ where
     let drain_imu     = Arc::clone(&latest_imu);
     let drain_imu_arrival = Arc::clone(&imu_arrival);
     let drain_contact = Arc::clone(&contact_state);
+    let drain_corridor = Arc::clone(&latest_corridor);
+    let drain_footprint = gate_footprint;
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
@@ -231,6 +277,24 @@ where
             ).await;
             let outcome = cleared.tick;
 
+            // ADR-0029 Phase 3b: gate the governed command against the live
+            // ego-relative corridor. No corridor configured/available → no-op
+            // (the command passes through). A breach / stale / low-confidence
+            // corridor → MRC (stopped twist + TickError::ContainmentBreach).
+            let outcome = match (drain_footprint, drain_corridor.lock().ok().and_then(|g| g.clone())) {
+                (Some(fp), Some(snap)) => apply_containment_gate(
+                    outcome,
+                    &fp,
+                    &snap.to_corridor(
+                        drain_config.corridor_min_confidence,
+                        drain_config.corridor_max_age_ms,
+                    ),
+                    CONTAINMENT_HORIZON_S,
+                    CONTAINMENT_STEP_S,
+                ),
+                _ => outcome,
+            };
+
             // Surface the per-tick clearance delivery (a console-recorded grant
             // arriving on this node's own tick). A `NoGrant` no-op is silent.
             match &cleared.delivery {
@@ -259,6 +323,10 @@ where
                     TickError::InferenceError(msg) =>
                         tracing::error!(error = %msg,
                             "parko-ros2: inference error; publishing MRC"),
+                    TickError::ContainmentBreach =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: SG2 containment breach (command lookahead left the \
+                             ego corridor, or the corridor was stale/low-confidence); publishing MRC"),
                 }
             }
 

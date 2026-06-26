@@ -38,6 +38,7 @@ pub mod platform_profile;
 pub mod posture_state;
 pub mod radar_shim;
 pub mod sensor_mapping;
+pub mod taj_corridor;
 pub mod tick_pipeline;
 
 // Re-export the PostureTracker so parko-ros2 consumers can refer to
@@ -56,6 +57,9 @@ pub use crate::platform_profile::CourierPlatformProfile;
 pub use crate::containment_gate::{
     apply_containment_gate, command_stays_in_corridor, command_stays_in_corridor_default,
     CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S,
+};
+pub use crate::taj_corridor::{
+    corridor_from_scan, taj_scan_from_raw, CorridorSnapshot, LaserScanRawFields, EGO_REAR_COVER_M,
 };
 pub use crate::sensor_mapping::{
     CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
