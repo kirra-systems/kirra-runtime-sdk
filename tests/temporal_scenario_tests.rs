@@ -60,21 +60,21 @@ async fn build_av_test_infrastructure() -> (
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
 
     // Register AV metadata (in production this comes through HTTP endpoints)
-    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
+    let _ = app.store.with(|store| store.register_av_subsystem_meta(
         "lidar_front", "Perception", "LIDAR-001", 0.70, 0,
-    );
-    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
+    ));
+    let _ = app.store.with(|store| store.register_av_subsystem_meta(
         "camera_front", "Perception", "CAM-001", 0.70, 0,
-    );
-    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
+    ));
+    let _ = app.store.with(|store| store.register_av_subsystem_meta(
         "gps_primary", "Positioning", "GPS-001", 0.70, 0,
-    );
-    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
+    ));
+    let _ = app.store.with(|store| store.register_av_subsystem_meta(
         "perception_fusion", "Planning", "FUSION-001", 0.70, 0,
-    );
-    let _ = app.store.lock().unwrap().register_av_subsystem_meta(
+    ));
+    let _ = app.store.with(|store| store.register_av_subsystem_meta(
         "trajectory_planner", "Planning", "PLAN-001", 0.70, 0,
-    );
+    ));
 
     // Set up dependency graph edges (mirrors POST /fleet/dependencies)
     // perception_fusion depends on lidar_front and camera_front

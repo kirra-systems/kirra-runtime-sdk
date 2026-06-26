@@ -269,8 +269,8 @@ impl ScenarioRunner {
             for event in active_events {
                 match event {
                     ScenarioEvent::TelemetryReport { ref node_id, confidence, hw_fault } => {
-                        let floor = self.app.store.lock().unwrap()
-                            .load_av_confidence_floor(node_id)
+                        let floor = self.app.store
+                            .with(|store| store.load_av_confidence_floor(node_id))
                             .unwrap_or(None)
                             .unwrap_or(self.default_confidence_floor);
 
@@ -284,8 +284,8 @@ impl ScenarioRunner {
                             };
 
                             // Disk-first: reset streak before memory mutation
-                            let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
-                            let _ = self.app.store.lock().unwrap().touch_av_telemetry_timestamp(node_id, ts);
+                            let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
+                            let _ = self.app.store.with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
 
                             if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                                 node.status = NodeTrustState::Untrusted(reason.to_string());
@@ -300,14 +300,12 @@ impl ScenarioRunner {
 
                             if currently_untrusted {
                                 // evaluate_recovery_report uses ts (virtual time), not wall time
-                                let decision = {
-                                    let guard = self.app.store.lock().unwrap();
-                                    // `&*guard` explicitly dereferences the MutexGuard so the
-                                    // generic `S: RecoveryStreakStore` bound resolves to
-                                    // `&VerifierStore` (S3 / #115 — trait seam, behavior
+                                let decision = self.app.store.with(|store| {
+                                    // `&*store` resolves the generic `S: RecoveryStreakStore`
+                                    // bound to `&VerifierStore` (S3 / #115 — trait seam, behavior
                                     // unchanged: the trait impl delegates verbatim).
-                                    evaluate_recovery_report(&*guard, node_id, ts)
-                                };
+                                    evaluate_recovery_report(&*store, node_id, ts)
+                                });
                                 match decision {
                                     HysteresisDecision::RecoveryConfirmed { streak } => {
                                         tracing::debug!(
@@ -318,7 +316,7 @@ impl ScenarioRunner {
                                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                                             node.status = NodeTrustState::Trusted;
                                         }
-                                        let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
+                                        let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
                                         needs_recalc = true;
                                     }
                                     HysteresisDecision::StreakBuilding { current, required, .. } => {
@@ -339,18 +337,18 @@ impl ScenarioRunner {
                                         // No posture change
                                     }
                                     HysteresisDecision::NotApplicable => {
-                                        let _ = self.app.store.lock().unwrap()
-                                            .touch_av_telemetry_timestamp(node_id, ts);
+                                        let _ = self.app.store
+                                            .with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
                                     }
                                 }
                             } else {
-                                let _ = self.app.store.lock().unwrap().touch_av_telemetry_timestamp(node_id, ts);
+                                let _ = self.app.store.with(|store| store.touch_av_telemetry_timestamp(node_id, ts));
                             }
                         }
                     }
 
                     ScenarioEvent::MarkUntrusted { ref node_id, ref reason } => {
-                        let _ = self.app.store.lock().unwrap().reset_recovery_streak(node_id, ts);
+                        let _ = self.app.store.with(|store| store.reset_recovery_streak(node_id, ts));
                         if let Some(mut node) = self.app.nodes.get_mut(node_id) {
                             node.status = NodeTrustState::Untrusted(reason.clone());
                         }

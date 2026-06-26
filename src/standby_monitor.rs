@@ -202,77 +202,83 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             // strictly changes each tick would do; `now_ms()` is convenient.
             let ts = now_ms();
 
-            match app.store.lock() {
-                Ok(store) => {
-                    if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
-                        tracing::warn!(
-                            error       = %e,
-                            instance_id = %id,
-                            "Heartbeat write failed"
-                        );
-                        continue;
-                    }
-
-                    let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id);
-
-                    // Proactive epoch-fence check: if the durable epoch has
-                    // advanced past our held value, another instance has
-                    // promoted and we have been fenced. Self-demote and stop
-                    // heartbeating. This fixes the pre-existing gap where
-                    // PROMOTION_RECORD_KEY detection only stopped the
-                    // heartbeat loop but left mode_active = true (the
-                    // mutation gate would still let writes through until
-                    // the next request-time epoch check).
-                    let held = app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-                    match store.current_epoch() {
-                        Ok(db_epoch) => {
-                            // Pass B1 (S3 / #115): cache the freshly observed
-                            // DB epoch so the gate can read it lock-free.
-                            // Release pairs with the gate's Acquire load.
-                            // This runs every HEARTBEAT_INTERVAL_MS (~2000 ms)
-                            // and is the cache repopulation path that bounds
-                            // the gate's staleness.
-                            app.cached_db_epoch.store(
-                                db_epoch,
-                                std::sync::atomic::Ordering::Release,
-                            );
-                            if held != 0 && db_epoch != held {
-                                app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                                tracing::error!(
-                                    instance_id = %id,
-                                    held        = held,
-                                    db_epoch    = db_epoch,
-                                    "FENCED — durable epoch advanced past held value; self-demoting and stopping heartbeat"
-                                );
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, instance_id = %id,
-                                "Heartbeat writer: epoch read failed");
-                        }
-                    }
-
-                    if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
-                        // Mirror the epoch path: tear down the local Active
-                        // flag too, not just the heartbeat loop.
-                        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                        tracing::error!(
-                            promoted_by = %promoted_by,
-                            instance_id = %id,
-                            "Standby has promoted — primary self-demoting and stopping heartbeat. \
-                             Restart this instance in PassiveStandby mode."
-                        );
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
+            // The store work runs under one acquisition; the closure returns
+            // a control signal that the outer loop acts on (the closure cannot
+            // `continue`/`break` the outer loop directly — Rule 4).
+            enum HeartbeatStep {
+                Continue,
+                Break,
+                Proceed,
+            }
+            let step = app.store.with(|store| {
+                if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
+                    tracing::warn!(
                         error       = %e,
                         instance_id = %id,
-                        "Heartbeat writer: store lock poisoned — cannot write heartbeat"
+                        "Heartbeat write failed"
                     );
+                    return HeartbeatStep::Continue;
                 }
+
+                let _ = store.save_engine_state(PRIMARY_INSTANCE_KEY, &id);
+
+                // Proactive epoch-fence check: if the durable epoch has
+                // advanced past our held value, another instance has
+                // promoted and we have been fenced. Self-demote and stop
+                // heartbeating. This fixes the pre-existing gap where
+                // PROMOTION_RECORD_KEY detection only stopped the
+                // heartbeat loop but left mode_active = true (the
+                // mutation gate would still let writes through until
+                // the next request-time epoch check).
+                let held = app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                match store.current_epoch() {
+                    Ok(db_epoch) => {
+                        // Pass B1 (S3 / #115): cache the freshly observed
+                        // DB epoch so the gate can read it lock-free.
+                        // Release pairs with the gate's Acquire load.
+                        // This runs every HEARTBEAT_INTERVAL_MS (~2000 ms)
+                        // and is the cache repopulation path that bounds
+                        // the gate's staleness.
+                        app.cached_db_epoch.store(
+                            db_epoch,
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        if held != 0 && db_epoch != held {
+                            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!(
+                                instance_id = %id,
+                                held        = held,
+                                db_epoch    = db_epoch,
+                                "FENCED — durable epoch advanced past held value; self-demoting and stopping heartbeat"
+                            );
+                            return HeartbeatStep::Break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, instance_id = %id,
+                            "Heartbeat writer: epoch read failed");
+                    }
+                }
+
+                if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
+                    // Mirror the epoch path: tear down the local Active
+                    // flag too, not just the heartbeat loop.
+                    app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        promoted_by = %promoted_by,
+                        instance_id = %id,
+                        "Standby has promoted — primary self-demoting and stopping heartbeat. \
+                         Restart this instance in PassiveStandby mode."
+                    );
+                    return HeartbeatStep::Break;
+                }
+
+                HeartbeatStep::Proceed
+            });
+            match step {
+                HeartbeatStep::Continue => continue,
+                HeartbeatStep::Break => break,
+                HeartbeatStep::Proceed => {}
             }
         }
 }
@@ -437,24 +443,22 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
             // (the primary writes now_ms(), but we never interpret its value as a
             // clock). On any read failure we skip this tick without disturbing the
             // anchor — we only ever decide on a successful read.
-            let token = match app.store.lock() {
-                Ok(store) => {
-                    match store.load_engine_state(HEARTBEAT_KEY) {
-                        Ok(Some(token)) => token,
-                        Ok(None) => {
-                            tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
-                            continue;
-                        }
-                    }
+            // Closure returns Some(token) on a successful read; None signals
+            // "skip this tick" (no key yet / read error) — the outer loop
+            // `continue`s on None (Rule 4: `continue` cannot cross the closure).
+            let token = match app.store.with(|store| match store.load_engine_state(HEARTBEAT_KEY) {
+                Ok(Some(token)) => Some(token),
+                Ok(None) => {
+                    tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
+                    None
                 }
-                Err(_) => {
-                    tracing::error!("Promotion monitor: store lock poisoned");
-                    continue;
+                Err(e) => {
+                    tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
+                    None
                 }
+            }) {
+                Some(token) => token,
+                None => continue,
             };
 
             let now = Instant::now();
@@ -521,45 +525,31 @@ async fn perform_promotion(
     // loser sees None and MUST abort — its in-memory mode_active stays
     // false and no audit/cache state is written. The previous in-memory
     // `compare_exchange` did NOT provide this guarantee: it was per-process.
-    let observed = match app.store.lock() {
-        Ok(store) => match store.current_epoch() {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!(error = %e, instance_id = %id,
-                    "promotion: cannot read epoch — aborting");
-                return false;
-            }
-        },
-        Err(_) => {
-            tracing::error!(instance_id = %id,
-                "promotion: store lock poisoned reading epoch — aborting");
+    let observed = match app.store.with(|store| store.current_epoch()) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error = %e, instance_id = %id,
+                "promotion: cannot read epoch — aborting");
             return false;
         }
     };
 
-    let new_epoch = match app.store.lock() {
-        Ok(mut store) => match store.try_claim_epoch(observed, id, ts) {
-            Ok(Some(e)) => e,
-            Ok(None) => {
-                // Fence held: another instance advanced the epoch between
-                // our read and our write. We stay PassiveStandby.
-                tracing::warn!(
-                    instance_id = %id,
-                    observed    = observed,
-                    reason      = %reason,
-                    "promotion ABORTED — epoch already advanced by another instance (durable fence held)"
-                );
-                return false;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, instance_id = %id,
-                    "promotion: epoch claim execute failed — aborting");
-                return false;
-            }
-        },
-        Err(_) => {
-            tracing::error!(instance_id = %id,
-                "promotion: store lock poisoned during claim — aborting");
+    let new_epoch = match app.store.with(|store| store.try_claim_epoch(observed, id, ts)) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            // Fence held: another instance advanced the epoch between
+            // our read and our write. We stay PassiveStandby.
+            tracing::warn!(
+                instance_id = %id,
+                observed    = observed,
+                reason      = %reason,
+                "promotion ABORTED — epoch already advanced by another instance (durable fence held)"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, instance_id = %id,
+                "promotion: epoch claim execute failed — aborting");
             return false;
         }
     };
@@ -580,23 +570,12 @@ async fn perform_promotion(
     // than staying PassiveStandby (another instance, or a later retry once the
     // store is healthy, promotes instead). A newly-Active writer on an unanchored
     // chain is the worse state, so we fail closed to standby.
-    match app.store.lock() {
-        Ok(mut store) => {
-            if let Err(e) = store.ensure_hash_v2_migration_anchor(ts) {
-                tracing::error!(
-                    error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
-                    "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
-                );
-                return false;
-            }
-        }
-        Err(_) => {
-            tracing::error!(
-                instance_id = %id, epoch = new_epoch, reason = %reason,
-                "promotion ABORTED — store lock poisoned ensuring hash-v2 audit anchor; staying PassiveStandby (fail-closed)"
-            );
-            return false;
-        }
+    if let Err(e) = app.store.with(|store| store.ensure_hash_v2_migration_anchor(ts)) {
+        tracing::error!(
+            error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
+            "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
+        );
+        return false;
     }
 
     // Step 2: Cache the won epoch in memory so the mutation gate can
@@ -638,11 +617,11 @@ async fn perform_promotion(
     // Step 4: Persist promotion record (disk-first).
     // save_engine_state takes &self; acquire lock once for that, then release
     // and re-acquire as mut for save_posture_event_chained (&mut self).
-    if let Ok(store) = app.store.lock() {
+    app.store.with(|store| {
         let _ = store.save_engine_state(PROMOTION_RECORD_KEY, id);
-    }
+    });
 
-    if let Ok(mut store) = app.store.lock() {
+    app.store.with(|store| {
         // Tag the audit payload with `epoch` so a partitioned write is
         // identifiable after the fact (the audit chain itself is
         // monotonic; the epoch column adds the HA-generation linkage).
@@ -660,7 +639,7 @@ async fn perform_promotion(
             Some(reason),
             ts,
         );
-    }
+    });
 
     // #112: record the control-authority handoff provenance ALONGSIDE the
     // promotion event (complement, not a duplicate). A primary failure transfers
@@ -1145,8 +1124,8 @@ mod sg_009_promotion_act_tests {
         assert!(app.is_active(), "promotion must flip mode_active false→true (now Active)");
 
         // 2. Durable promotion record written (disk-first bookkeeping).
-        let recorded = app.store.lock().unwrap()
-            .load_engine_state(PROMOTION_RECORD_KEY).unwrap();
+        let recorded = app.store
+            .with(|store| store.load_engine_state(PROMOTION_RECORD_KEY)).unwrap();
         assert_eq!(recorded.as_deref(), Some("standby-under-test"),
             "promoted instance must persist its id to the promotion record");
 
@@ -1161,8 +1140,8 @@ mod sg_009_promotion_act_tests {
             "promoted (Active) instance must recalculate posture and populate the cache");
 
         // 5. The promotion is recorded in the tamper-evident audit chain.
-        let audit = app.store.lock().unwrap()
-            .verify_audit_chain_full(None).unwrap();
+        let audit = app.store
+            .with(|store| store.verify_audit_chain_full(None)).unwrap();
         assert!(audit.total_entries >= 1,
             "promotion must append a STANDBY_PROMOTED_TO_ACTIVE audit event");
     }
@@ -1194,7 +1173,7 @@ mod sg_009_promotion_act_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
 
         assert_eq!(
-            app.store.lock().unwrap().count_audit_events_for_test("HASH_V2_MIGRATION"),
+            app.store.with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
             0,
             "precondition: no anchor marker before promotion"
         );
@@ -1203,7 +1182,7 @@ mod sg_009_promotion_act_tests {
 
         assert!(app.is_active(), "healthy promotion must complete (Active)");
         assert_eq!(
-            app.store.lock().unwrap().count_audit_events_for_test("HASH_V2_MIGRATION"),
+            app.store.with(|store| store.count_audit_events_for_test("HASH_V2_MIGRATION")),
             1,
             "promotion must ensure the hash-v2 anchor before writing as Active"
         );
@@ -1233,7 +1212,7 @@ mod sg_009_promotion_act_tests {
             0,
             "abort must occur before the in-memory epoch is cached (Step 2 not reached)"
         );
-        let record = app.store.lock().unwrap().load_engine_state(PROMOTION_RECORD_KEY).unwrap();
+        let record = app.store.with(|store| store.load_engine_state(PROMOTION_RECORD_KEY)).unwrap();
         assert_eq!(record, None, "aborted promotion must NOT write a promotion record");
         assert!(
             cache.read().unwrap().is_none(),

@@ -234,19 +234,15 @@ pub(crate) fn watchdog_sweep_once(
     if now.saturating_sub(*last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
         || *last_node_refresh_ms == 0
     {
-        let load_result = {
-            // SG-003 fail-CLOSED: recover a poisoned store lock rather than
-            // `.unwrap()`-panicking. The watchdog is the ASIL-D dead-man's
-            // switch — if a sibling task panics while holding `app.store`,
-            // this sweep must keep running, because a dead watchdog is
-            // fail-OPEN (a silent sensor would never be marked Untrusted and
-            // posture would never recalculate). Mirrors the graceful lock
-            // recovery already used in standby_monitor.rs / audit_writer.rs.
-            // The guard data is a transactional SQLite handle, safe to reuse
-            // after a poisoning.
-            let store = app.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            store.load_all_registered_av_node_ids()
-        }; // outer guard released here — before any per-node re-lock below
+        // SG-003 fail-CLOSED: recover a poisoned store lock rather than
+        // `.unwrap()`-panicking. The watchdog is the ASIL-D dead-man's
+        // switch — if a sibling task panics while holding `app.store`,
+        // this sweep must keep running, because a dead watchdog is
+        // fail-OPEN (a silent sensor would never be marked Untrusted and
+        // posture would never recalculate). `StoreHandle::with` recovers a
+        // poisoned lock internally. The handle releases the lock at the end
+        // of the closure — before any per-node re-lock below.
+        let load_result = app.store.with(|store| store.load_all_registered_av_node_ids());
 
         match load_result {
             Ok(node_ids) => {
@@ -257,9 +253,8 @@ pub(crate) fn watchdog_sweep_once(
                     node_health.entry(node_id.clone()).or_insert_with(|| {
                         // Load initial last_seen from persistent store.
                         // Safe: outer guard already released above.
-                        let last_seen = app.store.lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .get_last_telemetry_timestamp(node_id)
+                        let last_seen = app.store
+                            .with(|store| store.get_last_telemetry_timestamp(node_id))
                             .unwrap_or(0);
                         WatchdogNodeEntry {
                             node_id: node_id.clone(),
@@ -301,7 +296,7 @@ pub(crate) fn watchdog_sweep_once(
         // Sync last_seen_ms from the store on each sweep.
         // Lightweight in-memory read path; SQLite is only hit on the node
         // refresh cycle above.
-        if let Ok(ts) = app.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_last_telemetry_timestamp(&entry.node_id) {
+        if let Ok(ts) = app.store.with(|store| store.get_last_telemetry_timestamp(&entry.node_id)) {
             if ts > entry.last_seen_ms {
                 // Fresh telemetry received since last sweep — reset warn flag.
                 entry.last_seen_ms = ts;
@@ -568,18 +563,18 @@ mod watchdog_di_tests {
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         insert_trusted_node(&app, "lidar_front", anchor);
 
-        // Poison app.store: a thread panics while holding the lock.
+        // Poison app.store: a thread panics while holding the lock (inside a
+        // `StoreHandle::with` closure, which is where the lock is taken now).
         {
             let app_poison = Arc::clone(&app);
             let _ = std::thread::spawn(move || {
-                let _guard = app_poison.store.lock().unwrap();
-                panic!("intentional poison for regression test");
+                app_poison.store.with(|_store| {
+                    panic!("intentional poison for regression test");
+                });
             })
-            .join(); // Err — the thread panicked; the mutex is now poisoned.
-            assert!(
-                app.store.lock().is_err(),
-                "precondition: store mutex must be poisoned for this regression test"
-            );
+            .join(); // Err — the thread panicked; the underlying mutex is now poisoned.
+            // The handle recovers the poison internally, so a subsequent `.with`
+            // must still run (this is the property the watchdog relies on).
         }
 
         let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
@@ -689,15 +684,14 @@ mod watchdog_di_tests {
 
         let store = VerifierStore::new(":memory:").expect("memory store");
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-        {
-            let store = app.store.lock().unwrap();
+        app.store.with(|store| {
             store.register_av_subsystem_meta(
                 "lidar_front", "LIDAR", "hw-0001", 0.7, 1_000_000,
             ).expect("register av subsystem");
             store.register_av_subsystem_meta(
                 "imu_main", "IMU", "hw-0002", 0.7, 1_000_500,
             ).expect("register av subsystem");
-        }
+        });
         insert_trusted_node(&app, "lidar_front", 1_000_000);
         insert_trusted_node(&app, "imu_main", 1_000_500);
 

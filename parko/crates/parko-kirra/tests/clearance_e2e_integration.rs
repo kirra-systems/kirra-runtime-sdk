@@ -18,14 +18,13 @@
 //! divergence) are cross-component bugs no single unit test would catch. The second
 //! test pins the #321 per-class contract boundary mechanically.
 
-use std::sync::{Arc, Mutex};
-
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use kirra_verifier::attestation::{
     operator_grant_signing_payload, operator_key_fingerprint, verify_ed25519_pem_signature,
 };
+use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier::{AppState, VerifierOperationMode};
 use kirra_verifier::verifier_store::{AuditExportPage, VerifierStore};
 
@@ -86,8 +85,8 @@ fn escalated_loop() -> ClearanceLoop {
     l
 }
 
-fn audit_chain(store: &Arc<Mutex<VerifierStore>>, vk: &VerifyingKey) -> AuditExportPage {
-    store.lock().unwrap().load_audit_chain_page(500, 0, Some(vk)).unwrap()
+fn audit_chain(store: &StoreHandle, vk: &VerifyingKey) -> AuditExportPage {
+    store.with(|s| s.load_audit_chain_page(500, 0, Some(vk))).unwrap()
 }
 
 // --------------------------------------------------------------------------
@@ -107,9 +106,9 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     // 2. The operator PROVES identity (#314 verify-THEN-consume), then the grant is
     //    recorded through the real Phase-A store path.
     let (op_sk, op_pem) = operator_keypair(42);
-    store.lock().unwrap().register_operator(operator, &op_pem, 1).unwrap();
+    store.with(|s| s.register_operator(operator, &op_pem, 1)).unwrap();
     assert!(
-        store.lock().unwrap().load_operator(operator).unwrap().is_some(),
+        store.with(|s| s.load_operator(operator)).unwrap().is_some(),
         "operator is registered"
     );
 
@@ -140,9 +139,7 @@ fn sg6_latch_to_operator_signed_grant_to_phase_b_clears_motion() {
     // audit event naming WHICH operator key cleared it (non-repudiation).
     let fingerprint = operator_key_fingerprint(&op_pem);
     let rowid = store
-        .lock()
-        .unwrap()
-        .save_clearance_grant_chained_with_auth(node, operator, now, "operator-signed", fingerprint.as_deref())
+        .with(|s| s.save_clearance_grant_chained_with_auth(node, operator, now, "operator-signed", fingerprint.as_deref()))
         .unwrap();
     assert!(rowid > 0, "Phase-A recorded the grant");
 
@@ -197,13 +194,11 @@ fn operator_signed_grant_stale_at_delivery_is_rejected_two_checkpoint() {
     let mut sg6 = escalated_loop();
 
     let (_op_sk, op_pem) = operator_keypair(11);
-    store.lock().unwrap().register_operator(operator, &op_pem, 1).unwrap();
+    store.with(|s| s.register_operator(operator, &op_pem, 1)).unwrap();
     let granted = 1_000_000u64;
     let fingerprint = operator_key_fingerprint(&op_pem);
     store
-        .lock()
-        .unwrap()
-        .save_clearance_grant_chained_with_auth(node, operator, granted, "operator-signed", fingerprint.as_deref())
+        .with(|s| s.save_clearance_grant_chained_with_auth(node, operator, granted, "operator-signed", fingerprint.as_deref()))
         .unwrap();
 
     let delivery = ClearanceDelivery::new(store.clone(), node);

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
+use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{
     ClearanceLoop, ClearanceRejection, ClearanceState, ImpactCfg, ImpactEvidence, ImpactLatch,
@@ -97,12 +98,12 @@ fn parse_signing_key(key_b64: &str) -> Result<SigningKey, FatalAuditConfig> {
 /// and appends every event via [`VerifierStore::save_posture_event_chained`]
 /// (which goes through `AuditChainLinker::append_audit_event_tx`).
 struct ChainedAuditWriter {
-    store: Arc<Mutex<VerifierStore>>,
+    store: StoreHandle,
     write_failures: AtomicU64,
 }
 
 impl ChainedAuditWriter {
-    fn new(store: Arc<Mutex<VerifierStore>>) -> Self {
+    fn new(store: StoreHandle) -> Self {
         Self {
             store,
             write_failures: AtomicU64::new(0),
@@ -117,7 +118,7 @@ impl ChainedAuditWriter {
         let mut store = VerifierStore::new(db_path)
             .map_err(|e| FatalAuditConfig::StoreOpenFailed(e.to_string()))?;
         store.set_signing_key(key);
-        Ok(Self::new(Arc::new(Mutex::new(store))))
+        Ok(Self::new(StoreHandle::new(store)))
     }
 
     fn write_failures(&self) -> u64 {
@@ -139,19 +140,9 @@ impl ChainedAuditWriter {
     /// Infallible toward the caller: a lock-poison or write error increments
     /// `write_failures` and logs loudly — never propagated, never panics.
     fn record(&self, source: &str, event_type: &str, body: &str) {
-        let outcome = match self.store.lock() {
-            Ok(mut store) => {
-                store.save_posture_event_chained(source, event_type, body, None, Self::now_ms())
-            }
-            Err(_) => {
-                self.note_failure();
-                eprintln!(
-                    "[audit] {event_type} NOT recorded — audit store mutex poisoned \
-                     (event is UNAUDITED)"
-                );
-                return;
-            }
-        };
+        let outcome = self.store.with(|store| {
+            store.save_posture_event_chained(source, event_type, body, None, Self::now_ms())
+        });
         if let Err(e) = outcome {
             self.note_failure();
             eprintln!(
@@ -179,7 +170,7 @@ impl AuditChainLinkerDivergenceSink {
     /// does — `VerifierStore::new` creates `audit_log_chain`) and a signing key
     /// (set via `VerifierStore::set_signing_key` / `admit_signing_key`) for the
     /// entries to be signed.
-    pub fn new(store: Arc<Mutex<VerifierStore>>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self {
             writer: ChainedAuditWriter::new(store),
         }
@@ -366,7 +357,7 @@ pub struct ImpactAuditSink {
 
 impl ImpactAuditSink {
     /// Build a sink over an SDK store (must own the audit chain + a signing key).
-    pub fn new(store: Arc<Mutex<VerifierStore>>) -> Self {
+    pub fn new(store: StoreHandle) -> Self {
         Self {
             writer: ChainedAuditWriter::new(store),
         }
@@ -673,22 +664,23 @@ mod tests {
 
         let mut store = VerifierStore::new(db.to_str().unwrap()).expect("store");
         store.set_signing_key(key);
-        let store = Arc::new(Mutex::new(store));
+        let store = StoreHandle::new(store);
 
-        let sink = AuditChainLinkerDivergenceSink::new(Arc::clone(&store));
+        let sink = AuditChainLinkerDivergenceSink::new(store.clone());
         sink.record(sample_event());
         assert_eq!(sink.write_failures(), 0, "the divergence must have been durably recorded");
 
-        let guard = store.lock().unwrap();
-
-        // Durable + hash-linked + SIGNED (verifies under the real key).
-        let v = guard.verify_audit_chain_full(Some(&vk)).expect("verify");
+        let (v, events) = store.with(|guard| {
+            // Durable + hash-linked + SIGNED (verifies under the real key).
+            let v = guard.verify_audit_chain_full(Some(&vk)).expect("verify");
+            let events = guard.load_all_posture_events().expect("load events");
+            (v, events)
+        });
         assert!(v.chain_intact, "audit chain must be hash-intact");
         assert!(v.signature_valid, "the signature must verify under the signing key");
         assert!(v.signed_entries >= 1, "the divergence entry must be signed, got {}", v.signed_entries);
 
         // The entry is a `ComparatorDivergence` carrying the event body.
-        let events = guard.load_all_posture_events().expect("load events");
         let div = events
             .iter()
             .find(|e| e["event_type"] == COMPARATOR_DIVERGENCE_EVENT_TYPE)
@@ -697,29 +689,30 @@ mod tests {
         assert_eq!(div["posture"]["accumulator"], 7);
     }
 
-    /// A persistence failure (poisoned store) is surfaced via `write_failures`,
-    /// never silently swallowed — a detected-but-unaudited divergence is itself
-    /// safety-relevant.
+    /// DB-actor migration phase 1: `StoreHandle` RECOVERS a poisoned lock
+    /// internally, so a transient panicking holder no longer blocks the audit
+    /// write. The former "poison → write_failures incremented" arm is gone with
+    /// the bare mutex; this test now pins the recovery behavior — a divergence is
+    /// still durably recorded after a transient poison (write_failures stays 0).
     #[test]
-    fn persistence_failure_is_surfaced_not_swallowed() {
+    fn store_recovers_after_transient_poison_and_still_records() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("divergence_audit.sqlite");
-        let store = Arc::new(Mutex::new(VerifierStore::new(db.to_str().unwrap()).expect("store")));
+        let store = StoreHandle::new(VerifierStore::new(db.to_str().unwrap()).expect("store"));
 
-        // Poison the store mutex so the audit write cannot land.
-        let s = Arc::clone(&store);
+        // Poison the underlying mutex by panicking inside a `with` closure.
+        let s = store.clone();
         let _ = std::thread::spawn(move || {
-            let _g = s.lock().unwrap();
-            panic!("poison the audit store for the failure test");
+            s.with(|_g| panic!("poison the audit store for the recovery test"));
         })
         .join();
 
-        let sink = AuditChainLinkerDivergenceSink::new(Arc::clone(&store));
+        let sink = AuditChainLinkerDivergenceSink::new(store.clone());
         sink.record(sample_event());
         assert_eq!(
             sink.write_failures(),
-            1,
-            "a divergence that could not be durably recorded MUST be counted, not swallowed"
+            0,
+            "the handle recovers the poisoned lock and the divergence is still recorded"
         );
     }
 
@@ -890,7 +883,7 @@ mod tests {
 
         let mut store = VerifierStore::new(db.to_str().unwrap()).expect("store");
         store.set_signing_key(key);
-        let sink = Arc::new(ImpactAuditSink::new(Arc::new(Mutex::new(store))));
+        let sink = Arc::new(ImpactAuditSink::new(StoreHandle::new(store)));
         // keep a separate handle to read back after.
         // (Re-open below to verify durability across a fresh store handle.)
         let db_path = db.to_str().unwrap().to_string();
@@ -914,28 +907,29 @@ mod tests {
             "an ImpactCleared entry must exist");
     }
 
-    /// Sink failure (poisoned store) → `write_failures` increments, but the latch
-    /// state and the motion veto are UNCHANGED (the infallibility proof).
+    /// DB-actor migration phase 1: `StoreHandle` recovers a transient poison, so
+    /// the transition IS recorded (write_failures stays 0). The latch state and
+    /// motion veto remain UNCHANGED — the infallibility-toward-the-latch proof
+    /// still holds (the audit path never perturbs the veto regardless of outcome).
     #[test]
-    fn test_sink_failure_counts_latch_and_veto_unchanged() {
+    fn test_sink_recovers_after_transient_poison_latch_and_veto_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("impact_audit.sqlite");
-        let store = Arc::new(Mutex::new(VerifierStore::new(db.to_str().unwrap()).expect("store")));
+        let store = StoreHandle::new(VerifierStore::new(db.to_str().unwrap()).expect("store"));
 
-        // Poison the store mutex so the audit write cannot land.
-        let s = Arc::clone(&store);
+        // Poison the underlying mutex by panicking inside a `with` closure.
+        let s = store.clone();
         let _ = std::thread::spawn(move || {
-            let _g = s.lock().unwrap();
-            panic!("poison the audit store for the failure test");
+            s.with(|_g| panic!("poison the audit store for the recovery test"));
         })
         .join();
 
-        let sink = Arc::new(ImpactAuditSink::new(Arc::clone(&store)));
+        let sink = Arc::new(ImpactAuditSink::new(store.clone()));
         let mut latch = RecordedImpactLatch::new(sink.clone());
         latch.observe(&contact_ev(), &icfg());
 
-        assert_eq!(sink.write_failures(), 1, "a transition that could not be recorded MUST be counted");
-        assert!(latch.is_latched(), "the latch (motion veto) must be UNCHANGED by a sink failure");
+        assert_eq!(sink.write_failures(), 0, "the handle recovers the poison; the transition is recorded");
+        assert!(latch.is_latched(), "the latch (motion veto) must be UNCHANGED by the audit path");
     }
 
     /// No durable sink (in-memory fallback) → the wrapped latch behaves IDENTICALLY
@@ -1063,32 +1057,34 @@ mod tests {
         assert_eq!(json["operator_id"], "op-9", "the operator id (audit subject) is recorded");
     }
 
-    /// Sink failure (poisoned store) does NOT affect the state machine or the
-    /// motion veto — the #263 infallibility proof, extended to the loop.
+    /// The audit sink does NOT affect the state machine or the motion veto — the
+    /// #263 infallibility proof, extended to the loop. DB-actor migration phase 1:
+    /// `StoreHandle` recovers a transient poison, so the writes now SUCCEED
+    /// (write_failures stays 0); the veto/escalation invariants are unchanged
+    /// regardless of audit outcome.
     #[test]
-    fn test_loop_sink_failure_state_unaffected() {
+    fn test_loop_audit_path_state_unaffected_and_recovers_poison() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("impact_audit.sqlite");
-        let store = Arc::new(Mutex::new(VerifierStore::new(db.to_str().unwrap()).expect("store")));
-        // Poison the store mutex.
-        let s = Arc::clone(&store);
+        let store = StoreHandle::new(VerifierStore::new(db.to_str().unwrap()).expect("store"));
+        // Poison the underlying mutex by panicking inside a `with` closure.
+        let s = store.clone();
         let _ = std::thread::spawn(move || {
-            let _g = s.lock().unwrap();
-            panic!("poison the audit store for the failure test");
+            s.with(|_g| panic!("poison the audit store for the recovery test"));
         })
         .join();
 
-        let sink = Arc::new(ImpactAuditSink::new(Arc::clone(&store)));
+        let sink = Arc::new(ImpactAuditSink::new(store.clone()));
         let mut loop_ = RecordedClearanceLoop::new(sink.clone());
         loop_.observe(&contact_ev(), &icfg(), 1_000);
         loop_.observe(&clean_ev(), &icfg(), 1_001);
-        assert!(loop_.is_immobilized(), "veto unaffected by sink failure");
-        assert!(loop_.escalation_pending(), "escalation state unaffected by sink failure");
-        assert!(sink.write_failures() >= 1, "the failed writes must be counted");
+        assert!(loop_.is_immobilized(), "veto unaffected by the audit path");
+        assert!(loop_.escalation_pending(), "escalation state unaffected by the audit path");
+        assert_eq!(sink.write_failures(), 0, "the handle recovers the poison; writes land");
         // A good grant still clears the state machine regardless of audit outcome.
         let now = 5_000u64;
         assert!(loop_.try_clear(&good_grant(now), now, LOOP_MAX_AGE).is_ok());
-        assert!(!loop_.is_immobilized(), "clearance state machine unaffected by sink failure");
+        assert!(!loop_.is_immobilized(), "clearance state machine unaffected by the audit path");
     }
 
     /// The wrapped loop's veto tracks a bare `ClearanceLoop` bit-for-bit over a
