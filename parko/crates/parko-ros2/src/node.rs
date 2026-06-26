@@ -323,6 +323,10 @@ where
                     TickError::InferenceError(msg) =>
                         tracing::error!(error = %msg,
                             "parko-ros2: inference error; publishing MRC"),
+                    TickError::ContainmentBreach =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: SG2 containment breach (command lookahead left the \
+                             ego corridor, or the corridor was stale/low-confidence); publishing MRC"),
                 }
             }
 
