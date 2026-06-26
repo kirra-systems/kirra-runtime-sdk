@@ -211,6 +211,10 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// Busy timeout for a read-only replica connection (ms): brief, so a reader
+/// rides out a concurrent WAL checkpoint instead of surfacing `SQLITE_BUSY`.
+const READ_REPLICA_BUSY_TIMEOUT_MS: u64 = 250;
+
 pub struct VerifierStore {
     /// Hot/read connection — `synchronous=NORMAL`. Carries the verdict-adjacent
     /// per-command audit (no fsync; throughput-safe at 20 Hz+).
@@ -225,6 +229,10 @@ pub struct VerifierStore {
     /// durable-write seam #165 (active-key + genesis persistence) extends.
     durable_conn: Option<Connection>,
     pub signing_key: Option<ed25519_dalek::SigningKey>,
+    /// The database path this store was opened from (`":memory:"` for in-memory).
+    /// Retained so a [`StoreHandle`](crate::store_handle::StoreHandle) can open
+    /// independent READ-ONLY replica connections to the same WAL file.
+    db_path: String,
 }
 
 // --- audit key-rotation helpers (#76) --------------------------------------
@@ -701,7 +709,45 @@ impl VerifierStore {
             Some(dc)
         };
 
-        Ok(Self { conn, durable_conn, signing_key: None })
+        Ok(Self { conn, durable_conn, signing_key: None, db_path: path.to_string() })
+    }
+
+    /// The database path this store was opened from.
+    pub fn path(&self) -> &str {
+        &self.db_path
+    }
+
+    /// Open an independent READ-ONLY replica connection to an EXISTING WAL
+    /// database (the writer owns all DDL, so this runs no schema setup). In WAL
+    /// mode a read-only connection sees committed snapshots and neither blocks
+    /// nor is blocked by the writer, so routing read-only routes here decouples
+    /// them from the writer mutex (review P3). All read methods are `&self` and
+    /// fresh-prepare their statements, so they work directly against the replica.
+    ///
+    /// Returns `Err` for `":memory:"` — a second `:memory:` open is a DISTINCT
+    /// empty database (same caveat as `durable_conn`), so the caller falls back
+    /// to the writer there.
+    pub fn open_read_replica(path: &str) -> Result<Self> {
+        if path == ":memory:" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                ":memory: has no shareable read replica".to_string(),
+            ));
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // A read-only WAL reader can briefly contend with a checkpoint; a short
+        // busy timeout rides it out rather than surfacing SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_millis(READ_REPLICA_BUSY_TIMEOUT_MS))?;
+        Ok(Self {
+            conn,
+            durable_conn: None,
+            signing_key: None,
+            db_path: path.to_string(),
+        })
     }
 
     /// Durability-critical read/single-write connection: the FULL handle when
