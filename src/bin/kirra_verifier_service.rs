@@ -524,31 +524,75 @@ async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     }
 }
 
+/// A store offload could not run to completion (distinct from a DB-level error,
+/// which the closure returns itself). Both variants are fail-closed and map to a
+/// 500 by callers — exactly like the prior inline `store.lock()` `Err` arm.
+#[derive(Debug)]
+enum StoreOffloadError {
+    /// The store mutex was poisoned (a prior holder panicked).
+    LockPoisoned,
+    /// The `spawn_blocking` task panicked / was cancelled.
+    TaskFailed,
+}
+
+/// Outcome of the offloaded federation commit (`submit_federated_report`), mapped
+/// to an HTTP response on the async side. Side effects that must happen on the
+/// async task (the `Fenced` self-demote of `mode_active`) are applied by the caller,
+/// not inside the blocking closure.
+enum FedCommitOutcome {
+    Accepted,
+    /// Clean rejection — `&'static str` reason for the `ReportEvaluation` body.
+    Rejected(&'static str),
+    /// 500 with this error message.
+    InternalError(&'static str),
+    /// Epoch-fenced mid-commit; carries the debug reason for the log line.
+    Fenced(String),
+}
+
+/// Run a blocking `VerifierStore` operation OFF the async worker threads.
+///
+/// Long-held SQLite ops (full backup export, audit-chain verification, the
+/// federation commit transaction) otherwise occupy a tokio worker for their whole
+/// duration while holding the global store mutex on it. Cloning the store `Arc`
+/// into `tokio::task::spawn_blocking` and acquiring the lock there keeps the async
+/// runtime responsive — the same offload `audit_writer::spawn_audit_writer` already
+/// uses for the single-writer audit path. `VerifierStore` is `Send`, so this is
+/// sound. The `MutexGuard` derefs to `&mut VerifierStore`, so `f` may call both
+/// `&self` reads and `&mut self` writes. Fail-closed: a poisoned lock or a panicked
+/// task surfaces as `Err`, never a silent success.
+async fn with_store_blocking<F, R>(app: &Arc<AppState>, f: F) -> Result<R, StoreOffloadError>
+where
+    F: FnOnce(&mut VerifierStore) -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let store = Arc::clone(&app.store);
+    match tokio::task::spawn_blocking(move || match store.lock() {
+        Ok(mut guard) => Ok(f(&mut guard)),
+        Err(_) => Err(StoreOffloadError::LockPoisoned),
+    })
+    .await
+    {
+        Ok(inner) => inner,
+        Err(_) => Err(StoreOffloadError::TaskFailed),
+    }
+}
+
 async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.lock() {
-        Ok(store) => {
-            let nodes = match store.load_nodes() {
-                Ok(n) => n,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                                  Json(json!({ "error": "failed to load nodes" }))).into_response(),
-            };
-            let dependencies = match store.load_dependencies() {
-                Ok(d) => d,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                                  Json(json!({ "error": "failed to load dependencies" }))).into_response(),
-            };
-            let posture_events = match store.load_all_posture_events() {
-                Ok(e) => e,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                                  Json(json!({ "error": "failed to load posture events" }))).into_response(),
-            };
-            Json(BackupExport {
-                exported_at_ms: now_ms(),
-                nodes,
-                dependencies,
-                posture_events,
-            }).into_response()
-        }
+    let exported_at_ms = now_ms();
+    // Three full-table loads (nodes + dependencies + all posture events) under one
+    // lock — the heaviest read. Run it off the worker pool so a large dump cannot
+    // pin a tokio worker (and hold the store mutex on it) for its whole duration.
+    let result = with_store_blocking(&svc.app, move |store| {
+        let nodes = store.load_nodes().ok()?;
+        let dependencies = store.load_dependencies().ok()?;
+        let posture_events = store.load_all_posture_events().ok()?;
+        Some(BackupExport { exported_at_ms, nodes, dependencies, posture_events })
+    })
+    .await;
+    match result {
+        Ok(Some(export)) => Json(export).into_response(),
+        Ok(None) => (StatusCode::INTERNAL_SERVER_ERROR,
+                     Json(json!({ "error": "failed to export backup" }))).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "store lock poisoned" }))).into_response(),
     }
@@ -975,29 +1019,34 @@ async fn get_node_flap_status(
 async fn verify_audit_chain(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
-    let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.lock() {
-        Ok(store) => match store.verify_audit_chain_full(vk) {
-            Ok(r) => Json(json!({
-                "chain_intact": r.chain_intact,
-                "total_entries": r.total_entries,
-                "latest_hash": r.latest_hash,
-                "signing_enabled": r.signing_enabled,
-                "signed_entries": r.signed_entries,
-                "unsigned_entries": r.unsigned_entries,
-                "signature_valid": r.signature_valid,
-                "first_signed_at_ms": r.first_signed_at_ms,
-                "public_key_b64": r.public_key_b64,
-                // #77 anchor-head high-water mark: detects tail truncation/deletion.
-                "head_verified": r.head_verified,
-                "head_status": r.head_status,
-                // Overall verdict folds in the head check so a truncated chain
-                // (rows internally consistent but tail deleted) reads as not-verified.
-                "verified": r.chain_intact && r.signature_valid && r.head_verified,
-            })).into_response(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+    // `VerifyingKey` is `Copy`; copy it into the blocking task. A full-chain scan
+    // with a per-row Ed25519 verification is the heaviest read-side op — run it off
+    // the worker pool so it can't pin a tokio worker (and hold the store mutex).
+    let vk = svc.audit_verifying_key;
+    let result = with_store_blocking(&svc.app, move |store| {
+        store.verify_audit_chain_full(vk.as_ref())
+    })
+    .await;
+    match result {
+        Ok(Ok(r)) => Json(json!({
+            "chain_intact": r.chain_intact,
+            "total_entries": r.total_entries,
+            "latest_hash": r.latest_hash,
+            "signing_enabled": r.signing_enabled,
+            "signed_entries": r.signed_entries,
+            "unsigned_entries": r.unsigned_entries,
+            "signature_valid": r.signature_valid,
+            "first_signed_at_ms": r.first_signed_at_ms,
+            "public_key_b64": r.public_key_b64,
+            // #77 anchor-head high-water mark: detects tail truncation/deletion.
+            "head_verified": r.head_verified,
+            "head_status": r.head_status,
+            // Overall verdict folds in the head check so a truncated chain
+            // (rows internally consistent but tail deleted) reads as not-verified.
+            "verified": r.chain_intact && r.signature_valid && r.head_verified,
+        })).into_response(),
+        Ok(Err(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
                        Json(json!({ "error": "audit chain query failed" }))).into_response(),
-        },
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "store lock poisoned" }))).into_response(),
     }
@@ -1648,97 +1697,100 @@ async fn submit_federated_report(
     // re-checks it INSIDE the transaction, closing the gate→commit TOCTOU.
     let held_epoch = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
 
-    let mut store = match svc.app.store.lock() {
-        Ok(s) => s,
+    // The whole 5-step commit (key load → signature verify → nonce gate → chained
+    // report+nonce-burn commit) runs under ONE lock; offload it to the blocking pool
+    // so this multi-statement transaction — the heaviest write — can't pin a tokio
+    // worker. The #79 epoch fence is preserved: `held_epoch` is read above (before
+    // the lock, as before) and the durable commit re-checks it INSIDE its
+    // transaction, so the slightly larger read→lock window remains harmless. All
+    // rejection-path audit writes stay inside the locked closure (same atomicity).
+    let outcome = with_store_blocking(&svc.app, move |store| {
+        let pk_b64 = match store.load_trusted_federation_controller_key(&report.source_controller_id) {
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                let event = json!({ "source_controller_id": report.source_controller_id,
+                                    "reason": "UNREGISTERED_FEDERATION_CONTROLLER" });
+                let _ = store.save_posture_event_chained(
+                    "federation_gateway", "FEDERATION_REJECTED",
+                    &event.to_string(), Some("unregistered source"), received_at_ms,
+                );
+                return FedCommitOutcome::Rejected("UNREGISTERED_FEDERATION_CONTROLLER");
+            }
+            Err(_) => return FedCommitOutcome::InternalError("controller lookup failed"),
+        };
+
+        if !verify_federated_report_signature_v2(&report, &pk_b64) {
+            let event = json!({ "source_controller_id": report.source_controller_id,
+                                "reason": "INVALID_FEDERATION_SIGNATURE" });
+            let _ = store.save_posture_event_chained(
+                "federation_gateway", "FEDERATION_REJECTED",
+                &event.to_string(), Some("signature mismatch"), received_at_ms,
+            );
+            return FedCommitOutcome::Rejected("INVALID_FEDERATION_SIGNATURE");
+        }
+
+        match store.has_seen_federation_nonce(&report.nonce_hex) {
+            Ok(true) => {
+                let event = json!({ "source_controller_id": report.source_controller_id,
+                                    "nonce_hex": report.nonce_hex,
+                                    "reason": "FEDERATION_NONCE_REPLAY" });
+                let _ = store.save_posture_event_chained(
+                    "federation_gateway", "FEDERATION_REJECTED",
+                    &event.to_string(), Some("nonce replay"), received_at_ms,
+                );
+                return FedCommitOutcome::Rejected("FEDERATED_NONCE_REPLAY");
+            }
+            Ok(false) => {}
+            Err(_) => return FedCommitOutcome::InternalError("nonce lookup failed"),
+        }
+
+        match store.save_federated_report_chained(&report.as_v1(), report.source_generation, received_at_ms, held_epoch) {
+            Ok(()) => FedCommitOutcome::Accepted,
+            Err(DurableWriteError::NonceReplay) => {
+                // H1: a replay raced past the `has_seen_federation_nonce` gate above and
+                // lost the durable single-use claim (PRIMARY KEY violation aborted the
+                // transaction — report NOT persisted, nonce NOT double-burned). Map it to
+                // the SAME clean rejection + audit as the gate path, not an opaque 500.
+                let event = json!({ "source_controller_id": report.source_controller_id,
+                                    "nonce_hex": report.nonce_hex,
+                                    "reason": "FEDERATION_NONCE_REPLAY" });
+                let _ = store.save_posture_event_chained(
+                    "federation_gateway", "FEDERATION_REJECTED",
+                    &event.to_string(), Some("nonce replay (concurrent)"), received_at_ms,
+                );
+                FedCommitOutcome::Rejected("FEDERATED_NONCE_REPLAY")
+            }
+            Err(DurableWriteError::Fenced(reason)) => FedCommitOutcome::Fenced(format!("{reason:?}")),
+            Err(DurableWriteError::Db(_)) => FedCommitOutcome::InternalError("failed to persist federated report"),
+        }
+    })
+    .await;
+
+    let outcome = match outcome {
+        Ok(o) => o,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
                           Json(json!({ "error": "store lock poisoned" }))).into_response(),
     };
 
-    let pk_b64 = match store.load_trusted_federation_controller_key(&report.source_controller_id) {
-        Ok(Some(key)) => key,
-        Ok(None) => {
-            let event = json!({ "source_controller_id": report.source_controller_id,
-                                "reason": "UNREGISTERED_FEDERATION_CONTROLLER" });
-            let _ = store.save_posture_event_chained(
-                "federation_gateway", "FEDERATION_REJECTED",
-                &event.to_string(), Some("unregistered source"), received_at_ms,
-            );
-            return Json(ReportEvaluation {
-                accepted: false,
-                reason: "UNREGISTERED_FEDERATION_CONTROLLER".to_string(),
-            }).into_response();
-        }
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "controller lookup failed" }))).into_response(),
-    };
-
-    if !verify_federated_report_signature_v2(&report, &pk_b64) {
-        let event = json!({ "source_controller_id": report.source_controller_id,
-                            "reason": "INVALID_FEDERATION_SIGNATURE" });
-        let _ = store.save_posture_event_chained(
-            "federation_gateway", "FEDERATION_REJECTED",
-            &event.to_string(), Some("signature mismatch"), received_at_ms,
-        );
-        return Json(ReportEvaluation {
-            accepted: false,
-            reason: "INVALID_FEDERATION_SIGNATURE".to_string(),
-        }).into_response();
-    }
-
-    match store.has_seen_federation_nonce(&report.nonce_hex) {
-        Ok(true) => {
-            let event = json!({ "source_controller_id": report.source_controller_id,
-                                "nonce_hex": report.nonce_hex,
-                                "reason": "FEDERATION_NONCE_REPLAY" });
-            let _ = store.save_posture_event_chained(
-                "federation_gateway", "FEDERATION_REJECTED",
-                &event.to_string(), Some("nonce replay"), received_at_ms,
-            );
-            return Json(ReportEvaluation {
-                accepted: false,
-                reason: "FEDERATED_NONCE_REPLAY".to_string(),
-            }).into_response();
-        }
-        Ok(false) => {}
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "nonce lookup failed" }))).into_response(),
-    }
-
-    match store.save_federated_report_chained(&report.as_v1(), report.source_generation, received_at_ms, held_epoch) {
-        Ok(()) => Json(evaluation).into_response(),
-        Err(DurableWriteError::NonceReplay) => {
-            // H1: a replay raced past the `has_seen_federation_nonce` gate above and
-            // lost the durable single-use claim (PRIMARY KEY violation aborted the
-            // transaction — report NOT persisted, nonce NOT double-burned). Map it to
-            // the SAME clean rejection + audit as the gate path, not an opaque 500.
-            let event = json!({ "source_controller_id": report.source_controller_id,
-                                "nonce_hex": report.nonce_hex,
-                                "reason": "FEDERATION_NONCE_REPLAY" });
-            let _ = store.save_posture_event_chained(
-                "federation_gateway", "FEDERATION_REJECTED",
-                &event.to_string(), Some("nonce replay (concurrent)"), received_at_ms,
-            );
-            Json(ReportEvaluation {
-                accepted: false,
-                reason: "FEDERATED_NONCE_REPLAY".to_string(),
-            }).into_response()
-        }
-        Err(DurableWriteError::Fenced(reason)) => {
-            // Superseded between the request-path gate and this commit. Mirror
-            // the gate: self-demote and reject fail-closed — the report was NOT
-            // persisted and the nonce was NOT burned (transaction dropped).
-            drop(store);
+    match outcome {
+        FedCommitOutcome::Accepted => Json(evaluation).into_response(),
+        FedCommitOutcome::Rejected(reason) =>
+            Json(ReportEvaluation { accepted: false, reason: reason.to_string() }).into_response(),
+        FedCommitOutcome::InternalError(msg) =>
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg }))).into_response(),
+        FedCommitOutcome::Fenced(reason) => {
+            // Superseded between the request-path gate and this commit. Mirror the
+            // gate: self-demote and reject fail-closed — the report was NOT persisted
+            // and the nonce was NOT burned (the transaction was dropped in the closure).
             svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
             tracing::error!(
                 path = "/federation/reports/submit",
-                fence = ?reason,
+                fence = %reason,
                 "FENCED at top-tier write (in-transaction epoch re-check) — self-demoting to PassiveStandby and rejecting"
             );
             (StatusCode::SERVICE_UNAVAILABLE,
              Json(json!({ "error": "fenced: epoch superseded; instance demoted to passive standby" }))).into_response()
         }
-        Err(DurableWriteError::Db(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to persist federated report" }))).into_response(),
     }
 }
 
@@ -2897,12 +2949,13 @@ async fn main() {
     let shutdown_state = Arc::clone(&svc_state.app);
     let shutdown = async move {
         shutdown_signal().await;
-        match shutdown_state.store.lock() {
-            Ok(store) => match store.durable_checkpoint() {
-                Ok(()) => tracing::info!("audit: durable checkpoint flushed on shutdown"),
-                Err(e) => tracing::error!(error = %e, "audit: durable checkpoint FAILED on shutdown"),
-            },
-            Err(_) => tracing::error!("audit: durable checkpoint skipped — store lock poisoned at shutdown"),
+        // Offload the WAL checkpoint (a `wal_checkpoint(TRUNCATE)` fsync — the
+        // longest single store hold) so it runs on the blocking pool rather than the
+        // runtime thread driving graceful shutdown.
+        match with_store_blocking(&shutdown_state, |store| store.durable_checkpoint()).await {
+            Ok(Ok(())) => tracing::info!("audit: durable checkpoint flushed on shutdown"),
+            Ok(Err(e)) => tracing::error!(error = %e, "audit: durable checkpoint FAILED on shutdown"),
+            Err(_) => tracing::error!("audit: durable checkpoint skipped — store unavailable at shutdown"),
         }
     };
 
@@ -5863,5 +5916,57 @@ mod console_phase_a_tests {
         let (s, _b) = post_json(svc, "/console/clearance-grants", body, None).await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
             "a passive-standby instance must not accept grant writes (split-brain guard)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store offload helper (heavy-op spawn_blocking path).
+//
+// `with_store_blocking` moves the long-held SQLite ops (backup export,
+// audit-chain verify, federation commit) off the tokio worker pool. These tests
+// pin its contract: a closure runs to completion against the real store, a write
+// is visible to a subsequent offloaded read, and `&mut self` writes + `&self`
+// reads both work through the guard. Each runs on a multi-thread runtime so the
+// spawn_blocking offload is actually exercised.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod store_offload_tests {
+    use super::{with_store_blocking, StoreOffloadError};
+    use std::sync::Arc;
+    use kirra_verifier::verifier::{AppState, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
+
+    fn app() -> Arc<AppState> {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        Arc::new(AppState::new(store, VerifierOperationMode::Active))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offloaded_write_is_visible_to_an_offloaded_read() {
+        let app = app();
+
+        let wrote = with_store_blocking(&app, |store| {
+            store.save_engine_state("offload_probe", "42").is_ok()
+        })
+        .await;
+        assert!(matches!(wrote, Ok(true)), "offloaded write must run to completion: {wrote:?}");
+
+        let read = with_store_blocking(&app, |store| {
+            store.load_engine_state("offload_probe").ok().flatten()
+        })
+        .await;
+        assert!(
+            matches!(read, Ok(Some(ref v)) if v == "42"),
+            "an offloaded read must observe the offloaded write; got {read:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offloaded_closure_return_value_is_propagated() {
+        let app = app();
+        // A pure read that computes a value off-thread and returns it intact.
+        let n: Result<u64, StoreOffloadError> =
+            with_store_blocking(&app, |_store| 7u64 * 6).await;
+        assert!(matches!(n, Ok(42)), "closure return value must propagate; got {n:?}");
     }
 }
