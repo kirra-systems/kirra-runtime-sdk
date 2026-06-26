@@ -2473,6 +2473,12 @@ async fn main() {
     // ("min:max"); unset/invalid → analog control writes are denied (fail-closed).
     kirra_verifier::adapters::dnp3::init_analog_envelope_from_env();
 
+    // CANopen SDO download per-target magnitude bounds from KIRRA_CANOPEN_SDO_BOUNDS
+    // ("node:index:subindex=type:min:max", …) + KIRRA_CANOPEN_STRICT_BOUNDS. Unset →
+    // SDO writes are posture-only; a configured target is faithfully decoded by its
+    // declared type and bounded (fail-closed on breach/undecodable).
+    kirra_verifier::adapters::canopen::init_sdo_bounds_from_env();
+
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
             .filter(|s| !s.is_empty())

@@ -406,6 +406,8 @@ proptest = "1"  # dev-dependency
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |
 | `KIRRA_FABRIC_ASSET_ID` | No | — | Local fabric asset id fed by the verifier→fabric posture feed (#88). Unset/empty → feed inert (asset keeps its `Degraded` registration seed) |
 | `KIRRA_DNP3_ANALOG_OUTPUT_ENVELOPE` | No | — | DNP3 Analog Output (g41) magnitude envelope as `min:max` (e.g. `-100.0:100.0`). A control write (Operate/Direct_Operate) whose decoded setpoint is outside the envelope is denied. Unset/invalid → analog control writes are **denied (fail-closed)**; faithfully-undecodable g41 payloads are also refused (never fabricated) |
+| `KIRRA_CANOPEN_SDO_BOUNDS` | No | — | Per-target CANopen SDO expedited-download magnitude bounds, `node:index:subindex=type:min:max` comma-separated (e.g. `5:0x6042:0=i16:-500:500`). `type` ∈ {i8,u8,i16,u16,i32,u32,f32}. A download to a configured target is faithfully decoded **by the configured type** (the OD entry — the frame carries width at best, never type; #85) and bounded: out-of-range/undecodable/segmented/width-mismatch → denied. Unconfigured targets are posture-only. Unset → SDO writes are posture-only |
+| `KIRRA_CANOPEN_STRICT_BOUNDS` | No | `false` | `1`/`true` → a CANopen SDO **download** to a target with NO configured bound is denied (high-assurance mode) instead of posture-only. Reads/uploads/non-SDO frames are unaffected |
 
 **`kirra-ros2-adapter` slow-loop env gates** (consumed in `node.rs`, opt-in, default off →
 byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),
