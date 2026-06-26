@@ -151,6 +151,50 @@ fn test_posture_diamond_dag_not_misidentified_as_cycle() {
 }
 
 #[test]
+fn test_posture_deep_acyclic_chain_is_not_depth_locked_out() {
+    // REGRESSION (depth-limit non-determinism): a chain of 15 Trusted nodes
+    // (A0→A1→…→A14, deeper than MAX_DEPENDENCY_DEPTH = 10) plus a forward shortcut
+    // A0→A14. A14 is therefore reachable at depth 1 (shortcut) AND depth 14 (chain).
+    //
+    // The old `depth >= 10` fixed cap flipped the chain to LockedOut: the node at
+    // depth 10 returned the (un-memoized) sentinel, which propagated up to A0. Worse,
+    // because the sentinel was not memoized, A0's verdict depended on which dependency
+    // the DFS walked first — i.e. on dependency *insertion order*, not the graph's
+    // trust state. The chain is fully acyclic and healthy, so the only correct,
+    // order-invariant verdict is Nominal. Assert it for BOTH dependency orderings.
+    const N: usize = 15;
+    for shortcut_first in [false, true] {
+        let state = AppState::new(
+            crate::verifier_store::VerifierStore::new(":memory:").unwrap(),
+            crate::verifier::VerifierOperationMode::Active,
+        );
+        let ids: Vec<String> = (0..N).map(|i| format!("A{i}")).collect();
+        for id in &ids { make_node(&state, id, NodeTrustState::Trusted); }
+        // Chain edges A_i → A_{i+1}.
+        for i in 0..N - 1 {
+            state.dependency_graph.insert(ids[i].clone(), vec![ids[i + 1].clone()]);
+        }
+        // A0 also depends directly on the deepest node — the diamond shortcut that
+        // makes A14 reachable at two very different depths. Vary the edge order so a
+        // pass that survives only one DFS ordering is caught.
+        let a0_deps = if shortcut_first {
+            vec![ids[N - 1].clone(), ids[1].clone()]
+        } else {
+            vec![ids[1].clone(), ids[N - 1].clone()]
+        };
+        state.dependency_graph.insert(ids[0].clone(), a0_deps);
+
+        let posture = state.calculate_posture("A0");
+        assert_eq!(posture.propagated_status, FleetPosture::Nominal,
+            "a deep but acyclic, all-Trusted chain must be Nominal (shortcut_first={shortcut_first}), \
+             not depth-locked-out; got {:?} blocked_by={:?}",
+            posture.propagated_status, posture.blocked_by);
+        assert!(posture.blocked_by.is_empty(),
+            "no node should be blocked in a healthy acyclic chain (shortcut_first={shortcut_first})");
+    }
+}
+
+#[test]
 fn test_posture_cycle_returns_locked_out_with_diagnostic_tag() {
     // A→B→A: genuine cycle — must lock out and tag with INVALID_GRAPH_CONFIG.
     let state = AppState::new(crate::verifier_store::VerifierStore::new(":memory:").unwrap(), crate::verifier::VerifierOperationMode::Active);
