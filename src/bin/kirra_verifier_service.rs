@@ -422,6 +422,13 @@ struct RegisterNodeRequest {
     /// #398 console — optional firmware version label captured at registration.
     #[serde(default)]
     firmware_version: Option<String>,
+    /// TPM-quote follow-up (#572): when `true`, the node MUST present a hardware
+    /// TPM quote on `/attestation/verify` — a self-reported PCR16 digest alone is
+    /// not accepted. Absent/`false` → no requirement (back-compat). Persisted to
+    /// the `node_attestation_policy` table before the node record is committed,
+    /// so a required-quote node is never live without its policy (fail-closed).
+    #[serde(default)]
+    require_tpm_quote: bool,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +449,22 @@ struct VerifyAttestationRequest {
     /// (back-compat). See `attestation::verify_attestation_proof_with_pcr16`.
     #[serde(default)]
     presented_pcr16_digest_hex: Option<String>,
+    /// Hardware TPM quote (TPM-quote follow-up to #572). When present it is
+    /// verified via `tpm_quote::verify_tpm_quote` against the node's registered
+    /// AK, the challenge nonce (canonical 8-byte big-endian `extraData`), and
+    /// the expected PCR16 digest. REQUIRED for a node whose
+    /// `node_attestation_policy.require_tpm_quote` is set; optional otherwise.
+    #[serde(default)]
+    tpm_quote: Option<TpmQuoteEvidence>,
+}
+
+/// The two hex fields of a TPM 2.0 quote: the marshaled `TPMS_ATTEST` bytes the
+/// AK signed, and the Ed25519 signature over them. See
+/// `tpm_quote::marshal_pcr16_quote` for the canonical body encoding.
+#[derive(Deserialize)]
+struct TpmQuoteEvidence {
+    quote_msg_hex: String,
+    signature_hex: String,
 }
 
 #[derive(Serialize)]
@@ -538,6 +561,22 @@ async fn register_node(
         firmware_version: req.firmware_version,
     };
 
+    // TPM-quote policy (#572 follow-up) is committed BEFORE the node record, so
+    // a node that requires a hardware quote is never live without its policy
+    // (fail-closed: no window where the requirement silently does not apply). A
+    // store error here fails the whole registration — the node is not inserted.
+    {
+        let store = match svc.app.store.lock() {
+            Ok(s) => s,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                              Json(json!({ "error": "store lock poisoned" }))).into_response(),
+        };
+        if store.set_node_attestation_policy(&req.node_id, req.require_tpm_quote).is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to persist attestation policy" }))).into_response();
+        }
+    }
+
     if svc.app.persist_and_insert_node(node).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to persist node" }))).into_response();
@@ -588,8 +627,8 @@ async fn verify_attestation(
     // state is written. PCR16 (measured-boot) binding: when the node registered an
     // `expected_pcr16_digest_hex`, the proof must carry a matching digest BOUND
     // into the AK signature (`verify_attestation_proof_with_pcr16`); a node with no
-    // expectation is unaffected. (A hardware TPM *quote* remains the deeper
-    // follow-up; see src/attestation.rs.)
+    // expectation is unaffected. A hardware TPM *quote* (the deeper measured-boot
+    // root) is enforced just below for a node whose policy requires it.
     let (ak_public_pem, expected_pcr16) = match svc.app.nodes.get(&req.node_id) {
         Some(node) => (node.ak_public_pem.clone(), node.expected_pcr16_digest_hex.clone()),
         None => return (StatusCode::NOT_FOUND,
@@ -620,6 +659,72 @@ async fn verify_attestation(
         tracing::warn!(node_id = %req.node_id, reason = %reason.as_str(),
             "attestation proof rejected (fail-closed, #73)");
         return (status, Json(json!({ "error": reason.as_str() }))).into_response();
+    }
+
+    // SAFETY: SG9 | REQ: attestation-tpm-quote-enforcement | TEST: tpm_quote_required_but_absent_is_refused,tpm_quote_valid_attests_node_trusted,tpm_quote_invalid_is_refused_and_nonce_preserved,tpm_quote_policy_absent_is_back_compat
+    // Hardware-rooted measured boot. The #73/#572 check above proves a
+    // SELF-REPORTED PCR16 digest under the AK — a node in control of its AK
+    // could sign a FALSE digest. A node enrolled with `require_tpm_quote` must
+    // additionally present a TPM QUOTE: the TPM itself signs the live PCR bank +
+    // the challenge nonce, so a forged boot state cannot be minted in software.
+    // Fail-closed: a policy-lookup error, a required-but-absent quote, an absent
+    // expectation to check against, or an invalid quote all REJECT. Runs BEFORE
+    // `consume_challenge`, so a quote failure does NOT burn the nonce (retry).
+    let require_quote = match svc.app.store.lock() {
+        Ok(store) => match store.node_requires_tpm_quote(&req.node_id) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                              Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
+        },
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store lock poisoned" }))).into_response(),
+    };
+    match (&req.tpm_quote, require_quote) {
+        (Some(quote), _) => {
+            // The quote attests a HASH OVER the PCR16 value; the registered datum
+            // is the value itself. Bridge via `expected_single_pcr_digest_hex`.
+            let expected_digest = match expected_pcr16
+                .as_deref()
+                .and_then(kirra_verifier::tpm_quote::expected_single_pcr_digest_hex)
+            {
+                Some(d) => d,
+                None => {
+                    tracing::warn!(node_id = %req.node_id,
+                        "tpm quote presented but node has no expected PCR16 to verify against");
+                    return (StatusCode::FORBIDDEN,
+                            Json(json!({ "error": "tpm quote presented but no expected PCR16 registered" }))).into_response();
+                }
+            };
+            let nonce_bytes = req.nonce.to_be_bytes();
+            if let Err(e) = kirra_verifier::tpm_quote::verify_tpm_quote(
+                ak_public_pem.as_deref(),
+                &nonce_bytes,
+                &expected_digest,
+                &quote.quote_msg_hex,
+                &quote.signature_hex,
+            ) {
+                use kirra_verifier::tpm_quote::TpmQuoteError;
+                // A bad signature / unparseable bytes is an authentication failure
+                // (401); everything else (no key, wrong magic/type, nonce, PCR
+                // selection, digest) is a forbidden boot/identity state (403).
+                let status = match e {
+                    TpmQuoteError::SignatureInvalid
+                    | TpmQuoteError::MalformedEncoding
+                    | TpmQuoteError::MalformedQuote => StatusCode::UNAUTHORIZED,
+                    _ => StatusCode::FORBIDDEN,
+                };
+                tracing::warn!(node_id = %req.node_id, reason = %e.as_str(),
+                    "tpm quote rejected (fail-closed) — nonce preserved");
+                return (status, Json(json!({ "error": e.as_str() }))).into_response();
+            }
+        }
+        (None, true) => {
+            tracing::warn!(node_id = %req.node_id,
+                "node policy requires a tpm quote but none was presented");
+            return (StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "tpm quote required by node policy but not presented" }))).into_response();
+        }
+        (None, false) => { /* back-compat: no quote required, none presented */ }
     }
 
     if !svc.app.consume_challenge(&req.node_id, req.nonce, now) {
@@ -4535,6 +4640,148 @@ mod attestation_nonce_handler_tests {
         assert!(
             matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
             "node becomes Trusted after a valid PCR16-bound proof"
+        );
+    }
+
+    // ---- Hardware TPM quote enforcement (live wiring) ---------------------
+
+    /// The 32-byte PCR16 VALUE a quote node attests, in hex. The quote carries a
+    /// HASH OVER this (`SHA256(value)`); the self-report proof carries the value.
+    const PCR16_VALUE_HEX: &str =
+        "ababababababababababababababababababababababababababababababababab";
+
+    /// A node enrolled with an expected PCR16 AND `require_tpm_quote = true` in
+    /// the policy table, mirroring `svc_with_pcr16_node`.
+    fn svc_with_quote_node(ak_pem: String, expected_pcr16: &str) -> Arc<ServiceState> {
+        let svc = svc_with_pcr16_node(ak_pem, expected_pcr16);
+        svc.app
+            .store
+            .lock()
+            .unwrap()
+            .set_node_attestation_policy(NODE, true)
+            .expect("set require_tpm_quote policy");
+        svc
+    }
+
+    /// Build `(quote_msg_hex, signature_hex)` for the canonical single-PCR16
+    /// quote bound to `nonce`, signed by the node's AK.
+    fn quote_evidence(sk: &SigningKey, nonce: u64, pcr16_value_hex: &str) -> (String, String) {
+        let value = hex::decode(pcr16_value_hex).unwrap();
+        let quote = kirra_verifier::tpm_quote::marshal_pcr16_quote(&nonce.to_be_bytes(), &value);
+        let sig = hex::encode(sk.sign(&quote).to_bytes());
+        (hex::encode(quote), sig)
+    }
+
+    /// Post a verify with a self-report digest AND a TPM quote.
+    async fn verify_with_quote(
+        svc: Arc<ServiceState>,
+        nonce: u64,
+        proof_hex: String,
+        presented: Option<&str>,
+        quote: Option<(String, String)>,
+    ) -> StatusCode {
+        let tpm_quote = quote.map(|(q, s)| serde_json::json!({
+            "quote_msg_hex": q, "signature_hex": s,
+        }));
+        let req: VerifyAttestationRequest = serde_json::from_value(serde_json::json!({
+            "node_id": NODE, "nonce": nonce, "proof_hex": proof_hex,
+            "presented_pcr16_digest_hex": presented,
+            "tpm_quote": tpm_quote,
+        }))
+        .expect("build request");
+        verify_attestation(State(svc), Json(req)).await.into_response().status()
+    }
+
+    /// A node whose policy requires a TPM quote is REFUSED when it presents only
+    /// a (valid) self-reported proof and no quote — fail-closed, nonce preserved.
+    #[tokio::test]
+    async fn tpm_quote_required_but_absent_is_refused() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        let status = verify_with_quote(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+            None, // no quote, but policy requires one
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "policy requires a quote, none presented → 403");
+        assert!(svc.app.pending_challenges.contains_key(NODE), "a quote refusal must not burn the nonce");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Unknown),
+            "node is not trusted without the required quote"
+        );
+    }
+
+    /// A valid TPM quote (correct nonce + PCR16 digest, AK-signed) attests the
+    /// node → 200 OK, Trusted.
+    #[tokio::test]
+    async fn tpm_quote_valid_attests_node_trusted() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        let status = verify_with_quote(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+            Some(quote_evidence(&node_key, nonce, PCR16_VALUE_HEX)),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "valid quote attests");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            "node becomes Trusted after a valid hardware quote"
+        );
+    }
+
+    /// A quote signed by the WRONG key is refused (401) and the nonce is NOT
+    /// burned, so the node can retry with a genuine quote.
+    #[tokio::test]
+    async fn tpm_quote_invalid_is_refused_and_nonce_preserved() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let attacker = SigningKey::from_bytes(&[9u8; 32]); // not the registered AK
+        let svc = svc_with_quote_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        // The base proof is genuine (node_key); only the QUOTE is forged.
+        let status = verify_with_quote(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+            Some(quote_evidence(&attacker, nonce, PCR16_VALUE_HEX)),
+        ).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "quote signed by the wrong key → 401");
+        assert!(svc.app.pending_challenges.contains_key(NODE), "an invalid quote must not burn the nonce");
+    }
+
+    /// A node with NO quote policy is unaffected: the self-report path attests
+    /// without any quote (back-compat). Also proves a presented quote is still
+    /// rejected if it does not verify, even when the policy does not require one.
+    #[tokio::test]
+    async fn tpm_quote_policy_absent_is_back_compat() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        // svc_with_pcr16_node sets NO attestation policy → require_tpm_quote=false.
+        let svc = svc_with_pcr16_node(public_key_to_pem(&node_key.verifying_key()), PCR16_VALUE_HEX);
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+
+        let status = verify_with_pcr16(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "no quote policy → self-report path still attests");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            "node attests via the back-compat self-report path"
         );
     }
 

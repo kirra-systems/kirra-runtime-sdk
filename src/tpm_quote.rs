@@ -19,8 +19,13 @@
 //!
 //! This module is the PURE, hardware-free verification engine (parser + checks),
 //! testable with synthetic quotes (see [`tests::marshal_quote`]). Generating a
-//! real quote on a node is a TPM/`tss-esapi` concern (the `tpm` feature); WIRING
-//! this into the `/attestation/verify` policy is the next step.
+//! real quote on a node is a TPM/`tss-esapi` concern (the `tpm` feature).
+//!
+//! LIVE WIRING: [`verify_tpm_quote`] is enforced on `/attestation/verify` for a
+//! node whose `node_attestation_policy.require_tpm_quote` is set; the handler
+//! bridges the registered raw PCR16 value to the quote's `pcrDigest` via
+//! [`expected_single_pcr_digest_hex`], and [`marshal_pcr16_quote`] is the
+//! reference body encoder the node side must match.
 //!
 //! Marshaling note: TPM 2.0 structures are BIG-ENDIAN; `TPM2B_*` fields are a
 //! `u16` size prefix followed by that many bytes. Every read is bounds-checked
@@ -237,6 +242,66 @@ pub fn verify_tpm_quote(
     Ok(())
 }
 
+/// Compute the `pcrDigest` a TPM produces for a quote that selects EXACTLY the
+/// SHA-256 PCR16 — i.e. `SHA256(pcr16_value)`. TPM 2.0 defines a quote's
+/// `pcrDigest` as the bank hash over the concatenation of the selected PCR
+/// values in increasing index order; for a single PCR that is `H(value)`.
+///
+/// The live attestation flow registers the raw PCR16 VALUE (the 32-byte
+/// measured-boot register content, the same datum the #572 self-report binds);
+/// the quote attests a HASH OVER it. This bridges the two: pass the registered
+/// `expected_pcr16_digest_hex` (the value) and get the `pcrDigest` to compare a
+/// PCR16-only quote against. Returns `None` if the input is not valid hex.
+///
+/// A quote that selects PCR16 PLUS other PCRs yields a different `pcrDigest`
+/// and is therefore rejected by [`verify_tpm_quote`] against this expectation —
+/// fail-closed: only a quote over exactly PCR16 with the expected value passes.
+#[must_use]
+pub fn expected_single_pcr_digest_hex(pcr16_value_hex: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let value = hex::decode(pcr16_value_hex.trim()).ok()?;
+    Some(hex::encode(Sha256::digest(value)))
+}
+
+/// Reference encoder for the canonical single-PCR16 SHA-256 quote body a node's
+/// TPM produces for this system: a `TPMS_ATTEST` of type `QUOTE`, `extraData =
+/// nonce`, selecting exactly the SHA-256 PCR16, with `pcrDigest = SHA256(
+/// pcr16_value)`. This is the WIRE-FORMAT SPECIFICATION the node side must
+/// match (the bytes the AK signs) and the encoder the tests/tooling use.
+///
+/// It does NOT sign — authenticity comes solely from the node's AK over these
+/// bytes; a verifier-side encoder cannot mint a verifiable quote without the
+/// node's private key. `nonce` is the verifier's challenge in its canonical
+/// 8-byte big-endian form (`u64::to_be_bytes`).
+#[must_use]
+pub fn marshal_pcr16_quote(nonce: &[u8], pcr16_value: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let pcr_digest = Sha256::digest(pcr16_value);
+    let mut q = Vec::new();
+    q.extend_from_slice(&TPM_GENERATED_VALUE.to_be_bytes());
+    q.extend_from_slice(&TPM_ST_ATTEST_QUOTE.to_be_bytes());
+    // qualifiedSigner (TPM2B_NAME) — not checked by the verifier.
+    let signer = b"\x00\x0bAK-NAME-DIGEST";
+    q.extend_from_slice(&(signer.len() as u16).to_be_bytes());
+    q.extend_from_slice(signer);
+    // extraData (TPM2B_DATA) — the challenge nonce.
+    q.extend_from_slice(&(nonce.len() as u16).to_be_bytes());
+    q.extend_from_slice(nonce);
+    q.extend_from_slice(&[0u8; CLOCK_INFO_LEN]); // clockInfo
+    q.extend_from_slice(&0u64.to_be_bytes()); // firmwareVersion
+    // TPML_PCR_SELECTION: one selection, SHA-256, PCR16 set.
+    q.extend_from_slice(&1u32.to_be_bytes());
+    q.extend_from_slice(&TPM_ALG_SHA256.to_be_bytes());
+    q.push(3u8); // sizeofSelect (3 octets → PCR0..23)
+    let mut sel = [0u8; 3];
+    sel[PCR16_INDEX / 8] |= 1u8 << (PCR16_INDEX % 8);
+    q.extend_from_slice(&sel);
+    // pcrDigest (TPM2B_DIGEST).
+    q.extend_from_slice(&(pcr_digest.len() as u16).to_be_bytes());
+    q.extend_from_slice(&pcr_digest);
+    q
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +476,49 @@ mod tests {
             verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
             Err(TpmQuoteError::MalformedQuote)
         );
+    }
+
+    /// The reference encoder + the single-PCR digest bridge round-trip through
+    /// the verifier: a quote `marshal_pcr16_quote(nonce, value)` verifies against
+    /// the expectation `expected_single_pcr_digest_hex(hex(value))`, and the
+    /// quoted `pcrDigest` is `SHA256(value)` (a HASH OVER the value, not the
+    /// value itself — the live-flow bridge from the registered PCR16 datum).
+    #[test]
+    fn tpm_quote_pcr16_reference_encoder_round_trips_through_verify() {
+        use sha2::{Digest, Sha256};
+        let sk = ephemeral();
+        let pcr16_value = [0x9Au8; 32];
+        let q = marshal_pcr16_quote(NONCE, &pcr16_value);
+        let (qh, sh) = signed(&q, &sk);
+        let expected = expected_single_pcr_digest_hex(&hex::encode(pcr16_value)).unwrap();
+        // The expectation is the HASH of the value, never the value itself.
+        assert_eq!(expected, hex::encode(Sha256::digest(pcr16_value)));
+        assert_ne!(expected, hex::encode(pcr16_value));
+        assert_eq!(
+            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &expected, &qh, &sh),
+            Ok(())
+        );
+    }
+
+    /// A reference quote bound to one nonce does NOT verify against a different
+    /// nonce — the canonical big-endian nonce encoding is anti-replay-bound.
+    #[test]
+    fn tpm_quote_reference_encoder_is_nonce_bound() {
+        let sk = ephemeral();
+        let pcr16_value = [0x9Au8; 32];
+        let nonce_a = 0x1122_3344_5566_7788u64.to_be_bytes();
+        let nonce_b = 0x8877_6655_4433_2211u64.to_be_bytes();
+        let q = marshal_pcr16_quote(&nonce_a, &pcr16_value);
+        let (qh, sh) = signed(&q, &sk);
+        let expected = expected_single_pcr_digest_hex(&hex::encode(pcr16_value)).unwrap();
+        assert_eq!(
+            verify_tpm_quote(Some(&pem(&sk.verifying_key())), &nonce_b, &expected, &qh, &sh),
+            Err(TpmQuoteError::NonceMismatch)
+        );
+    }
+
+    #[test]
+    fn expected_single_pcr_digest_rejects_non_hex() {
+        assert!(expected_single_pcr_digest_hex("not-hex-zz").is_none());
     }
 }

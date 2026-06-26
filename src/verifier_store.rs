@@ -434,6 +434,20 @@ impl VerifierStore {
             [],
         )?;
 
+        // Per-node attestation POLICY (TPM-quote follow-up to #572). Kept as a
+        // distinct table from the `nodes` identity/trust record: a security
+        // policy is a separate concern, and an absent row is the fail-closed
+        // default (no requirement — back-compat for nodes that never opted in).
+        // `require_tpm_quote` = the node must present a hardware TPM quote on
+        // `/attestation/verify`, not merely a self-reported PCR16 digest.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS node_attestation_policy (
+                node_id           TEXT PRIMARY KEY,
+                require_tpm_quote  INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS posture_events (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1187,6 +1201,35 @@ impl VerifierStore {
                 },
             )
             .optional()
+    }
+
+    /// Persist a node's attestation policy (TPM-quote follow-up to #572).
+    /// `INSERT OR REPLACE` so re-registration reflects the operator's current
+    /// intent (including flipping the requirement back off). Isolated from the
+    /// `nodes` identity record by design — see the table comment.
+    pub fn set_node_attestation_policy(&self, node_id: &str, require_tpm_quote: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO node_attestation_policy (node_id, require_tpm_quote)
+             VALUES (?1, ?2)",
+            params![node_id, require_tpm_quote as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the node requires a hardware TPM quote on `/attestation/verify`.
+    /// An absent row → `false` (a node that never opted in / back-compat). The
+    /// CALL SITE must treat a store error as fail-closed (cannot prove → reject).
+    pub fn node_requires_tpm_quote(&self, node_id: &str) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let v: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT require_tpm_quote FROM node_attestation_policy WHERE node_id = ?1",
+                params![node_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0) != 0)
     }
 
     pub fn save_dependencies(&self, node_id: &str, deps: &[String]) -> Result<()> {
@@ -3490,6 +3533,18 @@ mod standby_store_tests {
         store.save_engine_state("key", "first").unwrap();
         store.save_engine_state("key", "second").unwrap();
         assert_eq!(store.load_engine_state("key").unwrap(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn node_attestation_policy_defaults_absent_to_false_and_round_trips() {
+        // TPM-quote follow-up: an unknown node requires no quote (fail-closed
+        // opt-in default); set persists; re-set can flip it back off.
+        let store = in_memory();
+        assert!(!store.node_requires_tpm_quote("unknown").unwrap(), "absent → false");
+        store.set_node_attestation_policy("n1", true).unwrap();
+        assert!(store.node_requires_tpm_quote("n1").unwrap(), "set true persists");
+        store.set_node_attestation_policy("n1", false).unwrap();
+        assert!(!store.node_requires_tpm_quote("n1").unwrap(), "re-set clears the requirement");
     }
 
     // --- #394 console rollups -----------------------------------------------
