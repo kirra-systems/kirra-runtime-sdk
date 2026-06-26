@@ -459,6 +459,15 @@ impl VerifierStore {
             )",
             [],
         )?;
+        // History/flapping/analytics reads filter by node_id and order by
+        // created_at_ms; without these the per-node and time-window queries are
+        // full-table scans + filesorts.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_posture_events_node_time
+                ON posture_events(node_id, created_at_ms);
+             CREATE INDEX IF NOT EXISTS idx_posture_events_time
+                ON posture_events(created_at_ms);",
+        )?;
 
         // Operator clearance grants (#103 SG6 / operator-console Phase A).
         // RECORD-ONLY: a row here is a recorded + audit-chained supervisor grant;
@@ -1233,18 +1242,24 @@ impl VerifierStore {
     }
 
     pub fn save_dependencies(&self, node_id: &str, deps: &[String]) -> Result<()> {
-        self.conn.execute(
+        // Atomic replace: the DELETE and the re-INSERTs must commit together, or
+        // a mid-loop failure leaves a torn dependency set (some edges dropped,
+        // not all re-added) — a corrupt DAG for the next posture calculation.
+        // unchecked_transaction works on &self (matches the other writers here).
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM dependencies WHERE node_id = ?1",
             params![node_id],
         )?;
-
-        for dep in deps {
-            self.conn.execute(
+        {
+            let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO dependencies (node_id, dep_id) VALUES (?1, ?2)",
-                params![node_id, dep],
             )?;
+            for dep in deps {
+                stmt.execute(params![node_id, dep])?;
+            }
         }
-
+        tx.commit()?;
         Ok(())
     }
 
@@ -1501,6 +1516,15 @@ impl VerifierStore {
                 seen_at_ms           INTEGER NOT NULL
             )",
             [],
+        )?;
+        // Per-asset report lookups order by received_at_ms; the nonce retention
+        // sweep deletes by seen_at_ms on every federation accept. Both scan
+        // unindexed columns without these.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_federated_reports_asset
+                ON federated_trust_reports(asset_id, received_at_ms);
+             CREATE INDEX IF NOT EXISTS idx_federation_nonces_seen
+                ON federation_report_nonces(seen_at_ms);",
         )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS attestation_identity_registry (
@@ -2774,9 +2798,16 @@ impl VerifierStore {
     }
 
     pub fn save_last_generation(&self, generation: u64) -> Result<()> {
+        // Monotonic max-write: never persist a generation lower than the one
+        // already stored. Concurrent recalculations each claim a generation
+        // then race to persist; a blind INSERT OR REPLACE let a slower thread
+        // overwrite a higher value with its lower one, regressing the
+        // cross-restart monotonicity that federation peers depend on.
         self.conn.execute(
-            "INSERT OR REPLACE INTO posture_engine_state (key, value)
-             VALUES ('last_generation', ?1)",
+            "INSERT INTO posture_engine_state (key, value)
+             VALUES ('last_generation', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1
+             WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
             params![generation.to_string()],
         )?;
         Ok(())

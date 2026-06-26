@@ -54,7 +54,7 @@ pub fn verify_federated_report_signature(
     public_key_b64: &str,
 ) -> bool {
     use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use ed25519_dalek::{Signature, VerifyingKey};
 
     let Ok(pk_bytes) = b64.decode(public_key_b64) else { return false; };
     let Ok(sig_bytes) = b64.decode(&report.signature_b64) else { return false; };
@@ -65,7 +65,10 @@ pub fn verify_federated_report_signature(
     let Ok(key) = VerifyingKey::from_bytes(&pk_array) else { return false; };
     let sig = Signature::from_bytes(&sig_array);
 
-    key.verify(canonical_federation_payload(report).as_bytes(), &sig).is_ok()
+    // verify_strict (not verify) rejects signature malleability and non-canonical
+    // / small-order edge cases, matching attestation.rs, tpm_quote.rs, and
+    // key_registry.rs. Fail-closed on any cryptographic failure.
+    key.verify_strict(canonical_federation_payload(report).as_bytes(), &sig).is_ok()
 }
 
 /// Evaluates structural completeness, chronological freshness, and replay window.
