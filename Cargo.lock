@@ -1996,8 +1996,10 @@ name = "kirra-governor-service"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "hmac",
  "kirra-core",
  "serde",
+ "sha2",
 ]
 
 [[package]]

@@ -14,13 +14,31 @@
 // PROTOTYPE STAGE (QM, not the cert build): regular Rust over UDP. The
 // Ferrocene / `no_std` / ASIL-D factoring and the shared-memory mailbox are a
 // later stage and do not block the demo — see ADR-0001 and the bring-up runbook.
+//
+// AUTHENTICATION (review B2): the UDP command path is a vehicle-control surface,
+// so it is NOT trusted by source address. Every datagram (both directions) carries
+// a 32-byte HMAC-SHA256 tag over its body, keyed by a pre-shared secret
+// (`KIRRA_GOVERNOR_PSK`, REQUIRED — absent/empty → the governor refuses to start,
+// fail-closed). An unauthenticated request is dropped SILENTLY (no reply), so a
+// forged source address cannot turn the governor into a reflector; replies are
+// MAC'd too, so a spoofed verdict (e.g. a forged "Allow") cannot be injected at
+// the car. The M6 watchdog now REJECTS (rather than only logging) a replayed /
+// non-advancing sequence, and — when `KIRRA_GOVERNOR_FRESHNESS_MS` is set —
+// rejects stale / future-dated proposals, emitting a fail-closed safe-state verdict.
 
+use hmac::{Hmac, Mac};
 use kirra_core::kinematics_contract::{
     validate_vehicle_command, DenyCode, EnforceAction, ProposedVehicleCommand,
     VehicleKinematicsContract,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::net::UdpSocket;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Length of the HMAC-SHA256 authentication tag prepended to every datagram.
+const MAC_LEN: usize = 32;
 
 /// Default listen address (override with `KIRRA_GOVERNOR_ADDR`).
 const DEFAULT_ADDR: &str = "0.0.0.0:9760";
@@ -92,29 +110,153 @@ fn decide(proposal: &Proposal, contract: &VehicleKinematicsContract) -> Verdict 
     }
 }
 
-/// Minimal M6 watchdog state (staleness check stubbed for the prototype; the
-/// safe-state wiring comes later per the runbook). For now it only flags a
-/// non-monotonic sequence, which would indicate a reordered/replayed proposal.
-#[derive(Default)]
+/// Compute the HMAC-SHA256 tag over `body` with the pre-shared key. HMAC accepts
+/// a key of any length, so this never fails for a non-empty key.
+fn compute_mac(psk: &[u8], body: &[u8]) -> [u8; MAC_LEN] {
+    let mut mac = HmacSha256::new_from_slice(psk).expect("HMAC accepts any key length");
+    mac.update(body);
+    let out = mac.finalize().into_bytes();
+    let mut tag = [0u8; MAC_LEN];
+    tag.copy_from_slice(&out);
+    tag
+}
+
+/// Constant-time verification that `tag` authenticates `body` under `psk`.
+/// `Mac::verify_slice` is constant-time; an empty key (which should be impossible
+/// past the startup check) fails closed.
+fn verify_mac(psk: &[u8], body: &[u8], tag: &[u8]) -> bool {
+    let mut mac = match HmacSha256::new_from_slice(psk) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    mac.verify_slice(tag).is_ok()
+}
+
+/// Frame the wire response: `tag(32) || bincode(verdict)`, so the car can
+/// authenticate the verdict and reject a spoofed one.
+fn frame_response(psk: &[u8], verdict: &Verdict) -> Result<Vec<u8>, bincode::Error> {
+    let body = bincode::serialize(verdict)?;
+    let tag = compute_mac(psk, &body);
+    let mut out = Vec::with_capacity(MAC_LEN + body.len());
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Outcome of the M6 freshness/replay watchdog for one proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogVerdict {
+    /// Fresh and sequence-advancing — safe to evaluate.
+    Fresh,
+    /// Sequence did not strictly advance — a reordered / replayed proposal.
+    Replay,
+    /// `ts_nanos` is older than the freshness window — a delayed / held command.
+    Stale,
+    /// `ts_nanos` is ahead of now beyond the window — clock skew / forgery.
+    FutureDated,
+}
+
+impl WatchdogVerdict {
+    fn as_str(self) -> &'static str {
+        match self {
+            WatchdogVerdict::Fresh => "FRESH",
+            WatchdogVerdict::Replay => "REPLAY",
+            WatchdogVerdict::Stale => "STALE",
+            WatchdogVerdict::FutureDated => "FUTURE_DATED",
+        }
+    }
+}
+
+/// M6 watchdog state. Sequence-replay rejection is ALWAYS active (it needs no
+/// clock). Absolute-time staleness is opt-in via `freshness_window_nanos`
+/// (`KIRRA_GOVERNOR_FRESHNESS_MS`) because it requires the car and governor
+/// clocks to be roughly synchronized (AOU-TIMESYNC-001); when unset, only the
+/// clock-free replay check runs.
 struct WatchdogState {
     last_seq: Option<u64>,
-    last_ts_nanos: Option<u128>,
+    freshness_window_nanos: Option<u128>,
 }
 
 impl WatchdogState {
-    /// Records the proposal and returns `false` if the sequence did not advance
-    /// (the caller logs it). Staleness-vs-deadline and the safe-state emission
-    /// are deliberately NOT implemented yet (M6).
-    fn observe(&mut self, proposal: &Proposal) -> bool {
-        let monotonic = self.last_seq.map(|p| proposal.seq > p).unwrap_or(true);
+    fn new(freshness_window_nanos: Option<u128>) -> Self {
+        Self {
+            last_seq: None,
+            freshness_window_nanos,
+        }
+    }
+
+    /// Classify a proposal against the replay and freshness rules. Advances the
+    /// stored sequence ONLY on `Fresh`, so a rejected (replayed/stale) proposal
+    /// can neither poison the high-water mark nor be laundered into acceptance.
+    fn observe(&mut self, proposal: &Proposal, now_nanos: u128) -> WatchdogVerdict {
+        // Replay: the sequence must strictly advance. The MAC already prevents an
+        // attacker forging a NEW high sequence, so monotonic-seq + MAC together
+        // reject both forged and captured-and-replayed datagrams.
+        if let Some(prev) = self.last_seq {
+            if proposal.seq <= prev {
+                return WatchdogVerdict::Replay;
+            }
+        }
+
+        // Freshness (opt-in; needs car/governor clock sync per AOU-TIMESYNC-001).
+        if let Some(window) = self.freshness_window_nanos {
+            if proposal.ts_nanos > now_nanos {
+                if proposal.ts_nanos - now_nanos > window {
+                    return WatchdogVerdict::FutureDated;
+                }
+            } else if now_nanos - proposal.ts_nanos > window {
+                return WatchdogVerdict::Stale;
+            }
+        }
+
         self.last_seq = Some(proposal.seq);
-        self.last_ts_nanos = Some(proposal.ts_nanos);
-        monotonic
+        WatchdogVerdict::Fresh
+    }
+}
+
+/// Current wall-clock time in nanoseconds since the UNIX epoch (read once per
+/// request in `main` and passed into the pure watchdog for testability).
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// The fail-closed safe-state verdict emitted for an authenticated-but-untrustworthy
+/// frame (replay / stale / future-dated): a `FrameIntegrityUntrusted` deny, so the
+/// car safe-stops rather than acting on the questionable command.
+fn safe_state_verdict(seq: u64) -> Verdict {
+    Verdict {
+        seq,
+        action: EnforceAction::DenyBreach(DenyCode::FrameIntegrityUntrusted),
+        reason_code: deny_code_num(DenyCode::FrameIntegrityUntrusted),
     }
 }
 
 fn main() -> std::io::Result<()> {
     let addr = std::env::var("KIRRA_GOVERNOR_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
+
+    // The UDP command path MUST be authenticated (review B2). No PSK → refuse to
+    // start, fail-closed (an unauthenticated vehicle-control surface is the bug).
+    let psk = std::env::var("KIRRA_GOVERNOR_PSK").unwrap_or_default();
+    if psk.trim().is_empty() {
+        eprintln!(
+            "FATAL: KIRRA_GOVERNOR_PSK is unset/empty — the UDP command path must be \
+             authenticated (HMAC-SHA256). Refusing to start fail-open."
+        );
+        std::process::exit(1);
+    }
+    let psk = psk.into_bytes();
+
+    // Optional absolute-time staleness window (AOU-TIMESYNC-001: requires the car
+    // and governor clocks to be roughly synchronized). Unset → only the clock-free
+    // sequence-replay check runs.
+    let freshness_window_nanos = std::env::var("KIRRA_GOVERNOR_FRESHNESS_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|ms| ms as u128 * 1_000_000);
 
     // The governor enforces its OWN envelope. Nominal reference profile for the
     // prototype; the MRC fallback profile is available for a degraded mode.
@@ -122,19 +264,37 @@ fn main() -> std::io::Result<()> {
 
     let socket = UdpSocket::bind(&addr)?;
     eprintln!(
-        "kirra-governor-service: listening on {addr} (UDP), \
-         contract = nominal_reference_profile, effective_max_speed = {:.2} m/s",
-        contract.effective_max_speed_mps()
+        "kirra-governor-service: listening on {addr} (UDP, HMAC-SHA256 authenticated), \
+         contract = nominal_reference_profile, effective_max_speed = {:.2} m/s, \
+         freshness_window = {}",
+        contract.effective_max_speed_mps(),
+        freshness_window_nanos
+            .map(|w| format!("{} ms", w / 1_000_000))
+            .unwrap_or_else(|| "disabled (seq-replay only)".to_string()),
     );
 
-    let mut watchdog = WatchdogState::default();
+    let mut watchdog = WatchdogState::new(freshness_window_nanos);
     // One UDP datagram per proposal; 64 KiB is far above the fixed-schema size.
     let mut buf = vec![0u8; 64 * 1024];
 
     loop {
         let (n, peer) = socket.recv_from(&mut buf)?;
+        let frame = &buf[..n];
 
-        let proposal: Proposal = match bincode::deserialize(&buf[..n]) {
+        // Authenticate first: frame = tag(32) || bincode(Proposal). A frame too
+        // short to carry a tag, or one whose tag does not verify, is dropped
+        // SILENTLY — no reply to a forged source (anti-reflection).
+        if frame.len() < MAC_LEN {
+            eprintln!("drop: short frame ({} bytes) from {peer}", frame.len());
+            continue;
+        }
+        let (tag, body) = frame.split_at(MAC_LEN);
+        if !verify_mac(&psk, body, tag) {
+            eprintln!("drop: unauthenticated datagram from {peer} (bad MAC; no reply)");
+            continue;
+        }
+
+        let proposal: Proposal = match bincode::deserialize(body) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("decode error from {peer}: {e}");
@@ -142,16 +302,21 @@ fn main() -> std::io::Result<()> {
             }
         };
 
-        if !watchdog.observe(&proposal) {
-            eprintln!(
-                "watchdog: non-monotonic seq {} from {peer} (staleness/safe-state is M6, stubbed)",
-                proposal.seq
-            );
-        }
+        // Authenticated peer: classify freshness/replay, then either evaluate or
+        // emit the fail-closed safe-state deny.
+        let verdict = match watchdog.observe(&proposal, now_nanos()) {
+            WatchdogVerdict::Fresh => decide(&proposal, &contract),
+            rejected => {
+                eprintln!(
+                    "watchdog {} seq {} from {peer} -> safe-state deny",
+                    rejected.as_str(),
+                    proposal.seq
+                );
+                safe_state_verdict(proposal.seq)
+            }
+        };
 
-        let verdict = decide(&proposal, &contract);
-
-        match bincode::serialize(&verdict) {
+        match frame_response(&psk, &verdict) {
             Ok(bytes) => {
                 if let Err(e) = socket.send_to(&bytes, peer) {
                     eprintln!("send error to {peer}: {e}");
@@ -232,14 +397,106 @@ mod service_tests {
     }
 
     #[test]
-    fn watchdog_flags_non_monotonic_seq() {
-        let mut wd = WatchdogState::default();
+    fn watchdog_rejects_replayed_seq() {
+        // No freshness window → only the clock-free replay check is active.
+        let mut wd = WatchdogState::new(None);
         let mut p = steady(1.0, 0.0);
         p.seq = 5;
-        assert!(wd.observe(&p), "first observation is always monotonic");
+        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh, "first observation is fresh");
         p.seq = 4;
-        assert!(!wd.observe(&p), "a lower seq must be flagged as non-monotonic");
+        assert_eq!(
+            wd.observe(&p, 0),
+            WatchdogVerdict::Replay,
+            "a lower seq is a replay and must be rejected"
+        );
+        p.seq = 5;
+        assert_eq!(
+            wd.observe(&p, 0),
+            WatchdogVerdict::Replay,
+            "an equal seq (re-sent datagram) is also a replay"
+        );
         p.seq = 6;
-        assert!(wd.observe(&p), "an advancing seq is monotonic again");
+        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh, "an advancing seq is fresh again");
+    }
+
+    #[test]
+    fn watchdog_rejected_proposal_does_not_advance_highwater() {
+        // A replayed proposal must not poison the sequence high-water mark.
+        let mut wd = WatchdogState::new(None);
+        let mut p = steady(1.0, 0.0);
+        p.seq = 10;
+        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh);
+        p.seq = 3;
+        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Replay);
+        // The high-water mark is still 10, so seq 11 is the next acceptable one.
+        p.seq = 11;
+        assert_eq!(wd.observe(&p, 0), WatchdogVerdict::Fresh);
+    }
+
+    #[test]
+    fn watchdog_freshness_window_rejects_stale_and_future() {
+        // 100 ms window, expressed in nanoseconds.
+        let window_ns: u128 = 100 * 1_000_000;
+        let now: u128 = 10_000_000_000; // arbitrary "now"
+        let mut wd = WatchdogState::new(Some(window_ns));
+
+        // Within window → fresh.
+        let mut p = steady(1.0, 0.0);
+        p.seq = 1;
+        p.ts_nanos = now - 50 * 1_000_000;
+        assert_eq!(wd.observe(&p, now), WatchdogVerdict::Fresh);
+
+        // Older than the window → stale (seq still advances so it is not a replay).
+        p.seq = 2;
+        p.ts_nanos = now - 250 * 1_000_000;
+        assert_eq!(wd.observe(&p, now), WatchdogVerdict::Stale);
+
+        // Future-dated beyond the window → forgery/skew rejection.
+        p.seq = 3;
+        p.ts_nanos = now + 250 * 1_000_000;
+        assert_eq!(wd.observe(&p, now), WatchdogVerdict::FutureDated);
+    }
+
+    #[test]
+    fn watchdog_freshness_disabled_ignores_timestamps() {
+        // No window → an ancient timestamp is accepted (replay check still gates seq).
+        let mut wd = WatchdogState::new(None);
+        let mut p = steady(1.0, 0.0);
+        p.seq = 1;
+        p.ts_nanos = 0;
+        assert_eq!(wd.observe(&p, 10_000_000_000), WatchdogVerdict::Fresh);
+    }
+
+    #[test]
+    fn mac_round_trips_and_rejects_tamper() {
+        let psk = b"shared-bench-secret";
+        let body = bincode::serialize(&steady(1.0, 0.0)).expect("encode");
+        let tag = compute_mac(psk, &body);
+        assert!(verify_mac(psk, &body, &tag), "a valid tag must verify");
+
+        // Wrong key → reject.
+        assert!(!verify_mac(b"other-key", &body, &tag), "a tag under another key must fail");
+
+        // Tampered body → reject.
+        let mut tampered = body.clone();
+        tampered[0] ^= 0xFF;
+        assert!(!verify_mac(psk, &tampered, &tag), "a tampered body must fail authentication");
+
+        // Tampered tag → reject.
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 0xFF;
+        assert!(!verify_mac(psk, &body, &bad_tag), "a tampered tag must fail authentication");
+    }
+
+    #[test]
+    fn framed_response_is_authenticated_and_decodes() {
+        let psk = b"shared-bench-secret";
+        let verdict = safe_state_verdict(7);
+        let framed = frame_response(psk, &verdict).expect("frame");
+        assert!(framed.len() > MAC_LEN, "framed response carries tag + body");
+        let (tag, body) = framed.split_at(MAC_LEN);
+        assert!(verify_mac(psk, body, tag), "the car must be able to authenticate the verdict");
+        // The body is the serialized verdict; reason_code is FrameIntegrityUntrusted (11).
+        assert_eq!(verdict.reason_code, 11);
     }
 }
