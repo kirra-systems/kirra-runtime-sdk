@@ -1212,6 +1212,74 @@ async fn evaluate_action_filter(
     })).into_response()
 }
 
+/// Replay/freshness metadata required on every per-protocol industrial request.
+/// Flattened on the wire: `sequence` and `timestamp_ms` sit at the top level
+/// alongside the protocol message's own fields. The message's `source_node` is the
+/// per-source replay key. (The unified `/industrial/evaluate` envelope carries the
+/// same fields on `UnifiedIndustrialRequest` directly.)
+#[derive(serde::Deserialize)]
+struct ReplayGuarded<T> {
+    sequence: u64,
+    timestamp_ms: u64,
+    #[serde(flatten)]
+    message: T,
+}
+
+/// Enforce industrial-message replay + freshness (IEC 62443). Returns `Some(reason)`
+/// to REJECT (fail-closed), or `None` to proceed — advancing the per-source sequence
+/// high-water mark atomically on accept. Freshness is checked BEFORE the sequence
+/// advance, so a stale/future message never burns sequence space. A rejection is
+/// audit-chained. `source_id` should be caller-namespaced (e.g. `"dnp3:plc-01"`) so
+/// the same source string under different protocols does not collide.
+fn enforce_industrial_replay(
+    svc: &ServiceState,
+    protocol: &str,
+    source_id: &str,
+    sequence: u64,
+    timestamp_ms: u64,
+) -> Option<&'static str> {
+    let now = now_ms();
+    let fresh = kirra_verifier::protocol_adapter::classify_industrial_freshness(
+        timestamp_ms,
+        now,
+        kirra_verifier::protocol_adapter::INDUSTRIAL_FRESHNESS_WINDOW_MS,
+    );
+    let mut store = match svc.app.store.lock() {
+        Ok(s) => s,
+        Err(_) => return Some("INDUSTRIAL_REPLAY_STORE_POISONED"),
+    };
+    let reason = match fresh {
+        Some(r) => Some(r),
+        None => match store.industrial_seq_check_and_advance(source_id, sequence, now) {
+            Ok(true) => None,
+            Ok(false) => Some("INDUSTRIAL_MESSAGE_REPLAY"),
+            Err(_) => Some("INDUSTRIAL_REPLAY_STORE_UNAVAILABLE"),
+        },
+    };
+    if let Some(r) = reason {
+        let payload = json!({
+            "protocol": protocol, "source_id": source_id,
+            "sequence": sequence, "timestamp_ms": timestamp_ms, "reason": r,
+        });
+        let _ = store.save_posture_event_chained(
+            "industrial_replay_guard", "INDUSTRIAL_MESSAGE_REJECTED",
+            &payload.to_string(), Some(r), now,
+        );
+    }
+    reason
+}
+
+/// Standard rejection response for a replay/freshness denial (200 + allowed:false,
+/// matching the industrial handlers' denial shape; the rejection precedes evaluation).
+fn industrial_replay_rejection(protocol: &str, reason: &str) -> axum::response::Response {
+    (StatusCode::OK, Json(json!({
+        "protocol": protocol,
+        "allowed": false,
+        "denial_reason": reason,
+        "replay_rejected": true,
+    }))).into_response()
+}
+
 async fn evaluate_industrial_adapter(
     State(svc): State<Arc<ServiceState>>,
     body: Result<Json<UnifiedIndustrialRequest>, axum::extract::rejection::JsonRejection>,
@@ -1227,10 +1295,18 @@ async fn evaluate_industrial_adapter(
         }
     };
 
+    let protocol_name = format!("{:?}", req.protocol);
+
+    // Replay/freshness gate (IEC 62443) — reject a stale/replayed message before
+    // evaluation. Key the per-source sequence by protocol:source_id.
+    let replay_key = format!("{protocol_name}:{}", req.source_id);
+    if let Some(reason) = enforce_industrial_replay(&svc, &protocol_name, &replay_key, req.sequence, req.timestamp_ms) {
+        return industrial_replay_rejection(&protocol_name, reason);
+    }
+
     let (posture, lockout_reason) = gate_posture(&svc);
 
     let audit_ref = now_ms().to_string();
-    let protocol_name = format!("{:?}", req.protocol);
 
     match evaluate_unified_industrial_request(req, posture) {
         Ok(mut result) => {
@@ -1310,10 +1386,10 @@ async fn evaluate_industrial_adapter(
 
 async fn evaluate_ethernet_ip_adapter(
     State(svc): State<Arc<ServiceState>>,
-    body: Result<Json<EtherNetIpMessage>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<ReplayGuarded<EtherNetIpMessage>>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
-    let msg = match body {
-        Ok(Json(m)) => m,
+    let (msg, sequence, timestamp_ms) = match body {
+        Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "MALFORMED_REQUEST",
@@ -1322,6 +1398,12 @@ async fn evaluate_ethernet_ip_adapter(
             }))).into_response();
         }
     };
+
+    // Replay/freshness gate before evaluation.
+    let replay_key = format!("ethernet_ip:{}", msg.source_node);
+    if let Some(reason) = enforce_industrial_replay(&svc, "ethernet_ip", &replay_key, sequence, timestamp_ms) {
+        return industrial_replay_rejection("ethernet_ip", reason);
+    }
 
     let (posture, lockout_reason) = gate_posture(&svc);
 
@@ -1374,10 +1456,10 @@ async fn evaluate_ethernet_ip_adapter(
 
 async fn evaluate_canopen_adapter(
     State(svc): State<Arc<ServiceState>>,
-    body: Result<Json<CanOpenMessage>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<ReplayGuarded<CanOpenMessage>>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
-    let msg = match body {
-        Ok(Json(m)) => m,
+    let (msg, sequence, timestamp_ms) = match body {
+        Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "MALFORMED_REQUEST",
@@ -1386,6 +1468,12 @@ async fn evaluate_canopen_adapter(
             }))).into_response();
         }
     };
+
+    // Replay/freshness gate before evaluation.
+    let replay_key = format!("canopen:{}", msg.source_node);
+    if let Some(reason) = enforce_industrial_replay(&svc, "canopen", &replay_key, sequence, timestamp_ms) {
+        return industrial_replay_rejection("canopen", reason);
+    }
 
     let (posture, lockout_reason) = gate_posture(&svc);
 
@@ -1523,10 +1611,10 @@ async fn evaluate_canopen_adapter(
 
 async fn evaluate_dnp3_adapter(
     State(svc): State<Arc<ServiceState>>,
-    body: Result<Json<Dnp3Message>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<ReplayGuarded<Dnp3Message>>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
-    let msg = match body {
-        Ok(Json(m)) => m,
+    let (msg, sequence, timestamp_ms) = match body {
+        Ok(Json(g)) => (g.message, g.sequence, g.timestamp_ms),
         Err(rejection) => {
             return (StatusCode::BAD_REQUEST, Json(json!({
                 "error": "MALFORMED_REQUEST",
@@ -1535,6 +1623,12 @@ async fn evaluate_dnp3_adapter(
             }))).into_response();
         }
     };
+
+    // Replay/freshness gate before evaluation.
+    let replay_key = format!("dnp3:{}", msg.source_node);
+    if let Some(reason) = enforce_industrial_replay(&svc, "dnp3", &replay_key, sequence, timestamp_ms) {
+        return industrial_replay_rejection("dnp3", reason);
+    }
 
     let (posture, lockout_reason) = gate_posture(&svc);
 
@@ -5069,7 +5163,7 @@ mod local_asset_lockedout_seed_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod dnp3_mandatory_audit_tests {
-    use super::evaluate_dnp3_adapter;
+    use super::{evaluate_dnp3_adapter, ReplayGuarded};
 
     use std::sync::Arc;
 
@@ -5130,7 +5224,10 @@ mod dnp3_mandatory_audit_tests {
     }
 
     async fn post(svc: Arc<ServiceState>, msg: Dnp3Message) -> (StatusCode, serde_json::Value) {
-        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(msg))).await.into_response();
+        // Wrap with fresh replay metadata (seq 1 on a fresh per-test store, current
+        // timestamp) so the replay/freshness gate admits and we reach the audit path.
+        let guarded = ReplayGuarded { sequence: 1, timestamp_ms: now_ms(), message: msg };
+        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(guarded))).await.into_response();
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
         (status, serde_json::from_slice(&bytes).expect("json body"))
@@ -5149,31 +5246,38 @@ mod dnp3_mandatory_audit_tests {
         assert!(n >= 1, "a broadcast must always produce an audit entry, got {n}");
     }
 
+    // NOTE on TR-012a/b interaction with the replay gate: the replay/freshness gate
+    // is a PRIMARY security control that runs BEFORE evaluation and needs the store,
+    // so it fail-closes (blocks) when the store is unavailable. A fully-poisoned
+    // store therefore now blocks at the replay gate, ahead of the TR-012a/b audit
+    // logic. The TR-012a "broadcast blocked when its mandatory audit write fails" and
+    // TR-012b "unicast audit-write failure is non-fatal" branches still exist in the
+    // handler and apply once the replay gate has PASSED (healthy store, failing audit
+    // write). The broadcast-IS-audited path (healthy store) is covered by
+    // `test_dnp3_broadcast_always_audited` above.
+
     #[tokio::test]
-    async fn test_dnp3_broadcast_blocked_on_audit_write_failure() {
+    async fn test_poisoned_store_fail_closes_broadcast_at_replay_gate() {
         let svc = svc();
-        poison_store(&svc); // mandatory audit write will fail
+        poison_store(&svc); // the replay gate cannot verify replay → fail-closed
         let (status, v) = post(Arc::clone(&svc), control_msg(DNP3_BROADCAST_ADDRESS)).await;
-        assert_eq!(
-            status,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "a broadcast whose mandatory audit failed must be blocked"
-        );
-        assert_eq!(v["allowed"], false, "TR-012a: broadcast blocked when audit unavailable");
-        assert_eq!(v["denial_reason"], "DNP3_BROADCAST_AUDIT_UNAVAILABLE");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["allowed"], false, "a poisoned store must block the command (fail-closed)");
+        assert_eq!(v["denial_reason"], "INDUSTRIAL_REPLAY_STORE_POISONED");
+        assert_eq!(v["replay_rejected"], true);
     }
 
     #[tokio::test]
-    async fn test_dnp3_unicast_audit_failure_non_fatal() {
+    async fn test_poisoned_store_fail_closes_unicast_too() {
+        // STRICTER than TR-012b's "unicast audit-failure is non-fatal": replay
+        // verification is a primary gate and fail-closes when the store is
+        // unavailable, so a unicast control is also blocked under a poisoned store.
         let svc = svc();
-        poison_store(&svc); // audit write will fail for this unicast control too
+        poison_store(&svc);
         let (status, v) = post(Arc::clone(&svc), control_msg(0x0005)).await;
-        assert_eq!(status, StatusCode::OK, "unicast audit failure is non-fatal");
-        assert_eq!(
-            v["allowed"], true,
-            "TR-012b: a unicast command is NOT blocked by an audit-write failure"
-        );
-        assert_eq!(v["adapter_details"]["is_broadcast"], false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["allowed"], false, "fail-closed: unverifiable replay blocks even unicast");
+        assert_eq!(v["denial_reason"], "INDUSTRIAL_REPLAY_STORE_POISONED");
     }
 }
 
@@ -6169,5 +6273,96 @@ mod federation_submit_e2e_tests {
             !svc.app.store.lock().unwrap().has_seen_federation_nonce("nonce-bad").unwrap(),
             "a rejected report must not burn its nonce"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Industrial replay/freshness gate — handler-level behavior (drives the DNP3
+// handler, since the gate is shared across all four industrial handlers).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod industrial_replay_handler_tests {
+    use super::{evaluate_dnp3_adapter, ReplayGuarded};
+    use std::sync::Arc;
+    use axum::body::to_bytes;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use kirra_verifier::adapters::dnp3::Dnp3Message;
+    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
+
+    fn svc() -> Arc<ServiceState> {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let posture_cache: SharedPostureCache =
+            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            started_at_ms: now_ms(),
+            audit_verifying_key: None,
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    // A benign DNP3 READ (fc 0x01) so the only gate exercised is replay/freshness
+    // (a read is ReadTelemetry → admitted in Nominal, not a control, not bounded).
+    fn read_msg(source: &str) -> Dnp3Message {
+        Dnp3Message {
+            source_address: 1, dest_address: 1, function_code: 0x01,
+            data_link_control: 0, objects: vec![], source_node: source.to_string(),
+        }
+    }
+
+    async fn post(svc: Arc<ServiceState>, msg: Dnp3Message, sequence: u64, timestamp_ms: u64) -> serde_json::Value {
+        let g = ReplayGuarded { sequence, timestamp_ms, message: msg };
+        let resp = evaluate_dnp3_adapter(State(svc), Ok(Json(g))).await.into_response();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("read body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_in_order_admitted_then_replay_and_regress_rejected() {
+        let svc = svc();
+        let now = now_ms();
+        let v1 = post(svc.clone(), read_msg("plc-1"), 10, now).await;
+        assert_eq!(v1["allowed"], true, "fresh in-order read admitted: {v1}");
+        let v2 = post(svc.clone(), read_msg("plc-1"), 10, now).await;
+        assert_eq!(v2["allowed"], false);
+        assert_eq!(v2["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY", "replay rejected: {v2}");
+        let v3 = post(svc.clone(), read_msg("plc-1"), 5, now).await;
+        assert_eq!(v3["denial_reason"], "INDUSTRIAL_MESSAGE_REPLAY", "regress rejected: {v3}");
+        let v4 = post(svc.clone(), read_msg("plc-1"), 11, now).await;
+        assert_eq!(v4["allowed"], true, "higher seq admitted again: {v4}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_and_future_rejected_and_stale_does_not_burn_sequence() {
+        let svc = svc();
+        let now = now_ms();
+        let stale = post(svc.clone(), read_msg("plc-2"), 1, now.saturating_sub(60_000)).await;
+        assert_eq!(stale["denial_reason"], "INDUSTRIAL_MESSAGE_STALE", "{stale}");
+        let future = post(svc.clone(), read_msg("plc-3"), 1, now + 60_000).await;
+        assert_eq!(future["denial_reason"], "INDUSTRIAL_MESSAGE_FUTURE_DATED", "{future}");
+        // The stale message (freshness-checked BEFORE the sequence advance) must NOT
+        // have burned the sequence: a later in-window seq-1 from plc-2 is admitted.
+        let ok = post(svc.clone(), read_msg("plc-2"), 1, now).await;
+        assert_eq!(ok["allowed"], true, "a stale message must not advance the sequence: {ok}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn distinct_sources_have_independent_sequences() {
+        let svc = svc();
+        let now = now_ms();
+        assert_eq!(post(svc.clone(), read_msg("plc-a"), 100, now).await["allowed"], true);
+        // plc-b starts fresh; its seq 1 is admitted despite plc-a sitting at 100.
+        assert_eq!(post(svc.clone(), read_msg("plc-b"), 1, now).await["allowed"], true);
     }
 }
