@@ -814,9 +814,19 @@ pub async fn run_adapter(
 
     // ----- Spin loop ----------------------------------------------------
     //
-    // r2r's spin model is to drive the node's executor on a regular
-    // tick. Phase 4 wires in a shutdown channel; Phase 1 just loops.
-    loop {
+    // r2r's spin model is to drive the node's executor on a regular tick.
+    // `spin_once` is a SYNCHRONOUS, thread-blocking call — it parks the
+    // calling thread on the rcl wait-set for up to its timeout (~10 ms here),
+    // so spinning it directly on the async runtime stalls a tokio worker for
+    // that whole window every tick. Move the spin loop onto a dedicated
+    // blocking thread via `spawn_blocking` so it never occupies a worker;
+    // `node` is owned and unused after this point, so it moves cleanly into
+    // the closure. Phase 4 wires in a shutdown channel; Phase 1 just loops.
+    tokio::task::spawn_blocking(move || loop {
         node.spin_once(Duration::from_millis(10));
-    }
+    })
+    .await
+    .expect("r2r spin-loop blocking task panicked");
+
+    Ok(())
 }
