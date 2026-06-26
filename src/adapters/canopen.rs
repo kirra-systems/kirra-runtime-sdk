@@ -103,15 +103,377 @@ impl crate::adapters::IndustrialAdapter for CanOpenAdapter {
         }
     }
 
-    // POSTURE-ONLY (no override): a CANopen PDO carries raw process data and an
-    // SDO download's command byte self-describes only the value WIDTH (1/2/4
-    // bytes) — never its TYPE (signed/unsigned, int/float) or scaling, which are
-    // defined by the node's object dictionary, NOT the frame. Numerically
-    // bounding a width-N byte run without that per-object type would FABRICATE the
-    // value's interpretation (#85). So CANopen stays bounded by posture only until
-    // a per-(node,index,subindex) object-dictionary type+envelope config exists
-    // (tracked follow-up). Contrast DNP3 group-41, whose variation byte DOES carry
-    // the type (i16/i32/f32/f64) — which is why only DNP3 overrides this today.
+    /// An SDO expedited download to a CONFIGURED `(node, index, subindex)` target
+    /// is faithfully decoded BY THE CONFIGURED TYPE (the object-dictionary entry —
+    /// the frame carries width at best, never type, #85) and bounded against its
+    /// envelope. Targets with no config stay posture-only unless strict mode is on.
+    /// PDOs (raw process data, no per-object target in the frame) remain
+    /// posture-only — faithfully bounding them needs PDO-mapping config (follow-up).
+    fn bound_magnitude(msg: &CanOpenMessage) -> Result<(), &'static str> {
+        CanOpenAdapter::bound_sdo_download(msg, global_sdo_bounds())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CANopen SDO expedited-download magnitude bounding (#85: faithful, config-typed)
+// ---------------------------------------------------------------------------
+
+use crate::adapters::BoundSpec;
+
+/// Env var carrying per-target SDO download bounds. Format: comma-separated
+/// `node:index:subindex=type:min:max`, e.g. `5:0x6042:0=i16:-500:500`. `node`
+/// and `subindex` are `u8` (decimal or `0x`-hex); `index` is `u16` (decimal or
+/// `0x`-hex); `type` ∈ {i8,u8,i16,u16,i32,u32,f32}. Unset → no bounds (SDO
+/// writes are posture-only). A malformed entry is SKIPPED, never fabricated, so
+/// one bad pair can't silently disable the rest.
+pub const CANOPEN_SDO_BOUNDS_ENV: &str = "KIRRA_CANOPEN_SDO_BOUNDS";
+
+/// When `1`/`true`, a CANopen SDO DOWNLOAD to a target with NO configured bound
+/// is DENIED (high-assurance mode) instead of falling through to posture-only.
+pub const CANOPEN_STRICT_BOUNDS_ENV: &str = "KIRRA_CANOPEN_STRICT_BOUNDS";
+
+/// Per-`(node, index, subindex)` SDO download bounds + the strict-mode flag.
+#[derive(Debug, Clone, Default)]
+pub struct CanOpenSdoBounds {
+    map: HashMap<(u8, u16, u8), BoundSpec>,
+    strict: bool,
+}
+
+impl CanOpenSdoBounds {
+    /// Parse the env spec. Malformed entries are skipped (never fabricated).
+    pub fn parse(spec: &str, strict: bool) -> Self {
+        let mut map = HashMap::new();
+        for entry in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((target, bound)) = entry.split_once('=') else {
+                continue;
+            };
+            let mut t = target.splitn(3, ':');
+            let (Some(n), Some(i), Some(si)) = (t.next(), t.next(), t.next()) else {
+                continue;
+            };
+            let (Some(node), Some(index), Some(sub)) =
+                (parse_u8_radix(n), parse_u16_radix(i), parse_u8_radix(si))
+            else {
+                continue;
+            };
+            let Some(b) = BoundSpec::parse(bound) else {
+                continue;
+            };
+            map.insert((node, index, sub), b);
+        }
+        Self { map, strict }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// Parse a `u8` in decimal or `0x`-hex.
+fn parse_u8_radix(s: &str) -> Option<u8> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u8::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u8>().ok()
+    }
+}
+
+/// Parse a `u16` in decimal or `0x`-hex.
+fn parse_u16_radix(s: &str) -> Option<u16> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u16>().ok()
+    }
+}
+
+/// A parsed SDO "initiate download" (write) request header (CiA 301 §7.2.4).
+struct SdoDownload<'a> {
+    index: u16,
+    subindex: u8,
+    /// The value region (`data[4..]`) for an EXPEDITED download; `None` for a
+    /// segmented (non-expedited) download — its value spans later frames and is
+    /// not faithfully present here.
+    expedited_value: Option<&'a [u8]>,
+    /// The size-indicated value width (`4 - n`) when the command byte's size bit
+    /// is set; `None` when size is not indicated (width then comes from config).
+    indicated_width: Option<usize>,
+}
+
+/// Parse an SDO download header from the data field. `None` when this is not an
+/// "initiate download" command (ccs ≠ 1, e.g. an upload request / abort) or the
+/// frame is too short to carry the 4-byte command-index-subindex header.
+fn parse_sdo_download(data: &[u8]) -> Option<SdoDownload<'_>> {
+    if data.len() < 4 {
+        return None;
+    }
+    let cs = data[0];
+    // ccs (client command specifier) = bits 7..5; 1 = initiate download (write).
+    if (cs >> 5) != 1 {
+        return None;
+    }
+    let index = u16::from_le_bytes([data[1], data[2]]);
+    let subindex = data[3];
+    let expedited = (cs & 0x02) != 0; // bit 1 (e)
+    let size_indicated = (cs & 0x01) != 0; // bit 0 (s)
+    let (expedited_value, indicated_width) = if expedited {
+        let value = data.get(4..).unwrap_or(&[]);
+        let iw = if size_indicated {
+            // n = bits 3..2 = number of value bytes NOT containing data.
+            Some(4usize.saturating_sub(((cs >> 2) & 0x03) as usize))
+        } else {
+            None
+        };
+        (Some(value), iw)
+    } else {
+        (None, None)
+    };
+    Some(SdoDownload {
+        index,
+        subindex,
+        expedited_value,
+        indicated_width,
+    })
+}
+
+impl CanOpenAdapter {
+    /// MAGNITUDE BOUND — a CANopen SDO expedited download (object-dictionary write)
+    /// to a CONFIGURED `(node, index, subindex)` target must carry a value within
+    /// the declared envelope. The value's TYPE comes from the integrator config
+    /// (the OD entry), NEVER the frame (#85). Fail-closed:
+    ///   - not an SDO download (upload request / abort / non-SDO) → `Ok` (no setpoint),
+    ///   - download to an UNCONFIGURED target → `Ok` unless strict mode (then denied),
+    ///   - configured target but a SEGMENTED download → `Err` (value not faithfully present),
+    ///   - configured type width ≠ the frame's size-indicated width → `Err`,
+    ///   - value bytes too short for the type → `Err`,
+    ///   - value outside `[min, max]` → `Err`.
+    pub fn bound_sdo_download(
+        msg: &CanOpenMessage,
+        bounds: &CanOpenSdoBounds,
+    ) -> Result<(), &'static str> {
+        // Only SDO (Receive-SDO, client→server) frames carry a download.
+        if !matches!(msg.function_code, 0xA | 0xB) {
+            return Ok(());
+        }
+        let Some(dl) = parse_sdo_download(&msg.data) else {
+            // Not a download command (upload request / abort / too short) — no
+            // commanded setpoint to bound; posture gate still applies.
+            return Ok(());
+        };
+        let key = (msg.node_id, dl.index, dl.subindex);
+        let Some(spec) = bounds.map.get(&key) else {
+            // Unconfigured target: posture-only, unless strict mode denies it.
+            return if bounds.strict {
+                Err("CANOPEN_SDO_UNCONFIGURED_TARGET_STRICT")
+            } else {
+                Ok(())
+            };
+        };
+        // Configured target: must be an EXPEDITED download with the value present.
+        let value = dl
+            .expedited_value
+            .ok_or("CANOPEN_SDO_SEGMENTED_UNBOUNDABLE")?;
+        // Cross-check the frame's declared width against the configured type.
+        if let Some(indicated) = dl.indicated_width {
+            if indicated != spec.ty.width() {
+                return Err("CANOPEN_SDO_WIDTH_MISMATCH");
+            }
+        }
+        spec.check(
+            value,
+            "CANOPEN_SDO_UNDECODABLE",
+            "CANOPEN_SDO_NONFINITE",
+            "CANOPEN_SDO_ENVELOPE_BREACH",
+        )
+    }
+}
+
+static GLOBAL_SDO_BOUNDS: OnceLock<CanOpenSdoBounds> = OnceLock::new();
+
+/// Read `KIRRA_CANOPEN_SDO_BOUNDS` (+ `KIRRA_CANOPEN_STRICT_BOUNDS`) once into the
+/// process-wide bounds, at startup. Mirrors the DNP3 analog-envelope init: kept
+/// out of `AppState`/`ServiceState` so this adapter-layer bound needs no change to
+/// their construction sites. Idempotent (subsequent calls are no-ops).
+pub fn init_sdo_bounds_from_env() {
+    let _ = GLOBAL_SDO_BOUNDS.set(load_sdo_bounds_from_env());
+}
+
+/// The process-wide CANopen SDO bounds, lazily loaded from the environment on
+/// first use if `init_sdo_bounds_from_env` was never called.
+pub fn global_sdo_bounds() -> &'static CanOpenSdoBounds {
+    GLOBAL_SDO_BOUNDS.get_or_init(load_sdo_bounds_from_env)
+}
+
+fn load_sdo_bounds_from_env() -> CanOpenSdoBounds {
+    let spec = std::env::var(CANOPEN_SDO_BOUNDS_ENV).unwrap_or_default();
+    let strict = std::env::var(CANOPEN_STRICT_BOUNDS_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    CanOpenSdoBounds::parse(&spec, strict)
+}
+
+#[cfg(test)]
+mod sdo_bounds_tests {
+    use super::*;
+
+    // Build an SDO expedited-download frame: command byte + index(LE) + subindex
+    // + `value` bytes (padded to the 8-byte SDO frame), size-indicated for `width`.
+    fn sdo_expedited(node: u8, index: u16, sub: u8, value: &[u8]) -> CanOpenMessage {
+        let width = value.len();
+        assert!((1..=4).contains(&width), "expedited value is 1..=4 bytes");
+        let n = (4 - width) as u8;
+        // ccs=1 (download), n in bits3..2, e=1 (bit1), s=1 (bit0).
+        let cs = (1u8 << 5) | (n << 2) | 0x02 | 0x01;
+        let idx = index.to_le_bytes();
+        let mut data = vec![cs, idx[0], idx[1], sub];
+        data.extend_from_slice(value);
+        data.resize(8, 0x00); // pad unused value bytes
+        CanOpenMessage {
+            node_id: node,
+            function_code: 0xA, // SDOReceive (download channel)
+            data,
+            source_node: "rtu-1".into(),
+        }
+    }
+
+    fn bounds(spec: &str, strict: bool) -> CanOpenSdoBounds {
+        CanOpenSdoBounds::parse(spec, strict)
+    }
+
+    #[test]
+    fn config_parses_decimal_and_hex_targets() {
+        let b = bounds("5:0x6042:0=i16:-500:500, 6:24642:1=u8:0:100", false);
+        assert!(b.map.contains_key(&(5, 0x6042, 0)));
+        assert!(b.map.contains_key(&(6, 24642, 1)));
+    }
+
+    #[test]
+    fn config_skips_malformed_entries_without_panicking() {
+        // bad type, missing field, inverted range, non-numeric node — all skipped.
+        let b = bounds(
+            "5:0x6042:0=i16:-500:500,bad,7:1:0=xx:0:1,8:1:0=i16:9:1,zz:1:0=i16:0:1",
+            false,
+        );
+        assert_eq!(b.map.len(), 1, "only the one valid entry survives");
+    }
+
+    #[test]
+    fn in_range_i16_setpoint_is_admitted() {
+        let b = bounds("5:0x6042:0=i16:-500:500", false);
+        // value = 100 (i16 LE)
+        let msg = sdo_expedited(5, 0x6042, 0, &100i16.to_le_bytes());
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&msg, &b), Ok(()));
+    }
+
+    #[test]
+    fn out_of_range_setpoint_is_denied() {
+        let b = bounds("5:0x6042:0=i16:-500:500", false);
+        let msg = sdo_expedited(5, 0x6042, 0, &1000i16.to_le_bytes());
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b),
+            Err("CANOPEN_SDO_ENVELOPE_BREACH")
+        );
+    }
+
+    #[test]
+    fn signedness_matters_negative_in_range() {
+        // -200 as i16 is in [-500,500]; as u16 the same bytes are 65336 (breach).
+        let b_i16 = bounds("5:0x6042:0=i16:-500:500", false);
+        let b_u16 = bounds("5:0x6042:0=u16:0:500", false);
+        let msg = sdo_expedited(5, 0x6042, 0, &(-200i16).to_le_bytes());
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&msg, &b_i16), Ok(()));
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b_u16),
+            Err("CANOPEN_SDO_ENVELOPE_BREACH"),
+            "the configured TYPE decides interpretation — not the bytes alone"
+        );
+    }
+
+    #[test]
+    fn unconfigured_target_is_posture_only_unless_strict() {
+        let lax = bounds("5:0x6042:0=i16:-500:500", false);
+        let strict = bounds("5:0x6042:0=i16:-500:500", true);
+        // A different (unconfigured) subindex.
+        let msg = sdo_expedited(5, 0x6042, 9, &100i16.to_le_bytes());
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&msg, &lax), Ok(()));
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &strict),
+            Err("CANOPEN_SDO_UNCONFIGURED_TARGET_STRICT")
+        );
+    }
+
+    #[test]
+    fn configured_type_width_mismatch_is_denied() {
+        // Frame is a size-indicated 2-byte download; config says i32 (width 4).
+        let b = bounds("5:0x6042:0=i32:-500:500", false);
+        let msg = sdo_expedited(5, 0x6042, 0, &100i16.to_le_bytes());
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b),
+            Err("CANOPEN_SDO_WIDTH_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn segmented_download_to_configured_target_is_denied() {
+        let b = bounds("5:0x6042:0=i32:-1:1", false);
+        // ccs=1, e=0 (segmented), s=1 → command byte 0x21; 4-byte size in data[4..8].
+        let idx = 0x6042u16.to_le_bytes();
+        let msg = CanOpenMessage {
+            node_id: 5,
+            function_code: 0xA,
+            data: vec![0x21, idx[0], idx[1], 0x00, 0x04, 0x00, 0x00, 0x00],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b),
+            Err("CANOPEN_SDO_SEGMENTED_UNBOUNDABLE")
+        );
+    }
+
+    #[test]
+    fn upload_request_and_non_sdo_carry_no_setpoint() {
+        let b = bounds("5:0x6042:0=i16:-500:500", true); // strict, to prove reads pass
+        // SDO upload request (ccs=2 → command byte 0x40) on the SDO channel.
+        let idx = 0x6042u16.to_le_bytes();
+        let upload = CanOpenMessage {
+            node_id: 5,
+            function_code: 0xA,
+            data: vec![0x40, idx[0], idx[1], 0x00, 0, 0, 0, 0],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&upload, &b), Ok(()));
+        // A PDO (function code 0x6) is not an SDO frame → not bounded here.
+        let pdo = CanOpenMessage {
+            node_id: 5,
+            function_code: 0x6,
+            data: vec![0xFF, 0xFF, 0xFF, 0xFF],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&pdo, &b), Ok(()));
+    }
+
+    #[test]
+    fn truncated_value_for_configured_type_is_undecodable() {
+        // Configured i32 (width 4) but the value region is only 2 meaningful bytes
+        // AND size-indicated as 2 → caught first as a width mismatch. To exercise
+        // UNDECODABLE, use a NON-size-indicated expedited frame whose value region
+        // is shorter than the configured width.
+        let b = bounds("5:0x6042:0=i32:-1:1", false);
+        let idx = 0x6042u16.to_le_bytes();
+        // ccs=1, e=1, s=0 → command byte 0x22; only 2 value bytes present.
+        let msg = CanOpenMessage {
+            node_id: 5,
+            function_code: 0xA,
+            data: vec![0x22, idx[0], idx[1], 0x00, 0x01, 0x00],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b),
+            Err("CANOPEN_SDO_UNDECODABLE")
+        );
+    }
 }
 
 /// Env var carrying the CANopen-node-id → fleet-node-id map (#84).
