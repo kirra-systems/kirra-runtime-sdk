@@ -117,6 +117,7 @@ Do not edit by hand — re-run the script.
 | SG9 | `src/posture_cache.rs:132` | ttl-staleness-detection | test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale |
 | SG9 | `src/posture_cache.rs:218` | unknown-command-denied | test_unknown_command_denied_before_posture_check,test_safety_goal_sg_006_unknown_command_denial |
 | SG9 | `src/posture_cache.rs:231` | posture-cache-stale-fails-closed | test_stale_cache_denies_all_non_unknown_commands,test_entry_beyond_ttl_is_stale,test_stale_cache_fails_closed_after_virtual_clock_advance |
+| SG9 | `src/tpm_quote.rs:192` | attestation-tpm-quote-verification | tpm_quote_valid_verifies,tpm_quote_bad_signature_rejected,tpm_quote_bad_magic_rejected,tpm_quote_wrong_type_rejected,tpm_quote_nonce_mismatch_rejected,tpm_quote_pcr16_not_selected_rejected,tpm_quote_pcr_digest_mismatch_rejected,tpm_quote_truncated_is_malformed,tpm_quote_absent_key_fails_closed |
 | SG9 | `src/wcet_gate.rs:364` | drivable-space-containment-wcet | wcet_validate_trajectory_containment_worst_case |
 
 ---

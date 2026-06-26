@@ -27,6 +27,7 @@ pub mod dds_bridge;
 pub mod ffi;
 #[cfg(feature = "tpm")]
 pub mod tpm;
+pub mod tpm_quote;
 pub mod startup_sentinel;
 pub mod attestation;
 pub mod verifier;
