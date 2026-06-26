@@ -1,0 +1,264 @@
+===========================================================================
+ TRIG & PRECALC IN THE REAL WORLD - a tour of a safety codebase
+===========================================================================
+
+This repository is an autonomous-vehicle / robot safety governor: software
+whose job is to stop a robot from issuing an unsafe motion command. The math
+in it isn't decorative - every sine, tangent, and quadratic is load-bearing.
+If the trig is wrong, the robot crashes. That makes it a nice place to see why
+a trig/precalc course is actually about something.
+
+Each section names the concept, shows the real code, and points to the file so
+you can go read it. At the end there are worked examples with real numbers you
+can check by hand.
+
+
+---------------------------------------------------------------------------
+ 1. SINE & COSINE - splitting motion into x and y
+---------------------------------------------------------------------------
+
+The most-used idea in the whole repo. A robot moving at speed v with heading
+angle theta moves a little East and a little North each instant:
+
+      x-dot = v * cos(theta)        y-dot = v * sin(theta)
+
+  // crates/kirra-core/src/kinematics_sim.rs:139
+  new_x = x + v * psi.cos() * dt;
+  new_y = y + v * psi.sin() * dt;
+
+This is the UNIT CIRCLE doing a job: cosine takes the horizontal share of the
+speed, sine the vertical share. It shows up everywhere motion is predicted.
+
+
+---------------------------------------------------------------------------
+ 2. TANGENT - how hard you can turn
+---------------------------------------------------------------------------
+
+  // crates/kirra-core/src/kinematics_sim.rs:144
+  heading_rate = (v / wheelbase) * delta_rad.tan();   // theta-dot = (v/L)*tan(delta)
+
+The steering angle delta controls how fast the heading changes through
+tan(delta) - which is why steering gets dramatically more aggressive near 90
+degrees (tan races toward infinity). The same tan bounds cornering force,
+a_lat = v^2 * tan(delta) / L; turn too hard at speed and you'd skid, so the
+code rejects commands that exceed the limit.
+
+
+---------------------------------------------------------------------------
+ 3. THE PYTHAGOREAN THEOREM - distance
+---------------------------------------------------------------------------
+
+Straight out of a^2 + b^2 = c^2:
+
+  (obj.x - tr.x).hypot(obj.y - tr.y)   // distance between two points = sqrt(dx^2 + dy^2)
+  (x.powi(2) + y.powi(2)).sqrt()       // distance from the origin
+
+"hypot" is literally "length of the hypotenuse." It answers: how far apart are
+two objects, how fast is something going (speed = sqrt(vx^2 + vy^2)), how long
+is a path piece.
+
+
+---------------------------------------------------------------------------
+ 4. INVERSE TRIG: atan2 - recovering an angle from the triangle
+---------------------------------------------------------------------------
+
+The reverse of #1: given the two legs, find the angle.
+
+  // "which way is this object heading?" from its velocity (vx, vy)
+  heading = vel.y.atan2(vel.x);
+
+atan2(y, x) is the careful version of arctan(y/x) that knows all four quadrants
+(so it can tell northeast from southwest). It recovers a heading toward a goal,
+a lane's direction, and even pulls a compass heading out of a 3-D sensor
+orientation.
+
+
+---------------------------------------------------------------------------
+ 5. RADIANS, pi, and "angle wrapping"
+---------------------------------------------------------------------------
+
+Angles are in RADIANS (pi = 180 degrees) and they wrap around the circle, so
+the code folds every angle back into the range (-pi, pi]:
+
+  // crates/kirra-taj/src/lib.rs:578
+  fn wrap_pi(a) { take a mod 2pi, then shift into (-pi, pi] }
+
+This is the unit-circle fact that theta and theta + 2pi point the same way -
+needed so "turn left 10 degrees" and "turn right 350 degrees" come out equal.
+You'll also meet FRAC_PI_2 (pi/2), TAU (2pi), and a lidar scan that slices a
+half-circle into evenly spaced rays: increment = pi / (n - 1).
+
+
+---------------------------------------------------------------------------
+ 6. ROTATION MATRICES - spinning a shape by an angle
+---------------------------------------------------------------------------
+
+To check the rectangular robot fits inside its lane, the code rotates each
+corner by the heading using the ROTATION MATRIX from precalc:
+
+  // crates/kirra-core/src/containment.rs:287
+  x' = x*cos(theta) - y*sin(theta)
+  y' = x*sin(theta) + y*cos(theta)
+
+      [ x' ]   [ cos(theta)  -sin(theta) ] [ x ]
+      [ y' ] = [ sin(theta)   cos(theta) ] [ y ]
+
+The INVERSE rotation (flip the minus sign) converts the world into the robot's
+own "forward / sideways" frame, to decide whether an object is ahead of it or
+behind it.
+
+
+---------------------------------------------------------------------------
+ 7. QUADRATICS - why speed is dangerous
+---------------------------------------------------------------------------
+
+The heart of the safety math, and it's a QUADRATIC: braking distance grows with
+the SQUARE of speed.
+
+  // parko/crates/parko-core/src/rss.rs:233
+  d_brake    = v^2 / (2 * a);     // v^2 / (2a) - stopping distance
+  d_reaction = v*t + 0.5*a*t^2;   // (1/2)a t^2 - the classic kinematics quadratic
+
+Double your speed -> QUADRUPLE your stopping distance. Every "is the gap safe?"
+decision is built from these v^2/(2a) and (1/2)a t^2 pieces. There's even a
+literal use of the QUADRATIC FORMULA, ( sqrt((a*t)^2 + 2*a*d) - a*t ), to solve
+"how fast may I approach a blind corner?"
+
+
+---------------------------------------------------------------------------
+ 8. FUNCTIONS: parametric, piecewise, interpolation, min/max
+---------------------------------------------------------------------------
+
+  - Parametric equations - a path as position vs. time:
+        (x, y) = (x0, y0) + t * (cos theta, sin theta)
+  - Linear interpolation (lerp) - y = y0 + t*(y1 - y0), the point-slope idea,
+    to read a boundary's height between two known points.
+  - Smoothstep - a cubic 3t^2 - 2t^3 for a smooth lane-change curve.
+  - Piecewise min/max envelopes - the speed limit is the MINIMUM of several
+    rules (cruise cap, curve cap, braking cap); the tightest wins:
+        limit = limit.min( (lat_accel / curvature).sqrt() );
+
+
+---------------------------------------------------------------------------
+ 9. COORDINATE GEOMETRY & VECTORS
+---------------------------------------------------------------------------
+
+  - Dot products to project a point onto a line segment and get perpendicular
+    distance - "how far is the robot from the edge of its lane?"
+  - Normal vectors (a 90-degree rotation, (-dy, dx)/length) to build lane
+    boundaries offset from the centerline.
+  - Point-in-polygon ray casting to test whether the robot sits inside the
+    drivable corridor.
+
+
+---------------------------------------------------------------------------
+ 10. BONUS - graphs & shortest paths
+---------------------------------------------------------------------------
+
+Not trig, but precalc-adjacent: the map is a WEIGHTED GRAPH, and DIJKSTRA'S
+ALGORITHM finds the cheapest route, pricing a lane-change higher (cost 3) than
+going straight (cost 1) so the planner prefers to stay in its lane.
+
+
+===========================================================================
+ WORKED EXAMPLES (real numbers from this codebase)
+===========================================================================
+
+The robot here is a small sidewalk-courier: about 0.9 m long x 0.6 m wide, top
+speed 1.5 m/s, guaranteed braking 1.0 m/s^2, reaction time 0.5 s. Grab a
+calculator.
+
+
+ A. Braking distance is a quadratic:  d = v^2 / (2a)
+ ---------------------------------------------------
+ At top speed v = 1.5 m/s, braking a = 1.0 m/s^2:
+
+      d = v^2 / (2a) = 1.5^2 / (2 * 1.0) = 2.25 / 2 = 1.125 m
+
+ Now DOUBLE the speed to 3.0 m/s:
+
+      d = 3.0^2 / (2 * 1.0) = 9 / 2 = 4.5 m
+
+ Speed x2 -> distance x4. That "x4" is the whole reason a quadratic, not a
+ line, governs safety. (This is the v^2/(2a) term in rss.rs.)
+
+
+ B. Full RSS following gap - a quadratic PLUS a linear piece
+ -----------------------------------------------------------
+ Before it can brake, the robot keeps moving for its reaction time t = 0.5 s,
+ and may even still be speeding up at a = 1.0 m/s^2. Total distance to stop from
+ v = 1.5 m/s:
+
+   - Reaction distance ((1/2)a t^2 form):
+        v*t + 0.5*a*t^2 = 1.5(0.5) + 0.5(1.0)(0.5^2) = 0.75 + 0.125 = 0.875 m
+   - Speed when braking starts:
+        v_after = v + a*t = 1.5 + 1.0(0.5) = 2.0 m/s
+   - Braking distance:
+        v_after^2 / (2a) = 2.0^2 / 2 = 2.0 m
+   - TOTAL ~ 2.875 m
+
+ So this little robot needs almost 3 m to stop from walking pace - the linear
+ reaction term plus the quadratic braking term, exactly as in
+ longitudinal_safe_distance.
+
+
+ C. atan2 + Pythagoras - heading and speed from a velocity vector
+ ----------------------------------------------------------------
+ An object's velocity components are (vx, vy) = (3, 4) m/s.
+
+   - Speed (hypotenuse): sqrt(3^2 + 4^2) = sqrt(25) = 5 m/s   <- the 3-4-5 triangle!
+   - Heading: atan2(4, 3) ~ 0.927 rad ~ 53.1 degrees north of east.
+
+ That's hypot and atan2 turning raw sensor numbers into "how fast, and which
+ way."
+
+
+ D. A rotation matrix in action - 90 degrees turns "forward" into "sideways"
+ ---------------------------------------------------------------------------
+ Take the front-left corner of the robot in its own frame, (x, y) = (0.45, 0.30)
+ (0.45 m ahead of center, 0.30 m to the left). Rotate by heading theta = 90
+ degrees, where cos 90 = 0, sin 90 = 1:
+
+      x' = 0.45(0) - 0.30(1) = -0.30
+      y' = 0.45(1) + 0.30(0) =  0.45
+
+ The corner that pointed FORWARD-LEFT now points LEFT-AND-SLIGHTLY-BACK -
+ exactly what you'd expect after turning the robot a quarter-turn. That's
+ footprint_corners in containment.rs deciding whether the rotated robot still
+ fits the lane.
+
+
+ E. Angle wrapping - why 350 degrees and -10 degrees are the same
+ ----------------------------------------------------------------
+ A heading of 350 degrees is 6.108 rad. Wrapping subtracts a full turn
+ 2pi = 6.283 rad:
+
+      6.108 - 6.283 = -0.175 rad = -10 degrees
+
+ So "350 degrees left" is stored as "10 degrees right" - the SHORTEST way
+ around. Without this, the robot might think a tiny turn is a near-full-circle
+ spin. That's wrap_pi.
+
+
+ F. Tangent - cornering force grows with speed^2 AND steering
+ ------------------------------------------------------------
+ Lateral (sideways) acceleration in a turn is a_lat = v^2 * tan(delta) / L. With
+ wheelbase L = 0.9 m, speed v = 1.5 m/s, steering delta = 20 degrees
+ (tan 20 ~ 0.364):
+
+      a_lat = (1.5^2 * 0.364) / 0.9 = (2.25 * 0.364) / 0.9 ~ 0.91 m/s^2
+
+ Notice it scales with v^2 (quadratic) AND tan(delta) (which blows up near 90
+ degrees) - both your units in one formula. The governor compares this to a
+ skid limit and clamps the command if it's too high.
+
+
+===========================================================================
+ THE ONE-LINE TAKEAWAY
+===========================================================================
+
+Sine and cosine split motion into directions, the Pythagorean theorem measures
+distance, atan2 and tangent convert between angles and slopes, rotation matrices
+spin shapes, and quadratics (v^2 / 2a) are WHY a fast robot needs far more room
+to stop. In this codebase it's all load-bearing: get the trig wrong and the
+robot hits something.
