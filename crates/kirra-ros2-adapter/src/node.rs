@@ -102,6 +102,33 @@ pub const CONTROL_CHANNEL_CAPACITY: usize = 16;
 /// different rates.
 pub const FAST_LOOP_WCET_BUDGET_US: u128 = 200;
 
+/// N1 — explicit SENSOR-DATA QoS for the high-rate safety-ingress streams
+/// (trajectory / objects / odometry / control). The RMW default
+/// (`QosProfile::default()` = Reliable + KeepLast(10)) BUFFERS up to ten samples,
+/// so after a publisher stall the adapter would drain a backlog of STALE samples
+/// before reaching the current one — the exact stale-drain hazard the
+/// actuator-OUTPUT side already forbids, here on the safety INGRESS.
+///
+/// Sensor-data discipline instead:
+///   * KeepLast(1) — keep ONLY the freshest sample; an older one is overwritten,
+///     never queued, so the validator never sees a backlog after a stall.
+///   * BestEffort — prioritize freshness over delivery-completeness AND maximise
+///     QoS compatibility: a BestEffort SUBSCRIBER accepts both Reliable and
+///     BestEffort publishers, so swapping this in never silently drops a
+///     producer's connection. The monotonic-clock staleness watchdog
+///     (`now_ms_fresh`) remains the authority on a genuine gap.
+///
+/// Deadline + Liveliness are intentionally NOT set here: a subscriber-REQUESTED
+/// deadline/lease the publisher does not OFFER rejects the QoS match and would
+/// blind the adapter — they are a publisher-coordinated follow-up. The latched
+/// map (`~/input/map`, a one-shot TransientLocal blob) and the control feedback
+/// keep their existing profiles (the map is not a high-rate stream and needs its
+/// own durability handling).
+#[inline]
+fn ingress_sensor_qos() -> r2r::QosProfile {
+    r2r::QosProfile::default().best_effort().keep_last(1)
+}
+
 #[inline]
 fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
@@ -216,11 +243,11 @@ pub async fn run_adapter(
     // `IngressControlCommand` channel).
     let traj_stream = node.subscribe::<r2r::autoware_planning_msgs::msg::Trajectory>(
         "~/input/trajectory",
-        r2r::QosProfile::default(),
+        ingress_sensor_qos(), // N1: KeepLast(1) + BestEffort — no stale backlog after a stall
     )?;
     let obj_stream = node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
         "~/input/objects",
-        r2r::QosProfile::default(),
+        ingress_sensor_qos(), // N1
     )?;
     // Redundant (channel-B) objects subscription — a SECOND, INDEPENDENT PredictedObjects topic
     // (e.g. a camera-only world model vs the primary radar+lidar) feeding the True-Redundancy
@@ -230,7 +257,7 @@ pub async fn run_adapter(
     let obj_b_stream = if perception_redundancy_enabled() {
         Some(node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
             "~/input/objects_secondary",
-            r2r::QosProfile::default(),
+            ingress_sensor_qos(), // N1
         )?)
     } else {
         None
@@ -242,12 +269,12 @@ pub async fn run_adapter(
     )?;
     let odom_stream = node.subscribe::<r2r::nav_msgs::msg::Odometry>(
         "~/input/odometry",
-        r2r::QosProfile::default(),
+        ingress_sensor_qos(), // N1
     )?;
     let _ctrl_sub = node.subscribe_untyped(
         "~/input/control_cmd",
         "autoware_control_msgs/msg/Control",
-        r2r::QosProfile::default(),
+        ingress_sensor_qos(), // N1: control feedback is also a high-rate fresh-only stream
     )?;
 
     tracing::info!(
