@@ -129,11 +129,20 @@ impl CachedFleetPosture {
 
 
     /// Returns true if this entry has exceeded its TTL relative to `now_ms`.
-    // SAFETY: SG9 | REQ: ttl-staleness-detection | TEST: test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale
-    // (≅ AEGIS SG-005. Saturating subtraction handles clock-skew without
-    //  panic; comparison threshold is the entry's owned ttl_ms.)
+    // SAFETY: SG9 | REQ: ttl-staleness-detection | TEST: test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale,test_backward_clock_step_is_stale_not_fresh_b11
+    // (≅ AEGIS SG-005. Comparison threshold is the entry's owned ttl_ms.)
     pub fn is_stale(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.generated_at_ms) >= self.ttl_ms
+        // B11: a BACKWARD clock step (`now_ms < generated_at_ms` — e.g. an NTP step
+        // back) makes the entry's age indeterminate. The prior `saturating_sub`
+        // clamped that to age 0 and read the entry as FRESH — a fail-OPEN that
+        // serves a stale posture as current until the wall clock catches back up.
+        // Fail closed: an un-ageable entry is stale (→ LockedOut at the gate), and
+        // the next posture refresh re-stamps it to clear the condition. A FORWARD
+        // jump only inflates the age → stale → already fail-closed.
+        match now_ms.checked_sub(self.generated_at_ms) {
+            Some(age) => age >= self.ttl_ms,
+            None => true,
+        }
     }
 }
 
@@ -304,6 +313,25 @@ mod posture_cache_tests {
             generation: 1,
         };
         assert!(entry.is_stale(now_ms()));
+    }
+
+    #[test]
+    fn test_backward_clock_step_is_stale_not_fresh_b11() {
+        // B11: an entry stamped at t=10_000 but read at now=5_000 (the wall clock
+        // stepped BACKWARD between write and read) is un-ageable. The prior
+        // `saturating_sub` read it as age 0 → FRESH (fail-open). It must now be
+        // treated as STALE (fail-closed → LockedOut at the gate).
+        let entry = CachedFleetPosture {
+            posture: FleetPosture::Nominal,
+            generated_at_ms: 10_000,
+            ttl_ms: POSTURE_CACHE_TTL_MS,
+            generation: 1,
+        };
+        assert!(entry.is_stale(5_000),
+            "an entry stamped in the future (backward clock step) must be stale, not fresh");
+        // Sanity: a normal forward read of the same entry within TTL is still fresh.
+        assert!(!entry.is_stale(10_000 + POSTURE_CACHE_TTL_MS - 1),
+            "within-TTL forward read must remain fresh");
     }
 
     #[test]
