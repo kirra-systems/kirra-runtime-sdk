@@ -119,6 +119,11 @@ pub enum MitigationCode {
     PassthroughUnrestrictedNormal,
     /// Degraded posture: demand bounded inside the reduced operating cap.
     DegradedPostureClamp { cap_min: f64, cap_max: f64 },
+    /// Degraded posture (#70/#410): the demand was a speed INCREASE, a
+    /// re-initiation from a stop, or a reversal through zero, which the
+    /// decel-to-stop-and-HOLD bound overrode. `held` is the emitted scalar —
+    /// non-increasing in magnitude and keeping the current sign.
+    DegradedDecelToStopHold { held: f64 },
     /// Shadow mode: the last validated scalar is held (no new motion authored).
     ShadowModeHoldEnforced { retained: f64 },
     /// LockedOut: the contract fallback state is commanded.
@@ -143,6 +148,9 @@ impl std::fmt::Display for MitigationCode {
             }
             MitigationCode::DegradedPostureClamp { cap_min, cap_max } => {
                 write!(f, "DEGRADED_POSTURE_CLAMP: Bounded inside [{cap_min} - {cap_max}]")
+            }
+            MitigationCode::DegradedDecelToStopHold { held } => {
+                write!(f, "DEGRADED_DECEL_TO_STOP_HOLD: Non-increasing hold at {held}")
             }
             MitigationCode::ShadowModeHoldEnforced { retained } => {
                 write!(f, "SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {retained:.1}")
