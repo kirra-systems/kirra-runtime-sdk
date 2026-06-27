@@ -24,6 +24,8 @@ pub mod output;
 pub mod gateway;
 pub mod robotics_alignment;
 pub mod dds_bridge;
+#[cfg(feature = "cyclonedds")]
+pub mod dds_cyclonedds;
 pub mod ffi;
 #[cfg(feature = "tpm")]
 pub mod tpm;
