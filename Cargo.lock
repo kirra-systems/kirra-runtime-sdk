@@ -2090,6 +2090,7 @@ dependencies = [
  "hmac",
  "http",
  "kirra-capture-schema",
+ "kirra-contract-channel",
  "kirra-core",
  "parko-core",
  "parko-kirra",
