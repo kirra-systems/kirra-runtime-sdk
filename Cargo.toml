@@ -55,6 +55,11 @@ tpm = ["dep:tss-esapi"]
 # deps (de-monolith Stage 7) so `crate::capture` / `crate::kinematics_sim` /
 # `crate::gateway::perception_monitor` keep resolving as thin re-export shims.
 kirra-core = { path = "crates/kirra-core", features = ["capture"] }
+# Clause 2 cross-partition boundary contract (ADR-0006 / HVCHAN-001): the frozen
+# GovernorContractView + odd/even seqlock. no_std, zero-dep; the release-token
+# binding (src/governor_release.rs) reuses THIS crate's canonical image plus the
+# verifier's EXISTING Ed25519/SHA-256 machinery (no new crypto).
+kirra-contract-channel = { path = "crates/kirra-contract-channel" }
 parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.
