@@ -365,6 +365,10 @@ async fn axis2a_sensor_fault_drives_posture_to_locked_out() {
 async fn axis2a_rss_fault_drives_posture_to_degraded() {
     let store = VerifierStore::new(":memory:").unwrap();
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+    // A real, Trusted AV DAG → genuine Nominal baseline (matching the sibling
+    // sensor-fault test), so the RSS fault escalates Nominal → Degraded. (An
+    // EMPTY live set now fails closed to LockedOut — the M-9 guard.)
+    register_av_infra(&app);
     let cache: SharedPostureCache =
         Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
 

@@ -47,6 +47,11 @@ pub fn next_generation() -> u64 {
 ///   2. Any Degraded node  → FleetPosture::Degraded
 ///   3. All nominal        → FleetPosture::Nominal
 ///
+/// An EMPTY set aggregates to `Nominal` here — correct at this pure layer (no
+/// node is Degraded/LockedOut). The fail-closed POLICY for an empty *live* set
+/// on an Active verifier ("no nodes" ≠ "healthy") lives one layer up in
+/// `recalculate_and_broadcast` (M-9), which overrides this to LockedOut.
+///
 /// Pure function — no I/O, no side effects.
 pub fn derive_fleet_posture(node_postures: &[FleetNodePosture]) -> FleetPosture {
     let mut any_degraded = false;
@@ -105,6 +110,36 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Step 2: Derive aggregate posture — pure function, no I/O.
     let dag_posture = derive_fleet_posture(&node_postures);
 
+    // M-9 (fail-closed on an empty live-node set): the pure `derive_fleet_posture`
+    // aggregates an empty set to `Nominal` — correct AT THAT LAYER (no node is
+    // LockedOut/Degraded), but on an ACTIVE verifier "no nodes" is "no positive
+    // trust evidence", not "the fleet is healthy". Caching Nominal here is
+    // fail-OPEN: `should_route_command` reads Nominal as "admit everything",
+    // so an actuator command would be authorized while the governor is blind.
+    //
+    // So an empty live set forces LockedOut (blocks all command routing). It is
+    // NOT sticky — it is recomputed every recalc, so it auto-recovers to the
+    // DAG posture the instant a node is registered (registration routes are not
+    // posture-gated), with no human reset. The store cross-check only selects the
+    // REASON for observability: a hydration/consistency gap (durable registry
+    // non-empty while memory is empty) vs a genuinely empty fleet (cold start /
+    // nothing deployed). Queried ONLY on the empty path, so the steady-state hot
+    // path takes no extra store lock.
+    let empty_live_set = node_ids.is_empty();
+    let empty_set_reason = if empty_live_set {
+        let registered = app
+            .store
+            .with(|store| store.count_nodes())
+            .unwrap_or(0);
+        Some(if registered > 0 {
+            "EMPTY_LIVE_SET_HYDRATION_GAP"
+        } else {
+            "EMPTY_LIVE_SET_NO_NODES"
+        })
+    } else {
+        None
+    };
+
     // RSS / flood escalation: an active RSS violation OR active flood condition
     // elevates Nominal to Degraded. The Nominal-only guard means LockedOut /
     // Degraded (from the DAG) are NEVER downgraded by this check; the two
@@ -134,6 +169,11 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst)
         || app.frame_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
     {
+        FleetPosture::LockedOut
+    } else if empty_live_set {
+        // M-9: no live nodes → no positive trust evidence → fail closed.
+        // Shares LockedOut with the sticky flags but is itself non-sticky
+        // (auto-recovers when a node registers — see the comment above).
         FleetPosture::LockedOut
     } else if escalate {
         FleetPosture::Degraded
@@ -171,8 +211,17 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         "is_transition":    is_transition,
         "generation":       generation,
         "node_count":       node_postures.len(),
+        "empty_set_reason": empty_set_reason,
         "computed_at_ms":   ts,
     });
+
+    if let Some(reason) = empty_set_reason {
+        tracing::warn!(
+            reason     = reason,
+            generation = generation,
+            "M-9 fail-closed: empty live-node set on an Active verifier — forcing LockedOut (no positive trust evidence)"
+        );
+    }
 
     let event_type = if is_transition {
         "SYSTEM_POSTURE_TRANSITION"
@@ -424,6 +473,19 @@ mod posture_engine_tests {
         assert!(is_transition);
     }
 
+    fn registered_trusted_node(id: &str) -> crate::verifier::RegisteredNode {
+        crate::verifier::RegisteredNode {
+            node_id: id.to_string(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        }
+    }
+
     #[test]
     fn test_recalculate_and_broadcast_writes_to_cache() {
         use std::sync::Arc;
@@ -434,6 +496,12 @@ mod posture_engine_tests {
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
 
+        // A live, Trusted node — so the happy path genuinely derives Nominal
+        // (M-9: an EMPTY live set now fails closed to LockedOut, see the
+        // dedicated tests below).
+        app.persist_and_insert_node(registered_trusted_node("node-1"))
+            .unwrap();
+
         recalculate_and_broadcast(&app, &cache);
 
         // Happy path: audit committed → cache + broadcast may proceed.
@@ -442,6 +510,91 @@ mod posture_engine_tests {
         let entry = guard.as_ref().unwrap();
         assert_eq!(entry.posture, FleetPosture::Nominal);
         assert!(entry.generation > 0);
+    }
+
+    // M-9 fail-closed: an empty live-node set on an Active verifier is "no
+    // positive trust evidence", NOT "healthy". The pure `derive_fleet_posture`
+    // still aggregates `[]` → Nominal (test above), but the engine overrides it.
+
+    #[test]
+    fn test_empty_live_set_fails_closed_to_locked_out() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Genuinely empty fleet (durable registry is empty too) — still must NOT
+        // certify Nominal; an Active governor with nothing to govern fails closed.
+        recalculate_and_broadcast(&app, &cache);
+
+        let guard = cache.read().unwrap();
+        assert_eq!(
+            guard.as_ref().unwrap().posture,
+            FleetPosture::LockedOut,
+            "an empty live-node set must fail closed to LockedOut, never Nominal"
+        );
+    }
+
+    #[test]
+    fn test_empty_live_set_with_orphaned_store_nodes_is_locked_out() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Hydration/consistency gap: the durable registry holds a node, but the
+        // in-memory live set was never populated with it (write to the store
+        // ONLY — bypassing `persist_and_insert_node`'s memory insert). This is
+        // the dangerous fail-open the cross-check targets; it must fail closed.
+        app.store
+            .with(|s| s.save_node(&registered_trusted_node("orphan")))
+            .unwrap();
+        assert!(app.nodes.is_empty(), "in-memory live set must be empty for this case");
+
+        recalculate_and_broadcast(&app, &cache);
+
+        let guard = cache.read().unwrap();
+        assert_eq!(
+            guard.as_ref().unwrap().posture,
+            FleetPosture::LockedOut,
+            "an empty live set while the store holds nodes (hydration gap) must fail closed"
+        );
+    }
+
+    #[test]
+    fn test_empty_live_set_lockout_auto_recovers_on_registration() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // Empty → LockedOut.
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(
+            cache.read().unwrap().as_ref().unwrap().posture,
+            FleetPosture::LockedOut
+        );
+
+        // The empty-set LockedOut is NOT sticky (unlike supervisor_tripped):
+        // registering a Trusted node and recalculating recovers to Nominal with
+        // no human reset.
+        app.persist_and_insert_node(registered_trusted_node("node-1"))
+            .unwrap();
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(
+            cache.read().unwrap().as_ref().unwrap().posture,
+            FleetPosture::Nominal,
+            "empty-set LockedOut must auto-recover once a Trusted node registers"
+        );
     }
 
     #[test]
@@ -575,13 +728,21 @@ mod posture_engine_tests {
     // Driven through the real authoritative write path (`recalculate_and_broadcast`,
     // audit-commit-gated), reading the resulting cache posture. DAG postures are
     // forced by inserting nodes: Untrusted → LockedOut, Unknown → Degraded,
-    // empty/Trusted → Nominal (per `recursive_calculate`).
+    // Trusted → Nominal (per `recursive_calculate`).
+    //
+    // These tests exercise the operational ESCALATION layer (flood / frame / RSS)
+    // composing ON TOP OF a healthy fleet, so `active_app` seeds one Trusted
+    // baseline node — i.e. a real, non-empty Nominal DAG. (Without it the M-9
+    // empty-live-set guard would fail the whole fleet closed to LockedOut before
+    // any escalation is considered — that guard has its own dedicated tests.)
 
     fn active_app() -> std::sync::Arc<AppState> {
         use crate::verifier::VerifierOperationMode;
         use crate::verifier_store::VerifierStore;
         let store = VerifierStore::new(":memory:").unwrap();
-        std::sync::Arc::new(AppState::new(store, VerifierOperationMode::Active))
+        let app = std::sync::Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_node(&app, "baseline", NodeTrustState::Trusted);
+        app
     }
 
     fn insert_node(app: &AppState, id: &str, status: NodeTrustState) {

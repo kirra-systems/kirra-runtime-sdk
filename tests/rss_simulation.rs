@@ -37,6 +37,21 @@ use parko_kirra::{KirraGovernor, MRC_VELOCITY_CEILING_MPS};
 fn build_app() -> (Arc<AppState>, SharedPostureCache) {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+    // One live, Trusted node → the DAG genuinely derives Nominal, so the RSS
+    // escalation under test is layered on a real Nominal fleet. (An EMPTY live
+    // set now fails closed to LockedOut — the M-9 guard — which would mask the
+    // Nominal → Degraded escalation these tests assert.)
+    app.persist_and_insert_node(RegisteredNode {
+        node_id: "rss-sim-node".to_string(),
+        status: NodeTrustState::Trusted,
+        registered_at_ms: 1,
+        last_trust_update_ms: 1,
+        ak_public_pem: None,
+        expected_pcr16_digest_hex: None,
+        site: None,
+        firmware_version: None,
+    })
+    .expect("register baseline node");
     let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
         CachedFleetPosture::new(FleetPosture::Nominal),
     )));

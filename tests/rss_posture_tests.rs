@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
+use kirra_verifier::verifier::{
+    AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
+};
 use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
 use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier_store::VerifierStore;
@@ -19,7 +21,21 @@ use parko_core::RssState;
 fn build_rss_test_app() -> (Arc<AppState>, SharedPostureCache) {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    // No nodes registered — DAG returns Nominal; RSS violation layer under test.
+    // One live, Trusted node → the DAG genuinely derives Nominal, so the RSS
+    // violation layer under test escalates from a real Nominal baseline. (An
+    // EMPTY live set now fails closed to LockedOut — the M-9 guard — which would
+    // mask the escalation this test targets.)
+    app.persist_and_insert_node(RegisteredNode {
+        node_id: "rss-node".to_string(),
+        status: NodeTrustState::Trusted,
+        registered_at_ms: 1,
+        last_trust_update_ms: 1,
+        ak_public_pem: None,
+        expected_pcr16_digest_hex: None,
+        site: None,
+        firmware_version: None,
+    })
+    .expect("register baseline node");
     let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
         CachedFleetPosture::new(FleetPosture::Nominal),
     )));

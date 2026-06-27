@@ -764,13 +764,29 @@ mod posture_engine_v2_tests {
     #[tokio::test]
     async fn test_periodic_refresh_restamps_cache_without_changing_posture() {
         use std::sync::Arc;
-        use crate::verifier::{AppState, FleetPosture, VerifierOperationMode};
+        use crate::verifier::{AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode};
         use crate::verifier_store::VerifierStore;
         use crate::posture_cache::SharedPostureCache;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+        // A live, Trusted node gives a genuine Nominal baseline. (Without it the
+        // M-9 empty-live-set guard fails closed to LockedOut — the re-stamp
+        // semantics under test are about an UNCHANGED posture, so a real Nominal
+        // fleet is the right fixture here.)
+        app.persist_and_insert_node(RegisteredNode {
+            node_id: "node-1".to_string(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        })
+        .unwrap();
 
         crate::posture_engine::recalculate_and_broadcast(&app, &cache);
         let first = cache.read().unwrap().as_ref().cloned()
