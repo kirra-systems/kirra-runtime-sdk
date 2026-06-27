@@ -734,11 +734,20 @@ mod dds_qos_tests {
         let requested = DdsQosProfile::critical_actuator_profile();
         let writer = LoopbackTestWriter::new(requested);
         assert_eq!(validate_qos_readback(&requested, &writer.negotiated_qos()), Ok(()));
+        // A 2-byte body is NOT 4-byte aligned, so `wrap_cdr_encapsulation`
+        // appends `pad = (4 - 2 % 4) % 4 = 2` trailing zero bytes and advertises
+        // that count in the options low byte (DDS-RTPS §10 / DDS-XTypes
+        // §7.6.3.1.2). The full frame is therefore the header `[0x00,0x01,0x00,
+        // 0x02]` (CDR_LE id + options-pad=2), the body, then the 2 pad bytes.
         let frame = DdsPublisherBridge::publish_actuator_command(&[0xDE, 0xAD], &requested).unwrap();
         writer.publish(&frame).unwrap();
         let sent = writer.sent.borrow();
         assert_eq!(sent.len(), 1);
-        assert_eq!(&sent[0][..4], &[0x00, 0x01, 0x00, 0x00], "the writer received the CDR-encapsulated frame");
+        assert_eq!(
+            sent[0],
+            vec![0x00, 0x01, 0x00, 0x02, 0xDE, 0xAD, 0x00, 0x00],
+            "the writer received the CDR-encapsulated frame (header + body + alignment pad)"
+        );
     }
 
     #[test]
