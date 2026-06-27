@@ -476,12 +476,22 @@ impl AppState {
         let mut gray: HashSet<Arc<str>> = HashSet::new();
         // Recursion bound for the stack-overflow backstop below. The gray set
         // already makes a repeated node on the active path impossible without a
-        // cycle, so the longest *acyclic* path is at most `nodes.len()` distinct
-        // nodes. A bound of at least that therefore CANNOT fire on a valid
-        // acyclic graph — making the depth check a pure stack-safety guard
-        // rather than a (traversal-order-dependent) semantic verdict. Floored at
+        // cycle, so the longest *acyclic* path visits at most as many DISTINCT
+        // ids as exist in the graph. That universe is NOT just `nodes` (B8):
+        // `dependency_graph` may carry edges to ids never registered as nodes (a
+        // dangling/forward dependency), and the traversal recurses into them
+        // (they resolve to `Unknown`). A chain of such unregistered ids can be
+        // LONGER than `nodes.len()`, so the old `nodes.len()` bound could fire on
+        // a perfectly acyclic graph and spuriously report LockedOut. Bound by the
+        // full id universe instead: `nodes.len() + dependency_graph.len()`
+        // over-approximates the distinct-id count (every id with an outgoing edge
+        // is a dependency_graph key; a leaf id has no edge and cannot extend a
+        // path), so the depth check CANNOT fire on a valid acyclic graph,
+        // registered or not — keeping it a pure stack-safety guard rather than a
+        // (traversal-order-dependent) semantic verdict. Floored at
         // MAX_DEPENDENCY_DEPTH so a tiny fleet still carries the documented guard.
-        let max_depth = self.nodes.len().max(MAX_DEPENDENCY_DEPTH);
+        let max_depth =
+            (self.nodes.len() + self.dependency_graph.len()).max(MAX_DEPENDENCY_DEPTH);
         let posture = self.recursive_calculate(node_id, &mut gray, black, 0, max_depth);
         (*posture).clone()
     }
@@ -517,16 +527,18 @@ impl AppState {
         }
 
         // Depth backstop — a stack-overflow guard, NOT a semantic verdict. Because
-        // the gray set bounds any acyclic path to `nodes.len()` distinct nodes and
-        // `max_depth >= nodes.len()`, this branch is unreachable on a valid acyclic
-        // graph (a cycle is always caught above first). It exists only so a
+        // the gray set bounds any acyclic path to the number of distinct ids in the
+        // graph and `max_depth` covers that whole id universe (registered nodes +
+        // dependency-graph edges, see above), this branch is unreachable on a valid
+        // acyclic graph (a cycle is always caught above first). It exists only so a
         // pathological graph degrades to fail-closed LockedOut instead of
         // overflowing the stack. The prior `depth >= MAX_DEPENDENCY_DEPTH` fixed cap
         // conflated this with graph validity: because the sentinel was not memoized,
         // a node reachable both within and beyond 10 hops resolved to LockedOut or
         // Nominal depending on which path the DFS reached it by FIRST — so the whole
         // fleet's posture depended on dependency *insertion order* rather than the
-        // graph's trust state. Bounding by node count removes that flip entirely.
+        // graph's trust state. Bounding by the id-universe count removes that flip
+        // entirely, including for chains of unregistered dependency ids (B8).
         if depth >= max_depth {
             return Arc::new(FleetNodePosture {
                 node_id: Arc::from(node_id),
@@ -917,5 +929,41 @@ mod shared_memo_equivalence_tests {
         assert_eq!(app.calculate_posture("t").propagated_status, FleetPosture::Nominal,
             "the independent node is unaffected by the cycle");
         assert_shared_equals_per_call(&app);
+    }
+
+    /// B8: a node whose dependency chain runs through ids that were never
+    /// registered (a dangling/forward dependency) is still a perfectly ACYCLIC
+    /// graph. The depth backstop must bound by the full id universe
+    /// (`nodes.len() + dependency_graph.len()`), NOT by `nodes.len()` alone —
+    /// otherwise a chain of unregistered ids longer than the node count trips
+    /// MAX_DEPTH_EXCEEDED and spuriously reports LockedOut. The verdict must be
+    /// driven by trust state (unregistered → Unknown → Degraded), not by depth.
+    #[test]
+    fn deep_chain_of_unregistered_deps_is_not_depth_locked() {
+        let app = app();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
+
+        // a -> u1 -> u2 -> ... -> u20, none of the u* registered as nodes. With
+        // only one registered node, the old `nodes.len().max(10)` bound (=10)
+        // would trip at u10; the id-universe bound clears the whole chain. Insert
+        // straight into the in-memory graph (the edges intentionally reference
+        // unregistered ids, which a persisted FK path would not allow).
+        const N: usize = 20;
+        app.dependency_graph.insert("a".to_string(), vec!["u1".to_string()]);
+        for i in 1..N {
+            app.dependency_graph
+                .insert(format!("u{i}"), vec![format!("u{}", i + 1)]);
+        }
+
+        let posture = app.calculate_posture("a");
+        assert_eq!(
+            posture.propagated_status,
+            FleetPosture::Degraded,
+            "an acyclic chain through unregistered (Unknown) deps is Degraded, not depth-locked",
+        );
+        assert!(
+            !posture.blocked_by.iter().any(|b| b.as_ref() == "MAX_DEPTH_EXCEEDED"),
+            "the depth backstop must not fire on a valid acyclic chain of unregistered ids",
+        );
     }
 }
