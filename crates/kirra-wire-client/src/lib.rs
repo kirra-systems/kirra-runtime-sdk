@@ -67,6 +67,7 @@ pub enum ClientDenyCode {
     DegradedReinitiationDenied,  // 8
     DegradedSpeedIncreaseDenied, // 9
     FrameIntegrityUntrusted,     // 10  (Stage S-FI1 — appended last; index = wire tag)
+    TrajectoryHorizonExceeded,   // 11  (review B10 — over-horizon doer-contract violation)
 }
 
 /// Mirror of core `EnforceAction` — variants in the SAME ORDER.
@@ -148,7 +149,7 @@ mod wire_layout {
     }
 
     #[test]
-    fn all_eleven_deny_codes_pin_their_index() {
+    fn all_twelve_deny_codes_pin_their_index() {
         // Each DenyCode must encode at its declared position. The DenyBreach
         // inner index sits at byte offset 12 (seq[0..8] + DenyBreach-tag[8..12]).
         let codes = [
@@ -163,6 +164,7 @@ mod wire_layout {
             ClientDenyCode::DegradedReinitiationDenied,
             ClientDenyCode::DegradedSpeedIncreaseDenied,
             ClientDenyCode::FrameIntegrityUntrusted, // 10 (Stage S-FI1)
+            ClientDenyCode::TrajectoryHorizonExceeded, // 11 (review B10)
         ];
         for (i, code) in codes.iter().enumerate() {
             let v = Verdict {

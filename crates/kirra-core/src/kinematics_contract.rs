@@ -267,10 +267,28 @@ pub enum DenyCode {
     /// when the [`crate::frame_integrity::FrameTrust`] verdict is `Untrusted`.
     /// (Stage S-FI1 — behind AOU-LOCALIZATION-001.)
     ///
-    /// APPENDED LAST deliberately: the bincode variant index is the wire tag
-    /// (see `kirra-wire-client` `ClientDenyCode`), so existing indices 0–9 must
+    /// Appended after the original 0–9: the bincode variant index is the wire
+    /// tag (see `kirra-wire-client` `ClientDenyCode`), so existing indices must
     /// not shift.
     FrameIntegrityUntrusted,
+    /// Safety: SG-002 ≅ SG2. The proposed trajectory exceeds
+    /// [`crate::containment::MAX_TRAJECTORY_HORIZON`] poses — a DOER↔CHECKER
+    /// CONTRACT violation, NOT a geometric departure. The horizon is a deliberate
+    /// bound: it caps the per-call verdict WCET, and every doer (the geometric
+    /// and learned planners) is built and unit-tested to emit
+    /// `≤ MAX_TRAJECTORY_HORIZON` poses (`kirra_planner`'s `HORIZON` mirrors this
+    /// constant). An over-length proposal therefore means the untrusted doer
+    /// broke the contract, so the checker fail-closes to the MRC rather than
+    /// validating a prefix and silently masking a misbehaving planner (review
+    /// B10 — the explicit reject-not-truncate decision). Carved out of
+    /// `DrivableSpaceDeparture` so the verdict is HONEST: an over-horizon
+    /// trajectory can be entirely INSIDE the corridor, so reporting a
+    /// "drivable space departure" misdiagnosed the failure. Issued by
+    /// `containment::validate_trajectory_containment`.
+    ///
+    /// APPENDED LAST (index 11): the variant index is the bincode wire tag, so
+    /// this must stay at the end and existing indices must not shift.
+    TrajectoryHorizonExceeded,
 }
 
 impl DenyCode {
@@ -291,6 +309,7 @@ impl DenyCode {
             Self::DegradedReinitiationDenied  => "DEGRADED_REINITIATION_DENIED",
             Self::DegradedSpeedIncreaseDenied => "DEGRADED_SPEED_INCREASE_DENIED",
             Self::FrameIntegrityUntrusted     => "FRAME_INTEGRITY_UNTRUSTED",
+            Self::TrajectoryHorizonExceeded   => "TRAJECTORY_HORIZON_EXCEEDED",
         }
     }
 }
