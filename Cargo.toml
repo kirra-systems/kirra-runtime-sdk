@@ -47,6 +47,12 @@ panic = "abort"
 [features]
 ros2 = []
 tpm = ["dep:tss-esapi"]
+# D1 (item 19): the real CycloneDDS actuator writer (`src/dds_cyclonedds.rs`).
+# Links the native CycloneDDS `libddsc` — built ONLY on an integrator host that
+# ships CycloneDDS (e.g. ROS 2 Jazzy), never in the default CI/build container.
+# Pulls NO Rust dependency; the QoS mapping + read-back validation it relies on
+# are pure functions in `dds_bridge.rs`, exercised by the default test suite.
+cyclonedds = []
 
 [dependencies]
 # Lean safety/contract foundation (de-monolith Stage 1): FleetPosture / NodeTrustState
