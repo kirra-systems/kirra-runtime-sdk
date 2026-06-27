@@ -115,10 +115,18 @@ pub struct BackupExport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetNodePosture {
-    pub node_id: String,
+    /// Interned node id (review P5). One `Arc<str>` per distinct id is minted
+    /// per whole-fleet recalc (in `recursive_calculate`) and shared by
+    /// `Arc::clone` into the gray set, the `black` memo key, this field, and
+    /// every parent's `blocked_by` — so a node depended on by K others costs one
+    /// id allocation, not K+. Serializes/compares exactly like the prior
+    /// `String` (it derefs to `str`).
+    pub node_id: Arc<str>,
     pub local_status: NodeTrustState,
     pub propagated_status: FleetPosture,
-    pub blocked_by: Vec<String>,
+    /// Interned blocking-dependency ids — each is an `Arc::clone` of that dep's
+    /// own `node_id`, not a fresh allocation (review P5).
+    pub blocked_by: Vec<Arc<str>>,
 }
 
 /// Capacity of the bounded broadcast channel for posture stream events.
@@ -439,7 +447,7 @@ impl AppState {
     }
 
     pub fn calculate_posture(&self, node_id: &str) -> FleetNodePosture {
-        let mut black: HashMap<String, Arc<FleetNodePosture>> = HashMap::new();
+        let mut black: HashMap<Arc<str>, Arc<FleetNodePosture>> = HashMap::new();
         self.calculate_posture_memoized(node_id, &mut black)
     }
 
@@ -455,14 +463,17 @@ impl AppState {
     /// `black`), so sharing `black` only ever reuses fully-resolved verdicts.
     /// The memo stores `Arc<FleetNodePosture>` so a hit is an `Arc::clone`
     /// (refcount bump) rather than a deep clone of the node id + `blocked_by`
-    /// vector (review P5, the contained part — full `Arc<str>` id interning is a
-    /// separate, larger migration).
+    /// vector. Node ids are interned as `Arc<str>` (review P5): the memo key, the
+    /// gray set, every `node_id` field and every `blocked_by` entry share one
+    /// allocation per distinct id, so a hot dependency referenced by K parents
+    /// costs one id allocation rather than K+ `String`s. `Arc<str>: Borrow<str>`
+    /// lets both maps be probed with a plain `&str` (no allocation on a lookup).
     pub fn calculate_posture_memoized(
         &self,
         node_id: &str,
-        black: &mut HashMap<String, Arc<FleetNodePosture>>,
+        black: &mut HashMap<Arc<str>, Arc<FleetNodePosture>>,
     ) -> FleetNodePosture {
-        let mut gray: HashSet<String> = HashSet::new();
+        let mut gray: HashSet<Arc<str>> = HashSet::new();
         // Recursion bound for the stack-overflow backstop below. The gray set
         // already makes a repeated node on the active path impossible without a
         // cycle, so the longest *acyclic* path is at most `nodes.len()` distinct
@@ -478,8 +489,8 @@ impl AppState {
     fn recursive_calculate(
         &self,
         node_id: &str,
-        gray: &mut HashSet<String>,
-        black: &mut HashMap<String, Arc<FleetNodePosture>>,
+        gray: &mut HashSet<Arc<str>>,
+        black: &mut HashMap<Arc<str>, Arc<FleetNodePosture>>,
         depth: usize,
         max_depth: usize,
     ) -> Arc<FleetNodePosture> {
@@ -498,10 +509,10 @@ impl AppState {
         // which is what makes sharing `black` across roots sound (P3).
         if gray.contains(node_id) {
             return Arc::new(FleetNodePosture {
-                node_id: node_id.to_string(),
+                node_id: Arc::from(node_id),
                 local_status: NodeTrustState::Unknown,
                 propagated_status: FleetPosture::LockedOut,
-                blocked_by: vec!["CYCLE_DETECTED".to_string()],
+                blocked_by: vec![Arc::from("CYCLE_DETECTED")],
             });
         }
 
@@ -518,14 +529,18 @@ impl AppState {
         // graph's trust state. Bounding by node count removes that flip entirely.
         if depth >= max_depth {
             return Arc::new(FleetNodePosture {
-                node_id: node_id.to_string(),
+                node_id: Arc::from(node_id),
                 local_status: NodeTrustState::Unknown,
                 propagated_status: FleetPosture::LockedOut,
-                blocked_by: vec!["MAX_DEPTH_EXCEEDED".to_string()],
+                blocked_by: vec![Arc::from("MAX_DEPTH_EXCEEDED")],
             });
         }
 
-        gray.insert(node_id.to_string());
+        // Mint the interned id ONCE for this node; every subsequent use (gray
+        // set, the result's `node_id`, the `black` key, and each parent's
+        // `blocked_by`) is an `Arc::clone` refcount bump, not a new allocation.
+        let id: Arc<str> = Arc::from(node_id);
+        gray.insert(Arc::clone(&id));
 
         let local_status = self.nodes
             .get(node_id)
@@ -537,18 +552,19 @@ impl AppState {
             .map(|d| d.value().clone())
             .unwrap_or_default();
 
-        let mut blocked_by: Vec<String> = Vec::new();
+        let mut blocked_by: Vec<Arc<str>> = Vec::new();
         let mut has_locked_out_dep = false;
 
         for dep_id in &deps {
             let dep_posture = self.recursive_calculate(dep_id, gray, black, depth + 1, max_depth);
             match &dep_posture.propagated_status {
                 FleetPosture::LockedOut => {
-                    blocked_by.push(dep_id.clone());
+                    // Share the dep's interned id rather than re-allocating it.
+                    blocked_by.push(Arc::clone(&dep_posture.node_id));
                     has_locked_out_dep = true;
                 }
                 FleetPosture::Degraded => {
-                    blocked_by.push(dep_id.clone());
+                    blocked_by.push(Arc::clone(&dep_posture.node_id));
                 }
                 FleetPosture::Nominal => {}
             }
@@ -563,14 +579,14 @@ impl AppState {
         };
 
         let posture = Arc::new(FleetNodePosture {
-            node_id: node_id.to_string(),
+            node_id: Arc::clone(&id),
             local_status,
             propagated_status,
             blocked_by,
         });
 
         gray.remove(node_id);
-        black.insert(node_id.to_string(), Arc::clone(&posture));
+        black.insert(id, Arc::clone(&posture));
 
         posture
     }
@@ -845,7 +861,7 @@ mod shared_memo_equivalence_tests {
     fn assert_shared_equals_per_call(app: &AppState) {
         let mut ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
         ids.sort();
-        let mut shared: HashMap<String, Arc<FleetNodePosture>> = HashMap::new();
+        let mut shared: HashMap<Arc<str>, Arc<FleetNodePosture>> = HashMap::new();
         for id in &ids {
             let per_call = app.calculate_posture(id);
             let shared_res = app.calculate_posture_memoized(id, &mut shared);
