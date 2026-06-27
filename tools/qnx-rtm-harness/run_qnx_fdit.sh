@@ -72,7 +72,11 @@ build_judge_buildstd() {
     local C="$BUILD/judge-crate"
     mkdir -p "$C/src"
     cp "$JUDGE_SRC" "$C/src/lib.rs"
+    # The leading empty [workspace] table DETACHES this throwaway crate from the
+    # repo's parent Cargo workspace (else cargo refuses to build it).
     cat > "$C/Cargo.toml" <<EOF
+[workspace]
+
 [package]
 name = "kirra_judge"
 version = "0.0.0"
@@ -84,11 +88,22 @@ panic = "abort"
 opt-level = 2
 debug = false
 EOF
-    # RUSTC_BOOTSTRAP=1 lets a stable rustc accept -Z if no nightly is installed;
-    # prefer an explicit nightly when present.
+    # build-std needs the rust-src component for the active toolchain.
+    if ! rustc --print sysroot >/dev/null 2>&1 \
+         || [[ ! -d "$(rustc --print sysroot)/lib/rustlib/src/rust" ]]; then
+        echo "[judge] NOTE: rust-src not found — run 'rustup component add rust-src' \
+(and on stable, this uses RUSTC_BOOTSTRAP=1)." >&2
+    fi
     local tgt="$RUST_TARGET"
-    ( cd "$C" && RUSTC_BOOTSTRAP=1 cargo build --release \
-            -Z build-std=core --target "$tgt" ) || return 1
+    local log="$BUILD/cargo_buildstd.log"
+    # Prefer an installed nightly; else RUSTC_BOOTSTRAP=1 lets stable accept -Z.
+    if rustc +nightly --version >/dev/null 2>&1; then
+        ( cd "$C" && cargo +nightly build --release \
+                -Z build-std=core --target "$tgt" ) 2>&1 | tee "$log" || return 1
+    else
+        ( cd "$C" && RUSTC_BOOTSTRAP=1 cargo build --release \
+                -Z build-std=core --target "$tgt" ) 2>&1 | tee "$log" || return 1
+    fi
     local base; base="$(basename "${tgt%.json}")"
     cp "$C/target/$base/release/libkirra_judge.a" "$JUDGE_LIB"
 }
@@ -102,15 +117,18 @@ else
     cat >&2 <<EOF
 
 [judge] FAILED to build the judge for '$RUST_TARGET'.
-        Your rustc does not list this nto tuple and the build-std fallback did
-        not succeed. Most likely fix — supply a custom target spec and re-run:
-
+        Logs:
+          direct rustc : $BUILD/rustc_direct.log
+          cargo build-std : $BUILD/cargo_buildstd.log
+        Most common causes:
+          * rust-src missing  → rustup component add rust-src
+          * no nightly + stable too old for -Z build-std
+        If rustc does NOT list the tuple at all (it DID here), supply a custom
+        target spec instead:
           rustc +nightly -Z unstable-options --target x86_64-pc-nto-qnx710 \\
                 --print target-spec-json > ~/nto-qnx800.json
-          # edit the file: set "os":"nto", llvm triple to ...-nto-qnx8.0.0,
-          # linker to qcc, then:
+          # set "os":"nto", llvm triple ...-nto-qnx8.0.0, linker qcc, then:
           KIRRA_RUST_TARGET_JSON=~/nto-qnx800.json $0
-
         (See docs/safety/WCET_QNX_BRINGUP.md §1 and docs/adr/KIRRA_QNX_CROSSCOMPILE.md.)
 EOF
     exit 1
