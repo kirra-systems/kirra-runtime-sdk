@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Cross-build wired — ready to run on an x86_64 QNX SDP 8.0 target.** The gated CMake QNX path, `qnx.toolchain.cmake` (qcc/q++), and the `run_qnx_fdit.sh` driver are in the tree; the host build is byte-identical when `KIRRA_QNX_TARGET=OFF`. Remaining = execute on the target and capture the row. |
+| Status | **RUN on a QNX SDP 8.0 x86_64 target — FDIT verdict-correctness gate PASSES.** The judge cross-compiled to `x86_64-pc-nto-qnx800` (core-only, no QNX std) and the FDIT/RTM matrix passed byte-identically on a `mkqnximage`/QEMU QNX 8.0 VM (`GATE: PASS`, all 9 rows). Acceptance #1 + #2 met. **WCET is INDICATIVE only** — the VM ran under QEMU TCG (VT-x disabled on the dev laptop), so a representative `max < 100 µs` (#4) is deferred to a KVM/hardware run; cert-grade WCET remains Phase-II (DRIVE + QNX OS for Safety). |
 | Date | 2026-06-27 |
 | Owner | Project / safety-case owner |
 | Issue | #274 (EPIC #270, QNX governor lane). RTM tracing #272 (done). |
@@ -158,5 +158,7 @@ What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verd
 | host-indicative WCET + CI regression gate | done (`src/wcet_gate.rs`) |
 | FDIT/RTM matrix traced to kernel RTM | done (#272, `QNX_MAPPING.md`) |
 | cross-compile recipe + measurement wrapper | done (`wcet_measure.cpp`) |
-| gated CMake QNX path + `qnx.toolchain.cmake` + `run_qnx_fdit.sh` driver | **done (this PR — host build byte-identical, ctest 2/2)** |
-| run on the x86_64 QNX SDP 8.0 target, capture FDIT PASS + WCET row, update CSV + methodology | **remaining (#274 — execute on the target)** |
+| gated CMake QNX path + `qnx.toolchain.cmake` + `run_qnx_fdit.sh` driver | done (host build byte-identical, ctest 2/2) |
+| judge cross-compiles to `x86_64-pc-nto-qnx800` (core-only, no QNX std) | **done — built via `cargo -Zbuild-std=core`, links `core` + `compiler_builtins` only** |
+| FDIT/RTM matrix runs byte-identically on a QNX 8.0 x86_64 VM (acceptance #2) | **done — `GATE: PASS`, all 9 verdicts correct on `mkqnximage`/QEMU QNX 8.0** |
+| representative `SCHED_FIFO` WCET (`max < 100 µs`, acceptance #4) | **deferred — VM ran under TCG (no VT-x); needs KVM or hardware. Cert-grade is Phase-II (DRIVE + QNX OS for Safety)** |
