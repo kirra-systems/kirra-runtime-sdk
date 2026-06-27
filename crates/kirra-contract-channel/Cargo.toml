@@ -1,0 +1,29 @@
+# kirra-contract-channel — the Clause 2 cross-partition boundary contract.
+#
+# ADR-0006 Clause 2 + HVCHAN-001 (docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md):
+# across the guest<->host partition boundary the transport is NOT a library — it
+# is a FROZEN, versioned, fixed-size #[repr(C)] layout over hypervisor shared
+# memory. This crate is that layout + its normative write/read trust chain.
+#
+# Deliberately minimal-TCB: `no_std`, ZERO dependencies, `#![forbid(unsafe_code)]`.
+# "A frozen layout imports a struct definition" — so this crate is a struct
+# definition plus the seqlock/validation logic, and nothing else. The only place
+# memory-mapping `unsafe` may live is the target integration shim that binds the
+# `ContractReader`/`ContractWriter` traits to the hypervisor-mapped region — that
+# shim is the ADR-0006 Clause 3 integration boundary, OUTSIDE this crate.
+[package]
+name = "kirra-contract-channel"
+version = "0.1.0"
+edition = "2021"
+description = "Frozen #[repr(C)] cross-partition governor contract view + odd/even generation seqlock (ADR-0006 Clause 2 / HVCHAN-001)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+
+[dependencies]
+# INTENTIONALLY EMPTY. No crypto, no CRC crate, no transport. The CRC-32/IEEE
+# and the canonical little-endian image are implemented in-crate; digest +
+# signing reuse the verifier's EXISTING Ed25519/SHA-256 machinery at the
+# integration seam (HVCHAN-001 §3 steps 5-6: "no new crypto primitives").
+
+[lints.rust]
+unsafe_code = "forbid"
