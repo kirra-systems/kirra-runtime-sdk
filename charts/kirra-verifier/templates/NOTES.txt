@@ -1,2 +1,0 @@
-Kirra Verifier Control Plane is online.
-Operational Mode: [ {{ .Values.verifier.mode | upper }} ]
