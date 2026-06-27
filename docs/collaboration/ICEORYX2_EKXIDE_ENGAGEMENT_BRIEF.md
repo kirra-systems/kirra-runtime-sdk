@@ -167,3 +167,92 @@ strictly QM and out of scope for this engagement.
   posture.
 - **WCET methodology** — `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md` (host
   timing is INDICATIVE; only QNX-target-under-FIFO numbers feed an FTTI claim).
+
+---
+
+## 7. Engagement log
+
+- **2026-06-27 — ekxide "working on passing to the QNX hypervisor."** Movement on
+  the #274 gate. The load-bearing clarification to settle before it changes our
+  design is **which boundary** this targets:
+  - **In-partition on a QNX guest under the hypervisor** → **Clause 1** (the
+    expected path). Pure de-risk of #274; no architectural tension.
+  - **Across the guest↔host hypervisor partition boundary** → intersects
+    **Clause 2**, where we deliberately chose a frozen `#[repr(C)]` layout over a
+    native iceoryx2 endpoint — for **TCB / certification scope**, not capability.
+  - **Open question to raise:** if iceoryx2 can cross the QNX hypervisor, **what
+    is its resident footprint in the safety partition?** A native endpoint that
+    pulls discovery / lifecycle / loan management / pools / recovery / version-
+    compat into the governor TCB does **not** change our Clause 2 decision; a
+    **minimal-resident, static, read-only consumer** mode might (it would let
+    iceoryx2 *carry* our frozen layout across the boundary without blowing cert
+    scope). This is the L4 ask in §9.
+
+> Status note: since this log entry, the Clause 2 boundary contract is no longer
+> just a spec — `kirra-contract-channel` (frozen `GovernorContractView` + odd/even
+> seqlock + validate) and the release-token trust chain (digest → Ed25519 token →
+> actuator verify) are implemented and tested on host. The frozen **payload** and
+> **trust chain** are ours regardless of transport; iceoryx2's role is **carrier**.
+
+---
+
+## 8. The ideal end-to-end design (what we want iceoryx2 to enable)
+
+Stated as the target we are asking ekxide to confirm iceoryx2 can hit. The
+**payload** (`GovernorContractView`) and the **trust chain** (seqlock → validate →
+digest → Ed25519 release token → actuator verify) are **ours and
+transport-independent** (ADR-0006 asymmetry); iceoryx2 is the **carrier**.
+
+1. **In-partition, both partitions (Clause 1) — the firm ask.** Native iceoryx2
+   zero-copy pub/sub, **Rust end-to-end**, **zero-allocation in steady state**
+   (pools sized once, no late discovery on the hot path), **no-FFI / no-unsafe**
+   command path, and a **bounded, measured WCET under FIFO scheduling** on QNX 8.0.
+   This carries sensor/planner data within each partition.
+
+2. **Across the boundary (Clause 2) — two acceptable shapes:**
+   - **Ideal-A — iceoryx2 as the cross-partition carrier, *if* the footprint
+     fits.** A **static, pre-provisioned, single-producer / single-consumer,
+     read-only** channel carrying the fixed-size `GovernorContractView` **by
+     value**, with **torn-read elimination by construction** (the owned-sample
+     discipline) and **no runtime discovery / lifecycle / pool / recovery
+     machinery resident in the safety partition**. If ekxide can offer this, the
+     governor's hand-rolled raw-SHM read collapses into an iceoryx2-managed one
+     while preserving the TCB argument.
+   - **Ideal-B — raw hypervisor SHM + our frozen layout (already built, the safe
+     default).** If Ideal-A's resident footprint is too large for cert scope, we
+     keep the frozen layout over raw hypervisor shared memory with our odd/even
+     seqlock + validate + digest. This is implemented today and needs nothing from
+     iceoryx2 across the boundary.
+
+3. **Hypervisor primitives the boundary leans on (HVCHAN-001 §5) — confirm /
+   provide:**
+   - **R-HV-1 Read-only mapping** — the contract region is mapped **read-only**
+     into the governor partition; a guest cannot induce a governor write.
+   - **R-HV-3 Boundary clock** — a **hypervisor-provided shared monotonic** source
+     both partitions read identically, with **bounded max skew**, and a **known
+     read cost** (it sits on the governor's validation WCET path).
+   - **R-HV-4 Partition scheduling** — the governor partition gets a CPU guarantee
+     **independent of guest behavior** (a guest flood/starve-then-burst cannot
+     starve the governor's bounded snapshot→validate→digest path).
+
+The single most valuable thing ekxide could deliver is **Ideal-A's
+minimal-footprint, static, read-only cross-partition consumer** — it is the only
+item that would change our Clause 2 design; everything else (Clause 1 + the
+hypervisor primitives) makes the existing design *shippable on target*.
+
+---
+
+## 9. Limitations ekxide might be able to fix
+
+Our concrete blockers, each mapped to the specific thing we'd want from ekxide.
+None is a position we hold — they are the asks.
+
+| # | Our limitation | What we'd want from ekxide |
+|---|---|---|
+| **L1** | **Edition-2024 floor.** iceoryx2 0.9.1's whole tree is `edition = "2024"` → Rust 1.85+; our cert toolchain is **QNX + Ferrocene**. | A Ferrocene-compatible path: edition-2024 support guidance on our timeline, **or** a maintained older-edition iceoryx2 line we can pin; and iceoryx2's **MSRV/edition policy** going forward so we plan the floor, not chase it. |
+| **L2** | **QNX 8.0 is tier-3; `--no-default-features` unverified on target.** Our target is 8.0; the empty-feature-subset finding is host-only. | **Tier-1 QNX 8.0** PAL support and a **verified zero-feature build + run** on 8.0, with the remaining **std-dependent gaps enumerated**. |
+| **L3** | **WCET / determinism for FTTI.** We need bounded, measured timing under FIFO. | A **static-allocation / fixed-pool** config that is **zero-alloc in steady state**, **WCET-relevant guidance** (worst case under contention, **pool-exhaustion behavior**), and — ideally — **measured numbers under QNX FIFO**. |
+| **L4** | **Cross-partition TCB footprint (Clause 2).** We will **not** put iceoryx2's discovery/lifecycle/pools/recovery into the **safety partition TCB**. | A **minimal-resident, static, read-only consumer** mode (Ideal-A §8). This is the one item that could let iceoryx2 carry our frozen layout across the boundary. |
+| **L5** | **Read-only consumer mapping (R-HV-1).** A guest must not be able to induce a governor write. | Confirm the cross-hypervisor channel supports a **read-only consumer mapping**, enforceable at the **hypervisor config** level. |
+| **L6** | **Boundary clock (R-HV-3).** We need a hypervisor shared monotonic source, bounded skew, identical reads in both partitions. | Whether ekxide's QNX hypervisor integration **exposes / can expose** such a primitive, and its **read cost** (on the validation WCET path). |
+| **L7** | **`rmw_iceoryx2` guest-side maturity.** Alpha; unsized types (`PointCloud2`) take a serialization fallback → per-type, not blanket, zero-copy. | Roadmap for **blanket unsized-type zero-copy**, and which **Autoware message types** are zero-copy **today**. *(Guest-side / perception-ingest; gates end-to-end latency, not the governor host hot path.)* |
