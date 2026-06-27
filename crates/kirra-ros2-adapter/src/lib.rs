@@ -16,6 +16,12 @@
 // Design tie-in: see `docs/safety/OCCY_131_OPTIONB_DESIGN.md`
 // (KIRRA-OCCY-OPTIONB-001) for the architecture this skeleton instantiates.
 
+// Mirrors the root crate's decision: this lint fires on intentionally
+// column-aligned ASCII derivation tables in safety doc-comments (e.g. the
+// per-class kinematic-budget tables in `config.rs`), which are read as evidence —
+// the alignment wins over the markdown-nesting pedantry.
+#![allow(clippy::doc_lazy_continuation)]
+
 pub mod config;
 pub mod corridor;
 pub mod geometry;

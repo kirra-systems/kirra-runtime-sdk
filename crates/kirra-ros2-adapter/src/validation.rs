@@ -357,6 +357,18 @@ pub fn validate_trajectory_slow_capped(
     // ego corridor laterally, containment handled it; longitudinal is
     // skipped to avoid spurious violations from objects in another lane.
     for obj in objects {
+        // H-2 (fail-closed RSS): a non-finite object field would poison every
+        // RSS `<` / `abs()` comparison below — NaN compares false against every
+        // threshold, so a dangerous object would be NEITHER rejected NOR skipped
+        // and the trajectory wrongly Accepted. A non-finite perception object is
+        // unlocalizable (we cannot even prove it is behind ego or laterally
+        // clear), so it is a perception fault → MRC. Mirrors the `pose_is_finite`
+        // discipline already enforced on the containment path. (The trajectory
+        // itself is already finiteness-guaranteed by the per-pose loop above,
+        // which rejects any NaN-derived command; objects are the unguarded seam.)
+        if !object_fields_finite(obj) {
+            return TrajectoryVerdict::MRCFallback;
+        }
         for traj_point in trajectory {
             let dx = obj.pos.x_m - traj_point.pose.x_m;
             let dy = obj.pos.y_m - traj_point.pose.y_m;
@@ -587,6 +599,23 @@ fn nearest_in_time(
 /// proximity) closes that gap. `max_lateral_accel_mps2` is the (posture-/perception-capped)
 /// per-pose contract's lateral-accel bound, so the predictive lateral check uses the SAME
 /// side-gap budget as the snapshot pass.
+/// Fail-closed finiteness predicate for a perceived object (review finding H-2).
+/// The snapshot RSS loop compares `obj`-derived quantities with `<` / `abs()`;
+/// under a NaN/Inf field every such test evaluates false, so a non-finite object
+/// is NEITHER rejected NOR skipped and the §4 conjunction is silently bypassed.
+/// Every field the RSS pass reads — position, the velocity vector `vel`, the
+/// speed magnitude, and the heading — must be finite, else the object is treated
+/// as a perception fault by the caller (`MRCFallback`).
+#[inline]
+fn object_fields_finite(obj: &PerceivedObject) -> bool {
+    obj.pos.x_m.is_finite()
+        && obj.pos.y_m.is_finite()
+        && obj.vel.x_m.is_finite()
+        && obj.vel.y_m.is_finite()
+        && obj.velocity_mps.is_finite()
+        && obj.heading_rad.is_finite()
+}
+
 // SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in,predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3,predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3
 fn predictive_rss_breach(
     trajectory: &[TrajectoryPoint],
@@ -604,6 +633,17 @@ fn predictive_rss_breach(
     for mode in modes {
         for pair in mode.samples.windows(2) {
             let (a, b) = (pair[0], pair[1]);
+            // H-2 (fail-closed predictive RSS): a non-finite predicted-mode
+            // sample position poisons the closing-rate (`ov*`) and gap math the
+            // same way as the snapshot pass (NaN `<` x == false → no breach
+            // detected). A non-finite prediction is a fault → breach → MRC.
+            if !(a.pos.x_m.is_finite()
+                && a.pos.y_m.is_finite()
+                && b.pos.x_m.is_finite()
+                && b.pos.y_m.is_finite())
+            {
+                return true;
+            }
             let dt = b.time_from_start_s - a.time_from_start_s;
             if dt <= 0.0 {
                 continue; // non-monotonic samples — unevaluable (see post-loop guard)

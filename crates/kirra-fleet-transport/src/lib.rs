@@ -27,7 +27,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use kirra_verifier::federation_reconciliation::{
@@ -474,7 +474,10 @@ pub fn verify_clearance_grant(grant: &SignedClearanceGrant, public_key_b64: &str
         grant.expires_at_ms,
         &grant.nonce_hex,
     );
-    key.verify(payload.as_bytes(), &sig).is_ok()
+    // L-1: verify_strict rejects malleable / non-canonical signatures, matching the
+    // crate-wide crypto discipline (federation uses verify_strict). Inherent method
+    // on VerifyingKey — no Verifier trait needed.
+    key.verify_strict(payload.as_bytes(), &sig).is_ok()
 }
 
 /// **THE GRANT RULE.** Verify a received grant, then write it through the EXISTING
