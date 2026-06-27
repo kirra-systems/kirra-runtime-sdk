@@ -34,6 +34,27 @@
 //! §3 steps 5-6: *"no new crypto primitives are introduced"*). This crate only
 //! produces the **exact validated bytes** that digest signs.
 //!
+//! ## The carrier-agnostic seam ([`ContractReader`] / [`ContractWriter`])
+//!
+//! The two region traits ARE the seam between the **contract** (this crate's
+//! frozen layout + trust chain, which never changes) and the **carrier** (how the
+//! bytes physically cross the boundary, which can). Three carriers bind the same
+//! seam:
+//!
+//! - **Ideal-B — raw hypervisor shared memory (available today).** The target
+//!   binds the traits to a mapped region; the mapping `unsafe` lives in the
+//!   ADR-0006 Clause 3 integration shim, *outside* this `forbid(unsafe)` crate.
+//! - **Ideal-A — a future minimal-footprint iceoryx2 consumer.** If iceoryx2
+//!   offers a static, read-only, no-discovery/lifecycle/pools consumer that fits
+//!   the safety-partition TCB, it binds the *same* traits — the contract and the
+//!   trust chain are byte-for-byte unchanged; only the carrier differs.
+//! - **Host / in-process — [`reference::InProcessRegion`].** An atomics-backed
+//!   region for tests and demos (e.g. two threads sharing one `Arc`), with no
+//!   `unsafe` and no allocation. The reference the target swaps out.
+//!
+//! Because the contract is carrier-agnostic, adopting a better carrier later is a
+//! drop-in: implement the two traits, change nothing else.
+//!
 //! ## Boundary clock domain (HVCHAN-001 §5, R-HV-3)
 //!
 //! All timestamp/deadline fields are defined in the **boundary clock domain**
@@ -49,6 +70,7 @@
 extern crate std;
 
 mod crc;
+pub mod reference;
 mod seqlock;
 mod validate;
 mod view;

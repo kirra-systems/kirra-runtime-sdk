@@ -103,9 +103,9 @@ pub fn publish<W: ContractWriter>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::{GovernorContractView, MAX_COMMAND_BYTES};
+    use crate::reference::InProcessRegion;
+    use crate::view::GovernorContractView;
     use core::cell::Cell;
-    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
     use std::sync::Arc;
     use std::{thread, vec::Vec};
 
@@ -167,83 +167,6 @@ mod tests {
         assert_eq!(read_coherent_snapshot(&r, 8), Ok(any_view()));
     }
 
-    // ---- a real concurrent region backed by atomics -----------------------
-
-    /// Host stand-in for the hypervisor-mapped region: every field is an atomic,
-    /// so concurrent reader/writer access is well-defined with no `unsafe`. The
-    /// generation carries the ordering (Acquire/Release); body fields are Relaxed.
-    struct AtomicRegion {
-        generation: AtomicU64,
-        layout_version: AtomicU32,
-        magic: AtomicU32,
-        sequence: AtomicU64,
-        publication_nanos: AtomicU64,
-        deadline_nanos: AtomicU64,
-        crc32: AtomicU32,
-        command_len: AtomicU32,
-        command: [AtomicU8; MAX_COMMAND_BYTES],
-    }
-
-    impl AtomicRegion {
-        fn new() -> Self {
-            Self {
-                generation: AtomicU64::new(0),
-                layout_version: AtomicU32::new(0),
-                magic: AtomicU32::new(0),
-                sequence: AtomicU64::new(0),
-                publication_nanos: AtomicU64::new(0),
-                deadline_nanos: AtomicU64::new(0),
-                crc32: AtomicU32::new(0),
-                command_len: AtomicU32::new(0),
-                command: core::array::from_fn(|_| AtomicU8::new(0)),
-            }
-        }
-    }
-
-    impl ContractReader for AtomicRegion {
-        fn load_generation(&self) -> u64 {
-            self.generation.load(Ordering::Acquire)
-        }
-        fn copy_view(&self) -> GovernorContractView {
-            let mut command = [0u8; MAX_COMMAND_BYTES];
-            for (i, slot) in command.iter_mut().enumerate() {
-                *slot = self.command[i].load(Ordering::Relaxed);
-            }
-            GovernorContractView {
-                layout_version: self.layout_version.load(Ordering::Relaxed),
-                magic: self.magic.load(Ordering::Relaxed),
-                generation: self.generation.load(Ordering::Relaxed),
-                sequence: self.sequence.load(Ordering::Relaxed),
-                publication_nanos: self.publication_nanos.load(Ordering::Relaxed),
-                deadline_nanos: self.deadline_nanos.load(Ordering::Relaxed),
-                crc32: self.crc32.load(Ordering::Relaxed),
-                command_len: self.command_len.load(Ordering::Relaxed),
-                command,
-            }
-        }
-    }
-
-    impl ContractWriter for AtomicRegion {
-        fn store_generation(&self, generation: u64) {
-            self.generation.store(generation, Ordering::Release);
-        }
-        fn store_body(&self, view: &GovernorContractView) {
-            // Every field EXCEPT generation. Written field-by-field so a reader
-            // that ignored the seqlock could observe a torn mix — which the
-            // seqlock is precisely what prevents.
-            self.layout_version.store(view.layout_version, Ordering::Relaxed);
-            self.magic.store(view.magic, Ordering::Relaxed);
-            self.sequence.store(view.sequence, Ordering::Relaxed);
-            self.publication_nanos.store(view.publication_nanos, Ordering::Relaxed);
-            self.deadline_nanos.store(view.deadline_nanos, Ordering::Relaxed);
-            self.crc32.store(view.crc32, Ordering::Relaxed);
-            self.command_len.store(view.command_len, Ordering::Relaxed);
-            for (i, b) in view.command.iter().enumerate() {
-                self.command[i].store(*b, Ordering::Relaxed);
-            }
-        }
-    }
-
     #[test]
     fn concurrent_writer_and_reader_never_yield_a_torn_snapshot() {
         // The publisher writes, for sequence s, a view whose fields satisfy a
@@ -251,7 +174,7 @@ mod tests {
         // command's CRC matches `crc32`. A torn snapshot (a mix of two writes)
         // would break the invariant; the seqlock must guarantee every coherent
         // snapshot the reader accepts is internally consistent.
-        let region = Arc::new(AtomicRegion::new());
+        let region = Arc::new(InProcessRegion::new());
         const N: u64 = 20_000;
 
         let w = Arc::clone(&region);
