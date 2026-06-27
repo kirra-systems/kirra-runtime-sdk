@@ -258,8 +258,35 @@ impl<C: SafetyContract> SafetyGovernor for KirraKernelGovernor<C> {
                 }
             }
             BehavioralAction::ApplyVelocityCap => {
-                let clamped_value = safe_clamp(core_bounded_demand, self.constraint_cap_min, self.constraint_cap_max);
-                (clamped_value, MitigationCode::DegradedPostureClamp { cap_min: self.constraint_cap_min, cap_max: self.constraint_cap_max })
+                // #410 residual / issue #70: Degraded is decel-to-stop-and-HOLD, NOT a
+                // sustained crawl. The prior pure clamp to [cap_min, cap_max] admitted a
+                // speed INCREASE up to the cap, a re-initiation from a stop, and a
+                // reversal through zero — the post-stop pullover-drag failure mode the
+                // vehicle path's `enforce_degraded_decel_to_stop` (#70) refuses. The
+                // scalar kernel governor (the FFI/scalar ingress, #404) was the one
+                // enforcement point left as a pure clamp.
+                //
+                // Enforce the same non-increasing / no-reinit / no-reversal rule on the
+                // scalar. Cap/envelope first (defense-in-depth, unchanged), THEN the
+                // decel-to-stop bound applied LAST so it is authoritative over any
+                // positive `cap_min` floor: emit `sign(current)·min(|capped|,|current|)`.
+                // This is epsilon-free yet complete — magnitude never exceeds the current
+                // (non-increasing), the sign is forced to the current direction (no
+                // reversal), and at a stop (`|current|≈0`) the magnitude term collapses to
+                // ~0 (no re-initiation) — while a genuine decelerating-toward-zero command
+                // still passes. Unlike the vehicle path there is no separate MRC channel,
+                // so a refused increase/reinit/reversal becomes a non-increasing HOLD in
+                // the current direction (itself a valid decel trajectory). Recovery is
+                // automatic on return to FullAutonomy. The Nominal WCET path is UNCHANGED.
+                let current = self.last_validated_scalar;
+                let capped = safe_clamp(core_bounded_demand, self.constraint_cap_min, self.constraint_cap_max);
+                let held = current.signum() * capped.abs().min(current.abs());
+                if (held - capped).abs() > 1e-9 {
+                    // The decel-to-stop bound actively overrode the (capped) demand.
+                    (held, MitigationCode::DegradedDecelToStopHold { held })
+                } else {
+                    (held, MitigationCode::DegradedPostureClamp { cap_min: self.constraint_cap_min, cap_max: self.constraint_cap_max })
+                }
             }
             BehavioralAction::ForceStationaryHold => {
                 (self.last_validated_scalar, MitigationCode::ShadowModeHoldEnforced { retained: self.last_validated_scalar })

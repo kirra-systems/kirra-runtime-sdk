@@ -34,6 +34,69 @@ fn test_unrestricted_autonomy_envelope_limit_clamping() {
     assert!(res.was_unsafe_attempt);
 }
 
+// --- #70 / #410: Degraded = decel-to-stop-and-HOLD on the scalar kernel governor.
+// Drive the trust engine to ConstrainedAdvisory (score 56..=85 → Degraded /
+// `ApplyVelocityCap`) and prove the branch refuses a speed increase, a
+// re-initiation from a stop, and a reversal through zero, while still admitting a
+// decelerating command. (Mirrors the vehicle path's `enforce_degraded_decel_to_stop`.)
+
+fn velocity_contract() -> KinematicContract {
+    KinematicContract {
+        max_linear_velocity: 2.0,     // symmetric envelope ±2.0
+        max_angular_velocity: 0.5,
+        max_linear_acceleration: 0.1,
+        fallback_linear_speed: 0.0,
+    }
+}
+
+/// Build a governor already in Degraded (ConstrainedAdvisory), holding `current`.
+fn degraded_velocity_governor(current: f64) -> KirraKernelGovernor<KinematicContract> {
+    // caps ±2.0 so the reduced cap does NOT bind — the decel-to-stop bound is the
+    // behaviour under test.
+    let mut gov = KirraKernelGovernor::new(velocity_contract(), current, -2.0, 2.0);
+    gov.trust_engine.decay_trust(30); // 100 → 70 ⇒ ConstrainedAdvisory (Degraded)
+    assert_eq!(gov.trust_engine.mode, crate::TrustMode::ConstrainedAdvisory);
+    gov
+}
+
+#[test]
+fn test_degraded_refuses_speed_increase_holds_current() {
+    // Moving at 1.0, planner demands 1.8 (within envelope AND cap): a pure clamp
+    // would admit 1.8 — a speed INCREASE in Degraded. Decel-to-stop holds at 1.0.
+    let mut gov = degraded_velocity_governor(1.0);
+    let res = gov.evaluate(1.8, 1.0);
+    assert_eq!(res.sanitized_scalar, 1.0, "Degraded must not author a speed increase");
+    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+}
+
+#[test]
+fn test_degraded_admits_deceleration() {
+    // Moving at 1.5, planner demands 0.5 — a decelerating command is admitted.
+    let mut gov = degraded_velocity_governor(1.5);
+    let res = gov.evaluate(0.5, 1.0);
+    assert_eq!(res.sanitized_scalar, 0.5, "a decelerating command must pass under Degraded");
+}
+
+#[test]
+fn test_degraded_refuses_reinitiation_from_stop() {
+    // Stopped (0.0), planner demands 1.5: a pure clamp would re-initiate motion.
+    // Decel-to-stop HOLDs at the stop.
+    let mut gov = degraded_velocity_governor(0.0);
+    let res = gov.evaluate(1.5, 1.0);
+    assert_eq!(res.sanitized_scalar, 0.0, "Degraded must not re-initiate motion from a stop");
+    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+}
+
+#[test]
+fn test_degraded_refuses_reversal_through_zero() {
+    // Moving forward at 1.5, planner demands -1.5 (reverse): the emitted scalar
+    // keeps the current sign — no reversal — at non-increasing magnitude.
+    let mut gov = degraded_velocity_governor(1.5);
+    let res = gov.evaluate(-1.5, 1.0);
+    assert_eq!(res.sanitized_scalar, 1.5, "Degraded must not reverse direction through a stop");
+    assert!(matches!(res.mitigation, crate::MitigationCode::DegradedDecelToStopHold { .. }));
+}
+
 #[test]
 fn test_type_safe_llm_parser_rejection_of_injections() {
     let parser = UnstructuredTextParser;
