@@ -2,12 +2,26 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft — defined build, not run** (no QNX hardware in this task). |
-| Date | 2026-06-21 |
+| Status | **Cross-build wired — ready to run on an x86_64 QNX SDP 8.0 target.** The gated CMake QNX path, `qnx.toolchain.cmake` (qcc/q++), and the `run_qnx_fdit.sh` driver are in the tree; the host build is byte-identical when `KIRRA_QNX_TARGET=OFF`. Remaining = execute on the target and capture the row. |
+| Date | 2026-06-27 |
 | Owner | Project / safety-case owner |
 | Issue | #274 (EPIC #270, QNX governor lane). RTM tracing #272 (done). |
 | Scope | Cross-compile the no_std verdict **judge** (`tools/qnx-rtm-harness/kirra_judge.rs`) for a QNX target and measure its per-verdict WCET under `SCHED_FIFO`, replacing the harness placeholder `wcet_status = TBD-QNX-TARGET`. |
-| Companions | `tools/qnx-rtm-harness/` (README, `QNX_MAPPING.md`, `CMakeLists.txt`, `kirra_judge.rs`, `kirra_ffi.h`, `wcet_measure.cpp`), `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`, `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`, `src/wcet_gate.rs`, `ASSUMPTIONS_OF_USE.md` (AOU-HW-QNX-TARGET-001), ADR-0001. |
+| Companions | `tools/qnx-rtm-harness/` (README, `QNX_MAPPING.md`, `CMakeLists.txt`, **`qnx.toolchain.cmake`**, **`run_qnx_fdit.sh`**, `kirra_judge.rs`, `kirra_ffi.h`, `wcet_measure.cpp`), `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`, `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`, `src/wcet_gate.rs`, `ASSUMPTIONS_OF_USE.md` (AOU-HW-QNX-TARGET-001), ADR-0001. |
+
+## TL;DR — run it
+
+```bash
+source ~/qnx800/qnxsdp-env.sh                 # sets QNX_HOST/QNX_TARGET + qcc
+tools/qnx-rtm-harness/run_qnx_fdit.sh         # x86_64 default; cross-builds judge + C++
+# → copy build-qnx/{rtm_harness,wcet_measure,kirra_demo} to the QNX target, then on-target:
+#   ./rtm_harness && echo PASS         # FDIT verdict-correctness gate
+#   ./wcet_measure                     # run as root for SCHED_FIFO; emits the CSV row
+```
+
+The driver handles the Rust-for-QNX toolchain (direct `rustc --target`, else
+`cargo -Zbuild-std=core`, else a custom-target.json prompt). The C++ side is
+qcc/q++ via `qnx.toolchain.cmake`.
 
 ## Hard boundaries (read first)
 
@@ -82,22 +96,24 @@ q++ -Vgcc_ntoaarch64_cxx -std=c++17 -Wall -Wextra -Werror -fno-exceptions -fno-r
 # QNX provides pthread/m/dl via libc; -ldl/-lm may be unneeded on QNX — confirm per `qcc -V`.
 ```
 
-### 1d. CMake hook extension (gated; host build unchanged)
+### 1d. CMake hook — now REAL (gated; host build unchanged)
 
-The existing hook is a **comment** in `CMakeLists.txt`. Make it real, gated by a `KIRRA_QNX_TARGET` option so the host build stays byte-identical when OFF:
+The hook is no longer a comment. `CMakeLists.txt` carries an `option(KIRRA_QNX_TARGET ... OFF)`; default OFF leaves the host build **byte-identical** (verified: `ctest` 2/2). With it ON plus `qnx.toolchain.cmake`:
 
-```cmake
-option(KIRRA_QNX_TARGET "Cross-compile the judge + harness for a QNX target" OFF)
-set(KIRRA_RUSTC_TARGET "<TARGET_TRIPLE_TBD>" CACHE STRING "rustc nto-qnx800 tuple")
+- the judge staticlib is taken from `-DKIRRA_JUDGE_LIB_PREBUILT=...` (built for the target by `run_qnx_fdit.sh`) **or** built here by an nto-capable rustc via `-DKIRRA_RUSTC_TARGET=...`;
+- `wcet_measure` is added as a target (QNX-only — a host WCET number is INDICATIVE, so it is structurally excluded from the host build);
+- ctest is **not** registered (the nto binaries run on the QNX target, not the build host);
+- `KIRRA_JUDGE_LINK` drops `-lpthread/-ldl/-lm` (QNX libc provides them).
 
-set(KIRRA_JUDGE_RUSTC_FLAGS --edition 2021 --crate-type staticlib
-    --crate-name kirra_judge -C panic=abort -C opt-level=2 -C debuginfo=0)
-if(KIRRA_QNX_TARGET)
-  list(APPEND KIRRA_JUDGE_RUSTC_FLAGS --target ${KIRRA_RUSTC_TARGET})
-  # select qcc/q++ via -DCMAKE_TOOLCHAIN_FILE=qnx.cmake, and add wcet_measure.cpp
-  # as an executable linked against ${KIRRA_JUDGE_LINK}.
-endif()
-# ... feed ${KIRRA_JUDGE_RUSTC_FLAGS} into the rustc add_custom_command ...
+`run_qnx_fdit.sh` is the one-command driver that wires all of the above. Manual configure (if you prefer):
+
+```bash
+source ~/qnx800/qnxsdp-env.sh
+cmake -S tools/qnx-rtm-harness -B build-qnx \
+      -DCMAKE_TOOLCHAIN_FILE=tools/qnx-rtm-harness/qnx.toolchain.cmake \
+      -DKIRRA_QNX_TARGET=ON -DKIRRA_QNX_QCC_VARIANT=gcc_ntox86_64 \
+      -DKIRRA_JUDGE_LIB_PREBUILT="$PWD/build-qnx/libkirra_judge.a"
+cmake --build build-qnx -j
 ```
 
 ## 2. SCHED_FIFO measurement wrapper
@@ -141,5 +157,6 @@ What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verd
 | no_std judge (C-ABI `kirra_judge_assess`) | done (`kirra_judge.rs`) |
 | host-indicative WCET + CI regression gate | done (`src/wcet_gate.rs`) |
 | FDIT/RTM matrix traced to kernel RTM | done (#272, `QNX_MAPPING.md`) |
-| cross-compile recipe + measurement wrapper | **done (this PR — drafted, not run)** |
-| run on a QNX target, capture the row, update CSV + methodology | **remaining (#274 — needs a QNX target)** |
+| cross-compile recipe + measurement wrapper | done (`wcet_measure.cpp`) |
+| gated CMake QNX path + `qnx.toolchain.cmake` + `run_qnx_fdit.sh` driver | **done (this PR — host build byte-identical, ctest 2/2)** |
+| run on the x86_64 QNX SDP 8.0 target, capture FDIT PASS + WCET row, update CSV + methodology | **remaining (#274 — execute on the target)** |

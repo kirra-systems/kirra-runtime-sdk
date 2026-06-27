@@ -121,10 +121,28 @@ row. See `docs/safety/ASSUMPTIONS_OF_USE.md` → **AOU-HW-QNX-TARGET-001**.
 `src/gateway/kinematics_contract.rs`; this harness **references** it, never
 imports it, and its number must never be read as a certified bound.
 
-## QNX
+## QNX cross-build + on-target FDIT/WCET (#274)
 
-`CMakeLists.txt` notes the QNX cross-compile hook as a comment; the real
-cross-compile + on-target FDIT/WCET work is **#274**. The harness→kernel-RTM
-tracing (**#272**, done) is in `QNX_MAPPING.md`; **adding the candidate `NO-RTM-ID`
-TRs to the RTM itself is a separate `docs/safety/**` change with its own review —
-not part of #272**, which only traces against the RTM as it stands.
+The QNX cross-compile is now **real and gated**, not a comment. The host build is
+**byte-identical** when `KIRRA_QNX_TARGET=OFF` (default) — `ctest` 2/2 as above.
+To cross-build for an **x86_64 QNX SDP 8.0** target and run the FDIT matrix +
+per-verdict WCET on it:
+
+```sh
+source ~/qnx800/qnxsdp-env.sh          # sets QNX_HOST/QNX_TARGET + qcc
+tools/qnx-rtm-harness/run_qnx_fdit.sh  # builds judge (nto) + shim/harness/wcet (qcc)
+# copy build-qnx/{rtm_harness,wcet_measure,kirra_demo} to the QNX target, then:
+#   ./rtm_harness && echo PASS   # verdict-correctness gate, on-target
+#   ./wcet_measure               # SCHED_FIFO WCET row (run as root); replaces TBD-QNX-TARGET
+```
+
+Pieces: `qnx.toolchain.cmake` (qcc/q++, x86_64 default), the `KIRRA_QNX_TARGET`
+CMake path (adds `wcet_measure`, drops the host-only `-lpthread/-ldl/-lm`, skips
+host ctest), and `run_qnx_fdit.sh` (handles the Rust-for-QNX toolchain: direct
+`rustc --target`, else `cargo -Zbuild-std=core`, else a custom-target.json prompt).
+Full recipe + Phase-I acceptance criteria: **`docs/safety/WCET_QNX_BRINGUP.md`**.
+
+The harness→kernel-RTM tracing (**#272**, done) is in `QNX_MAPPING.md`; **adding
+the candidate `NO-RTM-ID` TRs to the RTM itself is a separate `docs/safety/**`
+change with its own review — not part of #272**, which only traces against the
+RTM as it stands.
