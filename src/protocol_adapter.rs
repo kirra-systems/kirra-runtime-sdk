@@ -65,6 +65,23 @@ pub fn map_industrial_event_to_claim(event: &IndustrialEvent) -> Result<ActionCl
             }),
         ),
         Mapped::CmdVelSetpoint => {
+            // FAITHFUL WIDTH (#85, B15): a Modbus holding register is 16 bits on
+            // the wire, so a faithful single-register `write_register` value
+            // occupies the signed-OR-unsigned 16-bit range [-32768, 65535]. A
+            // value outside that cannot have originated from one faithful register
+            // — refuse rather than cast a corrupt `i64` into a setpoint (the
+            // binary adapters reject width mismatches the same way; #85). The
+            // kinematic envelope backstops this downstream, but refusing here
+            // keeps the decode honest instead of fabricating a magnitude from an
+            // unfaithful field. OPC-UA `write_node` carries its own (wider, typed)
+            // value and is NOT constrained to 16 bits, so the guard is scoped to
+            // Modbus.
+            if event.protocol == IndustrialProtocol::Modbus
+                && !(-32768..=65535).contains(&event.value)
+            {
+                return Err("MODBUS_REGISTER_VALUE_UNFAITHFUL_WIDTH");
+            }
+
             // FAITHFUL DECODE: the written register/node value IS the commanded
             // linear setpoint — carry it through verbatim. No synthesized 0.25
             // crawl, no invented scaling. The governor evaluates the REAL
@@ -365,6 +382,52 @@ mod no_fabricated_velocity_tests {
         assert!(!decision.allowed, "an unmappable motion command must NOT be admitted");
         assert!(decision.reason.starts_with("ADAPTER_TRANSLATION_FAILURE"));
         assert!(decision.reason.contains("UNMAPPABLE_TO_KINEMATIC_CLAIM"));
+    }
+
+    // B15: a Modbus single-register value that cannot fit a faithful 16-bit
+    // register ([-32768, 65535]) is refused, not cast into a setpoint.
+    #[test]
+    fn modbus_register_value_beyond_16_bits_is_refused() {
+        for v in [65_536_i64, 70_000, -32_769, i64::MAX, i64::MIN] {
+            assert_eq!(
+                map_industrial_event_to_claim(&modbus_event("write_register", v)).unwrap_err(),
+                "MODBUS_REGISTER_VALUE_UNFAITHFUL_WIDTH",
+                "value {v} is outside a faithful 16-bit register and must be refused",
+            );
+            let decision =
+                evaluate_industrial_event(modbus_event("write_register", v), FleetPosture::Nominal);
+            assert!(!decision.allowed, "an unfaithful-width register write must fail closed");
+            assert!(decision.reason.contains("MODBUS_REGISTER_VALUE_UNFAITHFUL_WIDTH"));
+        }
+    }
+
+    // The faithful 16-bit range (signed OR unsigned) still decodes — the width
+    // guard rejects only values that no single register could carry. The
+    // downstream kinematic envelope, not the width guard, governs magnitude.
+    #[test]
+    fn modbus_register_value_within_16_bits_still_decodes() {
+        for v in [-32_768_i64, -200, 0, 65_535] {
+            let claim = map_industrial_event_to_claim(&modbus_event("write_register", v))
+                .expect("a faithful 16-bit register value decodes");
+            assert_eq!(claim.payload["linear_x"].as_f64().unwrap(), v as f64);
+        }
+    }
+
+    // The 16-bit width guard is Modbus-scoped: an OPC-UA write_node carries its
+    // own wider typed value and must NOT be refused by the Modbus register bound.
+    #[test]
+    fn opcua_write_node_is_not_constrained_to_16_bits() {
+        let event = IndustrialEvent {
+            protocol: IndustrialProtocol::OpcUa,
+            asset_id: "asset-1".to_string(),
+            operation: "write_node".to_string(),
+            address: "ns=2;s=Speed".to_string(),
+            value: 70_000,
+            risk_class: "kinetic_write".to_string(),
+        };
+        let claim = map_industrial_event_to_claim(&event)
+            .expect("an OPC-UA node write is not bound to 16 bits");
+        assert_eq!(claim.payload["linear_x"].as_f64().unwrap(), 70_000.0);
     }
 
     // A generic OPC-UA method call has no velocity semantics → unmappable.

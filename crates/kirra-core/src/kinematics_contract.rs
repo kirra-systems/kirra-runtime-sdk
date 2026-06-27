@@ -412,6 +412,16 @@ pub fn enforce_degraded_decel_to_stop(
 
     // (c') No direction reversal through a stop while moving — commanding the
     // opposite sign at a non-trivial magnitude re-initiates motion in reverse.
+    //
+    // Order-independence / signum safety (F3): `f64::signum` maps +0.0→+1.0 and
+    // -0.0→-1.0, so a bare sign comparison is meaningless near zero. The
+    // `current > STOP_EPSILON_MPS && proposed > STOP_EPSILON_MPS` guard is what
+    // makes this sound — `reversing` is only ACTED ON when both magnitudes are
+    // firmly away from zero, where the sign is unambiguous. That makes the check
+    // independent of where it sits relative to (c)/(b): float jitter around a
+    // hold (e.g. +0.01 ↔ -0.01, both ≤ eps) can never be mistaken for a reversal,
+    // regardless of branch order. (Pinned by
+    // test_degraded_reversal_check_is_signum_order_independent.)
     let reversing = cmd.linear_velocity_mps.signum() != cmd.current_velocity_mps.signum();
     if reversing && current > STOP_EPSILON_MPS && proposed > STOP_EPSILON_MPS {
         return EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied);
@@ -1358,5 +1368,39 @@ mod kinematics_contract_tests {
             enforce_degraded_decel_to_stop(&cmd, &mrc),
             EnforceAction::DenyBreach(DenyCode::NanInfLinearVelocity)
         );
+    }
+
+    /// F3: the reversal check (c') is sound near zero precisely because of its
+    /// both-magnitudes-above-STOP_EPSILON guard, so its verdict does not depend on
+    /// `f64::signum`'s ±0.0 convention nor on its position relative to (c)/(b):
+    ///   - a genuine reversal while firmly moving IS denied (sign flip, both > eps);
+    ///   - sign jitter inside the hold band (both ≤ eps, opposite signs incl. ±0.0)
+    ///     is NOT mistaken for a reversal — it stays an allowed standstill hold.
+    #[test]
+    fn test_degraded_reversal_check_is_signum_order_independent() {
+        let mrc = VehicleKinematicsContract::mrc_fallback_profile();
+
+        // Genuine reversal while moving: forward 2.0 → reverse -1.0 → denied.
+        assert_eq!(
+            enforce_degraded_decel_to_stop(&degraded_cmd(2.0, -1.0), &mrc),
+            EnforceAction::DenyBreach(DenyCode::DegradedReinitiationDenied),
+        );
+
+        // Sign jitter around the standstill hold (both magnitudes ≤ eps), every
+        // sign combination — none may be read as a reversal re-initiation. With
+        // both ≤ eps, (c)/(c') cannot fire and the speed is non-increasing, so the
+        // command is an allowed hold.
+        for (current, proposed) in [
+            (0.01_f64, -0.01_f64),  // +tiny → -tiny
+            (-0.01, 0.01),          // -tiny → +tiny
+            (0.0, -0.0),            // +0.0 → -0.0 (the signum ±0.0 corner exactly)
+            (-0.0, 0.0),            // -0.0 → +0.0
+        ] {
+            assert_eq!(
+                enforce_degraded_decel_to_stop(&degraded_cmd(current, proposed), &mrc),
+                EnforceAction::Allow,
+                "near-zero sign jitter ({current} → {proposed}) must hold, not deny as reversal",
+            );
+        }
     }
 }

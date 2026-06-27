@@ -403,7 +403,30 @@ pub fn start_posture_engine_worker(
             let cache = cache.clone();
             let rx = Arc::clone(&rx);
             async move {
-                let mut rx = rx.lock().await;
+                // B7: the supervisor (`spawn_supervised`) awaits the prior task
+                // future to completion (`inner.await`) BEFORE re-invoking this
+                // closure, so any earlier guard is always dropped before we reach
+                // here — `try_lock` therefore succeeds on every legitimate
+                // (re)start. A CONTENDED lock would mean two worker futures are
+                // alive at once (a supervisor-contract violation); do NOT
+                // `lock().await`, which would hang this worker forever and
+                // silently stall recalculation. Fail closed instead: log and
+                // return. The supervisor treats the return as a terminal state and
+                // stops; the posture cache then goes stale and every gate denies
+                // (POSTURE_CACHE_TTL_MS). This makes the single-owner invariant
+                // explicit and fail-fast rather than an unstated drop-ordering
+                // coupling that deadlocks if it is ever broken.
+                let mut rx = match rx.try_lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        tracing::error!(
+                            "posture engine worker: trigger receiver already held — \
+                             concurrent worker (supervisor invariant violation); exiting \
+                             fail-closed (cache will stale to LockedOut)"
+                        );
+                        return;
+                    }
+                };
                 loop {
                     let first = match rx.recv().await {
                         Some(t) => t,
