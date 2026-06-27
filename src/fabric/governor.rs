@@ -65,7 +65,27 @@ impl KinematicProfileType {
         }
     }
 
+    /// The authoritative Degraded (MRC) envelope for this profile.
+    ///
+    /// ADR-0012 (#406 / #429): the AUTOMOTIVE Degraded envelope is the VALIDATED
+    /// `mrc_fallback_profile()` — the safety-case **5.0 m/s** crawl ceiling
+    /// (`SAFE_STATE_SPECIFICATION` SS-002; Cruise SF Oct-2023 ~3 m/s post-stop
+    /// pullover-drag, "under a 5 m/s crawl ceiling") — NOT a generic `0.3×` derate
+    /// of the 35 m/s nominal, which lands at **10.5 m/s** (2× the validated figure).
+    /// This converges the fabric automotive MRC onto the SAME ceiling the gateway
+    /// enforces (`enforce_actuator_safety_envelope` / `policy_layer`), eliminating
+    /// the #406 divergence — a future enforcement point cannot ship a looser
+    /// automotive Degraded ceiling. The cross-point invariant is pinned by
+    /// `mrc_ceiling_is_authoritative_across_enforcement_points` below.
+    ///
+    /// Non-automotive platforms keep the per-platform `0.3× / 0.4× / 0.5×` derate;
+    /// each factor is derived from that platform's HARA / safety case (ADR-0012),
+    /// not chosen for convenience.
     pub fn mrc_contract(&self) -> VehicleKinematicsContract {
+        // Automotive: the validated canonical MRC is authoritative (ADR-0012 item 1).
+        if matches!(self, Self::AutomotiveNominal) {
+            return VehicleKinematicsContract::mrc_fallback_profile();
+        }
         let nominal = self.nominal_contract();
         VehicleKinematicsContract {
             max_speed_mps: nominal.max_speed_mps * 0.3,
@@ -161,6 +181,74 @@ mod tests {
         let contract = g.profile.nominal_contract();
         assert_eq!(contract.max_speed_mps, 15.0);
         assert_eq!(contract.max_steering_deg, 180.0);
+    }
+
+    /// ADR-0012 / #406 / #429 — the cross-enforcement-point MRC conformance pin.
+    /// A fabric automotive asset in Degraded must yield the SAME effective MRC
+    /// envelope the gateway enforces (`mrc_fallback_profile`), NOT the old generic
+    /// 0.3× derate (10.5 m/s). A future enforcement point cannot ship a looser
+    /// automotive Degraded ceiling without failing here.
+    #[test]
+    fn mrc_ceiling_is_authoritative_across_enforcement_points() {
+        let fabric_mrc = KinematicProfileType::AutomotiveNominal.mrc_contract();
+        let gateway_mrc = VehicleKinematicsContract::mrc_fallback_profile();
+        // The validated SS-002 crawl ceiling, identical at both points.
+        assert_eq!(fabric_mrc.max_speed_mps, gateway_mrc.max_speed_mps);
+        assert_eq!(fabric_mrc.max_speed_mps, 5.0, "the validated SS-002 5.0 m/s ceiling");
+        // The full envelope converges (not just the speed scalar) — fabric ==
+        // gateway, byte-for-byte, so the whole Degraded contract is authoritative.
+        assert_eq!(
+            fabric_mrc, gateway_mrc,
+            "fabric automotive MRC must BE the canonical mrc_fallback_profile (ADR-0012)"
+        );
+        // Regression guard: the old 0.3× derate of the 35 m/s nominal = 10.5 m/s —
+        // 2× the validated figure (#406). It must never come back.
+        assert!(
+            fabric_mrc.max_speed_mps < 10.5,
+            "automotive MRC must not regress to the 2×-looser generic derate (#406)"
+        );
+    }
+
+    /// ADR-0012 — the authoritative-automotive change must NOT perturb the
+    /// non-automotive platforms; each keeps its per-platform (HARA-derived) derate.
+    #[test]
+    fn non_automotive_mrc_keeps_per_platform_derate() {
+        let robot = KinematicProfileType::RobotNominal.mrc_contract();
+        assert!((robot.max_speed_mps - 1.8 * 0.3).abs() < 1e-9, "robot {}", robot.max_speed_mps);
+        let drone = KinematicProfileType::DroneNominal.mrc_contract();
+        assert!((drone.max_speed_mps - 15.0 * 0.3).abs() < 1e-9, "drone {}", drone.max_speed_mps);
+        let industrial = KinematicProfileType::IndustrialNominal.mrc_contract();
+        assert!(
+            (industrial.max_speed_mps - 0.5 * 0.3).abs() < 1e-9,
+            "industrial {}", industrial.max_speed_mps
+        );
+    }
+
+    /// Behavioural proof the divergence is gone end-to-end: a Degraded automotive
+    /// command at 8 m/s (above the 5.0 ceiling, decelerating) is bounded by the
+    /// authoritative 5.0 envelope at the fabric governor — it would have been
+    /// admitted up to 10.5 under the old derate.
+    #[test]
+    fn degraded_automotive_command_is_bounded_by_the_authoritative_ceiling() {
+        let g = AssetGovernor::new("av01".to_string(), KinematicProfileType::AutomotiveNominal);
+        let contract = g.profile.mrc_contract();
+        assert_eq!(contract.max_speed_mps, 5.0);
+        // A decel command from 8 → 6 m/s: still above the 5.0 MRC ceiling, so the
+        // envelope must bound it (clamp), not pass it through as the old 10.5 would.
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 6.0,
+            current_velocity_mps: 8.0,
+            delta_time_s: 0.1,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        let result = g.evaluate_command(&cmd, &FleetPosture::Degraded, None);
+        // Decelerating + over-ceiling → the decel gate admits but clamps to MRC,
+        // never a clean Allow at 6.0 (which the old 10.5 ceiling would have given).
+        assert!(
+            matches!(result, EnforceAction::ClampLinear(_)),
+            "over-ceiling Degraded decel must clamp to the 5.0 envelope, got {result:?}"
+        );
     }
 
     // Issue #70: Degraded is decel-to-stop-and-HOLD. A re-initiation from a
