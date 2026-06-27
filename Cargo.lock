@@ -1965,6 +1965,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-contract-channel"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-core"
 version = "0.1.0"
 dependencies = [
