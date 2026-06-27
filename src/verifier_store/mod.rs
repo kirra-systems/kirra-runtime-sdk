@@ -292,11 +292,14 @@ fn audit_signing_payload(
 /// Verify a base64 Ed25519 signature over `payload` under `vk`.
 fn audit_verify_sig(vk: &ed25519_dalek::VerifyingKey, payload: &str, sig_b64: &str) -> bool {
     use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
-    use ed25519_dalek::{Signature, Verifier};
+    use ed25519_dalek::Signature;
     b64e.decode(sig_b64)
         .ok()
         .and_then(|b| <[u8; 64]>::try_from(b.as_slice()).ok())
-        .map(|arr| vk.verify(payload.as_bytes(), &Signature::from_bytes(&arr)).is_ok())
+        // L-2: verify_strict rejects malleable / non-canonical signatures, matching
+        // the rest of the crate's crypto discipline (the federation path already
+        // uses it). `verify_strict` is inherent on VerifyingKey — no Verifier trait.
+        .map(|arr| vk.verify_strict(payload.as_bytes(), &Signature::from_bytes(&arr)).is_ok())
         .unwrap_or(false)
 }
 

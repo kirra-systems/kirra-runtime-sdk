@@ -115,6 +115,71 @@ fn test_rss_violation_rejects() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. H-2 — a NON-FINITE perception object must FAIL CLOSED (MRCFallback), not be
+//     silently skipped. A NaN/Inf field poisons every RSS `<`/`abs()` comparison
+//     (NaN compares false), so pre-fix the dangerous object was neither rejected
+//     nor skipped and the trajectory was wrongly Accepted.
+// ---------------------------------------------------------------------------
+
+/// Control: a FINITE object placed far off-corridor is cleanly skipped and the
+/// trajectory Accepts — so the test below isolates the *non-finite* effect (the
+/// guard must reject only on non-finiteness, never over-reject a clean object).
+#[test]
+fn test_finite_far_object_is_skipped_and_accepts() {
+    let trajectory = straight_trajectory(10, 5.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let objects = vec![PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 50.0, y_m: 20.0 }, // far ahead AND 20 m off to the side
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::Accept,
+        "a finite, far, off-corridor object must be skipped (Accept); got {verdict:?}");
+}
+
+/// H-2: each non-finite object field independently fails closed to MRCFallback.
+#[test]
+fn test_nonfinite_object_field_fails_closed_h2() {
+    let trajectory = straight_trajectory(10, 5.0, 0.1);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    // Base object: far off-corridor, so a FINITE version Accepts (see control
+    // above). Each variant corrupts exactly one field with NaN or Inf.
+    let base = PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 50.0, y_m: 20.0 },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    };
+
+    let variants: Vec<(&str, PerceivedObject)> = vec![
+        ("pos.x_m=NaN", PerceivedObject { pos: Point { x_m: f64::NAN, y_m: 0.0 }, ..base }),
+        ("pos.y_m=Inf", PerceivedObject { pos: Point { x_m: 50.0, y_m: f64::INFINITY }, ..base }),
+        ("velocity_mps=NaN", PerceivedObject { velocity_mps: f64::NAN, ..base }),
+        ("heading_rad=NaN", PerceivedObject { heading_rad: f64::NAN, ..base }),
+        ("vel.x_m=Inf", PerceivedObject { vel: Point { x_m: f64::INFINITY, y_m: 0.0 }, ..base }),
+        ("vel.y_m=-Inf", PerceivedObject { vel: Point { x_m: 0.0, y_m: f64::NEG_INFINITY }, ..base }),
+    ];
+
+    for (label, obj) in variants {
+        let verdict = validate_trajectory_slow(
+            &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal,
+        );
+        assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+            "H-2: a non-finite object field ({label}) must fail closed to MRC, not be \
+             silently skipped; got {verdict:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 3a. Per-class RSS lateral band — a small-robot (courier) profile admits a side
 //     object a robotaxi refuses, WITHOUT changing the robotaxi number (#1 / the
 //     CONTRACT_PROFILES.md sibling rule). The checker LOGIC is identical; only the
