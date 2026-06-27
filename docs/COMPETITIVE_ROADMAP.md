@@ -3,7 +3,7 @@
 
 This roadmap tracks the work required to close the gap between Kirra's
 current state and what is required for production automotive deployment,
-acquirer readiness, and certification. It is organized by milestone,
+productization, and certification. It is organized by milestone,
 not by calendar date.
 
 > **Market context:** `docs/MARKET_AUTONOMOUS_SERVICES.md` maps the converging
@@ -44,7 +44,7 @@ not by calendar date.
 ### "Kirra runs on real hardware"
 **Target: v1.2.0**
 
-The gap between simulation and production credibility. Every acquirer
+The gap between simulation and production credibility. Every serious evaluator
 will ask "where has this run?" This milestone answers that question.
 
 ### M1.1 — QNX Deployment (TIME-SENSITIVE — license active)
@@ -80,7 +80,7 @@ while remaining vendor-neutral at the governance layer.
 
 **Why it matters:** A working robot demo is the proof that the architecture
 is not theoretical. It is the single most persuasive artifact for
-acquirer conversations, conference presentations, and press.
+customer conversations, conference presentations, and press.
 
 ---
 
@@ -107,10 +107,11 @@ becomes demonstrable, not theoretical.
 - [ ] QNN + QNX integration — safety governance on Snapdragon Ride target
 - [ ] Latency profile on Snapdragon hardware
 
-**Why it matters:** Qualcomm is the most likely acquirer outside NVIDIA.
-Kirra running on Snapdragon Ride is the direct pitch to Qualcomm's
-automotive division — they get a safety governance layer that makes
-their platform more competitive against NVIDIA DRIVE without building it.
+**Why it matters:** Qualcomm's Snapdragon Ride is a leading non-NVIDIA
+automotive compute platform. Kirra running on Snapdragon Ride demonstrates
+the vendor-neutral governance layer on a second silicon family — a safety
+governance layer that makes the platform more competitive against NVIDIA
+DRIVE without building it in-house.
 
 ### M2.3 — AMD Vitis AI Backend
 - [ ] Hardware procurement: AMD Kria K26 (~$200)
@@ -138,7 +139,7 @@ execution is a differentiator against TensorRT (JIT variance) and QNN
 This is the hardest milestone and the longest lead time. Full ASIL-D
 certification takes 2-3 years minimum. The goal here is to begin the
 process and produce artifacts that demonstrate certification intent
-to acquirers doing due diligence.
+to customers and assessors.
 
 ### M3.1 — ISO 21434 Cybersecurity (no code required)
 - [ ] TARA (Threat Analysis and Risk Assessment) document
@@ -149,7 +150,7 @@ to acquirers doing due diligence.
 
 **Why it matters:** ISO 21434 is now table stakes for any automotive
 safety system. NVIDIA, Qualcomm, and Mobileye all have it.
-NXP and BlackBerry will not consider a software partnership without it.
+It is a prerequisite for any serious automotive software partnership.
 This is process documentation, not code — it can be started today.
 
 ### M3.2 — IEC 61508 SIL 3 Requirements Mapping
@@ -205,8 +206,8 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 
 ---
 
-## Milestone 5 — Acquirer Readiness
-### "Kirra is ready for technical due diligence"
+## Milestone 5 — Productization & Public Launch
+### "Kirra is ready for external evaluation"
 
 ### M5.1 — Public Repository
 - [ ] Repo made public on GitHub

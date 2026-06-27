@@ -146,44 +146,12 @@ A customer already certified on one of these will not switch to QNX to adopt the
 
 ## 8. Market and relationship context
 
-- **Apex.AI is a category neighbor, not a competitor.** Apex.Grace is an ASIL-D-certified ROS 2 runtime (the *doer* layer); KIRRA is a runtime-assurance governor that sits *above* a planner. KIRRA could even run over Apex.Grace. Apex.Grace is supported on QNX, INTEGRITY, PikeOS, and Linux-PREEMPT_RT — so leaning on it would inherit multi-kernel portability, though KIRRA's own cert evidence remains per-kernel. The natural relationship is complementary, with acquisition a plausible outcome.
-- **The #1 value multiplier remains a named pilot.** The platform decision is now settled; the gating item for credibility and for any acquisition conversation is a real deployment. The kernel choice should follow the pilot customer's existing substrate — which, for the most likely (automotive/industrial/off-highway) customers, is QNX anyway.
+- **Apex.AI is a category neighbor, not a competitor.** Apex.Grace is an ASIL-D-certified ROS 2 runtime (the *doer* layer); KIRRA is a runtime-assurance governor that sits *above* a planner. KIRRA could even run over Apex.Grace. Apex.Grace is supported on QNX, INTEGRITY, PikeOS, and Linux-PREEMPT_RT — so leaning on it would inherit multi-kernel portability, though KIRRA's own cert evidence remains per-kernel. The natural relationship is complementary.
+- **The #1 value multiplier remains a named pilot.** The platform decision is now settled; the gating item for credibility is a real deployment. The kernel choice should follow the pilot customer's existing substrate — which, for the most likely (automotive/industrial/off-highway) customers, is QNX anyway.
 
 ---
 
-## 9. Strategic acquirers & partnership path
-
-KIRRA is open to an acquisition outcome. The platform decision shapes both *who* the credible acquirers are and *how* to reach them. The governing principle: **architecture makes KIRRA acquirable; traction makes it worth acquiring.**
-
-### The two named candidates
-
-**QNX / BlackBerry**
-- *Fit.* BlackBerry has refocused around QNX after divesting the Cylance endpoint-security business to Arctic Wolf (closed Feb 2025). QNX is now a profitable "Rule of 40" segment — ~$268M revenue, 14% YoY growth, 83% gross margin, embedded in 275M-plus vehicles — and is explicitly chasing "growing momentum in robotics, physical AI, and other adjacent markets." KIRRA *is* a physical-AI safety-governance layer, so it is adjacent to exactly the expansion QNX is publicly pursuing. Selling KIRRA-on-QNX sells more QNX, moves QNX up-stack, and plays to BlackBerry's surviving safety-plus-security positioning (secure-comms / sovereign DNA + ISO 21434 / UNECE WP.29 relevance). KIRRA's attestation / federated-trust layer is a security story as much as a safety one.
-- *Means.* Profitable, ~$432M cash, capital-disciplined (notable share buybacks). Able to do tuck-ins, but value-conscious.
-- *How they actually grow — the key insight.* QNX expands through **pre-integrated partnerships**, not an acquisition spree: QNX + Vector + TTTech Auto (pre-integrated vehicle software platform), QNX + AMD (robotics), QNX + Microsoft (SDP 8.0 on Azure), plus the General Embedded Development Platform. So the front door is the **QNX partner ecosystem**, not an M&A cold-pitch.
-- *Structural factor.* A QNX/IoT spin-off and public listing is targeted for roughly the first half of FY2027. The eventual acquirer may therefore be a soon-to-be-standalone QNX entity. Spin-preparation cuts both ways on near-term M&A appetite (caution vs. tuck-ins to strengthen the equity story).
-
-**Apex.AI**
-- *Fit.* A category neighbor, not a competitor. Apex.Grace is the certified ROS 2 *doer*-layer runtime; KIRRA sits *above* it as the governor, so the relationship is complementary, and Apex.Grace runs on QNX / INTEGRITY / PikeOS / Linux-RT — making "KIRRA over Apex.Grace" coherent. Apex is already ASIL-D, capitalized, and has customers/partners (Tier IV / Autoware, Toyota Woven, Green Hills, Infineon). KIRRA fills the runtime-assurance / attestation gap sitting above their runtime.
-
-### The sequence: partner, then acquire
-
-1. **Stand up on QNX SDP 8.0** (the Azure eval is low-lift) — establish a "running / validated on QNX" footing. This advances the cert-target work and the relationship simultaneously.
-2. **Enter the QNX partner ecosystem** as a pre-integrated runtime-safety-governance layer for QNX's robotics / physical-AI push — mirroring how Vector, TTTech, and AMD plugged in.
-3. **Land a QNX-based pilot** — the #1 value multiplier.
-4. **Let the acquisition conversation flow** from partnership + traction + defensible IP, rather than pitching it cold.
-
-### The optionality guardrail
-
-Deep QNX integration helps the BlackBerry thesis but risks a single-bidder corner. The **kernel-agnostic verdict core mandated by ADR-0001** is precisely what preserves Apex, the Tier-1s, and AV companies as *alternative* acquirers — and alternatives are what create pricing tension. Build on QNX as the reference target; keep the core portable so QNX is not the only buyer who can use KIRRA.
-
-### Valuation reality
-
-At the pre-pilot, pre-revenue stage, even a perfect-fit buyer values architecture as an acqui-hire or tech tuck-in, and a value-disciplined buyer (BlackBerry) will not pay up for architecture alone. What moves the number: a **named pilot** (ideally on QNX), **defensible IP** in the attestation / two-set DAG / federation design, and **relevance to the ISO 21434 / UNECE WP.29** cybersecurity tightening now hitting automotive.
-
----
-
-## 10. What does NOT change
+## 9. What does NOT change
 
 - **Dev workflow** — the Ubuntu / Jazzy laptop stays the doer-side development environment. This is a cert-*target* decision, not a day-to-day one.
 - **Rust** — retained at ASIL-D via Ferrocene's qualified QNX target.
@@ -209,10 +177,7 @@ At the pre-pilot, pre-revenue stage, even a perfect-fit buyer values architectur
 - QNX Hypervisor 8.0 for Safety GA (2026-03-10), certified VMM, unmodified Linux/Android guests — Newswire: https://www.newswire.com/news/qnx-hypervisor-8-0-for-safety-powers-the-industry-shift-toward-physical-ai
 - QNX Hypervisor for Safety — certified VM isolation, focus cert on your components — SoftwareOne: https://platform.softwareone.com/product/qnx-hypervisor-for-safety/PCP-9229-3037
 - QNX Hypervisor — SMMU DMA containment, Design Safe State, mixed criticality — QNX: https://qnx.software/en/software/products-and-solutions/qnx-hypervisor-and-hypervisor-for-safety
-- BlackBerry FY2026 results — QNX $268M / 14% growth / Rule of 40 / robotics & physical AI momentum — SEC 8-K: https://www.sec.gov/Archives/edgar/data/1070235/000107023526000029/q4fy26ex-991.htm
-- BlackBerry sells Cylance to Arctic Wolf (closed Feb 2025) — SEC 8-K: https://www.sec.gov/Archives/edgar/data/0001070235/000107023525000041/a2025-02x03xarcticwolfandb.htm
 - QNX partnerships (Vector/TTTech, AMD, Microsoft Azure, GEDP), 275M+ vehicles — SEC 8-K: https://www.sec.gov/Archives/edgar/data/0001070235/000107023525000065/q4fy25ex-991.htm
-- BlackBerry IoT/QNX spin-off targeted ~1H FY2027 — Finimize: https://finimize.com/content/bb-asset-snapshot
 
 ---
 
