@@ -58,6 +58,7 @@ pub const PROXY_MAX_COMMANDED_VELOCITY: i32 = 22_350; // mm/s ≈ 22.35 m/s (PRO
 #[repr(C)]
 pub struct KirraContractView {
     pub payload: *const u8, // const volatile uint8_t* on the C side (shim-owned)
+    pub generation: u64,    // seqlock counter; the SHIM owns the seqlock, the judge ignores it
     pub magic: u64,
     pub sequence: u64,
     pub last_accepted_sequence: u64,
@@ -103,7 +104,8 @@ pub unsafe extern "C" fn kirra_judge_assess(v: *const KirraContractView) -> u8 {
     let view = unsafe { &*v };
 
     // 1. Header magic. A garbled/torn header is fail-closed StaleHeader. (The
-    //    shim's double-read also sets `header_torn`; honor it here too.)
+    //    shim's generation seqlock catches torn writes upstream; the explicit
+    //    `header_torn` flag is honored here too as belt-and-braces.)
     if view.magic != KIRRA_CONTRACT_MAGIC || view.header_torn != 0 {
         return VERDICT_STALE_HEADER;
     }

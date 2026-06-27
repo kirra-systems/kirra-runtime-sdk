@@ -47,18 +47,20 @@ extern "C" {
  *
  * Layout: NATURALLY ALIGNED, widest-first AFTER the leading pointer. NOTHING is
  * packed — `repr(C)` on the Rust side matches this field order and the compiler
- * inserts only natural tail padding. (On LP64: payload@0, the five u64 @8..47,
- * payload_len@48, commanded_velocity@52, integrity_ok@56, header_torn@57, 6 B
- * tail pad → sizeof == 64, alignof == 8.)
+ * inserts only natural tail padding. (On LP64: payload@0, generation@8, the five
+ * u64 @16..55, payload_len@56, commanded_velocity@60, integrity_ok@64,
+ * header_torn@65, 6 B tail pad → sizeof == 72, alignof == 8.)
  *
- * `payload` is `const volatile uint8_t*`: the SHIM performs the double-read tear
- * detection and the CRC over this region (volatile = the underlying bytes may be
+ * `payload` is `const volatile uint8_t*`: the SHIM obtains a coherent snapshot via
+ * the GENERATION SEQLOCK (`generation`, below) and computes the CRC over this
+ * region (volatile = the underlying bytes may be
  * concurrently written by an untrusted producer). By the time the JUDGE runs,
  * the shim has stabilized and bounds/CRC-checked the data; the judge reads only
  * the scalar header fields below (it does NOT walk `payload`).
  */
 typedef struct KirraContractView {
     const volatile uint8_t *payload;     /* producer payload region (shim-owned) */
+    uint64_t generation;                 /* seqlock: ODD=write in progress, EVEN=committed */
     uint64_t magic;                      /* must equal KIRRA_CONTRACT_MAGIC      */
     uint64_t sequence;                   /* this command's monotonic sequence    */
     uint64_t last_accepted_sequence;     /* highest already-accepted sequence    */
@@ -67,7 +69,7 @@ typedef struct KirraContractView {
     uint32_t payload_len;                /* valid payload bytes; shim bounds-checks */
     int32_t  commanded_velocity;         /* extracted command scalar (see judge unit) */
     uint8_t  integrity_ok;               /* upstream integrity assertion (1 = set) */
-    uint8_t  header_torn;                /* shim double-read detected a tear (1 = torn) */
+    uint8_t  header_torn;                /* explicit upstream tear flag (1 = torn) */
 } KirraContractView;
 
 /*

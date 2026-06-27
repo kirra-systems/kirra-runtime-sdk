@@ -1,9 +1,9 @@
 // kirra_shim.hpp — the C++ SHIM (the driver) for the QNX RTM harness.
 //
 // EPIC #270, issue #271. The concern split (see README + ADR-0006 Clause 3):
-// the SHIM owns MEMORY/TRANSPORT safety — double-read tear detection on the
-// header, bounds rejection (oversize SHORT-CIRCUITS here and NEVER crosses the
-// FFI), and the in-place CRC over the payload. The Rust JUDGE
+// the SHIM owns MEMORY/TRANSPORT safety — odd/even generation-seqlock tear
+// detection on the header, bounds rejection (oversize SHORT-CIRCUITS here and
+// NEVER crosses the FFI), and the in-place CRC over the payload. The Rust JUDGE
 // (`kirra_judge_assess`) renders the CONTRACT verdict on the stabilized snapshot
 // the shim hands it. Memory faults die in the driver; contract faults go to the
 // judge.
@@ -28,8 +28,8 @@ std::uint32_t crc32_ieee(const std::uint8_t *data, std::uint32_t len) noexcept;
 // What the shim driver consumes for one assessment.
 struct ShimInput {
     // The SHARED header, qualified volatile: its bytes may be concurrently
-    // written by an untrusted producer. The shim double-reads it to detect a
-    // torn write before trusting any field.
+    // written by an untrusted producer. The shim reads it under the odd/even
+    // generation seqlock to obtain a coherent snapshot before trusting any field.
     const volatile KirraContractView *header;
     const std::uint8_t *payload;       // payload bytes (header->payload_len valid)
     std::uint32_t declared_crc;        // CRC the producer claims over the payload
