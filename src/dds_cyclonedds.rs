@@ -247,43 +247,66 @@ unsafe fn read_back_qos(writer: i32) -> Result<DdsQosProfile, CycloneDdsError> {
     if qos.is_null() {
         return Err(CycloneDdsError::QosAlloc);
     }
-    // Always delete `qos` before returning.
-    let result = (|| {
-        if dds_get_qos(writer, qos) < 0 {
-            return Err(CycloneDdsError::ReadbackUnavailable);
-        }
-        let mut durability_kind = -1;
-        let mut history_kind = -1;
-        let mut history_depth = -1;
-        let mut reliability_kind = -1;
-        let mut max_blocking = -1;
-        let mut lifespan_ns = -1;
-        let mut deadline_ns = -1;
-        let mut liveliness_kind = -1;
-        let mut liveliness_lease_ns = -1;
-
-        let ok = dds_qget_durability(qos, &mut durability_kind)
-            && dds_qget_history(qos, &mut history_kind, &mut history_depth)
-            && dds_qget_reliability(qos, &mut reliability_kind, &mut max_blocking)
-            && dds_qget_lifespan(qos, &mut lifespan_ns)
-            && dds_qget_deadline(qos, &mut deadline_ns)
-            && dds_qget_liveliness(qos, &mut liveliness_kind, &mut liveliness_lease_ns);
-        if !ok {
-            return Err(CycloneDdsError::ReadbackUnavailable);
-        }
-
-        let params = CycloneQosParams {
-            durability_kind,
-            history_kind,
-            history_depth,
-            reliability_kind,
-            lifespan_ns,
-            deadline_ns,
-            liveliness_kind,
-            liveliness_lease_ns,
-        };
-        cyclone_params_to_qos(&params).ok_or(CycloneDdsError::ReadbackUnrepresentable)
-    })();
+    let result = if dds_get_qos(writer, qos) < 0 {
+        Err(CycloneDdsError::ReadbackUnavailable)
+    } else {
+        read_back_from_qos(qos)
+    };
     dds_delete_qos(qos);
     result
+}
+
+/// Pull every actuator-relevant policy out of a populated `dds_qos_t` via the
+/// `dds_qget_*` getters and map it back to a `DdsQosProfile`. Shared by the live
+/// writer read-back and the self-check. Fail-closed: a missing getter or an
+/// unrepresentable kind is an error, never a silent default.
+unsafe fn read_back_from_qos(qos: *const DdsQos) -> Result<DdsQosProfile, CycloneDdsError> {
+    let mut durability_kind = -1;
+    let mut history_kind = -1;
+    let mut history_depth = -1;
+    let mut reliability_kind = -1;
+    let mut max_blocking = -1;
+    let mut lifespan_ns = -1;
+    let mut deadline_ns = -1;
+    let mut liveliness_kind = -1;
+    let mut liveliness_lease_ns = -1;
+
+    let ok = dds_qget_durability(qos, &mut durability_kind)
+        && dds_qget_history(qos, &mut history_kind, &mut history_depth)
+        && dds_qget_reliability(qos, &mut reliability_kind, &mut max_blocking)
+        && dds_qget_lifespan(qos, &mut lifespan_ns)
+        && dds_qget_deadline(qos, &mut deadline_ns)
+        && dds_qget_liveliness(qos, &mut liveliness_kind, &mut liveliness_lease_ns);
+    if !ok {
+        return Err(CycloneDdsError::ReadbackUnavailable);
+    }
+
+    let params = CycloneQosParams {
+        durability_kind,
+        history_kind,
+        history_depth,
+        reliability_kind,
+        lifespan_ns,
+        deadline_ns,
+        liveliness_kind,
+        liveliness_lease_ns,
+    };
+    cyclone_params_to_qos(&params).ok_or(CycloneDdsError::ReadbackUnrepresentable)
+}
+
+/// Network-free QoS-ABI self-check: build a real CycloneDDS `dds_qos_t` from
+/// `profile` via `qos_to_cyclone_params` + the `dds_qset_*` setters, then read
+/// every policy straight back out with `dds_qget_*` and map it home. No
+/// participant / domain / topic / writer needed — this exercises the part of the
+/// FFI most sensitive to a wrong constant or argument order (the QoS kind enums
+/// and `dds_duration_t` units) against the LIVE library. The caller then runs
+/// `validate_qos_readback(profile, &result)` to confirm the round-trip preserved
+/// every actuator guarantee.
+pub fn qos_roundtrip_selfcheck(profile: &DdsQosProfile) -> Result<DdsQosProfile, CycloneDdsError> {
+    unsafe {
+        let qos = build_qos(profile)?;
+        let result = read_back_from_qos(qos);
+        dds_delete_qos(qos);
+        result
+    }
 }

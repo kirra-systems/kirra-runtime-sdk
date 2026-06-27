@@ -139,3 +139,11 @@ path = "src/bin/kirra_carla_client.rs"
 [[bin]]
 name = "kirra_console_demo_seed"
 path = "src/bin/kirra_console_demo_seed.rs"
+
+# D1 (item 19) live CycloneDDS QoS read-back smoke test. `required-features` so a
+# default build never compiles it (it needs the native libddsc link). Run on an
+# integrator host: cargo run --example cyclonedds_readback_smoke --features cyclonedds
+[[example]]
+name = "cyclonedds_readback_smoke"
+path = "examples/cyclonedds_readback_smoke.rs"
+required-features = ["cyclonedds"]
