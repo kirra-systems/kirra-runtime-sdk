@@ -44,6 +44,14 @@ pub const MAX_TRAJECTORY_HORIZON: usize = 50;
 /// edge in the corridor polygon).
 pub const MAX_CORRIDOR_VERTICES: usize = 128;
 
+/// Minimum `|2 × signed area|` (m²) for a corridor polygon to count as
+/// non-degenerate and consistently wound (#409 Obs 2 / M-11 winding gate). A
+/// real drivable corridor (≥ footprint-width + margin laterally, spanning the
+/// trajectory longitudinally) has an area orders of magnitude above this; the
+/// epsilon only rejects a collapsed or area-balanced self-intersecting polygon
+/// sitting at ~0.
+pub const CORRIDOR_WINDING_AREA_EPS_M2: f64 = 1e-9;
+
 /// Inward lateral safety margin from the drivable-space boundary (meters).
 ///
 /// **Derived value — KIRRA-OCCY-SG2-MARGIN-001.** The PRIMARY pilot setting
@@ -118,19 +126,25 @@ impl Corridor<'_> {
     /// Failure → conservative containment failure (the entry function
     /// returns `DenyCode::DrivableSpaceDeparture`).
     ///
-    /// # Trust boundary: polygon simplicity / winding is NOT validated (#409 Obs 2)
+    /// # Trust boundary: corridor WINDING is now validated (#409 Obs 2 / M-11)
     ///
-    /// This checks confidence, age, and per-side vertex counts, but NOT that the
-    /// implicit polygon is SIMPLE (non-self-intersecting), nor that `left` is
-    /// actually left of `right` (consistent winding). A malformed corridor —
-    /// sides crossing or swapped — yields a self-intersecting polygon where the
-    /// PNPoly inside/outside result is ill-defined; unlike the other failure modes
-    /// (non-finite vertex, degenerate `n_total < 4` — both conservatively rejected
-    /// in `corner_inside_corridor`), this one is NOT guaranteed to fail in the
-    /// safe direction. Supplying a well-formed corridor is the integrator's
-    /// Perception Input Contract (#126) responsibility. Tracked defensive-hardening
-    /// option: require the two sides to be monotone-advancing along the corridor
-    /// axis, or test winding-sign consistency → conservative reject otherwise.
+    /// This checks confidence, age, and per-side vertex counts. The companion
+    /// `corridor_winding_is_consistent` gate (run in `validate_trajectory_containment`
+    /// right after this) now enforces CONSISTENT WINDING — `left` must be on the
+    /// vehicle's left of `right` (a clockwise, negative-signed-area polygon). A
+    /// swapped (`left`/`right` exchanged) or a front/back-reversed side flips the
+    /// orientation, and a collapsed / area-balanced self-intersection drives the
+    /// signed area to ~0 — all rejected, so the previously fail-OPEN class (a
+    /// self-intersecting polygon whose PNPoly inside/outside verdict is
+    /// ill-defined) now fails closed to the MRC.
+    ///
+    /// Residual (honestly narrower than the prior "not validated at all"): an
+    /// UNbalanced *partial* self-intersection that preserves the dominant
+    /// clockwise orientation is not caught by the orientation test alone; a full
+    /// simple-polygon proof would need the O((N+M)²) pairwise edge-intersection
+    /// test, deliberately not taken here to preserve the O(N+M)-per-call WCET
+    /// framing. Supplying a well-formed corridor remains the integrator's
+    /// Perception Input Contract (#126) responsibility.
     pub fn is_healthy(&self) -> bool {
         self.confidence >= self.min_confidence
             && self.age_ms <= self.max_age_ms
@@ -212,6 +226,13 @@ pub fn validate_trajectory_containment(
     // Conservative gates: any of these failing → containment failure (NOT
     // skip-the-check). Aligns with OCCY_FAULT_MODEL §3.
     if !corridor.is_healthy() {
+        return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
+    }
+    // #409 Obs 2 / M-11: a malformed corridor (sides swapped, a side reversed,
+    // or crossing) makes a self-intersecting polygon whose PNPoly inside/outside
+    // verdict is ill-defined — previously a FAIL-OPEN delegated to the integrator.
+    // Require consistent (clockwise) winding; anything else fails closed. O(N+M).
+    if !corridor_winding_is_consistent(corridor) {
         return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
     }
     if trajectory.is_empty() {
@@ -398,6 +419,39 @@ fn polygon_vertex(corridor: &Corridor, idx: usize) -> Point {
         let j = idx - n_left;
         corridor.right[corridor.right.len() - 1 - j]
     }
+}
+
+/// `2 ×` the signed area (shoelace) of the assembled corridor polygon, walked in
+/// the canonical order `left[0..N], right[M-1..0]`. The SIGN encodes winding: a
+/// well-formed corridor (the `left` field is the boundary on the vehicle's left
+/// of travel) is traversed CLOCKWISE, so the signed area is NEGATIVE. This is
+/// invariant to world rotation/translation and to corridor curvature (rigid
+/// motions preserve orientation), so a single fixed expected sign is valid for
+/// straight, curved, and lane-change corridors alike. O(N+M), no heap.
+#[inline]
+fn corridor_signed_area_2x(corridor: &Corridor) -> f64 {
+    let n_total = corridor.left.len() + corridor.right.len();
+    let mut acc = 0.0;
+    let mut k = 0;
+    while k < n_total {
+        let a = polygon_vertex(corridor, k);
+        let b = polygon_vertex(corridor, (k + 1) % n_total);
+        acc += a.x_m * b.y_m - b.x_m * a.y_m;
+        k += 1;
+    }
+    acc
+}
+
+/// Conservative WINDING / orientation gate (#409 Obs 2 / M-11). A well-formed
+/// corridor is clockwise (negative signed area); a swapped (`left`/`right`
+/// exchanged) or front/back-reversed side flips the sign, and a collapsed or
+/// area-balanced self-intersecting polygon drives it to ~0. Accept ONLY a firmly
+/// clockwise polygon — everything else (CCW, degenerate, balanced bowtie) fails
+/// closed. A non-finite vertex makes the sum NaN and `NaN < -eps` is `false`, so
+/// that too rejects (conservative). O(N+M), no heap.
+#[inline]
+fn corridor_winding_is_consistent(corridor: &Corridor) -> bool {
+    corridor_signed_area_2x(corridor) < -CORRIDOR_WINDING_AREA_EPS_M2
 }
 
 /// Squared distance from point P to segment AB. Standard closed-form.
@@ -690,6 +744,80 @@ mod tests {
             action,
             EnforceAction::Allow,
             "lane change within wide corridor must Allow"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // #409 Obs 2 / M-11: corridor WINDING / simplicity gate.
+    // A malformed corridor yields a self-intersecting polygon whose PNPoly
+    // inside/outside verdict is ill-defined — previously a FAIL-OPEN. These pin
+    // that it now fails closed, while a well-formed (incl. curved) corridor still
+    // Allows (covered by the straight/lane-change/translation tests above).
+    // ---------------------------------------------------------------------
+
+    /// A centered pose that a WELL-FORMED corridor admits is REJECTED once the
+    /// two sides are swapped (`left`/`right` exchanged → counter-clockwise
+    /// winding). This is the headline fail-open: a swapped corridor must not be
+    /// trusted to bound the trajectory.
+    #[test]
+    fn containment_rejects_swapped_winding_corridor() {
+        let (l, r) = straight_corridor(3.0, 100.0);
+        // Sanity: well-formed, the centered pose Allows.
+        let well_formed = healthy_corridor(&l, &r);
+        let traj = vec![pose(50.0, 0.0, 0.0)];
+        assert_eq!(
+            validate_trajectory_containment(&traj, &well_formed, &sedan(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+            "control: the centered pose is admitted in the well-formed corridor"
+        );
+        // Swap the sides → inconsistent winding → fail closed.
+        let swapped = healthy_corridor(&r, &l);
+        assert_eq!(
+            validate_trajectory_containment(&traj, &swapped, &sedan(), FrameTrust::Trusted),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "a swapped-winding corridor must fail closed, not admit the trajectory"
+        );
+    }
+
+    /// A self-intersecting "bowtie" corridor (the two sides cross) has an
+    /// ill-defined inside/outside; its signed area collapses to ~0 → rejected.
+    #[test]
+    fn containment_rejects_self_intersecting_bowtie_corridor() {
+        // left and right cross between station 0 and station 1.
+        let left = vec![Point { x_m: 0.0, y_m: 1.0 }, Point { x_m: 2.0, y_m: -1.0 }];
+        let right = vec![Point { x_m: 0.0, y_m: -1.0 }, Point { x_m: 2.0, y_m: 1.0 }];
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![pose(1.0, 0.0, 0.0)];
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "a self-intersecting corridor must fail closed"
+        );
+    }
+
+    /// The winding sign is curvature-invariant: a corridor that curves (left stays
+    /// on the +lateral side throughout) is still consistently wound and admits a
+    /// pose that follows the curve — proving the gate does NOT over-reject turns.
+    #[test]
+    fn containment_allows_consistently_wound_curved_corridor() {
+        // A gentle right-then-left S, left edge offset +3 m, right edge -3 m of a
+        // curving centerline. Both sides share the same per-station offset sign,
+        // so winding stays clockwise.
+        let n = 12;
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64 * 5.0;
+            let yc = (i as f64 * 0.4).sin() * 2.0; // wavy centerline
+            left.push(Point { x_m: x, y_m: yc + 3.0 });
+            right.push(Point { x_m: x, y_m: yc - 3.0 });
+        }
+        let corridor = healthy_corridor(&left, &right);
+        let traj = vec![pose(25.0, (5.0_f64 * 0.4).sin() * 2.0, 0.0)];
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+            "a consistently-wound curved corridor must still Allow (no over-rejection)"
         );
     }
 
