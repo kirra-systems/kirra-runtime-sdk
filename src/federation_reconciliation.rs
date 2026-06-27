@@ -402,6 +402,39 @@ mod federation_reconciliation_tests {
         assert_eq!(v2_payload, v1_payload);
     }
 
+    /// Item 20 — BYTE-STABILITY pin. The canonical payload is the exact byte string
+    /// the Ed25519 signature is computed over; any reordering, key rename, or
+    /// whitespace change silently breaks cross-controller verification (a signed
+    /// report from peer B would no longer verify here). These assertions pin the
+    /// serialized bytes so such a regression fails CI instead of the field.
+    #[test]
+    fn test_canonical_payload_v2_byte_stability_with_generation() {
+        let r = degraded("ctrl-a", 1000, Some(412));
+        let payload = canonical_federation_payload_v2(&r);
+        // serde_json serializes a Map with sorted keys (no preserve_order feature),
+        // so the field order is deterministic and alphabetical.
+        assert_eq!(
+            payload,
+            r#"{"asset_id":"lidar_front","expires_at_ms":31000,"issued_at_ms":1000,"nonce_hex":"ctrl-a_1000","posture":"Degraded","source_controller_id":"ctrl-a","source_generation":412}"#
+        );
+    }
+
+    /// Item 20 — BYTE-STABILITY pin for the v1-compat (no-generation) payload. It
+    /// must be byte-identical to the v1 canonical payload (no `source_generation`
+    /// key at all), or a v1 controller's signature would fail to verify on the v2
+    /// path. This is the wire-compat contract, asserted on exact bytes.
+    #[test]
+    fn test_canonical_payload_v2_byte_stability_without_generation() {
+        let r = nominal("ctrl-a", 1000, None);
+        let payload = canonical_federation_payload_v2(&r);
+        assert_eq!(
+            payload,
+            r#"{"asset_id":"lidar_front","expires_at_ms":31000,"issued_at_ms":1000,"nonce_hex":"ctrl-a_1000","posture":"Nominal","source_controller_id":"ctrl-a"}"#
+        );
+        // And it equals the v1 canonical payload byte-for-byte (the compat contract).
+        assert_eq!(payload, crate::federation::canonical_federation_payload(&r.as_v1()));
+    }
+
     #[test]
     fn test_payload_with_generation_includes_generation_field() {
         let r = degraded("ctrl-a", 1000, Some(412));

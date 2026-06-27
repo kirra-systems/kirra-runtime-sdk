@@ -115,6 +115,21 @@ pub(crate) async fn submit_federated_report(
                 );
                 FedCommitOutcome::Rejected("FEDERATED_NONCE_REPLAY")
             }
+            Err(DurableWriteError::GenerationRegress { found, high_water }) => {
+                // Item 20: a validly-signed but stale (older-generation) report that
+                // slipped inside the freshness window. Reject fail-closed with a clean
+                // audit trail — the report was NOT persisted and no nonce was burned.
+                let event = json!({ "source_controller_id": report.source_controller_id,
+                                    "asset_id": report.asset_id,
+                                    "offered_generation": found,
+                                    "high_water_generation": high_water,
+                                    "reason": "FEDERATION_GENERATION_REGRESS" });
+                let _ = store.save_posture_event_chained(
+                    "federation_gateway", "FEDERATION_REJECTED",
+                    &event.to_string(), Some("generation regress/replay"), received_at_ms,
+                );
+                FedCommitOutcome::Rejected("FEDERATED_GENERATION_REGRESS")
+            }
             Err(DurableWriteError::Fenced(reason)) => FedCommitOutcome::Fenced(format!("{reason:?}")),
             Err(DurableWriteError::Db(_)) => FedCommitOutcome::InternalError("failed to persist federated report"),
         }

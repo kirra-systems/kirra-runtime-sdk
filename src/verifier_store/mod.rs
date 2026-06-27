@@ -166,6 +166,14 @@ pub enum DurableWriteError {
     /// transaction). Distinct from `Db` so the handler maps it to a clean
     /// `FEDERATED_NONCE_REPLAY` rejection (+ audit), NOT an opaque HTTP 500.
     NonceReplay,
+    /// Item 20: the report's `source_generation` is <= the per-(controller, asset)
+    /// high-water mark — a generation regression or replay of an older signed
+    /// report that slipped inside the freshness window. The transaction is aborted
+    /// (report NOT persisted, nonce NOT burned, high-water NOT advanced), so the
+    /// handler maps it to a clean `FEDERATED_GENERATION_REGRESS` rejection (+ audit),
+    /// NOT an opaque HTTP 500. `found` is the offered generation; `high_water` is the
+    /// last accepted generation it failed to exceed.
+    GenerationRegress { found: u64, high_water: u64 },
     Db(rusqlite::Error),
 }
 
@@ -194,6 +202,10 @@ impl std::fmt::Display for DurableWriteError {
             DurableWriteError::NonceReplay => {
                 write!(f, "durable write rejected: federation nonce already burned (replay)")
             }
+            DurableWriteError::GenerationRegress { found, high_water } => write!(
+                f,
+                "durable write rejected: federation generation {found} <= high-water {high_water} (regress/replay)"
+            ),
             DurableWriteError::Db(e) => write!(f, "durable write failed: {e}"),
         }
     }
