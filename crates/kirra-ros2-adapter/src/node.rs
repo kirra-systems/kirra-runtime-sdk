@@ -129,6 +129,18 @@ fn ingress_sensor_qos() -> r2r::QosProfile {
     r2r::QosProfile::default().best_effort().keep_last(1)
 }
 
+/// Actuator-OUTPUT QoS for the gated control-command stream (`~/output/control_cmd`):
+/// **Reliable + KeepLast(1)**. A gated command is control-critical, so it must not
+/// be silently dropped (Reliable); but only the FRESHEST gated command is ever
+/// relevant — an older queued command must never actuate after a newer verdict —
+/// so the depth is 1, never a backlog. This is the output-side mirror of the N1
+/// ingress discipline (freshness over buffering), and matches INV-10's
+/// "never queue a stale actuator command" intent.
+#[inline]
+fn actuator_output_qos() -> r2r::QosProfile {
+    r2r::QosProfile::default().reliable().keep_last(1)
+}
+
 #[inline]
 fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
@@ -172,8 +184,9 @@ pub struct IngressControlCommand {
 }
 
 /// Outgoing control command — the gated command (pass-through on
-/// Accept, MRC on Reject/no-trajectory). Phase 4 replaces with a typed
-/// `autoware_control_msgs::Control` publisher.
+/// Accept, MRC on Reject/no-trajectory). Published on `~/output/control_cmd`
+/// as an UNTYPED `autoware_control_msgs/msg/Control` (mirroring the untyped
+/// `~/input/control_cmd` subscription; see [`control_command_to_json`]).
 #[derive(Debug, Clone)]
 pub struct OutgoingControlCommand {
     pub asset_id: String,
@@ -207,6 +220,45 @@ fn cmd_to_output(asset_id: &str, cmd: &IncomingControl) -> OutgoingControlComman
         // accel through if `autoware_control_msgs::Control` has it.
         accel_mps2: 0.0,
     }
+}
+
+/// Serialize an [`OutgoingControlCommand`] into the UNTYPED
+/// `autoware_control_msgs/msg/Control` JSON shape r2r's `publish` expects (Phase 4).
+///
+/// We publish untyped — exactly as `~/input/control_cmd` is subscribed untyped —
+/// so the adapter need not pull the integrator's typed `Control` binding at build
+/// time (the AOU-MSG-TOOLCHAIN curated-interface discipline). `now_ms` is the
+/// wall-clock header stamp (ROS `builtin_interfaces/Time`), split into sec/nanosec.
+///
+/// The exact field set of `Control` is **integrator-pinned** against their
+/// Autoware version (`AOU-MSG-TOOLCHAIN`); the well-established fields are
+/// populated here (`lateral.steering_tire_angle`, `longitudinal.velocity`,
+/// `longitudinal.acceleration`). A field-set mismatch surfaces at runtime on the
+/// untyped publish, never silently — same contract as the input subscription.
+fn control_command_to_json(out: &OutgoingControlCommand, now_ms: u64) -> serde_json::Value {
+    let stamp = serde_json::json!({
+        "sec": (now_ms / 1000) as i32,
+        "nanosec": ((now_ms % 1000) * 1_000_000) as u32,
+    });
+    serde_json::json!({
+        "stamp": stamp.clone(),
+        "lateral": {
+            "stamp": stamp.clone(),
+            "control_time": stamp.clone(),
+            "steering_tire_angle": out.steering_angle_rad as f32,
+            "steering_tire_rotation_rate": 0.0_f32,
+            "is_defined_steering_tire_rotation_rate": false,
+        },
+        "longitudinal": {
+            "stamp": stamp.clone(),
+            "control_time": stamp,
+            "velocity": out.linear_velocity_mps as f32,
+            "acceleration": out.accel_mps2 as f32,
+            "jerk": 0.0_f32,
+            "is_defined_acceleration": true,
+            "is_defined_jerk": false,
+        },
+    })
 }
 
 /// Run the adapter node. Owns the r2r context for the lifetime of the
@@ -776,20 +828,36 @@ pub async fn run_adapter(
         }
     });
 
-    // ----- Output publisher (Phase 3 placeholder) ----------------------
+    // ----- Output publisher (Phase 4 — the real output edge) -----------
     //
-    // For Phase 3 we drain the fast-loop output channel and log each
-    // command. Phase 4 replaces this with an r2r publisher to
-    // ~/output/control_cmd.
+    // The gated fast-loop command is now PUBLISHED on `~/output/control_cmd`,
+    // closing the doer→checker→actuator loop. Before this it was a
+    // `tracing::debug!` placeholder, which is why end-to-end FTTI was not
+    // measurable; with a real publish on every cycle, the loop-closure timing is.
+    //
+    // UNTYPED `autoware_control_msgs/msg/Control` — mirrors the untyped
+    // `~/input/control_cmd` subscription, so the adapter pulls no typed `Control`
+    // binding at build time (AOU-MSG-TOOLCHAIN). Reliable + KeepLast(1)
+    // (`actuator_output_qos`): a gated command is never silently dropped, but only
+    // the freshest one is relevant. The publisher is created from `node` (still
+    // owned here — it moves into the spin loop below) and moved into the drain
+    // task. Every drained verdict output (Accept pass-through or MRC) is
+    // published; a publish failure is loud, never swallowed.
+    let control_pub = node.create_publisher_untyped(
+        "~/output/control_cmd",
+        "autoware_control_msgs/msg/Control",
+        actuator_output_qos(),
+    )?;
     tokio::spawn(async move {
         while let Some(out) = fast_loop_out_rx.recv().await {
-            tracing::debug!(
-                asset_id = %out.asset_id,
-                v = out.linear_velocity_mps,
-                delta = out.steering_angle_rad,
-                accel = out.accel_mps2,
-                "fast-loop output (Phase 3 placeholder: would publish on ~/output/control_cmd)"
-            );
+            let msg = control_command_to_json(&out, wall_clock_ms());
+            if let Err(e) = control_pub.publish(msg) {
+                tracing::error!(
+                    asset_id = %out.asset_id,
+                    error = %e,
+                    "control_cmd publish FAILED — gated command did not reach the vehicle interface"
+                );
+            }
         }
     });
 
