@@ -483,6 +483,27 @@ impl VerifierStore {
             )",
             [],
         )?;
+        // Per-(controller, asset) generation HIGH-WATER mark. The nonce table stops a
+        // byte-identical replay, but two genuinely-distinct, validly-signed reports
+        // from one controller — a newer (higher-generation) and an older one — can
+        // still arrive out of order inside the freshness window; without a high-water
+        // gate the stale one would last-write-win at storage and the read-time
+        // reconciliation (`authoritative_posture`) would then have to undo it. This
+        // table makes generation regression fail-closed AT INGEST: a report whose
+        // generation is <= the stored mark for its (controller, asset) is rejected
+        // before it persists. A forward JUMP (generation > mark + 1) is accepted but
+        // leaves an in-chain FEDERATION_GENERATION_GAP audit marker recording the
+        // skipped generations (reports lost to a partition).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS federation_generation_highwater (
+                source_controller_id TEXT NOT NULL,
+                asset_id             TEXT NOT NULL,
+                last_generation      INTEGER NOT NULL,
+                last_seen_ms         INTEGER NOT NULL,
+                PRIMARY KEY (source_controller_id, asset_id)
+            )",
+            [],
+        )?;
         // Per-asset report lookups order by received_at_ms; the nonce retention
         // sweep deletes by seen_at_ms on every federation accept. Both scan
         // unindexed columns without these.

@@ -768,6 +768,96 @@ mod durability_tests {
         assert_eq!(count, 1, "the replayed report must NOT have been persisted (atomic rollback)");
     }
 
+    /// Item 20 — the per-(controller, asset) generation high-water gate ACCEPTS a
+    /// strictly-ascending generation and advances the mark each time.
+    #[test]
+    fn generation_highwater_accepts_ascending() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("g1"), Some(10), 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("g2"), Some(11), 2_001, 1).unwrap();
+        s.save_federated_report_chained(&report("g3"), Some(50), 2_002, 1).unwrap();
+        let hw: i64 = s.conn.query_row(
+            "SELECT last_generation FROM federation_generation_highwater
+             WHERE source_controller_id = 'ctrl-A' AND asset_id = 'asset-1'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(hw, 50, "the high-water mark advances to the latest accepted generation");
+    }
+
+    /// Item 20 — a report whose generation is <= the high-water (a regress, or an
+    /// equal-generation replay of a distinct signed report) is REJECTED fail-closed
+    /// and the whole commit rolls back: no report row, no burned nonce.
+    #[test]
+    fn generation_highwater_rejects_regress_and_rolls_back() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("hi"), Some(20), 2_000, 1).unwrap();
+
+        for (nonce, gen) in [("lo", 19u64), ("eq", 20u64)] {
+            let res = s.save_federated_report_chained(&report(nonce), Some(gen), 2_010, 1);
+            assert!(
+                matches!(res, Err(DurableWriteError::GenerationRegress { found, high_water })
+                    if found == gen && high_water == 20),
+                "generation {gen} <= high-water 20 must surface as GenerationRegress, got {res:?}"
+            );
+            assert!(!s.has_seen_federation_nonce(nonce).unwrap(),
+                "a rejected report must NOT have burned its nonce (atomic rollback)");
+        }
+
+        let count: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM federated_trust_reports WHERE asset_id = 'asset-1'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "only the first (gen 20) report persists; the regresses rolled back");
+    }
+
+    /// Item 20 — a v1 report (no generation) is NOT gated and does not seed the
+    /// high-water table, preserving backward-compatible timestamp ordering.
+    #[test]
+    fn generation_highwater_skips_v1_reports() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("v1a"), None, 2_000, 1).unwrap();
+        s.save_federated_report_chained(&report("v1b"), None, 2_001, 1).unwrap();
+        let rows: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM federation_generation_highwater", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(rows, 0, "a v1 (None-generation) report must not touch the high-water table");
+    }
+
+    /// Item 20 — a forward generation JUMP (gen > high-water + 1) is accepted but
+    /// records an in-chain FEDERATION_GENERATION_GAP marker naming the skipped
+    /// generations; a contiguous +1 step does NOT.
+    #[test]
+    fn generation_gap_emits_in_chain_audit_marker() {
+        let mut s = VerifierStore::new(":memory:").unwrap();
+        assert_eq!(s.try_claim_epoch(0, "A", 1).unwrap(), Some(1));
+        s.save_federated_report_chained(&report("base"), Some(5), 2_000, 1).unwrap();
+        // Contiguous step: no gap marker.
+        s.save_federated_report_chained(&report("step"), Some(6), 2_001, 1).unwrap();
+        // Jump 6 -> 9: missing 7,8 -> one gap marker.
+        s.save_federated_report_chained(&report("jump"), Some(9), 2_002, 1).unwrap();
+
+        let markers: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM audit_log_chain WHERE event_type = 'FEDERATION_GENERATION_GAP'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(markers, 1, "exactly one gap marker for the 6->9 jump (the +1 step emits none)");
+
+        let payload: String = s.conn.query_row(
+            "SELECT event_json FROM audit_log_chain
+             WHERE event_type = 'FEDERATION_GENERATION_GAP'",
+            [], |r| r.get(0),
+        ).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["last_accepted_generation"], 6);
+        assert_eq!(v["observed_generation"], 9);
+        assert_eq!(v["missing_from_generation"], 7);
+        assert_eq!(v["missing_through_generation"], 8);
+        assert_eq!(v["skipped_generations"], 2);
+    }
+
     /// M2: accepting a report prunes nonces older than the retention horizon, so the
     /// anti-replay table stays bounded. Pruning an aged nonce is safe — a replay of
     /// its report fails the freshness gate on its fixed signed issued_at_ms — this

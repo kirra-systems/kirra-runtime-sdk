@@ -27,6 +27,56 @@ impl VerifierStore {
         // fenced after the request-path gate check cannot land a stale report.
         Self::assert_epoch_held(&tx, held_epoch)?;
 
+        // Item 20 — per-(controller, asset) GENERATION HIGH-WATER gate. Runs inside
+        // the Immediate write lock (no interleave). Only v2 reports (a supplied
+        // `source_generation`) are gated; a v1 report (None) keeps its legacy
+        // timestamp-ordered behaviour. Two outcomes that matter here:
+        //   * regress/replay: `gen <= high_water` → abort the whole commit
+        //     (fail-closed; the stale report never persists and no nonce is burned);
+        //   * forward GAP: `gen > high_water + 1` → accept, but record the skipped
+        //     generations as an in-chain audit marker (below, after the report row).
+        // `gap_from` carries the prior high-water when a gap is detected so the
+        // marker can be appended in the SAME transaction as the accepted report.
+        let mut gap_from: Option<u64> = None;
+        if let Some(gen) = source_generation {
+            let high_water: Option<u64> = tx
+                .query_row(
+                    "SELECT last_generation FROM federation_generation_highwater
+                     WHERE source_controller_id = ?1 AND asset_id = ?2",
+                    params![report.source_controller_id, report.asset_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|g| Some(g as u64))
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+
+            if let Some(hw) = high_water {
+                if gen <= hw {
+                    // tx drops here → atomic rollback. Fail-closed.
+                    return Err(DurableWriteError::GenerationRegress { found: gen, high_water: hw });
+                }
+                if gen > hw + 1 {
+                    gap_from = Some(hw);
+                }
+            }
+
+            // Advance the high-water within the same tx (UPSERT; the gate above
+            // guarantees strict advance for an existing row).
+            tx.execute(
+                "INSERT INTO federation_generation_highwater
+                     (source_controller_id, asset_id, last_generation, last_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_controller_id, asset_id)
+                 DO UPDATE SET last_generation = ?3, last_seen_ms = ?4",
+                params![
+                    report.source_controller_id, report.asset_id,
+                    gen as i64, received_at_ms as i64,
+                ],
+            )?;
+        }
+
         let posture_json = serde_json::to_string(&report.posture)
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
 
@@ -76,6 +126,31 @@ impl VerifierStore {
             received_at_ms as i64,
             signing_key.as_ref(),
         )?;
+
+        // Item 20 — in-chain AUDIT_GAP marker. A forward generation jump means this
+        // controller's intermediate reports never reached us (a partition / drop):
+        // the chain MUST record that we are missing generations `hw+1 ..= gen-1`, so a
+        // later auditor sees an explicit, tamper-evident "coverage gap" instead of an
+        // unexplained generation discontinuity. Same tx as the accepted report → the
+        // marker is committed iff the report is.
+        if let (Some(hw), Some(gen)) = (gap_from, source_generation) {
+            let gap = serde_json::json!({
+                "source_controller_id": report.source_controller_id,
+                "asset_id": report.asset_id,
+                "last_accepted_generation": hw,
+                "observed_generation": gen,
+                "missing_from_generation": hw + 1,
+                "missing_through_generation": gen - 1,
+                "skipped_generations": gen - hw - 1,
+            });
+            crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+                &tx,
+                "FEDERATION_GENERATION_GAP",
+                &gap.to_string(),
+                received_at_ms as i64,
+                signing_key.as_ref(),
+            )?;
+        }
 
         // Bounded retention (review M2): the nonce table is the durable anti-replay
         // set, but it only ever grew (rising disk + fsync cost). A nonce aged past
