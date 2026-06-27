@@ -95,6 +95,7 @@ fn deny_code_num(code: DenyCode) -> u32 {
         DenyCode::DegradedReinitiationDenied => 9,
         DenyCode::DegradedSpeedIncreaseDenied => 10,
         DenyCode::FrameIntegrityUntrusted => 11,
+        DenyCode::TrajectoryHorizonExceeded => 12,
     }
 }
 

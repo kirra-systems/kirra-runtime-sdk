@@ -214,8 +214,31 @@ pub fn validate_trajectory_containment(
     if !corridor.is_healthy() {
         return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
     }
-    if trajectory.is_empty() || trajectory.len() > MAX_TRAJECTORY_HORIZON {
+    if trajectory.is_empty() {
         return EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture);
+    }
+    // Over-horizon is a DOER↔CHECKER CONTRACT violation, NOT a geometry
+    // departure — the trajectory may be entirely inside the corridor. The
+    // horizon bounds the per-call verdict WCET and every planner is built and
+    // unit-tested to emit `≤ MAX_TRAJECTORY_HORIZON` poses (`kirra_planner`'s
+    // `HORIZON` == this constant), so an over-length proposal is a misbehaving
+    // doer → fail-closed to the MRC.
+    //
+    // B10 (deliberate, reject-not-truncate): we do NOT truncate to the cap and
+    // validate the prefix. Truncation would silently ADMIT a planner that
+    // ignores the horizon contract — contrary to "the doer is untrusted; the
+    // checker is the invariant." The receding-horizon argument that *would*
+    // justify validating a prefix (the tail is re-planned next tick) presumes a
+    // well-behaved planner that simply emitted finer sampling; but the doers
+    // here are written to the cap, so an over-length proposal is anomalous, not
+    // routine. If a deployment genuinely needs a longer actionable horizon, the
+    // correct change is to raise `MAX_TRAJECTORY_HORIZON` (re-deriving the WCET
+    // budget) — keeping one honest bound — NOT to silently accept a prefix.
+    // A distinct `TrajectoryHorizonExceeded` code (vs `DrivableSpaceDeparture`)
+    // makes the failure diagnosable: an integrator sees "your planner exceeded
+    // the horizon contract", not a misleading "you left the drivable space".
+    if trajectory.len() > MAX_TRAJECTORY_HORIZON {
+        return EnforceAction::DenyBreach(DenyCode::TrajectoryHorizonExceeded);
     }
     // Footprint sanity (NaN/Inf in geometry → fail closed).
     if !footprint_is_finite(footprint) {
@@ -616,8 +639,10 @@ mod tests {
         let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
-            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
-            "horizon overflow must Reject (conservative)"
+            EnforceAction::DenyBreach(DenyCode::TrajectoryHorizonExceeded),
+            "horizon overflow must Reject (B10: doer-contract violation, fail-closed) \
+             with the honest TrajectoryHorizonExceeded code — NOT DrivableSpaceDeparture \
+             (the trajectory here is entirely inside the corridor)"
         );
     }
 
