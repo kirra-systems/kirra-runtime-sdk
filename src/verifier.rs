@@ -315,6 +315,14 @@ pub struct AppState {
     /// side channel); surfaced so an integrator can see how much training data the
     /// channel sizing is shedding.
     pub capture_drops: Arc<AtomicU64>,
+    /// H-3 — set when an AV subsystem is (de)registered, so the telemetry watchdog
+    /// refreshes its watched-node list on the NEXT sweep instead of waiting up to
+    /// `AV_WATCHDOG_NODE_REFRESH_MS` (30 s). Without this a node registered just
+    /// after a refresh was unmonitored for ~28 s — a fail-OPEN window where a
+    /// freshly-registered sensor could go silent/faulty undetected, breaking the
+    /// SG-003 detection-latency bound (TIMEOUT + one sweep). The watchdog swaps it
+    /// back to false when it refreshes. Defaults false.
+    pub av_registry_dirty: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -351,6 +359,7 @@ impl AppState {
             command_source_write_failures: Arc::new(AtomicU64::new(0)),
             audit_write_drops: Arc::new(AtomicU64::new(0)),
             capture_drops: Arc::new(AtomicU64::new(0)),
+            av_registry_dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 

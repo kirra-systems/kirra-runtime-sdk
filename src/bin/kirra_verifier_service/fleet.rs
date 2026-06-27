@@ -406,5 +406,15 @@ pub(crate) async fn handle_register_av_asset(
         }
     }).await;
 
+    // H-3: the av_subsystem_meta row is now committed (the `call` closure ran).
+    // Signal the telemetry watchdog to refresh its watched-node list on its NEXT
+    // sweep (~100 ms) rather than at the next 30 s periodic refresh — otherwise a
+    // node registered just after a refresh is unmonitored for up to ~28 s, a
+    // fail-OPEN window in which a silent/faulty fresh sensor would go undetected
+    // (breaking the SG-003 detection-latency bound).
+    svc.app
+        .av_registry_dirty
+        .store(true, std::sync::atomic::Ordering::Release);
+
     (StatusCode::OK, Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
 }
