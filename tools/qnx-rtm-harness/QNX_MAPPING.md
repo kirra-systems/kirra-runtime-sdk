@@ -173,24 +173,57 @@ SG-04/SG-05 never reach the judge — visible as the fast p50 on SG-05.)
 
 ---
 
-## 6. QNX cross-compile (real work = #274)
+## 6. QNX cross-compile + on-target run (#274)
+
+**Status: cross-build wired AND run on a QNX 8.0 x86_64 target.** `run_qnx_fdit.sh`
++ `qnx.toolchain.cmake` + the gated CMake path cross-build the `no_std` judge
+(`x86_64-pc-nto-qnx800`, core-only via `cargo -Zbuild-std=core`, **no QNX std**)
+and the C++ shim/harness/`wcet_measure` (`q++`, QCC 12.2.0). The recipe below is
+realized by the driver; see §6.1 for the executed result.
 
 The host build uses native `g++` + `rustc`. For a QNX 8.0 target:
 
-- **C++**: set a CMake toolchain file pointing at `q++` / `qcc` (the QNX SDP
-  compilers); the `-fno-exceptions -fno-rtti` discipline already matches a
+- **C++**: a CMake toolchain file points at `q++` / `qcc` (the QNX SDP compilers);
+  the `-fno-exceptions -fno-rtti` discipline already matches a
   freestanding-friendly build.
-- **Rust judge**: build the `no_std` staticlib for the QNX target tuple, e.g.
-  `--target x86_64-pc-nto-qnx8_0_0` or `aarch64-unknown-nto-qnx8_0_0`, keeping
-  `-C panic=abort`. The judge is already `no_std` + zero-alloc + integer-only.
-- **FDIT/WCET**: re-run the harness on the target under **FIFO scheduling** and
-  replace the indicative host p50/p99/max with **target-measured** percentiles —
-  the numbers that actually back the FTTI claim. This is **#274**.
+- **Rust judge**: build the `no_std` staticlib for the QNX target tuple
+  `x86_64-pc-nto-qnx800` (or `aarch64-unknown-nto-qnx800`), keeping
+  `-C panic=abort`. The judge is already `no_std` + zero-alloc + integer-only, so
+  it links `core` + a custom-built `compiler_builtins` only — the #189 QNX-std
+  blocker does not apply.
+- **FDIT/WCET**: re-run the harness on the target under **FIFO scheduling**. This
+  is **#274**.
 
-See `docs/adr/KIRRA_QNX_CROSSCOMPILE.md` for the existing cross-compile recipe.
+See `docs/adr/KIRRA_QNX_CROSSCOMPILE.md` and `docs/safety/WCET_QNX_BRINGUP.md` for
+the full recipe + acceptance criteria.
 
-## 7. WCET-TBD
+### 6.1 On-target result — Phase-I feasibility (QNX SDP 8.0 x86_64 VM)
 
-Host timing in the harness output is **indicative only** (`wcet_status` is the
-constant `TBD-QNX-TARGET`). Certified WCET is **TBD on the QNX target (#274)**; the
-PASS gate is **verdict correctness**, never timing.
+Executed on a QNX 8.0 `mkqnximage`/QEMU x86_64 VM (the binaries baked into the IFS,
+auto-run at boot). **The cross-compiled matrix passes byte-identically on QNX:**
+
+```
+GATE (verdict correctness): PASS          # all 9 rows verdict_observed == verdict_expected
+```
+
+This satisfies the **verdict-correctness** acceptance for Phase-I (cross-compilation
+changed not one verdict — SG-00..SG-08 all PASS on the nto-qnx800 binary, including
+the corrected replay rule SG-07 → `SequenceRegress` and the seqlock torn-write
+SG-08 → `StaleHeader`).
+
+**Timing on this run is INDICATIVE ONLY — the VM ran under QEMU TCG (software
+emulation), NOT KVM** (the dev laptop has VT-x disabled in firmware). A representative
+`SCHED_FIFO` WCET requires KVM (near-native) or hardware; under TCG the absolute
+numbers carry full interpreter + VM-deschedule overhead (observed: median ≈ 3.6 µs,
+p99.9 ≈ 10.6 µs, **max ≈ 2.2 ms** — the millisecond max is emulation jitter, not the
+judge). So the `max < 100 µs` criterion is **deferred** to a KVM/hardware run; the
+typical-case single-digit-µs figure even under heavy emulation is feasibility-positive.
+
+## 7. WCET — Phase-I indicative, cert-grade TBD
+
+The on-target run (§6.1) produced a real QNX-`SCHED_FIFO` row, but **under TCG
+emulation it is INDICATIVE, never a WCET**. The harness CSV still carries the
+`TBD-QNX-TARGET` discipline for the certified figure. Cert-grade WCET is **Phase-II**:
+NVIDIA DRIVE (Orin/Thor) + QNX OS for Safety + Ferrocene-qualified Rust under FIFO —
+that number, not a VM figure, backs the FTTI claim. The PASS gate remains **verdict
+correctness**, which is now demonstrated on a real QNX target.

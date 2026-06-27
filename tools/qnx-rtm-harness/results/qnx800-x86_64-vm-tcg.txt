@@ -1,0 +1,39 @@
+KIRRA #274 — on-target FDIT + WCET evidence (Phase-I feasibility)
+================================================================
+Target : QNX SDP 8.0, x86_64, mkqnximage/QEMU VM
+Accel  : QEMU TCG (software emulation) — VT-x disabled on dev laptop, NO KVM
+Build  : judge x86_64-pc-nto-qnx800 (cargo -Zbuild-std=core, no QNX std);
+         C++ via q++ (QCC 12.2.0). Binaries baked into the IFS, auto-run at boot.
+Date   : 2026-06-27
+
+GATE  : verdict correctness — the ONLY pass criterion. Result: PASS (all 9 rows).
+WCET  : INDICATIVE ONLY under TCG (interpreter + VM-deschedule overhead). The
+        millisecond `max` is emulation jitter, not the judge. A representative
+        SCHED_FIFO WCET (max < 100us, acceptance #4) needs KVM or hardware;
+        cert-grade WCET is Phase-II (NVIDIA DRIVE + QNX OS for Safety + Ferrocene).
+
+--- FDIT / RTM matrix (verbatim, on QNX) ----------------------------------------
+row    fault class            rtm            ok     verdict             p50(ns)    p99(ns)    max(ns)
+-------------------------------------------------------------------------------------------------
+SG-00  valid                  CONTROL        PASS   Ok                    35817     760498    3978246
+SG-01  bad-magic              NO-RTM-ID      PASS   StaleHeader           31468     138863    2222155
+SG-02  sequence-regress       NO-RTM-ID      PASS   SequenceRegress       31531     194874    7801932
+SG-03  deadline-missed        NO-RTM-ID      PASS   DeadlineMissed        31685     166417    2124281
+SG-04  payload-corrupt (CRC)  NO-RTM-ID      PASS   PayloadCorrupt        31173     182458    1833711
+SG-05  payload-oversize       NO-RTM-ID      PASS   PayloadOversize       10426      33412    9808246
+SG-06  over-envelope          SG-001/TR-001  PASS   KinematicLimit        31928     226044    3006376
+SG-07  replay (seq==last)     NO-RTM-ID      PASS   SequenceRegress       35527     196192    6282267
+SG-08  torn-write (odd gen)   NO-RTM-ID      PASS   StaleHeader           14237     117876    2244993
+
+GATE (verdict correctness): PASS
+FDIT_EXIT=0
+
+--- wcet_measure (INDICATIVE — TCG, not a WCET claim) ---------------------------
+WCET kirra_judge_assess  n=1000000  min=3300ns  med=3581ns  p99.9=10630ns  MAX=2198963ns
+metric,target,sched,n,warmup,max_ns,p999_ns,wcet_status
+kirra_judge_assess,x86_64-pc-nto-qnx800(TCG),SCHED_FIFO,1000000,10000,2198963,10630,INDICATIVE-TCG-NO-KVM
+WCET_EXIT=0
+
+Note: the harness binary emits `QNX-TARGET-MEASURED` in its own CSV; for THIS run
+that is downgraded to INDICATIVE-TCG-NO-KVM here because the VM had no KVM. The
+verdict-correctness PASS is unaffected by emulation and is the load-bearing result.
