@@ -103,7 +103,9 @@ pub(crate) struct WatchdogNodeEntry {
 ///      (NOT calling recalculate_and_broadcast directly — routes through the
 ///      serialized worker to prevent burst recalculations)
 ///   5. Every `AV_WATCHDOG_NODE_REFRESH_MS`, refreshes the node list from SQLite
-///      to pick up newly registered nodes
+///      to pick up newly registered nodes — OR immediately on the next sweep when
+///      a registration set `AppState::av_registry_dirty` (H-3), so a fresh node is
+///      monitored within one sweep rather than after up to ~28 s.
 ///
 /// # Disk-first ordering
 /// Trust state mutation (memory) happens after the trigger is sent to the engine.
@@ -231,7 +233,19 @@ pub(crate) fn watchdog_sweep_once(
     // briefly (released at the end of its own expression). Same operations
     // in the same order — only the lock scope changes.
     // ----------------------------------------------------------------------
-    if now.saturating_sub(*last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
+    // H-3: a registration/deregistration sets `av_registry_dirty`, forcing a
+    // refresh on the NEXT sweep instead of waiting up to AV_WATCHDOG_NODE_REFRESH_MS
+    // (30 s) — otherwise a freshly-registered node is unmonitored for ~28 s, a
+    // fail-OPEN window (a silent fresh sensor would never be marked Untrusted until
+    // the periodic refresh finally adds it). Swap-and-clear BEFORE the load: a
+    // registration that lands after this swap but before the load is still picked
+    // up by this load (it reads the committed DB), and if it lands after the load
+    // the flag is set again → caught on the next sweep (≤ one AV_WATCHDOG_SWEEP_MS).
+    let registry_dirty = app
+        .av_registry_dirty
+        .swap(false, std::sync::atomic::Ordering::AcqRel);
+    if registry_dirty
+        || now.saturating_sub(*last_node_refresh_ms) >= AV_WATCHDOG_NODE_REFRESH_MS
         || *last_node_refresh_ms == 0
     {
         // SG-003 fail-CLOSED: recover a poisoned store lock rather than
@@ -741,6 +755,55 @@ mod watchdog_di_tests {
         // (3) refresh stamp advanced to `now`.
         assert_eq!(observed_last_refresh, now,
             "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
+    }
+
+    /// H-3: a node registered just AFTER a periodic refresh must be picked up on
+    /// the next sweep (via `av_registry_dirty`), not after up to ~28 s. Drives the
+    /// fail-open as a control (within the refresh window + not dirty → not yet
+    /// monitored) and then proves the dirty flag forces a prompt refresh.
+    #[test]
+    fn test_av_registry_dirty_forces_prompt_refresh_within_window() {
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        // Register an AV subsystem AFTER construction (the realistic case).
+        app.store.with(|store| {
+            store
+                .register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 1_000_000)
+                .expect("register av subsystem");
+        });
+
+        let now: u64 = 1_000_500;
+        let clock = VirtualClock::starting_at(now);
+        let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
+        // A RECENT refresh stamp: both the 30 s periodic arm and the cold-start
+        // arm are NOT due, so without the dirty flag this sweep does NOT refresh.
+        let mut last_node_refresh_ms: u64 = now;
+
+        // Control — the ~28 s fail-open: within the window and not dirty, the
+        // freshly-registered node is NOT yet monitored.
+        watchdog_sweep_once(
+            &app, &tx, clock.as_ref(), &mut node_health, &mut last_node_refresh_ms,
+        );
+        assert!(
+            node_health.is_empty(),
+            "control: within the refresh window and not dirty, a fresh node is unmonitored"
+        );
+
+        // H-3: registration sets the dirty flag → the next sweep refreshes promptly.
+        app.av_registry_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        watchdog_sweep_once(
+            &app, &tx, clock.as_ref(), &mut node_health, &mut last_node_refresh_ms,
+        );
+        assert!(
+            node_health.contains_key("lidar_front"),
+            "H-3: a dirty registry must force a prompt refresh so the fresh node is monitored within one sweep"
+        );
+        assert!(
+            !app.av_registry_dirty.load(std::sync::atomic::Ordering::Acquire),
+            "the watchdog must clear av_registry_dirty after refreshing"
+        );
     }
 }
 
