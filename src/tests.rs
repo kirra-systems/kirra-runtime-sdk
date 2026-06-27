@@ -224,7 +224,7 @@ fn test_posture_locked_out_dep_propagates_locked_out_not_degraded() {
     let posture = state.calculate_posture("parent");
     assert_eq!(posture.propagated_status, FleetPosture::LockedOut,
         "LockedOut dependency must propagate LockedOut to parent, not be softened to Degraded");
-    assert!(posture.blocked_by.contains(&"dep".to_string()));
+    assert!(posture.blocked_by.iter().any(|s| &**s == "dep"));
 }
 
 // --- HTTP command classification tests ---------------------------------------

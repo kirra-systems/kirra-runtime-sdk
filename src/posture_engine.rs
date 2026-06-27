@@ -95,7 +95,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // others is traversed once and black-hit by the rest — O(N·(N+E)) → ~O(N+E).
     // (The per-call gray cycle-detection set stays fresh inside
     // `calculate_posture_memoized`.)
-    let mut black: std::collections::HashMap<String, std::sync::Arc<FleetNodePosture>> =
+    let mut black: std::collections::HashMap<std::sync::Arc<str>, std::sync::Arc<FleetNodePosture>> =
         std::collections::HashMap::new();
     let node_postures: Vec<FleetNodePosture> = node_ids
         .iter()
@@ -322,7 +322,7 @@ mod posture_engine_tests {
 
     fn nominal(id: &str) -> FleetNodePosture {
         FleetNodePosture {
-            node_id: id.to_string(),
+            node_id: Arc::from(id),
             local_status: NodeTrustState::Trusted,
             propagated_status: FleetPosture::Nominal,
             blocked_by: vec![],
@@ -331,19 +331,19 @@ mod posture_engine_tests {
 
     fn degraded(id: &str, blocked_by: &str) -> FleetNodePosture {
         FleetNodePosture {
-            node_id: id.to_string(),
+            node_id: Arc::from(id),
             local_status: NodeTrustState::Untrusted("test".to_string()),
             propagated_status: FleetPosture::Degraded,
-            blocked_by: vec![blocked_by.to_string()],
+            blocked_by: vec![Arc::from(blocked_by)],
         }
     }
 
     fn locked(id: &str, blocked_by: &str) -> FleetNodePosture {
         FleetNodePosture {
-            node_id: id.to_string(),
+            node_id: Arc::from(id),
             local_status: NodeTrustState::Untrusted("test".to_string()),
             propagated_status: FleetPosture::LockedOut,
-            blocked_by: vec![blocked_by.to_string()],
+            blocked_by: vec![Arc::from(blocked_by)],
         }
     }
 

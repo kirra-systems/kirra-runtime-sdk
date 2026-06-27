@@ -59,7 +59,12 @@ parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.
 kirra-capture-schema = { path = "crates/kirra-capture-schema" }
-serde = { version = "1.0", features = ["derive"] }
+# `rc`: enables serde's Serialize impls for `Arc`/`Rc`. Needed because
+# `FleetNodePosture` interns its node ids as `Arc<str>` (review P5) and is
+# serialized into HTTP/SSE responses. We never DESERIALIZE an `Arc`/`Rc`
+# (the feature's only sharp edge — deserialization doesn't preserve shared
+# identity), so enabling it is benign here.
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 hmac = "0.12"
 sha2 = "0.10"
