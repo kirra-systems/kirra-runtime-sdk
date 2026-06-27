@@ -13,6 +13,34 @@ service:
   type: ClusterIP
   port: 8090
 
+# --- Transport security (H-1 / AOU-TRANSPORT-TLS-001) ------------------------
+# IMPORTANT: the verifier API speaks PLAINTEXT HTTP on `service.port`. The admin
+# Bearer token (KIRRA_ADMIN_TOKEN) and EVERY state-mutating request are therefore
+# sent in CLEARTEXT on the wire. The default ClusterIP keeps that traffic
+# cluster-internal; any exposure beyond a trusted, encrypted path MUST terminate
+# TLS in front of the service.
+#
+# This Ingress is the supported way to terminate TLS. The chart FAILS to render
+# (fail-closed) if the Service is exposed via LoadBalancer/NodePort, or this
+# Ingress is enabled, without a TLS config — set `kirra.allowInsecureTransport`
+# only if TLS is handled by external infrastructure (an L7 LB / mesh mTLS).
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: kirra.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # TLS is REQUIRED for any real exposure. Leaving this empty with a
+  # LoadBalancer/NodePort Service or an enabled Ingress is refused at render time.
+  tls: []
+    # - secretName: kirra-tls
+    #   hosts:
+    #     - kirra.example.com
+
 persistence:
   enabled: true
   storageClass: ""
@@ -28,6 +56,13 @@ kirra:
 
   verifierMode: active        # active | passive_standby
   trustedIngressMode: false   # require x-kirra-client-id header on identity-gated routes
+
+  # H-1 / AOU-TRANSPORT-TLS-001 escape hatch. Leave false. Set true ONLY when TLS
+  # for the verifier API is terminated by infrastructure OUTSIDE this chart (an
+  # external L7 load balancer or a service mesh with mTLS). When false (default),
+  # the chart refuses to render an external (LoadBalancer/NodePort) Service or a
+  # non-TLS Ingress, so a cleartext admin endpoint can never ship by accident.
+  allowInsecureTransport: false
 
 resources:
   limits:
