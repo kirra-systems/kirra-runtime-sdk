@@ -65,6 +65,7 @@ struct Baseline {
     Baseline() {
         crc = kirra::crc32_ieee(payload, sizeof(payload));
         view.payload = payload;
+        view.generation = 2;                         // EVEN ⇒ committed (seqlock)
         view.magic = KIRRA_CONTRACT_MAGIC;
         view.last_accepted_sequence = 1000;
         view.sequence = 1001;                       // strictly newer ⇒ valid
@@ -119,6 +120,10 @@ void inj_kinematic(KirraContractView &v, std::uint8_t *, std::uint32_t &) {
 void inj_replay(KirraContractView &v, std::uint8_t *, std::uint32_t &) {
     v.sequence = 1000; // EQUAL to last_accepted ⇒ replay ⇒ SequenceRegress
 }
+void inj_torn_generation(KirraContractView &v, std::uint8_t *, std::uint32_t &) {
+    v.generation = 3; // ODD ⇒ write-in-progress ⇒ seqlock rejects (StaleHeader),
+                      // in the SHIM, before the FFI (judge NOT called).
+}
 
 // Verdicts + injection unchanged from #284; only the RTM-mapping cells are added.
 // Mapping is GROUNDED in REQUIREMENTS_TRACEABILITY.md / SAFETY_GOALS.md — only the
@@ -133,6 +138,7 @@ const Row kRows[] = {
     {"SG-05", "payload-oversize",      "NO-RTM-ID",     "NO-RTM-ID", "CANDIDATE", KIRRA_VERDICT_PAYLOAD_OVERSIZE, false, inj_oversize},
     {"SG-06", "over-envelope",         "SG-001/TR-001", "SG-001",    "TR-001",    KIRRA_VERDICT_KINEMATIC_LIMIT,  true,  inj_kinematic},
     {"SG-07", "replay (seq==last)",    "NO-RTM-ID",     "NO-RTM-ID", "CANDIDATE", KIRRA_VERDICT_SEQUENCE_REGRESS, true,  inj_replay},
+    {"SG-08", "torn-write (odd gen)",  "NO-RTM-ID",     "NO-RTM-ID", "CANDIDATE", KIRRA_VERDICT_STALE_HEADER,     false, inj_torn_generation},
 };
 
 struct RowResult {

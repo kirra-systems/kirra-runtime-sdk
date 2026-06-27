@@ -2,9 +2,9 @@
 
 C++ **shim** (driver) → Rust **judge** (checker) over a frozen `extern "C"`
 contract ABI, with an automated **FDIT / RTM fault-injection** matrix that proves
-**verdict correctness** across eight fault classes. Part of **EPIC #270**
+**verdict correctness** across nine fault classes. Part of **EPIC #270**
 (iceoryx2 transport / QNX governor lane). Each row is **traced to the kernel RTM**
-(**#272** — see `QNX_MAPPING.md`): one genuine hit (SG-001/TR-001, proxy), six
+(**#272** — see `QNX_MAPPING.md`): one genuine hit (SG-001/TR-001, proxy), seven
 honest `NO-RTM-ID` transport-contract gaps, one control.
 
 > Built with **g++ + rustc directly (no cargo)**. The Rust judge is a `no_std`
@@ -22,7 +22,7 @@ runtime component.
 
 | Concern | Owner | What it does |
 |---|---|---|
-| memory / transport safety | **C++ shim** (`kirra_shim.*`) | double-read **tear** detection on the header; **bounds** rejection (oversize **short-circuits in the shim and NEVER crosses the FFI**); in-place **CRC** over the payload |
+| memory / transport safety | **C++ shim** (`kirra_shim.*`) | odd/even generation-**seqlock** tear detection on the header (real `atomic_thread_fence(acquire)`, mirrors `kirra-contract-channel`); **bounds** rejection (oversize **short-circuits in the shim and NEVER crosses the FFI**); in-place **CRC** over the payload |
 | contract verdict | **Rust judge** (`kirra_judge.rs`) | magic → sequence → deadline → integrity → kinematic, on the **stabilized snapshot** the shim hands it |
 
 So `PayloadOversize` and `PayloadCorrupt` are produced by the **shim** (the judge
@@ -46,28 +46,29 @@ built `--crate-type staticlib -C panic=abort` and linked into the C++ executable
 
 ## The fault matrix (gate = verdict correctness only)
 
-Eight rows, each named for **exactly** what it injects, each carrying its grounded
+Nine rows, each named for **exactly** what it injects, each carrying its grounded
 **RTM** mapping (the `row` column is the LOCAL harness index, **not** an RTM id —
 the `rtm` column is the bridge). Host run:
 
 ```
 row    fault class            rtm            ok     verdict             p50(ns)    p99(ns)    max(ns)
 -------------------------------------------------------------------------------------------------
-SG-00  valid                  CONTROL        PASS   Ok                      500        645      19318
-SG-01  bad-magic              NO-RTM-ID      PASS   StaleHeader             500        692     141615
-SG-02  sequence-regress       NO-RTM-ID      PASS   SequenceRegress         500        522      58236
-SG-03  deadline-missed        NO-RTM-ID      PASS   DeadlineMissed          501        524      23158
-SG-04  payload-corrupt (CRC)  NO-RTM-ID      PASS   PayloadCorrupt          499        647      64000
-SG-05  payload-oversize       NO-RTM-ID      PASS   PayloadOversize          38         61       4815
-SG-06  over-envelope          SG-001/TR-001  PASS   KinematicLimit          500        635      69192
-SG-07  replay (seq==last)     NO-RTM-ID      PASS   SequenceRegress         500        531      40385
+SG-00  valid                  CONTROL        PASS   Ok                      182        198      33456
+SG-01  bad-magic              NO-RTM-ID      PASS   StaleHeader             182        185      28346
+SG-02  sequence-regress       NO-RTM-ID      PASS   SequenceRegress         181        185      20384
+SG-03  deadline-missed        NO-RTM-ID      PASS   DeadlineMissed          182        193      24340
+SG-04  payload-corrupt (CRC)  NO-RTM-ID      PASS   PayloadCorrupt          180        183      21842
+SG-05  payload-oversize       NO-RTM-ID      PASS   PayloadOversize          21         23       2911
+SG-06  over-envelope          SG-001/TR-001  PASS   KinematicLimit          182        193      27398
+SG-07  replay (seq==last)     NO-RTM-ID      PASS   SequenceRegress         182        185      45818
+SG-08  torn-write (odd gen)   NO-RTM-ID      PASS   StaleHeader              21         22       2807
 
 GATE (verdict correctness): PASS
 ```
 
 The RTM mapping is **grounded** in `docs/safety/{SAFETY_GOALS,REQUIREMENTS_TRACEABILITY}.md`
 (read-only). Only **over-envelope** has a genuine kernel TR home — **SG-001/TR-001**,
-qualified as PROXY (proxy bound, reject-not-clamp). The other six transport-contract
+qualified as PROXY (proxy bound, reject-not-clamp). The other seven transport-contract
 fault classes are honest **`NO-RTM-ID`** gaps (candidate new TRs for the EPIC #270
 lane), and the valid row is the clean-accept **`CONTROL`**. Full per-row
 justification + the surfaced coverage gaps: **`QNX_MAPPING.md`**.
@@ -78,7 +79,14 @@ justification + the surfaced coverage gaps: **`QNX_MAPPING.md`**.
   matching `tools/iceoryx2-spike/src/judge.rs`). `<` would be a replay hole and is
   **not** used.
 - **SG-05** (and SG-04) short-circuit in the shim — the harness asserts the judge
-  is **not** called for them (visible in the p50 ≈ 39 ns row).
+  is **not** called for them (visible in the p50 ≈ 21 ns row).
+- **SG-08 torn-write (odd generation)** exercises the shim's **odd/even generation
+  seqlock** (HVCHAN-001 §3, mirroring `kirra-contract-channel`): an odd generation
+  (write in progress) or a generation that changes across the copy is rejected as
+  `StaleHeader` in the shim, before the FFI (so the judge is **not** called — it
+  short-circuits like SG-05). This replaces the prior compiler-fence-only
+  double-read-compare (review finding **S2**) with a real `atomic_thread_fence(acquire)`
+  barrier + a monotonic counter — sound on weakly-ordered targets, not ABA-prone.
 
 ## Honesty (WCET-TBD)
 

@@ -8,7 +8,7 @@ this change (#272 touches only `tools/qnx-rtm-harness/**`).
 
 > **The local `SG-0N` is the HARNESS ROW INDEX, not a kernel RTM id.** The
 > `rtm_id`/`tr_id` columns are the bridge. The mapping is honest: only **one** row
-> has a genuine kernel TR home; **six** are real coverage gaps; one is a control.
+> has a genuine kernel TR home; **seven** are real coverage gaps; one is a control.
 > A shoehorned mapping would be worse than a named gap — the gap IS the evidence
 > (it is exactly what `RTM_GAP_REPORT.md` exists to capture).
 
@@ -26,6 +26,7 @@ this change (#272 touches only `tools/qnx-rtm-harness/**`).
 | SG-05 | payload oversize (bounds) | `PayloadOversize` | `NO-RTM-ID` | `CANDIDATE` | **gap** |
 | SG-06 | over-envelope velocity | `KinematicLimit` | `SG-001` | `TR-001` | **genuine hit (proxy)** |
 | SG-07 | replay (`seq == last`) | `SequenceRegress` | `NO-RTM-ID` | `CANDIDATE` | **gap** |
+| SG-08 | torn write (odd generation) | `StaleHeader` | `NO-RTM-ID` | `CANDIDATE` | **gap** |
 
 ---
 
@@ -47,7 +48,7 @@ this change (#272 touches only `tools/qnx-rtm-harness/**`).
   So this is *proxy/partial* evidence for SG-001 — it does **not** discharge or
   substitute for TR-001's certified `test_speed_above_ceiling_triggers_clamp_linear`.
 
-The six **`NO-RTM-ID`** rows below are honest gaps: each names the **principle
+The seven **`NO-RTM-ID`** rows below are honest gaps: each names the **principle
 precedent** SG (the safety principle that already exists in the kernel for a
 *different* artifact) under which a candidate new TR would live, but **no current
 TR covers the transport-contract instantiation** the harness exercises.
@@ -96,13 +97,24 @@ TR covers the transport-contract instantiation** the harness exercises.
   **complementary barriers** (don't-cache vs do-reject), and neither substitutes for
   the other. Candidate new TR (alongside SG-02) remains needed.
 
+- **SG-08 torn write (odd generation) → `NO-RTM-ID`.** A snapshot caught with an
+  **odd** generation (a write in progress) — or a generation that changes across
+  the copy — is rejected by the shim's **odd/even generation seqlock** (HVCHAN-001
+  §3 steps 2-3) before the FFI, so the judge is never called (a shim-side
+  short-circuit, like SG-05). This replaces the prior compiler-fence-only
+  double-read-compare (review finding **S2**): the seqlock uses a real CPU acquire
+  barrier and a monotonic counter, so it is sound on weakly-ordered targets and
+  not ABA-prone. The mechanism mirrors `crates/kirra-contract-channel`. No kernel
+  TR exists for cross-partition snapshot coherence — candidate new TR under the
+  same FFI-robustness / freedom-from-interference goal as SG-01.
+
 ---
 
 ## 3. Coverage gaps surfaced (the held line)
 
-The harness traces **8 transport-contract fault classes**; against the **current**
+The harness traces **9 transport-contract fault classes**; against the **current**
 kernel RTM, exactly **one** (over-envelope → SG-001/TR-001, proxy) has a real TR
-home. The other **six** are genuine **`NO-RTM-ID`** gaps:
+home. The other **seven** are genuine **`NO-RTM-ID`** gaps:
 
 | Gap | Fault class | Principle precedent | Candidate new TR home |
 |---|---|---|---|
@@ -112,11 +124,13 @@ home. The other **six** are genuine **`NO-RTM-ID`** gaps:
 | 4 | message payload integrity (CRC) | SG-010 (audit-chain integrity) | payload-integrity TR |
 | 5 | FFI payload bounds (oversize) | OCCY_FFI_EVIDENCE / OCCY_DFA (FFI) | FFI-robustness TR |
 | 6 | message replay (`seq == last`) | SG-014 (federation replay) | transport replay TR |
+| 7 | snapshot coherence (torn write / odd generation) | OCCY_FFI_EVIDENCE / OCCY_DFA (FFI) | snapshot-coherence / seqlock TR |
 
 This is the finding, not a defect of the harness: the EPIC #270 iceoryx2/QNX
-**transport-contract** surface (framing, ordering, freshness, integrity, bounds)
-is **not yet represented in the kernel RTM**, which was authored for the HTTP
-verifier + governor + protocol adapters. Surfacing these six gaps is the point.
+**transport-contract** surface (framing, ordering, freshness, integrity, bounds,
+snapshot coherence) is **not yet represented in the kernel RTM**, which was
+authored for the HTTP verifier + governor + protocol adapters. Surfacing these
+seven gaps is the point.
 
 > **Adding these candidate TRs to the RTM itself is a follow-up `docs/safety/**`
 > change requiring its own safety review — it is explicitly NOT part of this PR.**
@@ -148,7 +162,7 @@ should be re-aligned to it (a one-line `printf` change).
 
 ## 5. The concern split (recap)
 
-- **C++ shim = driver** — memory/transport safety: double-read tear detection,
+- **C++ shim = driver** — memory/transport safety: generation-seqlock tear detection,
   bounds (oversize short-circuits, never crosses the FFI), CRC over the payload.
 - **Rust judge = checker** — the contract verdict (magic → sequence → deadline →
   integrity → kinematic) on the shim's stabilized snapshot.
