@@ -1,3 +1,20 @@
+{{- /*
+  H-1 / AOU-TRANSPORT-TLS-001 fail-closed transport guard.
+  The verifier API speaks PLAINTEXT HTTP — the admin Bearer token and every
+  state-mutating request are sent in cleartext. A LoadBalancer / NodePort Service
+  exposes that plaintext endpoint OUTSIDE the cluster. Refuse to render unless
+  either (a) a TLS-terminating Ingress is configured, or (b) the operator
+  explicitly acknowledges that TLS is handled by external infrastructure. The
+  default ClusterIP (cluster-internal) is unaffected, so existing in-cluster
+  installs are not impacted — only an actually-external, un-encrypted exposure is
+  blocked.
+*/}}
+{{- if or (eq .Values.service.type "LoadBalancer") (eq .Values.service.type "NodePort") }}
+{{- $hasIngressTls := and .Values.ingress.enabled .Values.ingress.tls }}
+{{- if and (not $hasIngressTls) (not .Values.kirra.allowInsecureTransport) }}
+{{- fail (printf "SECURITY (H-1 / AOU-TRANSPORT-TLS-001): service.type=%s exposes the verifier OUTSIDE the cluster but no TLS is configured — the admin Bearer token and all mutation traffic would cross the network in CLEARTEXT. Enable a TLS Ingress (ingress.enabled=true with ingress.tls), or set kirra.allowInsecureTransport=true to acknowledge that TLS is terminated by external infrastructure." .Values.service.type) }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

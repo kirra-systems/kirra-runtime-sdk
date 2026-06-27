@@ -54,6 +54,7 @@ the verification passes for the target deployment.
 | AOU-TIMESYNC-001 | Sensor/message timestamps consumed by governor staleness/deadline validation are synchronized, monotonic, drift-bounded vs the boundary clock domain, and converted to it before publication (HVCHAN §5 non-mixing rule) | Integrator (time sync / platform) | **AoU-GAP** — integrator obligation; drift bound **VALIDATION-PENDING** (set with the FTTI budget, #274/#278) | the governor staleness/deadline barrier (HVCHAN §3 judge; the #271 harness + #273 spike deadline checks); PTP/gPTP expected discharge |
 | AOU-HW-QNX-TARGET-001 | The QNX-resident safety partition and its **certified-WCET** evidence run on an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX Thor) running DRIVE OS + QNX OS for Safety — **NOT** a Jetson module (Orin NX / AGX Orin / Jetson Thor), which runs L4T/Linux and which NVIDIA does **not** support QNX on | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate; vendor-fixed (informational) | the QNX-target WCET / FTTI claim (`TBD-QNX-TARGET`, #274); the EPIC #270 QNX safety-partition lane; ADR `KIRRA_QNX_CROSSCOMPILE` aarch64 path |
 | AOU-PLATFORM-GEOMETRY-001 | A non-Ackermann platform deployed behind the `PlatformKinematics` abstraction supplies a footprint and kinematic limits (via its impl) that MATCH the physical platform; for a platform using the center-convention `VehicleFootprint` (`wheelbase_m = 0`, symmetric overhangs), the supplied pose is the **geometric center** | Integrator (platform) | **AoU** (by design) — abstraction + SG2 seam IMPLEMENTED and dual-platform-PROVEN (S-PK1a/b/c, ADR-0027); a live non-Ackermann **deployment** is **DEPLOYMENT-PENDING** (integrator wires a node consuming `validate_platform_containment` + supplies verified geometry/limits). The Ackermann path is unchanged/ENFORCED | SG2 drivable-space containment for any platform via `validate_platform_containment` (`crates/kirra-core/src/platform_kinematics.rs`); the per-platform envelope (`evaluate`) + RSS stay platform-specific |
+| AOU-TRANSPORT-TLS-001 | The verifier HTTP API (admin token + mutation routes) is reached only over a TLS-terminated / encrypted transport; plaintext exposure beyond a trusted cluster-internal path is prohibited | Integrator (deployment / platform) | **AoU** (by design) — chart fail-closed guard + TLS Ingress live (H-1); cert/issuer integrator-supplied | the confidentiality of `KIRRA_ADMIN_TOKEN` (Tier-2 Bearer auth) and the integrity of all mutation routes — `constant_time_compare` defends the comparison, not the wire |
 
 ---
 
@@ -1073,3 +1074,59 @@ Ackermann path — generalized to the trait.
 - `parko/crates/parko-kirra/src/platform.rs` — `DiffDrivePlatform`,
   `centered_footprint`, `diffdrive_is_bounded_by_the_generic_containment_seam`.
 - ADR-0027; `docs/safety/STAGE_S-PK1_PLATFORM_KINEMATICS.md`.
+
+---
+
+## AOU-TRANSPORT-TLS-001 — The verifier API is reached only over a TLS-terminated transport
+
+### Assumption
+> *Every client of the verifier HTTP API — admin tooling, the ROS 2 interlock
+> interceptor, federation peers, operator consoles — reaches it over a
+> TLS-terminated / encrypted transport. The plaintext listener
+> (`KIRRA_VERIFIER_ADDR`, default `0.0.0.0:8090`) is bound only to a trusted,
+> cluster-internal path; TLS is terminated by the deployment (a TLS Ingress, an
+> L7 load balancer, or a service-mesh mTLS sidecar) before any untrusted network
+> segment. The verifier process itself speaks plaintext HTTP by design (ADR-0006
+> Clause 3 keeps crypto/transport at the integration boundary, not the governor
+> hot path).*
+
+### Why it is load-bearing
+Tier-2 routes authenticate with a static Bearer token (`KIRRA_ADMIN_TOKEN`) and
+Tier-1 routes add an `x-kirra-client-id` header. The in-process defenses are real
+but **comparison-side only**: `constant_time_compare` stops a timing oracle, and
+`require_admin_token` fails closed on an absent token. None of that protects the
+token **on the wire** — over plaintext HTTP the `Authorization: Bearer …` header
+and every state-mutating body (attestation registration, dependency edges,
+federation reports, supervisor reset) are transmitted in cleartext, so a
+passive on-path observer captures the admin token and can then drive the full
+mutation surface of the safety governor. (`docs/ros2_interlock.md` already records
+this for the interceptor: *"include the admin token in every HTTP request — use
+TLS in production to prevent token interception."*)
+
+### Status / scope
+- **Chart fail-closed guard — LIVE (H-1).** `helm/kirra` refuses to render when the
+  Service is exposed externally (`LoadBalancer` / `NodePort`) or the Ingress is
+  enabled without a `tls:` block, unless the operator sets
+  `kirra.allowInsecureTransport=true` to acknowledge external TLS termination. The
+  default `ClusterIP` (cluster-internal) is unaffected.
+- **TLS Ingress — PROVIDED.** `helm/kirra/templates/ingress.yaml` (opt-in,
+  `ingress.enabled` + `ingress.tls`) is the supported termination point;
+  cert/issuer (e.g. cert-manager) is integrator-supplied.
+- **In-process TLS (rustls) — NOT provided** (deliberate, ADR-0006 Clause 3). If a
+  deployment cannot terminate TLS in front of the process, that is a separate
+  request, not this AoU.
+
+### Consequence if violated
+A cleartext-exposed verifier leaks `KIRRA_ADMIN_TOKEN` to any on-path observer →
+full unauthorized control of the mutation surface (node trust, dependency graph,
+federation, supervisor reset) → the fail-closed posture engine can be driven
+arbitrarily. This is a confidentiality/integrity break of the entire admin
+control plane, not a single route.
+
+### Evidence
+- `helm/kirra/templates/ingress.yaml`, `helm/kirra/templates/service.yaml`
+  (fail-closed guard), `helm/kirra/values.yaml` (`ingress`,
+  `kirra.allowInsecureTransport`).
+- `docs/ros2_interlock.md` (interceptor token-over-TLS note).
+- Route auth matrix: `CLAUDE.md` / `docs/v1_route_authorization_matrix.md`
+  (Tier-1 / Tier-2 routes that carry the token).

@@ -1,5 +1,21 @@
 Kirra Safety Kernel deployed successfully.
 
+{{- if .Values.ingress.enabled }}
+{{- $scheme := ternary "https" "http" (not (empty .Values.ingress.tls)) }}
+
+Verifier API (via Ingress):
+{{- range $host := .Values.ingress.hosts }}
+  {{- range $host.paths }}
+  {{ $scheme }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- if not .Values.ingress.tls }}
+
+  ⚠️  SECURITY (H-1): this Ingress has NO TLS — the admin Bearer token and all
+      mutation traffic cross the network in CLEARTEXT. Add an ingress.tls block.
+{{- end }}
+{{- end }}
+
 Verifier API:
 {{- if contains "NodePort" .Values.service.type }}
   export NODE_PORT=$(kubectl get svc {{ include "kirra.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")
