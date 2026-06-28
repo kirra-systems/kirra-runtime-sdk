@@ -154,9 +154,10 @@ pub fn objects_are_equivalent_extended(
         last_divergence = EquivalenceCheckResult::HeadingDivergence;
     }
 
-    // Ego-frame velocity projections
+    // Ego-frame velocity projections (both projected using heading1 as the common
+    // reference frame so that the velocity check is independent of heading divergence)
     let (v1_lon, v1_lat) = ego_frame_velocity(vel1_x, vel1_y, heading1);
-    let (v2_lon, v2_lat) = ego_frame_velocity(vel2_x, vel2_y, heading2);
+    let (v2_lon, v2_lat) = ego_frame_velocity(vel2_x, vel2_y, heading1);
 
     // Longitudinal velocity check
     let v_lon_diff = (v1_lon - v2_lon).abs();

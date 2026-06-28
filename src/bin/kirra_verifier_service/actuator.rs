@@ -6,6 +6,7 @@
 // root re-export (`use actuator::*`) lets build_app/tests name them unqualified.
 
 use super::*;
+use kirra_verifier::verifier_store::FenceError;
 
 pub(crate) async fn handle_actuator_motion_command(
     State(svc): State<Arc<ServiceState>>,
@@ -40,9 +41,19 @@ pub(crate) async fn handle_actuator_motion_command(
         "delta_time_s":                 cmd.delta_time_s,
         "admitted_at_ms":               now,
     });
-    // P1: durable audit write off the worker pool (materialize the payload first).
+    // P1: audit write off the worker pool (materialize the payload first).
+    //
+    // Layer-3 HA final authority check: the outer posture/policy gate asserted
+    // epoch ownership before body parsing, but the actuator response is the
+    // command-release boundary. The blocking closure below re-asserts epoch
+    // ownership immediately before writing the "admitted" audit event. If the
+    // epoch changed during envelope/body work, it returns a fence error, writes
+    // no admitted event, and the handler rejects without releasing a command.
+    // SAFETY: SG-009 / HA-L3 / REQ-HA-ACTUATOR-EPOCH-FENCE.
     let audit_str = audit.to_string();
-    let _ = svc.app.store.call(move |store| {
+    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let final_epoch_assertion = svc.app.store.call(move |store| {
+        store.assert_actuator_epoch_held(held)?;
         if let Err(e) = store.save_posture_event_chained(
             "actuator_motion", "MOTION_COMMAND_ADMITTED",
             &audit_str, None, now,
@@ -50,7 +61,35 @@ pub(crate) async fn handle_actuator_motion_command(
             tracing::error!(error=%e,
                 "AUDIT-CHAIN WRITE FAILED for MOTION_COMMAND_ADMITTED — event missing from tamper-evident log");
         }
+        Ok::<(), FenceError>(())
     }).await;
+
+    match final_epoch_assertion {
+        Ok(Ok(())) => {}
+        Ok(Err(FenceError::EpochSuperseded { held, durable })) => {
+            svc.app
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                held = held,
+                durable = durable,
+                ha_req = "REQ-HA-ACTUATOR-EPOCH-FENCE",
+                "FENCED — final actuator epoch assertion failed; self-demoting and rejecting command"
+            );
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Ok(Err(FenceError::EpochUnreadable)) | Err(_) => {
+            svc.app
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                held = held,
+                ha_req = "REQ-HA-DISK-WEDGE-DEMOTE",
+                "DISK-WEDGE — final actuator epoch unreadable; self-demoting and rejecting command"
+            );
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
 
     // Response speaks the ROS interceptor's schema (action / enforced_*) AND
     // the legacy keys (now accurate). See `EnforcementOutcome::response_body`.

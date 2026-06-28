@@ -3852,14 +3852,26 @@ mod store_offload_guard {
         let mut nearest_access = ""; // "with" (sync) | "call" (off-worker)
         let mut in_test = false; // tests live only in the root file; submodules are all production
         for (idx, line) in src.lines().enumerate() {
-            if line.trim_start().starts_with("#[cfg(test)]") {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                    continue;
+                }
+                if trimmed.starts_with("#[cfg(test)]") {
                 in_test = true;
             }
             // Track the nearest ENCLOSING store access (last one seen wins; the
             // production sites place the access immediately above the write).
-            if line.contains(".store.call(") || line.contains(".store.call_read(") {
+                if line.contains(".store.call(")
+                    || line.contains(".store.call_read(")
+                    || trimmed.starts_with(".call(")
+                    || trimmed.starts_with(".call_read(")
+                {
                 nearest_access = "call";
-            } else if line.contains(".store.with(") || line.contains(".store.with_read(") {
+                } else if line.contains(".store.with(")
+                    || line.contains(".store.with_read(")
+                    || trimmed.starts_with(".with(")
+                    || trimmed.starts_with(".with_read(")
+                {
                 nearest_access = "with";
             }
             if !in_test

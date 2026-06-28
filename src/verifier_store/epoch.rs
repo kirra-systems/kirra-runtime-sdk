@@ -45,6 +45,32 @@ impl VerifierStore {
         Ok(())
     }
 
+    /// Layer-3 HA actuator fence.
+    ///
+    /// Unlike federation/key-rotation writes, the actuator command path does not
+    /// naturally own a durable SQLite mutation whose transaction can carry
+    /// [`Self::assert_epoch_held`]. This helper creates a bounded
+    /// `BEGIN IMMEDIATE` assertion transaction solely for the actuator authority
+    /// check: while it is open, a competing epoch claim serializes behind it; if
+    /// a competing claim already landed, the assertion observes the newer epoch
+    /// and rejects before the actuator response is issued.
+    ///
+    /// SAFETY: SG-009 / HA-L3 / REQ-HA-ACTUATOR-EPOCH-FENCE.
+    /// Fail closed on `held == 0`, epoch mismatch, unreadable `ha_state`, or
+    /// transaction failure. The check is O(1), uses no heap allocation, and has
+    /// no unbounded retry loop; SQLite's configured busy timeout is the bound.
+    pub fn assert_actuator_epoch_held(
+        &mut self,
+        held_epoch: u64,
+    ) -> std::result::Result<(), FenceError> {
+        let tx = self
+            .durable_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| FenceError::EpochUnreadable)?;
+        Self::assert_epoch_held(&tx, held_epoch)?;
+        tx.commit().map_err(|_| FenceError::EpochUnreadable)
+    }
+
     /// Current durable HA epoch. Source of truth for "who owns writes."
     pub fn current_epoch(&self) -> Result<u64> {
         let e: i64 = self.conn.query_row(
@@ -94,5 +120,14 @@ impl VerifierStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// TEST-ONLY: remove the singleton HA row to simulate an epoch-read/disk
+    /// wedge at the fence boundary. Production code never deletes this row.
+    #[cfg(test)]
+    pub fn delete_ha_state_for_test(&mut self) {
+        self.durable_mut()
+            .execute("DELETE FROM ha_state WHERE id = 1", [])
+            .expect("delete ha_state singleton row for test");
     }
 }
