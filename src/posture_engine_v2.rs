@@ -74,11 +74,14 @@ pub fn resolve_posture_with_reason(
     match cache.read() {
         Ok(guard) => match guard.as_ref() {
             Some(cached) => {
-                let age_ms = ts.saturating_sub(cached.generated_at_ms);
-                if age_ms >= posture_cache_ttl_ms {
+                let age_ms = ts.checked_sub(cached.generated_at_ms);
+                if age_ms.is_none_or(|age| age >= posture_cache_ttl_ms) {
                     tracing::warn!(
                         reason       = %LockoutReason::PostureCacheStale,
-                        age_ms       = age_ms,
+                        age_ms       = age_ms.unwrap_or(0),
+                        clock_moved_backward = age_ms.is_none(),
+                        now_ms = ts,
+                        generated_at_ms = cached.generated_at_ms,
                         ttl_ms       = posture_cache_ttl_ms,
                         generation   = cached.generation,
                         last_posture = ?cached.posture,
@@ -625,6 +628,34 @@ mod posture_engine_v2_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
         assert_eq!(posture, FleetPosture::LockedOut);
+        assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
+    }
+
+    #[test]
+    fn test_backward_clock_step_cache_fails_closed_b3() {
+        use std::sync::Arc;
+        use crate::posture_cache::CachedFleetPosture;
+
+        // B3: `resolve_posture_with_reason` must match
+        // `CachedFleetPosture::is_stale`: if wall time moves backward and the
+        // cache appears to be stamped in the future, the age is indeterminate.
+        // The prior `saturating_sub` treated this as age 0 and served Nominal.
+        let future_ts = now_ms_engine() + 60_000;
+        let cached = CachedFleetPosture {
+            posture: FleetPosture::Nominal,
+            generated_at_ms: future_ts,
+            ttl_ms: 10_000,
+            generation: 7,
+        };
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
+
+        let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
+
+        assert_eq!(
+            posture,
+            FleetPosture::LockedOut,
+            "a future-stamped cache entry must fail closed, not serve Nominal"
+        );
         assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
     }
 
