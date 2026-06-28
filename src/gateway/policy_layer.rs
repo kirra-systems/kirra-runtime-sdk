@@ -25,6 +25,7 @@ use crate::posture_cache::{
     now_ms as posture_now_ms, should_route_command, CachedFleetPosture, ServiceState,
 };
 use crate::verifier::FleetPosture;
+use crate::verifier_store::FenceError;
 
 /// Hard ceiling on an actuator-command request body. A `ProposedVehicleCommand`
 /// is ~5 × f64 plus serde overhead — a few hundred bytes serialized. 16 KiB is
@@ -60,6 +61,60 @@ fn resolve_posture(svc: &ServiceState) -> FleetPosture {
         crate::posture_cache::POSTURE_CACHE_TTL_MS,
     );
     posture
+}
+
+/// Layer-3 HA actuator authority assertion.
+///
+/// The actuator route has no durable application write to hang the existing
+/// in-transaction HA fence on, so it gets its own bounded assertion transaction
+/// (`VerifierStore::assert_actuator_epoch_held`) before command admission. Any
+/// ambiguity about role, epoch ownership, or disk health self-demotes this
+/// process and rejects the command.
+///
+/// SAFETY: SG-009 / HA-L3 / REQ-HA-ACTUATOR-EPOCH-FENCE,
+/// REQ-HA-DISK-WEDGE-DEMOTE.
+pub async fn assert_actuator_epoch_or_demote(
+    svc: &ServiceState,
+    method: &'static str,
+    path: &'static str,
+) -> Result<(), StatusCode> {
+    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = svc
+        .app
+        .store
+        .call(move |store| store.assert_actuator_epoch_held(held))
+        .await;
+
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(FenceError::EpochSuperseded { held, durable })) => {
+            svc.app
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                method = method,
+                path = path,
+                held = held,
+                durable = durable,
+                ha_req = "REQ-HA-ACTUATOR-EPOCH-FENCE",
+                "FENCED — actuator epoch assertion failed; self-demoting and rejecting command"
+            );
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        Ok(Err(FenceError::EpochUnreadable)) | Err(_) => {
+            svc.app
+                .mode_active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                method = method,
+                path = path,
+                held = held,
+                ha_req = "REQ-HA-DISK-WEDGE-DEMOTE",
+                "DISK-WEDGE — actuator epoch unreadable; self-demoting and rejecting command"
+            );
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
 }
 
 /// The enforcement verdict the actuator middleware reached for one command,
@@ -494,46 +549,19 @@ pub async fn enforce_posture_routing(
     // commit is rejected (and the handler self-demotes) even if it passed this
     // gate. This gate remains the fast first-line fence; the in-transaction
     // re-check is the authoritative one.
-    let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
     match cmd {
-        // 1b — ACTUATOR PATH gets a LIVE epoch fence. Unlike the top-tier durable
-        // writes (federation / key-rotation), an actuator command performs NO
-        // durable write, so there is no transaction to hang an in-transaction
-        // `assert_epoch_held` re-check on — it relied SOLELY on the cached epoch,
-        // which the heartbeat re-stamps only every HEARTBEAT_INTERVAL_MS (~2 s).
-        // During failover the old primary could therefore keep admitting actuator
-        // commands for up to ~2 s after the new primary claimed the epoch (the
-        // review's highest-consequence two-writer residual). Read the LIVE durable
-        // epoch off the WAL read-replica instead (committed-snapshot visibility, so
-        // the new primary's epoch-CAS is seen immediately; `call_read` keeps it off
-        // the tokio worker per P1). This closes the window to ~one command. The
-        // kernel WCET path (`validate_vehicle_command`) is untouched — this read is
-        // on the HTTP gate, which already does serde + Tower work.
-        OperationalCommand::ActuatorMotion if held != 0 => {
-            match svc.app.store.call_read(|s| s.current_epoch()).await {
-                // Still the owner — admit (the downstream decel gate still runs).
-                Ok(Ok(durable)) if durable == held => {}
-                // Superseded: a newer primary owns the epoch. Self-demote + reject.
-                Ok(Ok(durable)) => {
-                    svc.app
-                        .mode_active
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        method = %method, path = %path, held = held, durable = durable,
-                        "FENCED (live) — actuator command on a superseded epoch; self-demoting and rejecting (HA split-brain prevention)"
-                    );
-                    return Err(StatusCode::SERVICE_UNAVAILABLE);
-                }
-                // Could not read the live epoch (DB error / task failure / disk
-                // wedge). Cannot confirm ownership → fail closed (review item 1).
-                Ok(Err(_)) | Err(_) => {
-                    tracing::error!(
-                        method = %method, path = %path, held = held,
-                        "actuator epoch read failed — cannot confirm HA ownership; failing closed"
-                    );
-                    return Err(StatusCode::SERVICE_UNAVAILABLE);
-                }
-            }
+        // Layer 3 — ACTUATOR PATH gets an authoritative assertion transaction.
+        // Unlike the top-tier durable writes (federation / key-rotation), an
+        // actuator command performs no natural DB commit, so a cached epoch or a
+        // read-replica observation leaves a residual failover window. The helper
+        // below runs `BEGIN IMMEDIATE` + `assert_epoch_held` on the durable writer:
+        // no heap allocation, O(1), bounded by SQLite's busy timeout, and
+        // fail-closed on mismatch/unreadable epoch. The handler repeats the same
+        // assertion immediately before its admitted response, after body parsing
+        // and any audit work, so an epoch change during the actuator write is
+        // caught at the final authority boundary too.
+        OperationalCommand::ActuatorMotion => {
+            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await?;
         }
         // Other mutations keep the fast CACHED epoch check (Pass B1): they ARE
         // backstopped by the in-transaction `assert_epoch_held` on their durable
@@ -543,6 +571,7 @@ pub async fn enforce_posture_routing(
         // Acquire here pairs with both. A 0 cache (cold start) falls through to the
         // mode/posture checks below.
         OperationalCommand::WriteState | OperationalCommand::SystemMutation => {
+            let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
             let db = svc.app.cached_db_epoch.load(std::sync::atomic::Ordering::Acquire);
             if db != 0 && held != 0 && held != db {
                 svc.app
@@ -586,8 +615,157 @@ pub async fn enforce_posture_routing(
 #[cfg(test)]
 mod actuator_middleware_tests {
     use super::*;
+    use crate::fabric::causal_log::FabricCausalLog;
+    use crate::fabric::router::FabricRouter;
+    use crate::fabric::telemetry::FabricTelemetry;
     use crate::gateway::kinematics_contract::{ProposedVehicleCommand, VehicleKinematicsContract};
-    use crate::verifier::FleetPosture;
+    use crate::gateway::perception_monitor::SharedPerceptionCap;
+    use crate::posture_cache::{SharedPostureCache, POSTURE_CACHE_TTL_MS};
+    use crate::verifier::{AppState, FleetPosture, VerifierOperationMode};
+    use crate::verifier_store::VerifierStore;
+    use std::sync::atomic::Ordering;
+
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "kirra-ha-actuator-{}-{}-{}.sqlite",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn service_from_store(store: VerifierStore) -> Arc<ServiceState> {
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let posture_cache: SharedPostureCache =
+            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture {
+                posture: FleetPosture::Nominal,
+                generated_at_ms: posture_now_ms(),
+                ttl_ms: POSTURE_CACHE_TTL_MS,
+                generation: 1,
+            })));
+        let perception_cap: SharedPerceptionCap = Arc::new(std::sync::RwLock::new(None));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            started_at_ms: posture_now_ms(),
+            audit_verifying_key: None,
+            fabric_router: Arc::new(FabricRouter::new()),
+            fabric_telemetry: Arc::new(FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap,
+            perception_monitor_enabled: false,
+        })
+    }
+
+    fn claim_epoch(svc: &ServiceState, observed: u64, holder: &str, now_ms: u64) -> u64 {
+        let claimed = svc
+            .app
+            .store
+            .with(|store| store.try_claim_epoch(observed, holder, now_ms))
+            .expect("epoch claim sql")
+            .expect("epoch claim wins");
+        svc.app.held_epoch.store(claimed, Ordering::SeqCst);
+        claimed
+    }
+
+    /// Layer-3 HA: two instances can both have local `mode_active = true` during
+    /// failover, but only the one whose held epoch matches the durable epoch may
+    /// pass the actuator authority assertion. The old primary self-demotes before
+    /// a command reaches the actuator response boundary.
+    #[tokio::test]
+    async fn ha_l3_two_writer_window_closed_on_actuator_path() {
+        let path = temp_db_path("two-writer");
+        let path_str = path.to_str().expect("utf8 path").to_string();
+
+        let svc_old = service_from_store(VerifierStore::new(&path_str).expect("old store"));
+        let old_epoch = claim_epoch(&svc_old, 0, "old-primary", 1_000);
+        assert_eq!(old_epoch, 1);
+
+        let svc_new = service_from_store(VerifierStore::new(&path_str).expect("new store"));
+        let new_epoch = claim_epoch(&svc_new, 1, "new-primary", 2_000);
+        assert_eq!(new_epoch, 2);
+
+        assert!(svc_old.app.is_active(), "old primary still thinks it is Active");
+        assert!(svc_new.app.is_active(), "new primary is Active");
+
+        assert!(
+            assert_actuator_epoch_or_demote(&svc_new, "POST", "/actuator/motion/command")
+                .await
+                .is_ok(),
+            "the current epoch holder must be able to issue actuator commands"
+        );
+        assert!(
+            assert_actuator_epoch_or_demote(&svc_old, "POST", "/actuator/motion/command")
+                .await
+                .is_err(),
+            "the superseded old primary must be fenced on the actuator path"
+        );
+        assert!(
+            !svc_old.app.is_active(),
+            "fenced old primary must self-demote to stop issuing actuator commands"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    /// Layer-3 HA disk-wedge: if the Active primary cannot read the durable epoch,
+    /// actuator authority is ambiguous. The gate denies and flips mode_active off.
+    #[tokio::test]
+    async fn ha_l3_disk_wedge_epoch_unreadable_self_demotes() {
+        let svc = service_from_store(VerifierStore::new(":memory:").expect("store"));
+        let epoch = claim_epoch(&svc, 0, "primary", 1_000);
+        assert_eq!(epoch, 1);
+        svc.app
+            .store
+            .with(|store| store.delete_ha_state_for_test());
+
+        let res =
+            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
+        assert!(res.is_err(), "unreadable epoch must deny actuator command");
+        assert!(
+            !svc.app.is_active(),
+            "unreadable epoch must self-demote the primary (fail-closed disk-wedge behavior)"
+        );
+    }
+
+    /// Layer-3 HA: if the durable epoch changes after a node acquired its role but
+    /// before an actuator command reaches the write boundary, the assertion
+    /// rejects and the node transitions to safe/passive state.
+    #[tokio::test]
+    async fn ha_l3_epoch_change_during_actuator_write_is_rejected() {
+        let svc = service_from_store(VerifierStore::new(":memory:").expect("store"));
+        let held = claim_epoch(&svc, 0, "primary", 1_000);
+        assert_eq!(held, 1);
+        let advanced = svc
+            .app
+            .store
+            .with(|store| store.try_claim_epoch(held, "standby", 2_000))
+            .expect("advance sql")
+            .expect("standby advances epoch");
+        assert_eq!(advanced, 2);
+        assert_eq!(
+            svc.app.held_epoch.load(Ordering::SeqCst),
+            1,
+            "local held epoch remains stale until the actuator assertion fences it"
+        );
+
+        let res =
+            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
+        assert!(res.is_err(), "stale held epoch must reject actuator write");
+        assert!(
+            !svc.app.is_active(),
+            "epoch-change fence must self-demote the stale writer"
+        );
+    }
 
     /// Pin the posture-exemption set in BOTH directions (#306). The failure modes
     /// it guards are asymmetric and both bad: silently GAINING an exemption
