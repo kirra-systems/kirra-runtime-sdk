@@ -25,6 +25,10 @@ pub mod prediction;
 // Perception redundancy cross-check (True-Redundancy analog) — pure, no ROS.
 pub mod perception_redundancy;
 
+// Phase 2A Adversarial Review Hardening
+pub mod validation_hardening;
+pub mod redundancy_hardening;
+
 // Public surface — the symbols downstream consumers import directly. Kept identical
 // to the adapter's prior re-exports so a consumer switch is a pure path rename.
 pub use crate::config::VehicleConfig;
