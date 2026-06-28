@@ -51,7 +51,7 @@ default = []
 # This feature pulls NO C++ / no cxx / no lanelet2 — that is the separate
 # `lanelet2` feature below (the perception governance path is independent of
 # the map/corridor layer). See README.
-ros2 = ["dep:tokio", "dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:serde_json", "dep:bytes", "kirra-core/capture"]
+ros2 = ["dep:tokio", "dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:bytes", "kirra-core/capture"]
 
 # Enable the real Lanelet2CorridorSource — a cxx/C++ wrap of `lanelet2_core`'s
 # boost::serialization deserializer (`fromBinMsg`). Implies `ros2` (the only
@@ -127,7 +127,9 @@ futures = { version = "0.3", optional = true }
 # activated transitively via the now-severed `kirra-verifier` reqwest dep
 # through Cargo feature unification.
 reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"], optional = true }
-serde_json = { version = "1",    optional = true }
+# Untyped control-command parsing is intentionally pure/non-ROS-gated so the
+# B2 fast-loop ingress contract is unit-tested without a sourced ROS toolchain.
+serde_json = "1"
 bytes      = { version = "1",    optional = true }
 
 [build-dependencies]

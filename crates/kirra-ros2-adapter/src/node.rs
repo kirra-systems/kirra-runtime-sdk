@@ -38,6 +38,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+pub use crate::control_ingress::IngressControlCommand;
+use crate::control_ingress::{fail_closed_control_command, parse_control_command_json};
 use crate::corridor::CorridorSource;
 use crate::state::{
     AdaptorState, TrajectoryPoint, TrajectoryVerdict,
@@ -171,18 +173,6 @@ pub struct IngressTrajectory {
     pub points: Vec<TrajectoryPoint>,
 }
 
-/// Control-command ingress payload (envelope over the typed
-/// `autoware_control_msgs::Control` map). The fast-loop task converts
-/// this to `IncomingControl` for the conformance check.
-#[derive(Debug, Clone)]
-pub struct IngressControlCommand {
-    pub asset_id: String,
-    pub linear_velocity_mps: f64,
-    pub steering_angle_rad: f64,
-    /// Wall-clock ms when the command was received.
-    pub stamp_ms: u64,
-}
-
 /// Outgoing control command — the gated command (pass-through on
 /// Accept, MRC on Reject/no-trajectory). Published on `~/output/control_cmd`
 /// as an UNTYPED `autoware_control_msgs/msg/Control` (mirroring the untyped
@@ -290,9 +280,9 @@ pub async fn run_adapter(
     // task hands to `crate::parsing::*` for the kernel-shape conversion.
     //
     // Map + control_cmd remain untyped (the map is a one-shot binary
-    // blob handed to lanelet2_bridge; the control command's parser is
-    // Phase 5+ scope and is currently logged-only via the
-    // `IngressControlCommand` channel).
+    // blob handed to lanelet2_bridge; the control command uses the pure
+    // JSON parser in `control_ingress` so the fast-loop conformance gate
+    // stays ROS-message-codegen neutral).
     let traj_stream = node.subscribe::<r2r::autoware_planning_msgs::msg::Trajectory>(
         "~/input/trajectory",
         ingress_sensor_qos(), // N1: KeepLast(1) + BestEffort — no stale backlog after a stall
@@ -323,7 +313,7 @@ pub async fn run_adapter(
         "~/input/odometry",
         ingress_sensor_qos(), // N1
     )?;
-    let _ctrl_sub = node.subscribe_untyped(
+    let ctrl_stream = node.subscribe_untyped(
         "~/input/control_cmd",
         "autoware_control_msgs/msg/Control",
         ingress_sensor_qos(), // N1: control feedback is also a high-rate fresh-only stream
@@ -358,6 +348,7 @@ pub async fn run_adapter(
     //                        `trajectory_id`).
     //        - Objects     → `state.update_objects(...)` write-replace.
     //        - Odometry    → `state.update_odom(...)` write-replace.
+    //        - Control     → control_tx channel for the fast-loop gate.
     use futures::StreamExt;
 
     // Per-node asset id. Phase 4c is single-asset (one Governor instance
@@ -410,6 +401,58 @@ pub async fn run_adapter(
             }
         }
         tracing::error!("trajectory subscription stream closed — staleness will fire fleet-wide");
+    });
+
+    let ctrl_tx_clone = control_tx.clone();
+    tokio::spawn(async move {
+        let mut s = ctrl_stream;
+        while let Some(item) = s.next().await {
+            let received_fresh_ms = now_ms_fresh();
+            let received_wall_ms = wall_clock_ms();
+            tracing::info!(
+                target: "kirra::ingress",
+                topic = "control_cmd",
+                stamp_ms = received_fresh_ms,
+                "subscription_callback"
+            );
+
+            let envelope = match item {
+                Ok(msg) => match parse_control_command_json(asset_id_str, &msg, received_wall_ms) {
+                    Ok(cmd) => cmd,
+                    Err(reason) => {
+                        tracing::warn!(
+                            reason = reason,
+                            "control_cmd malformed — forwarding fail-closed command to fast loop"
+                        );
+                        fail_closed_control_command(asset_id_str, received_wall_ms)
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "control_cmd untyped decode failed — forwarding fail-closed command to fast loop"
+                    );
+                    fail_closed_control_command(asset_id_str, received_wall_ms)
+                }
+            };
+
+            match ctrl_tx_clone.try_send(envelope) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "control channel FULL — dropping command (fast loop is behind; \
+                         staleness will collapse the next read to MRC)"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        "control channel CLOSED — fast loop is gone; adapter must restart"
+                    );
+                    return;
+                }
+            }
+        }
+        tracing::error!("control_cmd subscription stream closed — fast loop will stop receiving commands");
     });
 
     let obj_state = Arc::clone(&state);
@@ -861,9 +904,9 @@ pub async fn run_adapter(
         }
     });
 
-    // ----- Drop-on-full helpers (used by the subscription callbacks
-    //       once Phase 2 fills them in). Kept here so Phase 1 fixes the
-    //       drop-on-full policy in one place.
+    // ----- Drop-on-full helpers (legacy local helpers kept for tests /
+    //       future refactors). The live trajectory and control drains above
+    //       enforce this same bounded, never-blocking policy inline.
     #[allow(dead_code)]
     fn try_publish_trajectory(tx: &mpsc::Sender<IngressTrajectory>, item: IngressTrajectory) {
         match tx.try_send(item) {
@@ -901,10 +944,8 @@ pub async fn run_adapter(
         }
     }
 
-    // The trajectory_tx / control_tx senders are kept alive by the
-    // subscription callbacks once Phase 2 wires the typed deserializers
-    // in. For Phase 1 the senders just need to outlive their channel
-    // halves so the tasks above don't see Closed immediately.
+    // The drain tasks own clones. Keep the original senders bound so the
+    // compiler makes lifetime/ownership explicit at the end of setup.
     let _ = (trajectory_tx, control_tx);
 
     // ----- Spin loop ----------------------------------------------------
