@@ -64,13 +64,19 @@ use parko_core::{
 };
 
 pub mod angular_bound;
+// R5: the verifier-backed durable sinks are opt-in (feature `verifier-sink`); the
+// governor/comparator core below depends only on `kirra-core`.
+#[cfg(feature = "verifier-sink")]
 pub mod audit_sink;
+#[cfg(feature = "verifier-sink")]
 pub mod clearance_delivery;
 pub mod comparator;
 pub mod diverse;
 pub mod platform;
 pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEAR_VELOCITY_MPS};
+#[cfg(feature = "verifier-sink")]
 pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
+#[cfg(feature = "verifier-sink")]
 pub use audit_sink::{
     select_divergence_sink, select_impact_sink, AuditChainLinkerDivergenceSink, FatalAuditConfig,
     ImpactAuditSink, ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,

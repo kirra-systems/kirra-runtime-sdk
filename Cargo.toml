@@ -111,7 +111,9 @@ proptest = "1"
 # per-connection, so tampering a row written by one connection from a second
 # connection (the audit-chain tamper scenario, SG-010) requires an on-disk file.
 tempfile = "3"
-parko-kirra = { path = "parko/crates/parko-kirra" }
+# R5: the demo-seed test exercises parko-kirra's `VerifierStore`-backed clearance
+# delivery, so it needs the opt-in `verifier-sink` feature.
+parko-kirra = { path = "parko/crates/parko-kirra", features = ["verifier-sink"] }
 # `test-util` enables `#[tokio::test(start_paused = true)]` + `tokio::time::advance`
 # for deterministic time-driven tests (telemetry_watchdog DI seam, S3 / #115).
 # Test-only feature stacked onto the production tokio dependency above; release
