@@ -221,6 +221,7 @@ pub fn spawn_telemetry_watchdog_with_clock(
 // ≥ AV_TELEMETRY_TIMEOUT_MS is marked Untrusted(TELEMETRY_TIMEOUT) and a
 // PostureRecalcTrigger::WatchdogTimeout is sent within one sweep
 // (sg_003_cert_tests + watchdog_di_tests).
+#[cfg(test)]
 pub(crate) fn watchdog_sweep_once(
     app: &Arc<AppState>,
     posture_engine_tx: &PostureEngineSender,
@@ -817,7 +818,7 @@ mod watchdog_di_tests {
         insert_trusted_node(&app, "camera_front", anchor);
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
-            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, now),
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 0, now),
         )));
 
         let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(1);
