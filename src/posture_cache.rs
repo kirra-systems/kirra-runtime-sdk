@@ -128,10 +128,17 @@ impl CachedFleetPosture {
     }
 
 
-    /// Returns true if this entry has exceeded its TTL relative to `now_ms`.
-    // SAFETY: SG9 | REQ: ttl-staleness-detection | TEST: test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale,test_backward_clock_step_is_stale_not_fresh_b11
-    // (≅ AEGIS SG-005. Comparison threshold is the entry's owned ttl_ms.)
-    pub fn is_stale(&self, now_ms: u64) -> bool {
+    /// Returns true if this entry has exceeded `ttl_ms` relative to `now_ms`.
+    ///
+    /// R3: this is the SINGLE staleness authority. Both the entry-owned
+    /// [`is_stale`](Self::is_stale) (which uses the entry's own `ttl_ms`) and the
+    /// explicit-TTL gate `posture_engine_v2::resolve_posture_with_reason` (which
+    /// passes the production `POSTURE_CACHE_TTL_MS`) route through this one
+    /// function, so the backward-clock fail-closed semantics can never drift
+    /// between the two call sites.
+    // SAFETY: SG9 | REQ: ttl-staleness-detection | TEST: test_entry_beyond_ttl_is_stale,test_entry_exactly_at_ttl_boundary_is_stale,test_backward_clock_step_is_stale_not_fresh_b11,test_is_stale_with_ttl_matches_entry_ttl,test_is_stale_with_ttl_backward_clock_fails_closed
+    // (≅ AEGIS SG-005.)
+    pub fn is_stale_with_ttl(&self, now_ms: u64, ttl_ms: u64) -> bool {
         // B11: a BACKWARD clock step (`now_ms < generated_at_ms` — e.g. an NTP step
         // back) makes the entry's age indeterminate. The prior `saturating_sub`
         // clamped that to age 0 and read the entry as FRESH — a fail-OPEN that
@@ -140,9 +147,16 @@ impl CachedFleetPosture {
         // the next posture refresh re-stamps it to clear the condition. A FORWARD
         // jump only inflates the age → stale → already fail-closed.
         match now_ms.checked_sub(self.generated_at_ms) {
-            Some(age) => age >= self.ttl_ms,
+            Some(age) => age >= ttl_ms,
             None => true,
         }
+    }
+
+    /// Returns true if this entry has exceeded its OWN `ttl_ms` relative to
+    /// `now_ms`. Thin wrapper over the single authority
+    /// [`is_stale_with_ttl`](Self::is_stale_with_ttl).
+    pub fn is_stale(&self, now_ms: u64) -> bool {
+        self.is_stale_with_ttl(now_ms, self.ttl_ms)
     }
 }
 
@@ -332,6 +346,43 @@ mod posture_cache_tests {
         // Sanity: a normal forward read of the same entry within TTL is still fresh.
         assert!(!entry.is_stale(10_000 + POSTURE_CACHE_TTL_MS - 1),
             "within-TTL forward read must remain fresh");
+    }
+
+    // R3: `is_stale` must be exactly `is_stale_with_ttl(now, self.ttl_ms)` — the
+    // single staleness authority both the gate and the engine route through.
+    #[test]
+    fn test_is_stale_with_ttl_matches_entry_ttl() {
+        let entry = CachedFleetPosture {
+            posture: FleetPosture::Nominal,
+            generated_at_ms: 1_000,
+            ttl_ms: 5_000,
+            generation: 1,
+        };
+        for now in [1_000u64, 5_999, 6_000, 6_001, 100_000] {
+            assert_eq!(
+                entry.is_stale(now),
+                entry.is_stale_with_ttl(now, entry.ttl_ms),
+                "is_stale must delegate to is_stale_with_ttl with the entry's own ttl"
+            );
+        }
+        // An explicit shorter TTL makes a within-own-ttl entry stale — proving the
+        // engine's `POSTURE_CACHE_TTL_MS` argument actually governs the decision.
+        assert!(!entry.is_stale(3_000), "age 2000 < own ttl 5000 → fresh");
+        assert!(entry.is_stale_with_ttl(3_000, 1_500), "age 2000 >= explicit ttl 1500 → stale");
+    }
+
+    #[test]
+    fn test_is_stale_with_ttl_backward_clock_fails_closed() {
+        let entry = CachedFleetPosture {
+            posture: FleetPosture::Nominal,
+            generated_at_ms: 10_000,
+            ttl_ms: POSTURE_CACHE_TTL_MS,
+            generation: 1,
+        };
+        assert!(
+            entry.is_stale_with_ttl(5_000, POSTURE_CACHE_TTL_MS),
+            "an un-ageable (future-stamped) entry must be stale under any explicit ttl"
+        );
     }
 
     #[test]
