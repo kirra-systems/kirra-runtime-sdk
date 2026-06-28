@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use tokio::time::{interval, Duration};
 
 use crate::clock::{Clock, SystemClock};
+use crate::posture_cache::SharedPostureCache;
 use crate::posture_engine_v2::{PostureEngineSender, PostureRecalcTrigger};
 use crate::verifier::{AppState, NodeTrustState};
 
@@ -124,12 +125,18 @@ pub(crate) struct WatchdogNodeEntry {
 pub fn spawn_telemetry_watchdog(
     app: Arc<AppState>,
     posture_engine_tx: PostureEngineSender,
+    posture_cache: SharedPostureCache,
 ) {
-    // DI seam (S3 / #115): production callers stay untouched; they implicitly
-    // get the real SystemClock. The `_with_clock` form below is the test-only
-    // entry point — see `watchdog_di_tests` for the deterministic VirtualClock
-    // wiring. The body is identical except `now_ms()` becomes `clock.now_ms()`.
-    spawn_telemetry_watchdog_with_clock(app, posture_engine_tx, Arc::new(SystemClock));
+    // DI seam (S3 / #115): production callers get the real SystemClock. The
+    // `_with_clock` form below is the test-only entry point — see
+    // `watchdog_di_tests` for the deterministic VirtualClock wiring. The body is
+    // identical except `now_ms()` becomes `clock.now_ms()`.
+    spawn_telemetry_watchdog_with_clock(
+        app,
+        posture_engine_tx,
+        posture_cache,
+        Arc::new(SystemClock),
+    );
 }
 
 /// Same as [`spawn_telemetry_watchdog`] but takes an injected clock.
@@ -142,15 +149,16 @@ pub fn spawn_telemetry_watchdog(
 pub fn spawn_telemetry_watchdog_with_clock(
     app: Arc<AppState>,
     posture_engine_tx: PostureEngineSender,
+    posture_cache: SharedPostureCache,
     clock: Arc<dyn Clock>,
 ) {
     // C2: a wedged watchdog is fail-OPEN (a silent sensor would never be marked
     // Untrusted), so it is supervised as CRITICAL. On repeated panic the
     // escalation sets the sticky `supervisor_tripped` flag and nudges the
     // (surviving) posture engine to recompute — which then reads the flag and
-    // forces LockedOut. The watchdog holds no cache handle, so it escalates via
-    // the engine; if the engine ITSELF is the dead task, its own supervisor
-    // force-writes the cache directly.
+    // forces LockedOut. The timeout path also holds the posture cache handle so
+    // a recalc-channel failure can force-write LockedOut immediately instead of
+    // serving the pre-timeout cache until TTL expiry.
     let escalate: crate::supervisor::Escalation = {
         let app = Arc::clone(&app);
         let tx = posture_engine_tx.clone();
@@ -169,6 +177,7 @@ pub fn spawn_telemetry_watchdog_with_clock(
         move || {
             let app = Arc::clone(&app);
             let posture_engine_tx = posture_engine_tx.clone();
+            let posture_cache = posture_cache.clone();
             let clock = Arc::clone(&clock);
             async move {
                 let mut sweep_interval = interval(Duration::from_millis(AV_WATCHDOG_SWEEP_MS));
@@ -184,9 +193,10 @@ pub fn spawn_telemetry_watchdog_with_clock(
                 let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
                 loop {
                     sweep_interval.tick().await;
-                    watchdog_sweep_once(
+                    watchdog_sweep_once_inner(
                         &app,
                         &posture_engine_tx,
+                        Some(&posture_cache),
                         clock.as_ref(),
                         &mut node_health,
                         &mut last_node_refresh_ms,
@@ -214,6 +224,24 @@ pub fn spawn_telemetry_watchdog_with_clock(
 pub(crate) fn watchdog_sweep_once(
     app: &Arc<AppState>,
     posture_engine_tx: &PostureEngineSender,
+    clock: &dyn Clock,
+    node_health: &mut HashMap<String, WatchdogNodeEntry>,
+    last_node_refresh_ms: &mut u64,
+) {
+    watchdog_sweep_once_inner(
+        app,
+        posture_engine_tx,
+        None,
+        clock,
+        node_health,
+        last_node_refresh_ms,
+    );
+}
+
+fn watchdog_sweep_once_inner(
+    app: &Arc<AppState>,
+    posture_engine_tx: &PostureEngineSender,
+    posture_cache: Option<&SharedPostureCache>,
     clock: &dyn Clock,
     node_health: &mut HashMap<String, WatchdogNodeEntry>,
     last_node_refresh_ms: &mut u64,
@@ -359,6 +387,13 @@ pub(crate) fn watchdog_sweep_once(
                                 node_id = %entry.node_id,
                                 "Watchdog: failed to send recalc trigger — engine channel full or closed"
                             );
+                            force_watchdog_lockout(
+                                app,
+                                posture_cache,
+                                now,
+                                &entry.node_id,
+                                "watchdog timeout trigger send failed",
+                            );
                         }
                     }
                     Ok(false) => {
@@ -375,6 +410,13 @@ pub(crate) fn watchdog_sweep_once(
                                 node_id = %entry.node_id,
                                 "Watchdog: failed to send missing-node recalc trigger"
                             );
+                            force_watchdog_lockout(
+                                app,
+                                posture_cache,
+                                now,
+                                &entry.node_id,
+                                "missing-node graph recalc trigger send failed",
+                            );
                         }
                     }
                     Err(()) => {
@@ -383,8 +425,13 @@ pub(crate) fn watchdog_sweep_once(
                             "Watchdog: failed to persist telemetry-timeout trust state — \
                              tripping supervisor lockout"
                         );
-                        app.supervisor_tripped
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        force_watchdog_lockout(
+                            app,
+                            posture_cache,
+                            now,
+                            &entry.node_id,
+                            "failed to persist telemetry timeout trust state",
+                        );
                         if let Err(e) =
                             posture_engine_tx.try_send(PostureRecalcTrigger::PeriodicRefresh)
                         {
@@ -408,6 +455,26 @@ pub(crate) fn watchdog_sweep_once(
             );
             entry.warn_logged = true;
         }
+    }
+}
+
+fn force_watchdog_lockout(
+    app: &Arc<AppState>,
+    posture_cache: Option<&SharedPostureCache>,
+    now_ms: u64,
+    node_id: &str,
+    reason: &'static str,
+) {
+    app.supervisor_tripped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(cache) = posture_cache {
+        crate::posture_engine::force_lockout(cache, now_ms);
+    } else {
+        tracing::warn!(
+            node_id = %node_id,
+            reason = reason,
+            "Watchdog: supervisor tripped but no posture cache handle was available to force immediate lockout"
+        );
     }
 }
 
@@ -729,6 +796,58 @@ mod watchdog_di_tests {
             &mut node_health, &mut last_node_refresh_ms);
         assert!(rx.try_recv().is_err(),
             "second sweep on the same ongoing silence must NOT re-fire");
+    }
+
+    /// B4 regression: if the posture-engine trigger channel is full/closed after
+    /// a watchdog timeout is durably recorded, the old fleet posture cache must
+    /// not continue serving until TTL expiry. The watchdog has the shared cache
+    /// handle in production and force-writes LockedOut immediately.
+    #[test]
+    fn test_watchdog_recalc_channel_full_forces_immediate_lockout_b4() {
+        use std::sync::atomic::Ordering;
+        use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
+        use crate::verifier::FleetPosture;
+
+        let anchor: u64 = 10_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "camera_front", anchor);
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, now),
+        )));
+
+        let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(1);
+        tx.try_send(PostureRecalcTrigger::ManualTrigger {
+            operator_id: "fill-channel".to_string(),
+        })
+        .expect("test setup: channel has capacity for one item");
+
+        let mut node_health = prepopulated_node_health("camera_front", anchor);
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once_inner(
+            &app,
+            &tx,
+            Some(&cache),
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
+
+        assert!(
+            app.supervisor_tripped.load(Ordering::SeqCst),
+            "recalc enqueue failure must trip the sticky supervisor lockout flag"
+        );
+        let cached = cache.read().unwrap().as_ref().cloned().unwrap();
+        assert_eq!(
+            cached.posture,
+            FleetPosture::LockedOut,
+            "watchdog recalc enqueue failure must force the shared cache to LockedOut immediately"
+        );
     }
 
     /// SG9 / regression — cold-refresh path COMPLETES without deadlock.
