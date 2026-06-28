@@ -136,16 +136,7 @@ pub fn validate_odom_freshness(
 ) -> bool {
     match odom {
         None => false, // No odom → treat as stale
-        Some(o) => {
-            // NOTE: EgoOdom field access assumes timestamp_ms exists. If not present,
-            // this should be `true` (assume fresh if provided; caller adds field in refactor).
-            // For now, we conservatively return true if odom exists.
-            // When deployed with timestamp_ms field:
-            //   let age_ms = now_ms.saturating_sub(o.timestamp_ms);
-            //   age_ms <= max_age_ms
-            // Placeholder: assume fresh if provided (pre-timestamp-refactor)
-            true
-        }
+        Some(o) => now_ms.saturating_sub(o.stamp_ms) <= max_age_ms,
     }
 }
 
