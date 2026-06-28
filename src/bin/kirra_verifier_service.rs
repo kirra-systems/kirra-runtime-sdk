@@ -1135,6 +1135,7 @@ async fn main() {
         kirra_verifier::telemetry_watchdog::spawn_telemetry_watchdog(
             Arc::clone(&svc_state.app),
             posture_tx.clone(),
+            Arc::clone(&svc_state.posture_cache),
         );
         watchdog_spawned = true;
         tracing::info!(
