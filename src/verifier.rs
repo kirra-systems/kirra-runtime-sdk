@@ -506,6 +506,28 @@ impl AppState {
         (*posture).clone()
     }
 
+    /// Whole-fleet per-node posture in ONE pass with a SHARED `black` memo
+    /// (review P3): O(N+E) instead of the O(N·(N+E)) of calling
+    /// [`calculate_posture`](Self::calculate_posture) once per node (each with a
+    /// fresh memo). Result is IDENTICAL to mapping `calculate_posture` over every
+    /// registered node — the per-node verdict is root-independent, so one shared
+    /// memo only ever reuses fully-resolved verdicts (proven in
+    /// `shared_memo_equivalence_tests`).
+    ///
+    /// The node-id set is snapshotted FIRST (the `nodes` shard guards are dropped
+    /// before any traversal), so the re-entrant `nodes.get(...)` inside the DAG
+    /// walk cannot deadlock against a held `nodes.iter()` guard — the same B1
+    /// hazard the posture-engine recalc already avoids. (The previous
+    /// `/fleet/posture` handler iterated `nodes` while calling `calculate_posture`
+    /// per entry, holding the iter guard across re-entrant gets.)
+    pub fn calculate_fleet_posture(&self) -> Vec<FleetNodePosture> {
+        let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
+        let mut black: HashMap<Arc<str>, Arc<FleetNodePosture>> = HashMap::new();
+        ids.iter()
+            .map(|id| self.calculate_posture_memoized(id.as_str(), &mut black))
+            .collect()
+    }
+
     fn recursive_calculate(
         &self,
         node_id: &str,
@@ -979,6 +1001,36 @@ mod shared_memo_equivalence_tests {
         assert_eq!(app.calculate_posture("d").propagated_status, FleetPosture::LockedOut,
             "d inherits c's LockedOut");
         assert_shared_equals_per_call(&app);
+    }
+
+    /// M2: `calculate_fleet_posture` (the shared-memo whole-fleet pass that the
+    /// `/fleet/posture` handler now uses) must yield, for every registered node,
+    /// the SAME `FleetNodePosture` as the per-node `calculate_posture`, and cover
+    /// exactly the registered id set.
+    #[test]
+    fn calculate_fleet_posture_matches_per_node_m2() {
+        let app = app();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into()))).unwrap();
+        app.persist_and_insert_deps("b", vec!["a".into(), "x".into()]).unwrap();
+
+        let fleet = app.calculate_fleet_posture();
+        assert_eq!(fleet.len(), 3, "one posture per registered node");
+
+        for fp in &fleet {
+            let per_node = app.calculate_posture(fp.node_id.as_ref());
+            assert_eq!(
+                format!("{fp:?}"),
+                format!("{per_node:?}"),
+                "fleet entry must equal per-node calculate_posture for {}",
+                fp.node_id
+            );
+        }
+
+        let mut got: Vec<String> = fleet.iter().map(|p| p.node_id.to_string()).collect();
+        got.sort();
+        assert_eq!(got, vec!["a".to_string(), "b".to_string(), "x".to_string()]);
     }
 
     #[test]
