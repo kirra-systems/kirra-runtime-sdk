@@ -142,7 +142,7 @@ pub fn objects_are_equivalent_extended(
     let pos_dx = pos1_x - pos2_x;
     let pos_dy = pos1_y - pos2_y;
     let pos_dist = (pos_dx * pos_dx + pos_dy * pos_dy).sqrt();
-    if pos_dist > cfg.position_tol_m && pos_dist.is_finite() {
+    if !pos_dist.is_finite() || pos_dist > cfg.position_tol_m {
         divergence_count += 1;
         last_divergence = EquivalenceCheckResult::PositionDivergence;
     }
