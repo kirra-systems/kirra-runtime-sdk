@@ -72,15 +72,35 @@ mechanism gaps rather than faked.
 | SG-013 | B | **CLOSED** | `tests/cert_003_rtm_gap_stubs.rs::test_safety_goal_sg_013_recovery_hysteresis_streak_and_window` (external — the whole closure is public): 4 healthy reports → `StreakBuilding{4}`; 5th in-window → `RecoveryConfirmed{5}`; >10s gap → `WindowExpired` then rebuild-to-4 (no confirm); injected unhealthy report (the production `reset_recovery_streak` path) → reset, rebuild-to-4 (no confirm). Time injected via explicit `now_ms`. |
 | SG-015 | B | **CLOSED** | `src/security.rs` mod `sg_015_admin_token_tests`: the env-check is factored into pure `admin_token_ok(provided, configured)` (uses `constant_time_compare`, never `==`); `require_admin_token` calls it while preserving the 503 (configured absent/empty) vs 401 (provided absent/mismatch) mapping. Truth table tested in-crate without env-var mutation (INVARIANT #13). |
 
-Net: SG-009, SG-013, SG-015 fully CLOSED; SG-010 tamper-detection CLOSED with an
-explicit startup-verification sub-gap; SG-012 is an open mechanism gap. Each
-non-pointer mechanism carries a `// Verifies: SG-NNN` tag. The two open items
-are mechanism (behavior) changes, deliberately excluded from this test-only,
-no-behavior-change increment.
+Net: SG-009, SG-012, SG-013, SG-015 fully CLOSED; SG-010 tamper-detection CLOSED
+with an explicit startup-verification sub-gap. Each non-pointer mechanism
+carries a `// Verifies: SG-NNN` tag. The remaining SG-010 startup-verification
+item is a behavior change (verify-and-abort before listener bind), deliberately
+excluded from the original test-only, no-behavior-change increment.
+
+## Update — M6 RTM stub cleanup (2026-06-28)
+
+The old `#[ignore]` / `todo!()` placeholders in
+`tests/cert_003_rtm_gap_stubs.rs` have been removed for implemented goals. The
+file now contains executable integration tests where the relevant API is public
+(for example SG-007 causal-log propagation and SG-013 recovery hysteresis), and
+comment-only pointers where the evidence must live in-crate or in-bin because it
+drives private seams (for example SG-003, SG-008, SG-009, SG-010, SG-015). SG-012
+is no longer a mechanism gap: dedicated and unified DNP3 handlers both write the
+mandatory audit record before returning an admitted broadcast verdict and block
+the broadcast when the mandatory audit write is unavailable.
+
+This report's original "Gaps" and "Recommendation" sections below are retained
+as historical baseline material from the 2026-05/06 CERT-003 investigation; they
+no longer describe the live test inventory.
 
 ## Gaps — goals without any test coverage
 
-After CERT-004 these **8** safety goals (down from 11) still have no real test in the codebase. SG-006, SG-014, and SG-016 were closed and now live in `tests/fault_injection.rs`. The remaining 8 stubs are in `tests/cert_003_rtm_gap_stubs.rs`, with infrastructure-required notes added for SG-010, SG-013, and SG-015.
+**Historical baseline (superseded by the updates above).** After CERT-004 these
+**8** safety goals (down from 11) still had no real test in the codebase.
+SG-006, SG-014, and SG-016 were closed and lived in `tests/fault_injection.rs`.
+The remaining 8 placeholders were in `tests/cert_003_rtm_gap_stubs.rs`, with
+infrastructure-required notes added for SG-010, SG-013, and SG-015.
 
 | Goal | ASIL | Description (one line) | Missing RTM-named tests |
 |---|---|---|---|
@@ -114,7 +134,9 @@ These 5 goals have one named test in the codebase but the other two RTM-required
 
 ## Recommendation
 
-The RTM in its current state is **not defensible for an ASIL-D certification assessment.** Two distinct deficiencies that must be closed in this order:
+**Historical recommendation (superseded by subsequent CERT-003/M6 work).** The
+RTM in its then-current state was **not defensible for an ASIL-D certification
+assessment**. Two distinct deficiencies had to be closed in this order:
 
 1. **Implement the 11 missing zero-coverage tests first** (highest priority — most are ASIL B/C/D safety properties with no automated check today). Test stubs are landed in `tests/cert_003_rtm_gap_stubs.rs`; replace each `todo!()` body with the verification logic per the RTM's TR-N description for that goal. ASIL-D goals (SG-003, 006, 007, 008) should be implemented before ASIL B/C ones.
 2. **Implement the 2nd and 3rd test for each single-coverage goal** (SG-001, 002, 004, 005, 011). The existing one-test-per-goal pattern provides no defense against test mutation or deletion.
