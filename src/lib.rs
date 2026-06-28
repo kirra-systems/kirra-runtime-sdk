@@ -63,6 +63,9 @@ pub mod wcet_gate;
 pub mod traceability_gate;
 pub mod federation;
 pub mod federation_reconciliation;
+// R2: `impl FleetTrustStore for VerifierStore` — the narrow durable seam the QM
+// fleet transport drives instead of depending on this crate's `VerifierStore`.
+pub mod fleet_trust_store;
 pub mod protocol_adapter;
 pub mod adapters;
 pub mod fabric;

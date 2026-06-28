@@ -1986,6 +1986,8 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "kirra-core",
+ "kirra-fleet-types",
  "kirra-verifier",
  "rand 0.8.6",
  "serde",
@@ -1993,6 +1995,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "zenoh",
+]
+
+[[package]]
+name = "kirra-fleet-types"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "kirra-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2103,6 +2116,7 @@ dependencies = [
  "kirra-capture-schema",
  "kirra-contract-channel",
  "kirra-core",
+ "kirra-fleet-types",
  "parko-core",
  "parko-kirra",
  "proptest",

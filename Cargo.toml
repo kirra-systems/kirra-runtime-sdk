@@ -13,7 +13,7 @@
 # That separation keeps the ML inference pipeline (parko-core / parko-onnx /
 # parko-kirra) independent of the safety-kernel build.
 [workspace]
-members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-trajectory", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
+members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
 resolver = "2"
 
 [package]
@@ -61,6 +61,11 @@ cyclonedds = []
 # deps (de-monolith Stage 7) so `crate::capture` / `crate::kinematics_sim` /
 # `crate::gateway::perception_monitor` keep resolving as thin re-export shims.
 kirra-core = { path = "crates/kirra-core", features = ["capture"] }
+# R2: the lean fleet-lane trust/wire types (federation v1/v2 + verification +
+# the FleetTrustStore seam). The verifier re-exports `federation` /
+# `federation_reconciliation` from here and implements `FleetTrustStore` for
+# `VerifierStore` (src/fleet_trust_store.rs).
+kirra-fleet-types = { path = "crates/kirra-fleet-types" }
 # Clause 2 cross-partition boundary contract (ADR-0006 / HVCHAN-001): the frozen
 # GovernorContractView + odd/even seqlock. no_std, zero-dep; the release-token
 # binding (src/governor_release.rs) reuses THIS crate's canonical image plus the
