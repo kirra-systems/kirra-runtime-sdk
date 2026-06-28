@@ -30,12 +30,15 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use kirra_verifier::federation_reconciliation::{
+// R2: the QM fleet transport depends only on the lean fleet-lane types + the
+// `FleetTrustStore` seam (+ kirra-core for FleetPosture) — NOT the heavy
+// `kirra-verifier` service crate. The verifier implements `FleetTrustStore` for
+// its `VerifierStore`; the ingest functions below are generic over that trait.
+use kirra_core::FleetPosture;
+use kirra_fleet_types::federation_reconciliation::{
     evaluate_federated_report_v2, verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
-use kirra_verifier::key_registry::{KeyRegistry, KeyRole};
-use kirra_verifier::verifier::FleetPosture;
-use kirra_verifier::verifier_store::VerifierStore;
+use kirra_fleet_types::store::{FleetKeyRole, FleetTrustStore};
 
 pub mod transport;
 
@@ -254,13 +257,13 @@ pub fn accept_report(
 /// store. Fail-closed: an unresolvable principal (unknown controller / malformed
 /// stored key) is a counted [`RejectReason::BadSignature`] reject — the report is
 /// untrusted, never accepted by default.
-pub fn accept_report_from_registry(
+pub fn accept_report_from_registry<S: FleetTrustStore>(
     bytes: &[u8],
     principal_id: &str,
-    registry: &KeyRegistry,
+    store: &S,
     counter: &RejectionCounter,
 ) -> Result<FederatedTrustReportV2, RejectReason> {
-    let key_b64 = match registry.resolve_ed25519_pubkey(principal_id, KeyRole::FederationController) {
+    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController) {
         Ok(Some(k)) => B64.encode(k),
         _ => {
             counter.record(&RejectReason::BadSignature);
@@ -280,8 +283,8 @@ pub fn accept_report_from_registry(
 /// before ([`RejectReason::Replayed`]). On the explicitly-untrusted carrier this is
 /// what stops a captured validly-signed report from replaying forever — trust is
 /// the signature + freshness + single-use nonce, never the carrier.
-pub fn ingest_report(
-    store: &mut VerifierStore,
+pub fn ingest_report<S: FleetTrustStore>(
+    store: &S,
     bytes: &[u8],
     public_key_b64: &str,
     counter: &RejectionCounter,
@@ -343,15 +346,14 @@ pub fn ingest_report(
 /// report path. Resolves the controller's key from the unified [`KeyRegistry`]
 /// (grounded in a STORED registration), then delegates to [`ingest_report`].
 /// Fail-closed: an unresolvable principal is a counted [`RejectReason::BadSignature`].
-pub fn ingest_report_from_registry(
-    store: &mut VerifierStore,
+pub fn ingest_report_from_registry<S: FleetTrustStore>(
+    store: &S,
     bytes: &[u8],
     principal_id: &str,
-    registry: &KeyRegistry,
     counter: &RejectionCounter,
     now_ms: u64,
 ) -> Result<FederatedTrustReportV2, RejectReason> {
-    let key_b64 = match registry.resolve_ed25519_pubkey(principal_id, KeyRole::FederationController) {
+    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController) {
         Ok(Some(k)) => B64.encode(k),
         _ => {
             let r = RejectReason::BadSignature;
@@ -494,8 +496,8 @@ pub fn verify_clearance_grant(grant: &SignedClearanceGrant, public_key_b64: &str
 /// verify-AND-consume step; a nonce already on record means the same grant was
 /// ingested before ([`RejectReason::Replayed`]). The burn happens BEFORE the store
 /// write so a replay can never land a duplicate PENDING row.
-pub fn ingest_clearance_grant(
-    store: &mut VerifierStore,
+pub fn ingest_clearance_grant<S: FleetTrustStore>(
+    store: &mut S,
     grant: &SignedClearanceGrant,
     public_key_b64: &str,
     counter: &RejectionCounter,
@@ -569,23 +571,23 @@ pub fn ingest_clearance_grant(
 /// a scoped immutable borrow that ends BEFORE the mutating store path. The `&str`
 /// variant remains the test/spike path. Fail-closed: an unresolvable signer is a
 /// counted [`RejectReason::BadSignature`] reject.
-pub fn ingest_clearance_grant_from_registry(
-    store: &mut VerifierStore,
+pub fn ingest_clearance_grant_from_registry<S: FleetTrustStore>(
+    store: &mut S,
     grant: &SignedClearanceGrant,
     principal_id: &str,
     counter: &RejectionCounter,
     now_ms: u64,
 ) -> Result<i64, RejectReason> {
     let key_b64 = {
-        let registry = KeyRegistry::new(store);
-        match registry.resolve_ed25519_pubkey(principal_id, KeyRole::FleetGrant) {
+        // Scoped immutable borrow for key lookup; it ends before the mutating
+        // `ingest_clearance_grant` (which burns the nonce + writes the row).
+        match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FleetGrant) {
             Ok(Some(k)) => B64.encode(k),
             _ => {
                 counter.record(&RejectReason::BadSignature);
                 return Err(RejectReason::BadSignature);
             }
         }
-        // the registry's immutable borrow of `store` ends here
     };
     ingest_clearance_grant(store, grant, &key_b64, counter, now_ms)
 }
@@ -593,6 +595,9 @@ pub fn ingest_clearance_grant_from_registry(
 #[cfg(test)]
 mod core_tests {
     use super::*;
+    // R2: the reference `FleetTrustStore` impl used to drive the generic ingest
+    // functions in tests (a DEV-dependency; not in the production build graph).
+    use kirra_verifier::verifier_store::VerifierStore;
     use ed25519_dalek::SigningKey;
 
     fn keypair() -> (SigningKey, String) {
@@ -606,7 +611,7 @@ mod core_tests {
     /// A genuinely signed report, built the way the verifier signs (over the
     /// canonical v2 payload).
     fn signed_report(sk: &SigningKey, asset: &str, gen: Option<u64>) -> FederatedTrustReportV2 {
-        use kirra_verifier::federation_reconciliation::canonical_federation_payload_v2;
+        use kirra_fleet_types::federation_reconciliation::canonical_federation_payload_v2;
         let mut report = FederatedTrustReportV2 {
             source_controller_id: "controller-A".into(),
             asset_id: asset.into(),

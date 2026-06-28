@@ -5,8 +5,8 @@
 
 use zenoh::Session;
 
-use kirra_verifier::federation_reconciliation::FederatedTrustReportV2;
-use kirra_verifier::verifier_store::VerifierStore;
+use kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2;
+use kirra_fleet_types::store::FleetTrustStore;
 
 use crate::{
     accept_report, encode_report, ingest_clearance_grant, key_clearance_grant, key_posture,
@@ -116,9 +116,9 @@ impl GrantIngest {
 
     /// Receive the next grant, verify it against `public_key_b64`, and on success
     /// write it to `store` via the Phase-A path. Returns the store rowid.
-    pub async fn recv_and_ingest(
+    pub async fn recv_and_ingest<S: FleetTrustStore>(
         &self,
-        store: &mut VerifierStore,
+        store: &mut S,
         public_key_b64: &str,
         counter: &RejectionCounter,
         now_ms: u64,
@@ -142,9 +142,12 @@ impl GrantIngest {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+    // R2: reference `FleetTrustStore` impl for the in-process round-trip tests
+    // (DEV-dependency only).
+    use kirra_verifier::verifier_store::VerifierStore;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
-    use kirra_verifier::federation_reconciliation::canonical_federation_payload_v2;
+    use kirra_fleet_types::federation_reconciliation::canonical_federation_payload_v2;
 
     use crate::{sign_clearance_grant, key_trust_report};
 

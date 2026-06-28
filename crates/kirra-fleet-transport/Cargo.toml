@@ -22,11 +22,16 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
-# The SDK is the source of truth for the fleet payload types + their verification:
-# FederatedTrustReportV2 / verify_federated_report_signature_v2 / FleetPosture and
-# the Phase-A clearance-grant store path. This crate adds NO new payload trust
-# logic of its own beyond a grant envelope that reuses the same Ed25519 pattern.
-kirra-verifier = { path = "../.." }
+# R2: the lean fleet-lane types + the `FleetTrustStore` persistence seam — the
+# source of truth for the fleet payload types + their verification
+# (FederatedTrustReportV2 / verify_federated_report_signature_v2) and the narrow
+# durable trust operations (nonce burn / clearance-grant persist / key lookup).
+# This crate no longer depends on the heavy `kirra-verifier` service crate in its
+# normal build; the ingest functions are generic over `FleetTrustStore`, which the
+# verifier implements for its `VerifierStore` (used as the impl in tests).
+kirra-fleet-types = { path = "../kirra-fleet-types" }
+# FleetPosture (the wire-shared posture enum) lives in the lean foundation.
+kirra-core = { path = "../kirra-core" }
 
 # The fleet carrier. default-features OFF (no TLS/QUIC — see the manifest note);
 # `transport_tcp` = the localhost peer transport; `unstable` only for the explicit
@@ -49,6 +54,11 @@ base64 = "0.22"
 rand = "0.8"
 
 [dev-dependencies]
+# The reference `FleetTrustStore` impl is the verifier's SQLite `VerifierStore`;
+# the in-process round-trip tests drive the generic ingest functions through it.
+# It is a DEV-dependency only — the production transport build stays off the
+# verifier service tree (R2).
+kirra-verifier = { path = "../.." }
 # zenoh is async; the in-process two-session round-trip tests need a runtime.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"

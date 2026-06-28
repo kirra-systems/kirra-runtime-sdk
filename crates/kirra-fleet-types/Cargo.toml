@@ -1,0 +1,38 @@
+# crates/kirra-fleet-types/Cargo.toml
+#
+# R2 — the lean FLEET-LANE wire + trust types, extracted from the heavy
+# `kirra-verifier` root crate so the QM fleet transport (`kirra-fleet-transport`,
+# ADR-0007) depends on the shared payload/verification contract WITHOUT pulling
+# the verifier service tree (axum / tokio / rusqlite / reqwest).
+#
+# Contents:
+#   - `federation`               — v1 `FederatedTrustReport` + canonical payload,
+#                                  Ed25519 verify, freshness/replay evaluation
+#   - `federation_reconciliation`— v2 `FederatedTrustReportV2` + verify/evaluate +
+#                                  generation-ordered reconciliation
+#   - `store`                    — the `FleetTrustStore` trait: the NARROW persistence
+#                                  seam (nonce burn + clearance-grant persist + fleet
+#                                  key lookup) the transport needs, implemented by the
+#                                  verifier's `VerifierStore` (so the SQLite + audit
+#                                  chain stays in the verifier, not here).
+#
+# `kirra-verifier` depends on this crate and RE-EXPORTS `federation` /
+# `federation_reconciliation` so every existing `kirra_verifier::federation*::*`
+# path (service binary, store, tests) resolves unchanged.
+
+[package]
+name = "kirra-fleet-types"
+version = "0.1.0"
+edition = "2021"
+description = "Lean fleet-lane trust/wire types for Kirra — federated trust reports (v1/v2), Ed25519 verification, freshness, and the FleetTrustStore persistence seam. No service/DB deps."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# FleetPosture (the wire-shared posture enum) lives in the lean foundation.
+kirra-core = { path = "../kirra-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "2" }
