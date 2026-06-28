@@ -394,6 +394,17 @@ fn watchdog_sweep_once_inner(
                     "Watchdog: sensor node silent beyond timeout — marking Untrusted"
                 );
 
+                // Q4: a timed-out node must earn a FULL recovery-streak window
+                // again before it can be re-trusted — otherwise a node that had
+                // accumulated (threshold - 1) healthy reports before going silent
+                // would re-trust on its very first report after recovery, bypassing
+                // the hysteresis. Disk-first (store write before the trust mutation
+                // below), and `*_preserving_telemetry` so the timeout does NOT
+                // fabricate a fresh `last_telemetry_ms` (no report actually arrived).
+                let _ = app
+                    .store
+                    .with(|store| store.reset_recovery_streak_preserving_telemetry(&entry.node_id));
+
                 match app.mark_node_untrusted(&entry.node_id, "TELEMETRY_TIMEOUT", now) {
                     Ok(true) => {
                         let trigger = PostureRecalcTrigger::WatchdogTimeout {
@@ -932,6 +943,64 @@ mod watchdog_di_tests {
             }
             other => panic!("expected WatchdogTimeout, got {other:?}"),
         }
+    }
+
+    /// Q4 regression: a watchdog timeout must RESET the node's recovery streak
+    /// (so a node that had accumulated nearly a full streak before going silent
+    /// cannot re-trust on its first post-recovery report), WITHOUT fabricating a
+    /// fresh `last_telemetry_ms` (no report arrived).
+    #[test]
+    fn test_watchdog_timeout_resets_recovery_streak_preserving_telemetry_q4() {
+        let anchor: u64 = 12_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 250;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        // Register the AV row (last_telemetry_ms = anchor) and drive the recovery
+        // streak up to threshold-1 = 4 (each increment re-stamps last_telemetry_ms
+        // to `anchor`, the same value).
+        app.store.with(|s| {
+            s.register_av_subsystem_meta("lidar_front", "Perception", "LDR-1", 0.70, anchor)
+                .expect("register av meta");
+            for _ in 0..(crate::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD - 1) {
+                s.increment_recovery_streak("lidar_front", anchor)
+                    .expect("increment streak");
+            }
+        });
+        assert_eq!(
+            app.store.with(|s| s.load_recovery_streak("lidar_front").unwrap()).0,
+            crate::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD - 1,
+            "precondition: streak is threshold-1"
+        );
+        insert_trusted_node(&app, "lidar_front", anchor);
+
+        let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = prepopulated_node_health("lidar_front", anchor);
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once(
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
+
+        // Node is untrusted, streak is cleared, and the telemetry timestamp is
+        // PRESERVED (the timeout did not invent a fresh last-seen).
+        assert_eq!(
+            app.nodes.get("lidar_front").unwrap().status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+        );
+        let (count, start) = app.store.with(|s| s.load_recovery_streak("lidar_front").unwrap());
+        assert_eq!(count, 0, "watchdog timeout must reset the recovery streak");
+        assert_eq!(start, 0, "watchdog timeout must clear the streak-start stamp");
+        assert_eq!(
+            app.store.with(|s| s.get_last_telemetry_timestamp("lidar_front").unwrap()),
+            anchor,
+            "watchdog timeout must NOT fabricate a fresh last_telemetry_ms"
+        );
     }
 
     /// B4 regression (transient): a FULL posture-engine channel after a watchdog
