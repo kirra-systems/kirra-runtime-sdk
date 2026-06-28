@@ -19,9 +19,9 @@ use kirra_planner::{
     mick_drive_once, EgoState, GeometricPlanner, Goal, MickBrain, MickError, MickIntent, PlanInput,
     PlanOutput, Planner, Pose, ProposalKind, TrajectoryPoint, WorldContext,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use kirra_core::FleetPosture;
 
 const TICK_DT: f64 = 0.5; // seconds advanced per loop tick

@@ -18,8 +18,8 @@ use kirra_planner::{
     LineType, MickIntent, PerceivedObject, PlanInput, PlanOutput, Planner, Pose, TrajectoryVerdict,
     TurnDirection,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// A LEFT-turn junction whose approach is a WIDE two-lane carriageway with a crossable
 /// (Broken) divider — wide and long enough for the planner's overtake-based route-around to

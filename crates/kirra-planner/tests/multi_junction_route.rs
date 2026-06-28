@@ -18,9 +18,9 @@ use kirra_planner::{
     EgoState, FastLoopTracker, FleetPosture, GeometricPlanner, Goal, Lane, LaneCorridor, LaneEdge,
     LaneGraph, LineType, MickDriver, MickIntent, PlanInput, Pose, ScriptedBrain, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::state::PerceivedObject;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::state::PerceivedObject;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const FAST_DT_S: f64 = 0.1;
 const FAST_DT_MS: u64 = 100;

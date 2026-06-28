@@ -15,8 +15,8 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneControl, LaneEdge,
     LaneGraph, LineType, MickIntent, Occluder, PlanInput, Pose, ProposalKind, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// A single straight approach lane (0,0)→(40,0) east; the junction conflict sits at its
 /// terminus (x=40). `sight` optionally flags it as occluded with that assured-clear distance.

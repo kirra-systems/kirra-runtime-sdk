@@ -15,8 +15,8 @@ use kirra_planner::{
     LineType, MickIntent, PlanInput, PlanOutput, Pose, ProposalKind, TrajectoryVerdict,
     TurnDirection,
 };
-use kirra_ros2_adapter::corridor::Point;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::Point;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const R: f64 = 12.0;
 const HALF: f64 = 3.0;
@@ -57,7 +57,7 @@ fn junction() -> LaneGraph {
 
 /// Ground a `TurnAt` from the approach near the junction mouth. `goal` is the exit-lane
 /// target the planner drives toward along the materialized route corridor.
-fn ground_turn<'a>(g: &'a LaneGraph, ego_corr: &'a dyn kirra_ros2_adapter::corridor::CorridorSource, goal: Pose, dir: TurnDirection) -> PlanOutput {
+fn ground_turn<'a>(g: &'a LaneGraph, ego_corr: &'a dyn kirra_trajectory::corridor::CorridorSource, goal: Pose, dir: TurnDirection) -> PlanOutput {
     let input = PlanInput {
         ego: EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 2.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
         goal: Goal { target: goal },
@@ -128,7 +128,7 @@ fn a_turn_with_no_such_branch_fails_closed_to_hold() {
 #[test]
 fn a_turn_without_a_lane_graph_fails_closed_to_hold() {
     // No lane graph supplied → TurnAt cannot resolve → HOLD (the loop's safe default).
-    let corr = kirra_ros2_adapter::corridor::MockCorridorSource::straight_5m_half_width(100.0);
+    let corr = kirra_trajectory::corridor::MockCorridorSource::straight_5m_half_width(100.0);
     let input = PlanInput {
         ego: EgoState { pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 2.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
         goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },

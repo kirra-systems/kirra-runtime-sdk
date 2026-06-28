@@ -20,7 +20,7 @@ use kirra_planner::{
 };
 // Re-exported by kirra-planner from the locked upstream contract.
 use kirra_planner::{FleetPosture, Pose, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use kirra_taj::{LaserScan, TajConfig, TajPhaseA};
 use std::f64::consts::PI;
 
@@ -170,12 +170,12 @@ fn route_around_in_corridor_object_admits() {
     let scan = corridor_scan(5.0, None); // clear 5 m corridor (walls only)
     let mut perception = taj.process(&scan, 2);
     // A detected obstacle off-center in the lane (not part of the corridor walls).
-    perception.objects.push(kirra_ros2_adapter::state::PerceivedObject {
+    perception.objects.push(kirra_trajectory::state::PerceivedObject {
         id: 99,
-        pos: kirra_ros2_adapter::corridor::Point { x_m: 20.0, y_m: 3.0 },
+        pos: kirra_trajectory::corridor::Point { x_m: 20.0, y_m: 3.0 },
         velocity_mps: 0.0,
         heading_rad: 0.0,
-        vel: kirra_ros2_adapter::corridor::Point { x_m: 0.0, y_m: 0.0 },
+        vel: kirra_trajectory::corridor::Point { x_m: 0.0, y_m: 0.0 },
     });
 
     let input = PlanInput {

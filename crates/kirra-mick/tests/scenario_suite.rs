@@ -18,9 +18,9 @@ use kirra_planner::{
     LaneControl, LaneEdge, LaneGraph, LineType, MickDecisionRecord, MickEvalSummary, MickIntent,
     Occluder, PlanInput, PlanOutput, Pose, SignalState, TurnDirection,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const R: f64 = 12.0; // turn radius (gentle enough to admit)
 const APPROACH_END: f64 = 30.0; // ego lane (0,0)→(30,0); the conflict line / stop line is here

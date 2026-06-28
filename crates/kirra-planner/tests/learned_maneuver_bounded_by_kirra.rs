@@ -16,9 +16,9 @@ use kirra_planner::{
     plan_for_intent, EgoState, Goal, LearnedManeuverPlanner, MickIntent, PlanInput, PlanOutput,
     Pose, Teacher,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use kirra_core::FleetPosture;
 
 const SEED: u64 = 0xC0FFEE;

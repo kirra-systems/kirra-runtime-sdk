@@ -20,9 +20,9 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind, TrajectoryPoint,
 };
-use kirra_ros2_adapter::corridor::{MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const DT_MS: u64 = 200; // 5 Hz slow loop
 const DT_S: f64 = 0.2;

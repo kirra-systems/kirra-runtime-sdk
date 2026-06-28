@@ -19,8 +19,8 @@ use kirra_planner::{
     EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType, MotionState,
     PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::Point;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::Point;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// A quarter-circle arc (n+1 points) sweeping +π/2 about `(cx, cy)` from `start` — a smooth
 /// LEFT-turn centerline.
@@ -48,7 +48,7 @@ const R: f64 = 12.0;
 
 /// The ego committed to the turn, low on the arc (heading part-way between east and north),
 /// driving toward a goal up the exit lane along the stitched route corridor.
-fn mid_turn_world<'a>(map: &'a dyn kirra_ros2_adapter::corridor::CorridorSource, objects: &'a [PerceivedObject], motion: &'a [MotionState]) -> PlanInput<'a> {
+fn mid_turn_world<'a>(map: &'a dyn kirra_trajectory::corridor::CorridorSource, objects: &'a [PerceivedObject], motion: &'a [MotionState]) -> PlanInput<'a> {
     PlanInput {
         ego: EgoState { pose: Pose { x_m: 23.5, y_m: 1.0, heading_rad: 0.4 }, linear_x_mps: 3.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
         goal: Goal { target: Pose { x_m: 20.0 + R, y_m: R + 16.0, heading_rad: std::f64::consts::FRAC_PI_2 } },
@@ -71,7 +71,7 @@ fn mid_turn_world<'a>(map: &'a dyn kirra_ros2_adapter::corridor::CorridorSource,
     }
 }
 
-fn verdict(traj: &[kirra_planner::TrajectoryPoint], map: &dyn kirra_ros2_adapter::corridor::CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
+fn verdict(traj: &[kirra_planner::TrajectoryPoint], map: &dyn kirra_trajectory::corridor::CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
     validate_trajectory_slow(traj, map, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
 }
 fn admitted(v: TrajectoryVerdict) -> bool {

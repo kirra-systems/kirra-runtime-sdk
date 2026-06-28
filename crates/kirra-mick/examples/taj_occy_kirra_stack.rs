@@ -30,9 +30,9 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind,
 };
-use kirra_ros2_adapter::corridor::Point;
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::Point;
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use kirra_taj::{LaserScan, TajConfig, TajPhaseA};
 use std::f64::consts::PI;
 

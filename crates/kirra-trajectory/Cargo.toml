@@ -1,0 +1,39 @@
+# crates/kirra-trajectory/Cargo.toml
+#
+# R1 — the lean trajectory CHECKER, extracted from `kirra-ros2-adapter` so the
+# doer side (kirra-planner / kirra-taj / kirra-mick) and any host test can depend
+# on the *contract + verdict* without pulling the ROS 2 integration crate (r2r /
+# tokio / cxx / lanelet2). This crate is ROS-free and async-free.
+#
+# Contents (relocated verbatim from the adapter):
+#   - `validation`            — validate_trajectory_slow{,_capped} + check_command_conforms
+#   - `prediction`            — multi-modal predictive-RSS mode producer
+#   - `perception_redundancy` — True-Redundancy divergence cap
+#   - `config`                — VehicleConfig (bridge to kirra-core kinematics/containment)
+#   - `state`                 — AcceptedTrajectory / EgoOdom contract types (+ kirra-core
+#                               trajectory re-exports); the ROS runtime `AdaptorState`
+#                               STAYS in the adapter.
+#
+# `kirra-ros2-adapter` now depends on this crate and RE-EXPORTS its modules so every
+# existing `kirra_ros2_adapter::{validation,prediction,perception_redundancy,config,state}`
+# path (including the ros2/lanelet2-gated node code) resolves unchanged.
+
+[package]
+name = "kirra-trajectory"
+version = "0.1.0"
+edition = "2021"
+description = "Lean trajectory checker for the Kirra stack — containment + per-pose kinematics + RSS + predictive RSS, over kirra-core types. ROS-free, async-free."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The lean foundation: trajectory/perception/corridor types, the SG2 containment
+# checker, the kinematics-contract talisman, frame-integrity, FleetPosture.
+kirra-core = { path = "../kirra-core" }
+# RSS longitudinal/lateral/opposite-direction safe-distance kernels.
+parko-core = { path = "../../parko/crates/parko-core" }
+# Stack-resident predicted-sample buffers in `prediction` (no per-mode heap Vec).
+smallvec = "1"
+# `config` logs a one-time warning when no ODD speed cap is configured.
+tracing = "0.1"

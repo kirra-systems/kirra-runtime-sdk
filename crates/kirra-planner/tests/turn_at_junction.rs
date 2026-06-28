@@ -18,8 +18,8 @@ use kirra_planner::{
     EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType, PlanInput,
     Planner, Pose, ProposalKind, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::Point;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::Point;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// A quarter-circle arc (n+1 points) sweeping +π/2 about `(cx, cy)` from `start_angle` —
 /// a smooth LEFT-turn centerline.

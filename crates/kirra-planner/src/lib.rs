@@ -12,7 +12,7 @@
 //! that the **existing checker** consumes — it does not check, and it does not
 //! redefine the checker's types.
 //!
-//! - The checker entry is [`kirra_ros2_adapter::validate_trajectory_slow`] (the
+//! - The checker entry is [`kirra_trajectory::validate_trajectory_slow`] (the
 //!   **#131** per-trajectory containment path), which consumes `&[TrajectoryPoint]`.
 //!   So [`PlanOutput`] carries exactly `Vec<TrajectoryPoint>` — the same type,
 //!   imported, never redefined.
@@ -108,7 +108,7 @@ enum LimitKind {
 
 /// Ego world-state the planner consumes.
 ///
-/// `// PHASE-0 LOCKED` — derived from `kirra_ros2_adapter::state::EgoOdom`
+/// `// PHASE-0 LOCKED` — derived from `kirra_trajectory::state::EgoOdom`
 /// (`linear_x_mps`, `yaw_rate_rads`, `stamp_ms`), plus the ego `pose`. The pose is
 /// **integrator / localization sourced** (the SDK localization-integrity gate,
 /// AOU-LOCALIZATION-001, owns its trustworthiness — not this crate).
@@ -295,7 +295,7 @@ pub enum ProposalKind {
 /// A trajectory proposal — **exactly** the shape the #131 checker consumes.
 ///
 /// `// PHASE-0 LOCKED` — `trajectory` is `Vec<TrajectoryPoint>`, the input type of
-/// [`kirra_ros2_adapter::validate_trajectory_slow`]. No curvature / accel / metadata
+/// [`kirra_trajectory::validate_trajectory_slow`]. No curvature / accel / metadata
 /// fields are added: the checked `TrajectoryPoint` is `{pose, velocity_mps,
 /// time_from_start_s}`, and the checker derives per-pose deltas itself. (The #89
 /// "Trajectory {…curvature, accel, horizon, metadata}" shape is **not** the checked
@@ -1940,9 +1940,9 @@ impl LateralBump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kirra_ros2_adapter::config::VehicleConfig;
-    use kirra_ros2_adapter::corridor::MockCorridorSource;
-    use kirra_ros2_adapter::validate_trajectory_slow;
+    use kirra_trajectory::config::VehicleConfig;
+    use kirra_trajectory::corridor::MockCorridorSource;
+    use kirra_trajectory::validate_trajectory_slow;
 
     fn sample_input<'a>(map: &'a dyn CorridorSource) -> PlanInput<'a> {
         PlanInput {
