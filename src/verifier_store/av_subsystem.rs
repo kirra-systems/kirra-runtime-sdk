@@ -105,6 +105,26 @@ impl VerifierStore {
         Ok(())
     }
 
+    /// Reset the recovery streak WITHOUT touching `last_telemetry_ms` (Q4).
+    ///
+    /// The sibling `reset_recovery_streak` stamps `last_telemetry_ms = now`
+    /// because its callers reset on the RECEIPT of a (fault) report — the report
+    /// genuinely arrived "now". The telemetry watchdog is the opposite case: a
+    /// node went SILENT past the timeout, so NO report arrived. Resetting the
+    /// streak there must NOT fabricate a fresh "last seen" (which would reset the
+    /// watchdog's own silence detection). This variant clears only the streak
+    /// counters so a timed-out node must earn a full `AV_RECOVERY_STREAK_THRESHOLD`
+    /// window again before it can be re-trusted.
+    pub fn reset_recovery_streak_preserving_telemetry(&self, node_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE av_subsystem_meta
+             SET recovery_streak_count = 0, recovery_streak_start_ms = 0
+             WHERE node_id = ?1",
+            params![node_id],
+        )?;
+        Ok(())
+    }
+
     pub fn increment_recovery_streak(&self, node_id: &str, now_ms: u64) -> Result<u32> {
         self.conn.execute(
             "UPDATE av_subsystem_meta

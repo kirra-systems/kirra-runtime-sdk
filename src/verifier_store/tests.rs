@@ -90,6 +90,30 @@ mod attestation_registry_tests {
         assert_eq!(start, 0);
     }
 
+    // Q4: the watchdog timeout path resets the streak WITHOUT stamping a fresh
+    // last_telemetry_ms (no report arrived). Streak clears; telemetry timestamp
+    // is preserved (unlike `reset_recovery_streak`, which sets it to `now`).
+    #[test]
+    fn test_reset_recovery_streak_preserving_telemetry() {
+        let store = in_memory();
+        store.register_av_subsystem_meta("lidar", "Perception", "LDR-1", 0.70, 5_000).unwrap();
+        store.increment_recovery_streak("lidar", 5_000).unwrap();
+        store.increment_recovery_streak("lidar", 5_000).unwrap();
+        assert_eq!(store.load_recovery_streak("lidar").unwrap().0, 2);
+        assert_eq!(store.get_last_telemetry_timestamp("lidar").unwrap(), 5_000);
+
+        store.reset_recovery_streak_preserving_telemetry("lidar").unwrap();
+
+        let (count, start) = store.load_recovery_streak("lidar").unwrap();
+        assert_eq!(count, 0, "streak must be cleared");
+        assert_eq!(start, 0, "streak start must be cleared");
+        assert_eq!(
+            store.get_last_telemetry_timestamp("lidar").unwrap(),
+            5_000,
+            "last_telemetry_ms must be PRESERVED — the timeout must not fabricate a fresh last-seen"
+        );
+    }
+
     #[test]
     fn test_generation_persistence() {
         let store = in_memory();
