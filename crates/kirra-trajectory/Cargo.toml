@@ -33,7 +33,11 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 kirra-core = { path = "../kirra-core" }
 # RSS longitudinal/lateral/opposite-direction safe-distance kernels.
 parko-core = { path = "../../parko/crates/parko-core" }
-# Stack-resident predicted-sample buffers in `prediction` (no per-mode heap Vec).
-smallvec = "1"
+# Stack-resident scratch buffers: predicted-sample runs in `prediction` and the
+# per-tick containment kernel-point/pose buffers in `validation` (M3). The
+# `const_generics` feature provides `Array` for arbitrary inline sizes (e.g. the
+# MAX_TRAJECTORY_HORIZON = 50 / MAX_CORRIDOR_VERTICES = 128 bounds), not just the
+# fixed power-of-two set.
+smallvec = { version = "1", features = ["const_generics"] }
 # `config` logs a one-time warning when no ODD speed cap is configured.
 tracing = "0.1"

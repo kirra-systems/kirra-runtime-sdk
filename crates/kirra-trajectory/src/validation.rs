@@ -16,9 +16,11 @@
 // kinematics is recorded but does NOT short-circuit — containment +
 // RSS still get a vote.
 
+use smallvec::SmallVec;
+
 use kirra_core::containment::{
     self as containment, Corridor, Pose as KernelPose,
-    Point as KernelPoint,
+    Point as KernelPoint, MAX_CORRIDOR_VERTICES, MAX_TRAJECTORY_HORIZON,
 };
 use kirra_core::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
@@ -198,12 +200,19 @@ pub fn validate_trajectory_slow_capped(
     // ----- A) Containment (SG2) ----------------------------------------
     //
     // Materialize the kernel-side Corridor from the trait. The trait
-    // returns adapter `Point`s; we need kernel `Point`s. The field
-    // shapes are identical so the conversion is a 1-for-1 copy.
-    let left_kernel:  Vec<KernelPoint> = corridor.left_boundary().iter()
-        .map(adapter_to_kernel_point).collect();
-    let right_kernel: Vec<KernelPoint> = corridor.right_boundary().iter()
-        .map(adapter_to_kernel_point).collect();
+    // returns adapter `Point`s; we need kernel `Point`s (distinct structs,
+    // identical field shape → a 1-for-1 copy).
+    //
+    // M3: these per-tick scratch buffers are STACK-INLINE `SmallVec`s sized to
+    // the checker's own input bounds (`MAX_CORRIDOR_VERTICES` per corridor side,
+    // `MAX_TRAJECTORY_HORIZON` poses). A valid input therefore allocates NO heap
+    // on the ~10 Hz slow-loop path; an over-bound input spills to the heap but is
+    // rejected by the containment shape/horizon checks anyway, so the spill is
+    // both rare and harmless.
+    let left_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> =
+        corridor.left_boundary().iter().map(adapter_to_kernel_point).collect();
+    let right_kernel: SmallVec<[KernelPoint; MAX_CORRIDOR_VERTICES]> =
+        corridor.right_boundary().iter().map(adapter_to_kernel_point).collect();
     let kernel_corridor = Corridor {
         left:           &left_kernel,
         right:          &right_kernel,
@@ -213,7 +222,8 @@ pub fn validate_trajectory_slow_capped(
         max_age_ms:     SLOW_LOOP_MAX_CORRIDOR_AGE_MS,
     };
     let footprint = config.to_vehicle_footprint();
-    let poses: Vec<KernelPose> = trajectory.iter().map(|p| adapter_to_kernel_pose(&p.pose)).collect();
+    let poses: SmallVec<[KernelPose; MAX_TRAJECTORY_HORIZON]> =
+        trajectory.iter().map(|p| adapter_to_kernel_pose(&p.pose)).collect();
 
     let containment_verdict = containment::validate_trajectory_containment(
         &poses, &kernel_corridor, &footprint, frame_trust,
