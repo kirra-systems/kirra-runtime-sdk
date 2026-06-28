@@ -62,10 +62,10 @@ pub(crate) async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl 
 }
 
 pub(crate) async fn get_fleet_posture(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    let postures: Vec<FleetNodePosture> = svc.app.nodes
-        .iter()
-        .map(|entry| svc.app.calculate_posture(entry.key()))
-        .collect();
+    // M2: one shared-memo whole-fleet pass (O(N+E)) instead of O(N·(N+E))
+    // per-node recomputation, and no `nodes.iter()` guard held across the
+    // re-entrant DAG walk (the B1 hazard). Result is identical.
+    let postures = svc.app.calculate_fleet_posture();
     Json(json!({ "fleet": postures }))
 }
 

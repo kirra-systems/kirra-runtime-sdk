@@ -19,7 +19,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
 use kirra_verifier::verifier::{
-    validate_client_identity_headers, AppState, BackupExport, FlapStatus, FleetNodePosture,
+    validate_client_identity_headers, AppState, BackupExport, FlapStatus,
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
