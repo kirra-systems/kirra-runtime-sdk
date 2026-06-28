@@ -7,12 +7,12 @@
 // asserting the system's safe-state response per
 // docs/safety/SAFE_STATE_SPECIFICATION.md.
 //
-// This commit lands implementations for 3 of 16 safety goals
-// (SG-006, SG-014, SG-016). The remaining 8 zero-coverage goals
-// (SG-003, 007, 008, 009, 010, 012, 013, 015) remain as
-// #[ignore]'d stubs in tests/cert_003_rtm_gap_stubs.rs with
-// detailed TODO comments documenting the test infrastructure they
-// each require.
+// This suite originally closed the first CERT-004 fault-injection slice
+// (SG-006, SG-014, SG-016). The broader CERT-003 RTM reconciliation has since
+// replaced the old ignored placeholders in `tests/cert_003_rtm_gap_stubs.rs`
+// with executable tests or precise pointers to in-crate / binary tests for
+// private seams. Keep this file focused on externally-drivable safe-state
+// injections.
 //
 // Tracking: CERT-004, ADL-010 / ADL-011 in work/decisions.md.
 

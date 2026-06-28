@@ -1,18 +1,17 @@
-// CERT-003 — RTM Gap Test Stubs
+// CERT-003 — RTM Coverage Reconciliation
 //
-// One #[ignore]'d stub per Safety Goal that currently has zero
-// corresponding test coverage in the codebase. The RTM names specific
-// tests for each goal but those tests do not exist yet. Stubs here
-// preserve the goal-ID-to-test mapping so the gaps are visible to
-// `cargo test`, `--list`, and CI without falsifying coverage numbers.
-//
-// Each stub uses `todo!()` so that removing the `#[ignore]` without
-// implementing the body causes an immediate panic rather than a silent
-// pass. Tracked in CERT-003 (work/decisions.md ADL-011).
+// This file originally held `#[ignore]`/`todo!()` placeholders for RTM entries
+// whose named tests did not exist. Those placeholders are gone for implemented
+// goals: either the evidence lives here (when the public API is reachable from
+// an integration test) or the comment below points to the in-crate / binary test
+// that exercises a private seam. Do not add a placeholder for an implemented
+// goal — add or reference real executable evidence instead. If a mechanism is
+// genuinely missing, keep it documented in the RTM gap report rather than
+// falsifying coverage with a passing stub.
 //
 // Safety goal definitions: docs/safety/SAFETY_GOALS.md
 // Traceability matrix:    docs/safety/REQUIREMENTS_TRACEABILITY.md
-// Gap report:             docs/safety/RTM_GAP_REPORT.md
+// Historical gap report:  docs/safety/RTM_GAP_REPORT.md
 
 // SG-003 — Sensor Timeout Fault Detection (ASIL D): IMPLEMENTED (CERT-003).
 // The RTM-named tests live in `src/telemetry_watchdog.rs` mod `sg_003_cert_tests`
@@ -22,11 +21,9 @@
 // which is `pub(crate)`, so they must be in-crate unit tests — not this external
 // integration file. The mechanism carries a `// Verifies: SG-003` tag.
 
-#[test]
-#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_006_unknown_command_denial"]
-fn test_safety_goal_sg_006_unknown_command_denial() {
-    // See tests/fault_injection.rs for full implementation (CERT-004).
-}
+// SG-006 — Unknown Command Denial in All Posture States (ASIL D): IMPLEMENTED.
+// Evidence lives in `tests/fault_injection.rs`:
+// `test_safety_goal_sg_006_unknown_command_denial`.
 
 // SG-007 — Cross-Asset Fleet Lockout Propagation (ASIL D): CLOSED.
 // The propagation SAFETY PROPERTY (leader LockedOut → all Nominal followers
@@ -120,12 +117,9 @@ fn test_safety_goal_sg_007_causal_log_records_propagation_event() {
 // (decision: stale→promote / fresh→hold / inclusive boundary / clock-skew-safe;
 // ACT: mode_active false→true, durable promotion record + audit event, posture
 // recalc populates the cache). `promotion_decision` carries `// Verifies: SG-009`.
-#[test]
-#[ignore = "Implemented in src/standby_monitor.rs — mod sg_009_promotion_act_tests"]
-fn test_safety_goal_sg_009_ha_standby_promotion_within_timeout() {
-    // See src/standby_monitor.rs mod sg_009_promotion_act_tests (CERT-003).
-}
 
+// SG-009 executable evidence lives in `src/standby_monitor.rs`
+// `sg_009_promotion_act_tests`.
 // SG-010 — Audit Chain Tamper Detection (ASIL B): tamper-detection IMPLEMENTED;
 // startup-verification sub-gap OPEN.
 //
@@ -143,32 +137,15 @@ fn test_safety_goal_sg_009_ha_standby_promotion_within_timeout() {
 // `TcpListener::bind` and verifies the chain on demand via `/system/audit/verify`
 // (plus a shutdown checkpoint). Wiring verify-and-abort into startup is a
 // behavior change, out of scope for a test-only increment.
-#[test]
-#[ignore = "Implemented in src/verifier_store.rs — mod sg_010_audit_tamper_tests (startup-verify sub-gap OPEN, see note)"]
-fn test_safety_goal_sg_010_audit_chain_tamper_detection() {
-    // See src/verifier_store.rs mod sg_010_audit_tamper_tests (CERT-003).
-}
-
-// SG-012 — DNP3 Broadcast Command Mandatory Audit (ASIL B): MECHANISM GAP (OPEN).
-//
-// Investigated (CERT-003, 2026-06-08): the property is NOT testable today because
-// the mechanism does not exist. `src/adapters/dnp3.rs::Dnp3Adapter::evaluate` is a
-// PURE classifier — it returns a `Dnp3Evaluation { is_broadcast, is_control, ... }`
-// and nothing else. There is:
-//   - no audit-chain write on the DNP3 path (broadcast or otherwise),
-//   - no control-output application at this layer, hence
-//   - no "audit-before-control" ordering and no "block control on audit-write
-//     failure" fail-closed path to assert.
-// The only caller, `protocol_adapter.rs` (the `/industrial/dnp3/evaluate` route),
-// likewise just classifies. Writing a passing test here would assert nothing
-// (DO NOT FAKE COVERAGE). Closing SG-012 requires ADDING the mandatory-audit-
-// before-control mechanism — a behavior change, out of scope for a test-only
-// increment. Reported as an open mechanism gap. See RTM_GAP_REPORT.md (SG-012).
-#[test]
-#[ignore = "MECHANISM GAP (CERT-003): DNP3 audit-before-control does not exist; see note + RTM_GAP_REPORT.md"]
-fn test_safety_goal_sg_012_dnp3_broadcast_mandatory_audit() {
-    todo!("SG-012 mechanism (mandatory audit before control output) not implemented — see note above")
-}
+// SG-012 — DNP3 Broadcast Command Mandatory Audit (ASIL B): IMPLEMENTED.
+// The dedicated DNP3 handler and the unified industrial path now both write a
+// tamper-evident audit record before returning an admitted broadcast verdict, and
+// block a broadcast if that mandatory audit write is unavailable. Evidence lives
+// in `src/bin/kirra_verifier_service.rs`:
+//   - `sg_012_dnp3_broadcast_audit_tests::test_dnp3_broadcast_always_audited`
+//   - `sg_012_dnp3_broadcast_audit_tests::test_store_recovers_after_poison_broadcast_still_evaluates`
+// plus the unified-path tests in `src/bin/kirra_verifier_service/industrial.rs`
+// and `protocol_adapter::unified_tests`.
 
 // SG-013 — Recovery Hysteresis Streak and Window Enforcement (ASIL B): IMPLEMENTED
 // here (external) — the whole closure is reachable through the PUBLIC API
@@ -288,14 +265,10 @@ fn test_safety_goal_sg_013_recovery_hysteresis_streak_and_window() {
     }
 }
 
-#[test]
-#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_014_federation_report_replay_prevention"]
-fn test_safety_goal_sg_014_federation_report_replay_prevention() {
-    // See tests/fault_injection.rs for full implementation (CERT-004).
-    // Note: nonce-burn replay prevention (persistence-layer) remains
-    // out of scope for the in-memory unit; covered separately by an
-    // integration test against VerifierStore in a future increment.
-}
+// SG-014 — Federation Report Replay Prevention (ASIL B): IMPLEMENTED.
+// Evidence lives in `tests/fault_injection.rs`
+// (`test_safety_goal_sg_014_federation_report_replay_prevention`) and the
+// VerifierStore/fleet-transport nonce-burn tests.
 
 // SG-015 — Admin Token Absent Fail-Closed (ASIL B): IMPLEMENTED.
 // The env-var check is factored out of the `require_admin_token` middleware into
@@ -308,14 +281,8 @@ fn test_safety_goal_sg_014_federation_report_replay_prevention() {
 // middleware still maps configured-absent/empty → 503 and provided-absent/
 // mismatch → 401 (behavior unchanged); it now calls `admin_token_ok` for the
 // comparison. `admin_token_ok` carries `// Verifies: SG-015`.
-#[test]
-#[ignore = "Implemented in src/security.rs — mod sg_015_admin_token_tests"]
-fn test_safety_goal_sg_015_admin_token_absent_fail_closed() {
-    // See src/security.rs mod sg_015_admin_token_tests (CERT-003).
-}
+// SG-015 executable evidence lives in `src/security.rs`
+// `sg_015_admin_token_tests`.
 
-#[test]
-#[ignore = "Implemented in tests/fault_injection.rs — test_safety_goal_sg_016_dds_actuator_volatile_durability"]
-fn test_safety_goal_sg_016_dds_actuator_volatile_durability() {
-    // See tests/fault_injection.rs for full implementation (CERT-004).
-}
+// SG-016 executable evidence lives in `tests/fault_injection.rs`:
+// `test_safety_goal_sg_016_dds_actuator_volatile_durability`.
