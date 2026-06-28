@@ -74,8 +74,12 @@ pub fn resolve_posture_with_reason(
     match cache.read() {
         Ok(guard) => match guard.as_ref() {
             Some(cached) => {
-                let age_ms = ts.checked_sub(cached.generated_at_ms);
-                if age_ms.is_none_or(|age| age >= posture_cache_ttl_ms) {
+                // R3: route the decision through the single staleness authority
+                // (`CachedFleetPosture::is_stale_with_ttl`) so the backward-clock
+                // fail-closed semantics stay identical to `should_route_command`'s
+                // `is_stale`. `age_ms` below is computed ONLY for the diagnostic log.
+                if cached.is_stale_with_ttl(ts, posture_cache_ttl_ms) {
+                    let age_ms = ts.checked_sub(cached.generated_at_ms);
                     tracing::warn!(
                         reason       = %LockoutReason::PostureCacheStale,
                         age_ms       = age_ms.unwrap_or(0),
