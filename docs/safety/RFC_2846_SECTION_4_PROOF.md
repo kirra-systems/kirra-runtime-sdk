@@ -336,8 +336,7 @@ This proof satisfies the "Design Review Evidence" requirement for safety-critica
 
 **Certification Claim:**
 
-> The Kirra RSS §4 conjunction implementation is PROVEN CORRECT against IEEE 2846-2022 and requires no further design review for this mechanism.
-
+> The Kirra RSS §4 conjunction implementation is supported by the correctness argument above as design-review evidence against IEEE 2846-2022; it remains subject to peer review by the safety team and validation by the certification body.
 ---
 
 ## Appendix A: IEEE 2846 vs. Kirra Mapping
