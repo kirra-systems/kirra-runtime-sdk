@@ -4,6 +4,8 @@
 // used by the ROS 2 adapter. Kept outside `node.rs` so the ingress contract is
 // unit-tested without requiring a sourced ROS 2/r2r toolchain.
 
+#![cfg_attr(not(feature = "ros2"), allow(dead_code))]
+
 use serde_json::Value;
 
 /// Control-command ingress payload (envelope over the untyped
