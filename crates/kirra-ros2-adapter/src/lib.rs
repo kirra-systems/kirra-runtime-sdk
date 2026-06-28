@@ -23,6 +23,7 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 pub mod config;
+mod control_ingress;
 pub mod corridor;
 pub mod geometry;
 pub mod state;
