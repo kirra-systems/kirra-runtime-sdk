@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn heading_difference_half_turn() {
         let diff = (heading_difference(0.0, PI)).abs();
-        assert!((diff - PI).abs() < 1e-9 || (diff - PI).abs() > (PI - 1e-9));
+        assert!((diff - PI).abs() < 1e-9, "0 vs π should be a half-turn difference");
     }
 
     #[test]
