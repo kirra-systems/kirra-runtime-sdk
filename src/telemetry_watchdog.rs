@@ -82,6 +82,11 @@ pub(crate) struct WatchdogNodeEntry {
     /// Last telemetry timestamp from av_subsystem_meta.last_telemetry_ms.
     /// Updated in memory when the watchdog observes a fresh telemetry report.
     pub(crate) last_seen_ms: u64,
+    /// Baseline for nodes that have never reported (`last_seen_ms == 0`).
+    /// Prefer the node registration timestamp so a restart cannot grant an
+    /// unbounded fresh grace window; fall back to first watchdog observation
+    /// only if the node registry row is missing.
+    pub(crate) monitoring_started_ms: u64,
     /// Whether a timeout warning has already been logged for this sweep cycle.
     /// Prevents repeated WARN logs for the same ongoing silence.
     pub(crate) warn_logged: bool,
@@ -301,9 +306,18 @@ fn watchdog_sweep_once_inner(
                         let last_seen = app.store
                             .with(|store| store.get_last_telemetry_timestamp(node_id))
                             .unwrap_or(0);
+                        let monitoring_started_ms = if last_seen == 0 {
+                            app.nodes
+                                .get(node_id)
+                                .map(|n| n.registered_at_ms)
+                                .unwrap_or(now)
+                        } else {
+                            last_seen
+                        };
                         WatchdogNodeEntry {
                             node_id: node_id.clone(),
                             last_seen_ms: last_seen,
+                            monitoring_started_ms,
                             warn_logged: false,
                         }
                     });
@@ -349,14 +363,16 @@ fn watchdog_sweep_once_inner(
             }
         }
 
-        // Skip nodes that have never reported (last_seen_ms == 0).
-        // Newly registered nodes that haven't sent their first health
-        // report yet — not a timeout condition.
-        if entry.last_seen_ms == 0 {
-            continue;
-        }
-
-        let silence_ms = now.saturating_sub(entry.last_seen_ms);
+        // If no telemetry has ever arrived, silence is measured from the
+        // registration/monitoring baseline, not skipped forever. A silent fresh
+        // node gets at most one timeout window; a restarted verifier does not
+        // reset the window when the node's durable registration time is present.
+        let silence_start_ms = if entry.last_seen_ms == 0 {
+            entry.monitoring_started_ms
+        } else {
+            entry.last_seen_ms
+        };
+        let silence_ms = now.saturating_sub(silence_start_ms);
 
         if silence_ms >= AV_TELEMETRY_TIMEOUT_MS {
             // Already-timed-out check avoids repeated triggers for the
@@ -608,6 +624,7 @@ mod watchdog_di_tests {
         m.insert(node_id.to_string(), WatchdogNodeEntry {
             node_id: node_id.to_string(),
             last_seen_ms,
+            monitoring_started_ms: last_seen_ms,
             warn_logged: false,
         });
         m
@@ -797,6 +814,57 @@ mod watchdog_di_tests {
             &mut node_health, &mut last_node_refresh_ms);
         assert!(rx.try_recv().is_err(),
             "second sweep on the same ongoing silence must NOT re-fire");
+    }
+
+    /// B6 regression: `last_seen_ms == 0` means "no telemetry report has ever
+    /// arrived", not "immune to timeout forever". A registered AV node that
+    /// stays silent must time out from its registration/monitoring baseline.
+    #[test]
+    fn test_never_reported_registered_node_times_out_from_registration_b6() {
+        let anchor: u64 = 10_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 250;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "camera_front", anchor);
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut node_health = HashMap::new();
+        node_health.insert(
+            "camera_front".to_string(),
+            WatchdogNodeEntry {
+                node_id: "camera_front".to_string(),
+                last_seen_ms: 0,
+                monitoring_started_ms: anchor,
+                warn_logged: false,
+            },
+        );
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once(
+            &app,
+            &tx,
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
+
+        assert_eq!(
+            app.nodes.get("camera_front").unwrap().status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "a registered node that never reports must not be skipped forever"
+        );
+        match rx
+            .try_recv()
+            .expect("never-reported node timeout must enqueue WatchdogTimeout")
+        {
+            PostureRecalcTrigger::WatchdogTimeout { node_id, timeout_ms } => {
+                assert_eq!(node_id, "camera_front");
+                assert_eq!(timeout_ms, now - anchor);
+            }
+            other => panic!("expected WatchdogTimeout, got {other:?}"),
+        }
     }
 
     /// B4 regression: if the posture-engine trigger channel is full/closed after
@@ -1026,6 +1094,7 @@ mod sg_003_cert_tests {
             WatchdogNodeEntry {
                 node_id: node_id.to_string(),
                 last_seen_ms,
+                monitoring_started_ms: last_seen_ms,
                 warn_logged: false,
             },
         );
