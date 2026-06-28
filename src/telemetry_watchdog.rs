@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::time::{interval, Duration};
 
+use tokio::sync::mpsc::error::TrySendError;
+
 use crate::clock::{Clock, SystemClock};
 use crate::posture_cache::SharedPostureCache;
 use crate::posture_engine_v2::{PostureEngineSender, PostureRecalcTrigger};
@@ -399,17 +401,13 @@ fn watchdog_sweep_once_inner(
                             timeout_ms: silence_ms,
                         };
                         if let Err(e) = posture_engine_tx.try_send(trigger) {
-                            tracing::error!(
-                                error   = %e,
-                                node_id = %entry.node_id,
-                                "Watchdog: failed to send recalc trigger — engine channel full or closed"
-                            );
-                            force_watchdog_lockout(
+                            handle_recalc_send_failure(
                                 app,
                                 posture_cache,
                                 now,
                                 &entry.node_id,
-                                "watchdog timeout trigger send failed",
+                                "watchdog timeout trigger",
+                                e,
                             );
                         }
                     }
@@ -422,17 +420,13 @@ fn watchdog_sweep_once_inner(
                         if let Err(e) =
                             posture_engine_tx.try_send(PostureRecalcTrigger::DependencyGraphChanged)
                         {
-                            tracing::error!(
-                                error   = %e,
-                                node_id = %entry.node_id,
-                                "Watchdog: failed to send missing-node recalc trigger"
-                            );
-                            force_watchdog_lockout(
+                            handle_recalc_send_failure(
                                 app,
                                 posture_cache,
                                 now,
                                 &entry.node_id,
-                                "missing-node graph recalc trigger send failed",
+                                "missing-node graph recalc trigger",
+                                e,
                             );
                         }
                     }
@@ -442,11 +436,15 @@ fn watchdog_sweep_once_inner(
                             "Watchdog: failed to persist telemetry-timeout trust state — \
                              tripping supervisor lockout"
                         );
+                        // A durable trust-state write failure is a genuine fault
+                        // (not a transient backlog): trip the sticky supervisor
+                        // lockout so recovery is an explicit human/HA action.
                         force_watchdog_lockout(
                             app,
                             posture_cache,
                             now,
                             &entry.node_id,
+                            /* sticky */ true,
                             "failed to persist telemetry timeout trust state",
                         );
                         if let Err(e) =
@@ -475,22 +473,91 @@ fn watchdog_sweep_once_inner(
     }
 }
 
+/// Route a posture-engine trigger-send failure to a PROPORTIONATE fail-closed
+/// response. The node is already durably `Untrusted` at this point; the only
+/// question is how to force posture to reflect that when the recalc could not be
+/// enqueued.
+///
+///   * `Full`   — the engine is backlogged but ALIVE. This is potentially
+///     transient, so force the posture cache to `LockedOut` IMMEDIATELY
+///     (fail-closed now) but do NOT trip the sticky supervisor flag — the next
+///     successful recalc (periodic refresh, or the engine draining) recovers to
+///     the correct posture WITHOUT a human reset.
+///   * `Closed` — the posture engine receiver is gone (a dead/panicked worker).
+///     That is a fatal safety-loop failure: trip the sticky supervisor lockout
+///     (human/HA reset, matching the C2 escalation semantics).
+fn handle_recalc_send_failure(
+    app: &Arc<AppState>,
+    posture_cache: Option<&SharedPostureCache>,
+    now_ms: u64,
+    node_id: &str,
+    trigger_label: &'static str,
+    err: TrySendError<PostureRecalcTrigger>,
+) {
+    match err {
+        TrySendError::Full(_) => {
+            tracing::error!(
+                node_id = %node_id,
+                trigger = trigger_label,
+                "Watchdog: recalc trigger channel FULL — forcing immediate LockedOut \
+                 (transient; auto-recovers on the next successful recalc, no sticky trip)"
+            );
+            force_watchdog_lockout(
+                app,
+                posture_cache,
+                now_ms,
+                node_id,
+                /* sticky */ false,
+                "recalc trigger channel full",
+            );
+        }
+        TrySendError::Closed(_) => {
+            tracing::error!(
+                node_id = %node_id,
+                trigger = trigger_label,
+                "Watchdog: recalc trigger channel CLOSED — posture engine is gone; \
+                 tripping sticky supervisor lockout (human/HA reset required)"
+            );
+            force_watchdog_lockout(
+                app,
+                posture_cache,
+                now_ms,
+                node_id,
+                /* sticky */ true,
+                "recalc trigger channel closed",
+            );
+        }
+    }
+}
+
+/// Force the fleet posture to `LockedOut` from the watchdog.
+///
+/// Always force-writes the posture cache to `LockedOut` immediately (the
+/// fail-closed safety floor). `sticky` controls whether this is ALSO a
+/// human-reset condition: when `true`, the sticky `supervisor_tripped` flag is
+/// set so every subsequent recalc keeps producing `LockedOut` until an explicit
+/// human/HA reset; when `false`, the lockout is a transient floor that the next
+/// successful recalc can lift.
 fn force_watchdog_lockout(
     app: &Arc<AppState>,
     posture_cache: Option<&SharedPostureCache>,
     now_ms: u64,
     node_id: &str,
+    sticky: bool,
     reason: &'static str,
 ) {
-    app.supervisor_tripped
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if sticky {
+        app.supervisor_tripped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     if let Some(cache) = posture_cache {
         crate::posture_engine::force_lockout(cache, now_ms);
     } else {
         tracing::warn!(
             node_id = %node_id,
             reason = reason,
-            "Watchdog: supervisor tripped but no posture cache handle was available to force immediate lockout"
+            sticky = sticky,
+            "Watchdog: lockout requested but no posture cache handle was available to force immediate lockout"
         );
     }
 }
@@ -867,12 +934,13 @@ mod watchdog_di_tests {
         }
     }
 
-    /// B4 regression: if the posture-engine trigger channel is full/closed after
-    /// a watchdog timeout is durably recorded, the old fleet posture cache must
-    /// not continue serving until TTL expiry. The watchdog has the shared cache
-    /// handle in production and force-writes LockedOut immediately.
+    /// B4 regression (transient): a FULL posture-engine channel after a watchdog
+    /// timeout must force the shared cache to LockedOut IMMEDIATELY (fail-closed,
+    /// no stale-serve until TTL) WITHOUT tripping the sticky supervisor flag —
+    /// the engine is alive, just backlogged, so the next successful recalc must
+    /// be able to recover without a human reset.
     #[test]
-    fn test_watchdog_recalc_channel_full_forces_immediate_lockout_b4() {
+    fn test_watchdog_recalc_channel_full_forces_transient_lockout_b4() {
         use std::sync::atomic::Ordering;
         use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
         use crate::verifier::FleetPosture;
@@ -889,6 +957,7 @@ mod watchdog_di_tests {
             CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 0, now),
         )));
 
+        // Receiver kept ALIVE (channel open) but filled to capacity → Full.
         let (tx, _rx) = mpsc::channel::<PostureRecalcTrigger>(1);
         tx.try_send(PostureRecalcTrigger::ManualTrigger {
             operator_id: "fill-channel".to_string(),
@@ -907,15 +976,64 @@ mod watchdog_di_tests {
             &mut last_node_refresh_ms,
         );
 
-        assert!(
-            app.supervisor_tripped.load(Ordering::SeqCst),
-            "recalc enqueue failure must trip the sticky supervisor lockout flag"
-        );
         let cached = cache.read().unwrap().as_ref().cloned().unwrap();
         assert_eq!(
             cached.posture,
             FleetPosture::LockedOut,
-            "watchdog recalc enqueue failure must force the shared cache to LockedOut immediately"
+            "a FULL channel must force the shared cache to LockedOut immediately"
+        );
+        assert!(
+            !app.supervisor_tripped.load(Ordering::SeqCst),
+            "a transient FULL channel must NOT trip the sticky supervisor lockout (auto-recoverable)"
+        );
+    }
+
+    /// B4 regression (fatal): a CLOSED posture-engine channel means the engine
+    /// receiver is gone. That is a fatal safety-loop failure → force LockedOut
+    /// AND trip the sticky supervisor flag (human/HA reset required).
+    #[test]
+    fn test_watchdog_recalc_channel_closed_trips_sticky_lockout_b4() {
+        use std::sync::atomic::Ordering;
+        use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
+        use crate::verifier::FleetPosture;
+
+        let anchor: u64 = 11_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        insert_trusted_node(&app, "camera_front", anchor);
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 0, now),
+        )));
+
+        // Drop the receiver → channel CLOSED (the engine is gone).
+        let (tx, rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        drop(rx);
+
+        let mut node_health = prepopulated_node_health("camera_front", anchor);
+        let mut last_node_refresh_ms: u64 = now;
+
+        watchdog_sweep_once_inner(
+            &app,
+            &tx,
+            Some(&cache),
+            clock.as_ref(),
+            &mut node_health,
+            &mut last_node_refresh_ms,
+        );
+
+        let cached = cache.read().unwrap().as_ref().cloned().unwrap();
+        assert_eq!(
+            cached.posture,
+            FleetPosture::LockedOut,
+            "a CLOSED channel must force the shared cache to LockedOut immediately"
+        );
+        assert!(
+            app.supervisor_tripped.load(Ordering::SeqCst),
+            "a CLOSED channel (dead engine) must trip the sticky supervisor lockout"
         );
     }
 
