@@ -71,6 +71,17 @@ fn build_state(initial: Option<CachedFleetPosture>) -> Arc<ServiceState> {
     })
 }
 
+fn claim_epoch(svc: &ServiceState, observed: u64, holder: &str, now_ms: u64) -> u64 {
+    let claimed = svc
+        .app
+        .store
+        .with(|store| store.try_claim_epoch(observed, holder, now_ms))
+        .expect("epoch claim sql")
+        .expect("epoch claim wins");
+    svc.app.held_epoch.store(claimed, Ordering::SeqCst);
+    claimed
+}
+
 async fn ok_handler() -> &'static str {
     "ok"
 }
@@ -199,9 +210,17 @@ async fn test_lockedout_blocks_functional_reads() {
 
 #[tokio::test]
 async fn test_degraded_defers_actuator_motion_but_blocks_other_writes() {
+    let svc = build_state_with_posture(FleetPosture::Degraded);
+    let now = kirra_verifier::posture_cache::now_ms();
+    assert_eq!(
+        claim_epoch(&svc, 0, "primary", now),
+        1,
+        "the actuator-path proof must satisfy the live epoch fence before exercising posture deferral"
+    );
+
     // The inner-gated actuator route passes the outer gate under Degraded.
     let actuator = req_status(
-        build_test_app(build_state_with_posture(FleetPosture::Degraded)),
+        build_test_app(Arc::clone(&svc)),
         "POST",
         "/actuator/motion/command",
     )
