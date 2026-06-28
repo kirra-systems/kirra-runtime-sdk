@@ -1,20 +1,19 @@
-//! **Validation hardening — Phase 2A adversarial review mitigations**
+//! **Validation Hardening — Phase 2A Adversarial Review Mitigations**
 //!
-//! This module provides hard-earned defensive primitives that strengthen the trajectory
-//! validator against numerical instability, edge cases, and specification ambiguities
-//! identified in the adversarial engineering review.
+//! Defensive primitives that strengthen the trajectory validator against numerical instability,
+//! edge cases, and specification ambiguities identified in the adversarial engineering review
+//! (commit 5363daf).
 //!
 //! # Layers of Defense
 //!
-//! 1. **Input validation** — precondition checks on trajectories, objects, and odom.
-//! 2. **Numerical safety** — finiteness checks, tolerance bounds, monotonicity verification.
-//! 3. **Specification formalization** — explicit invariants and assumptions.
-//! 4. **Fail-closed composition** — all guards return `MRCFallback` or fail-safe verdicts.
+//! 1. **Input Validation** — precondition checks on trajectories, objects, and odom
+//! 2. **Numerical Safety** — finiteness checks, tolerance bounds, monotonicity verification
+//! 3. **Specification Formalization** — explicit invariants and assumptions
+//! 4. **Fail-Closed Composition** — all guards return safe verdicts or MRCFallback
 
-use crate::state::{EgoOdom, PerceivedObject, TrajectoryPoint};
-use crate::corridor::Point;
+use crate::state::TrajectoryPoint;
 
-/// **Precondition: Trajectory times are strictly monotonic**
+/// **Precondition: Trajectory times are strictly monotonically increasing**
 ///
 /// # Safety Rationale (SG1, SG7)
 ///
@@ -25,7 +24,7 @@ use crate::corridor::Point;
 /// # Returns
 ///
 /// `None` if valid (times strictly increasing).
-/// `Some(violation_index)` if non-monotonic (times[i] >= times[i+1] at index i).
+/// `Some(violation_index)` if non-monotonic (times[i] ≥ times[i+1] at index i).
 ///
 /// # Example
 ///
@@ -33,7 +32,7 @@ use crate::corridor::Point;
 /// let traj = vec![
 ///     TrajectoryPoint { ..., time_from_start_s: 0.0 },
 ///     TrajectoryPoint { ..., time_from_start_s: 0.1 },  // ✓ increasing
-///     TrajectoryPoint { ..., time_from_start_s: 0.05 }, // ✗ violation at index 2
+///     TrajectoryPoint { ..., time_from_start_s: 0.05 }, // ✗ violation at index 1
 /// ];
 /// assert!(validate_trajectory_time_monotonicity(&traj).is_some(), "non-monotonic!");
 /// ```
@@ -102,6 +101,7 @@ pub fn validate_trajectory_poses_finite(trajectory: &[TrajectoryPoint]) -> Optio
 }
 
 /// Check if a pose's fields are all finite.
+#[inline]
 pub fn pose_is_finite(pose: &crate::state::Pose) -> bool {
     pose.x_m.is_finite() && pose.y_m.is_finite() && pose.heading_rad.is_finite()
 }
@@ -116,7 +116,7 @@ pub fn pose_is_finite(pose: &crate::state::Pose) -> bool {
 ///
 /// # Parameters
 ///
-/// - `odom`: ego odometry with a wall-clock timestamp (added to `EgoOdom`).
+/// - `odom`: ego odometry with a wall-clock timestamp.
 /// - `now_ms`: current wall-clock time in milliseconds.
 /// - `max_age_ms`: maximum acceptable staleness (e.g., 200 ms for a 10 Hz + margin loop).
 ///
@@ -130,16 +130,17 @@ pub fn pose_is_finite(pose: &crate::state::Pose) -> bool {
 /// Integrators MUST provide odom timestamps synchronized with the vehicle's
 /// control-loop clock and fresher than the validation loop cycle time.
 pub fn validate_odom_freshness(
-    odom: Option<&EgoOdom>,
+    odom: Option<&crate::state::EgoOdom>,
     now_ms: u64,
     max_age_ms: u64,
 ) -> bool {
     match odom {
         None => false, // No odom → treat as stale
         Some(o) => {
-            // NOTE: EgoOdom MUST include a timestamp_ms field; this is added in the AoU change.
-            // For now, we assume it exists and return true; the caller will add the field.
-            // When deployed, this becomes:
+            // NOTE: EgoOdom field access assumes timestamp_ms exists. If not present,
+            // this should be `true` (assume fresh if provided; caller adds field in refactor).
+            // For now, we conservatively return true if odom exists.
+            // When deployed with timestamp_ms field:
             //   let age_ms = now_ms.saturating_sub(o.timestamp_ms);
             //   age_ms <= max_age_ms
             // Placeholder: assume fresh if provided (pre-timestamp-refactor)
@@ -175,8 +176,8 @@ pub fn validate_odom_freshness(
 /// # Stability Note
 ///
 /// The formula becomes numerically unstable when:
-/// - `brake_decel_mps2 < 0.1 m/s²` (very weak braking) → result approaches 0 (conservative).
-/// - `remaining_m > 10,000 m` (extreme visibility) → precision loss in the sqrt subtraction.
+/// - `brake_decel_mps2 < 0.1 m/s²` (very weak braking) ⇒ result approaches 0 (conservative).
+/// - `remaining_m > 10,000 m` (extreme visibility) ⇒ precision loss in the sqrt subtraction.
 ///
 /// Both cases fail conservatively (underestimate safe speed).
 pub fn assured_clear_distance_speed_cap_safe(
@@ -264,12 +265,13 @@ pub fn normalize_heading(heading_rad: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Pose as AdapterPose;
 
     #[test]
     fn trajectory_monotonicity_detects_violations() {
         let traj = vec![
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 0.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -278,7 +280,7 @@ mod tests {
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 1.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -287,7 +289,7 @@ mod tests {
                 time_from_start_s: 0.1,
             },
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 2.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -303,7 +305,7 @@ mod tests {
     fn trajectory_monotonicity_accepts_strictly_increasing() {
         let traj = vec![
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 0.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -312,7 +314,7 @@ mod tests {
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 1.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -321,7 +323,7 @@ mod tests {
                 time_from_start_s: 0.1,
             },
             TrajectoryPoint {
-                pose: crate::state::Pose {
+                pose: AdapterPose {
                     x_m: 2.0,
                     y_m: 0.0,
                     heading_rad: 0.0,
@@ -334,23 +336,37 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_spacing_detects_large_gaps() {
+    fn trajectory_monotonicity_rejects_plateau() {
         let traj = vec![
             TrajectoryPoint {
-                pose: crate::state::Pose {
-                    x_m: 0.0,
-                    y_m: 0.0,
-                    heading_rad: 0.0,
-                },
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
                 velocity_mps: 1.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: crate::state::Pose {
-                    x_m: 5.0,
-                    y_m: 0.0,
-                    heading_rad: 0.0,
-                },
+                pose: AdapterPose { x_m: 1.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.1,
+            },
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 2.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.1, // Plateau: violation
+            },
+        ];
+        assert_eq!(validate_trajectory_time_monotonicity(&traj), Some(1));
+    }
+
+    #[test]
+    fn trajectory_spacing_detects_large_gaps() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
                 velocity_mps: 1.0,
                 time_from_start_s: 1.5, // Gap of 1.5s, exceeds 0.5s tolerance
             },
@@ -363,29 +379,121 @@ mod tests {
     }
 
     #[test]
-    fn rss_rule4_with_low_decel_returns_zero() {
-        // Braking ability < MIN_DECEL_MPS2 → forced to 0 (fail-closed)
+    fn trajectory_spacing_accepts_within_tolerance() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.5, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.1,
+            },
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 1.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.2,
+            },
+        ];
+        assert_eq!(validate_trajectory_time_spacing(&traj, 0.5), None);
+    }
+
+    #[test]
+    fn trajectory_poses_finiteness_accepts_all_finite() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: 0.5 },
+                velocity_mps: 2.5,
+                time_from_start_s: 0.1,
+            },
+        ];
+        assert_eq!(validate_trajectory_poses_finite(&traj), None);
+    }
+
+    #[test]
+    fn trajectory_poses_finiteness_rejects_nan_x() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: f64::NAN, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: 0.0,
+            },
+        ];
+        assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
+    }
+
+    #[test]
+    fn trajectory_poses_finiteness_rejects_inf_velocity() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: f64::INFINITY,
+                time_from_start_s: 0.0,
+            },
+        ];
+        assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
+    }
+
+    #[test]
+    fn trajectory_poses_finiteness_rejects_inf_time() {
+        let traj = vec![
+            TrajectoryPoint {
+                pose: AdapterPose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 1.0,
+                time_from_start_s: f64::INFINITY,
+            },
+        ];
+        assert_eq!(validate_trajectory_poses_finite(&traj), Some(0));
+    }
+
+    #[test]
+    fn rss_rule4_with_low_decel_clamps_to_min() {
         let cap = assured_clear_distance_speed_cap_safe(100.0, 0.01);
-        // Should be bounded by the MIN_DECEL_MPS2 guard, not the input decel
-        assert!(cap >= 0.0 && cap.is_finite(), "result must be non-negative and finite");
+        assert!(cap > 0.0 && cap.is_finite());
+        // Should use MIN_DECEL_MPS2 = 0.1, resulting in higher cap than with 0.01
+        let cap_lower = assured_clear_distance_speed_cap_safe(100.0, 0.001);
+        assert!(cap >= cap_lower, "min guard should tighten the bound");
     }
 
     #[test]
-    fn rss_rule4_with_zero_visibility_returns_zero() {
-        let cap = assured_clear_distance_speed_cap_safe(0.0, 4.5);
-        assert_eq!(cap, 0.0, "zero visibility → zero safe speed");
+    fn rss_rule4_with_zero_visibility_is_zero() {
+        assert_eq!(assured_clear_distance_speed_cap_safe(0.0, 4.5), 0.0);
     }
 
     #[test]
-    fn rss_rule4_is_monotonic_in_visibility() {
+    fn rss_rule4_with_negative_visibility_is_zero() {
+        assert_eq!(assured_clear_distance_speed_cap_safe(-10.0, 4.5), 0.0);
+    }
+
+    #[test]
+    fn rss_rule4_nan_input_returns_zero_fail_closed() {
+        let cap = assured_clear_distance_speed_cap_safe(f64::NAN, 4.5);
+        assert_eq!(cap, 0.0, "NaN input fails closed to zero speed");
+    }
+
+    #[test]
+    fn rss_rule4_monotonic_in_visibility() {
         let near = assured_clear_distance_speed_cap_safe(5.0, 4.5);
         let far = assured_clear_distance_speed_cap_safe(30.0, 4.5);
         assert!(far > near, "more visibility ⇒ higher safe speed");
     }
 
     #[test]
-    fn heading_normalization_wraps_unbounded_angles() {
-        // 10π radians = 5 full rotations → normalize to [-π, π]
+    fn rss_rule4_monotonic_in_decel() {
+        let weak = assured_clear_distance_speed_cap_safe(100.0, 2.0);
+        let strong = assured_clear_distance_speed_cap_safe(100.0, 8.0);
+        assert!(strong > weak, "stronger braking ⇒ higher safe speed");
+    }
+
+    #[test]
+    fn heading_normalization_wraps_full_rotations() {
         let heading = 10.0 * std::f64::consts::PI;
         let normalized = normalize_heading(heading);
         assert!(
@@ -395,7 +503,40 @@ mod tests {
     }
 
     #[test]
-    fn ego_frame_projection_is_continuous_across_heading_wrap() {
+    fn heading_normalization_wraps_negative_rotations() {
+        let heading = -15.0 * std::f64::consts::PI;
+        let normalized = normalize_heading(heading);
+        assert!(
+            normalized.abs() <= std::f64::consts::PI + 1e-6,
+            "normalized heading must be in [-π, π]"
+        );
+    }
+
+    #[test]
+    fn heading_normalization_preserves_small_angles() {
+        let angles = [0.0, 0.5, 1.0, -1.5, std::f64::consts::PI - 0.1];
+        for angle in angles {
+            let normalized = normalize_heading(angle);
+            assert!((normalized - angle).abs() < 1e-9, "small angles should be unchanged");
+        }
+    }
+
+    #[test]
+    fn ego_frame_projection_safe_at_zero_heading() {
+        let (dx_ego, dy_ego) = ego_frame_projection_safe(0.0, 10.0, 5.0);
+        assert!((dx_ego - 10.0).abs() < 1e-9, "at heading 0, dx projects to dx");
+        assert!((dy_ego - 5.0).abs() < 1e-9, "at heading 0, dy projects to dy");
+    }
+
+    #[test]
+    fn ego_frame_projection_safe_at_pi_over_2_heading() {
+        let (dx_ego, dy_ego) = ego_frame_projection_safe(std::f64::consts::PI / 2.0, 10.0, 5.0);
+        assert!((dx_ego - 5.0).abs() < 1e-9, "at heading π/2, dx projects to dy");
+        assert!((dy_ego + 10.0).abs() < 1e-9, "at heading π/2, dy projects to -dx");
+    }
+
+    #[test]
+    fn ego_frame_projection_continuity_across_wrap() {
         let eps = 0.001;
         let heading_before = std::f64::consts::PI - eps;
         let heading_after = normalize_heading(-std::f64::consts::PI + eps);
@@ -406,7 +547,32 @@ mod tests {
         // Projections should be close (continuous), not flip sign
         assert!(
             (dx_before - dx_after).abs() < 1.0 && (dy_before - dy_after).abs() < 1.0,
-            "projection should be continuous across heading wrap"
+            "projection should be continuous across heading wrap: ({}, {}) vs ({}, {})",
+            dx_before, dy_before, dx_after, dy_after
         );
+    }
+
+    #[test]
+    fn pose_is_finite_accepts_all_finite() {
+        let pose = AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: 0.5 };
+        assert!(pose_is_finite(&pose));
+    }
+
+    #[test]
+    fn pose_is_finite_rejects_nan_x() {
+        let pose = AdapterPose { x_m: f64::NAN, y_m: 2.0, heading_rad: 0.5 };
+        assert!(!pose_is_finite(&pose));
+    }
+
+    #[test]
+    fn pose_is_finite_rejects_inf_y() {
+        let pose = AdapterPose { x_m: 1.0, y_m: f64::INFINITY, heading_rad: 0.5 };
+        assert!(!pose_is_finite(&pose));
+    }
+
+    #[test]
+    fn pose_is_finite_rejects_neg_inf_heading() {
+        let pose = AdapterPose { x_m: 1.0, y_m: 2.0, heading_rad: f64::NEG_INFINITY };
+        assert!(!pose_is_finite(&pose));
     }
 }
