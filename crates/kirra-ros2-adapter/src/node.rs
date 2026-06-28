@@ -569,7 +569,29 @@ pub async fn run_adapter(
         let mut rx = trajectory_rx;
         while let Some(traj) = rx.recv().await {
             let start = std::time::Instant::now();
-            let objects = slow_state.snapshot_objects();
+            // M7 (fail-closed): a POISONED objects cache returns `None`. Do NOT
+            // validate against a phantom-empty object set (RSS would see no
+            // obstacles and could pass an unsafe trajectory). Install an
+            // MRCFallback verdict — which removes the accepted slot, so the fast
+            // loop publishes MRC — and skip this candidate.
+            let objects = match slow_state.snapshot_objects() {
+                Some(o) => o,
+                None => {
+                    tracing::error!(
+                        asset_id = %traj.asset_id,
+                        trajectory_id = traj.trajectory_id,
+                        "objects_cache POISONED — slow loop failing closed to MRCFallback"
+                    );
+                    slow_state.update_trajectory(
+                        traj.asset_id.clone(),
+                        traj.trajectory_id,
+                        traj.points.clone(),
+                        TrajectoryVerdict::MRCFallback,
+                        now_ms_fresh(),
+                    );
+                    continue;
+                }
+            };
             let odom = slow_state.snapshot_odom();
             let posture = slow_state.current_posture();
 
