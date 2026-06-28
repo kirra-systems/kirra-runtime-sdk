@@ -12,20 +12,42 @@ parko-core = { path = "../parko-core" }
 # The lean foundation (de-monolith Stage 5): the kinematics-contract talisman,
 # FleetPosture, and the shared `all_finite` governor guard — serde-only, no heavy tree.
 kirra-core = { path = "../../../crates/kirra-core" }
-# Kept for the SQLite `VerifierStore` durable audit/clearance sink (heavy, verifier-tier;
-# see audit_sink / clearance_delivery) — not on the governor hot path.
-kirra-verifier = { path = "../../.." }
-# CERT-006 durable divergence sink: serialise DivergenceEvent → JSON and persist
-# it through the SDK's hash-chained, signed audit log (VerifierStore).
+# R5: the heavy SQLite `VerifierStore` durable audit/clearance sink is now OPT-IN
+# behind the `verifier-sink` feature (default OFF) — the governor/comparator core
+# builds on `kirra-core` alone, so a consumer wanting just the diverse-governor +
+# divergence comparator no longer pulls the verifier service tree. The parko-ros2
+# integration node enables `verifier-sink`. (audit_sink / clearance_delivery.)
+kirra-verifier = { path = "../../..", optional = true }
+# DivergenceEvent serialisation (always-on: the comparator emits it regardless of
+# whether a durable sink is wired).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `AuditChainLinkerDivergenceSink::open` parses a base64-encoded Ed25519 signing
-# key (KIRRA_LOG_SIGNING_KEY) in non-test code, so these are regular deps.
-ed25519-dalek = { version = "2" }
-base64 = "0.22"
+# Ed25519 signing-key parsing for the durable sinks (`KIRRA_LOG_SIGNING_KEY`) —
+# only used by the `verifier-sink` modules, so gated with the feature.
+ed25519-dalek = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+default = []
+# R5: durable audit + clearance sinks backed by the SDK SQLite `VerifierStore`
+# (hash-chained, signed ledger). OFF by default so the parko ML core stays lean;
+# enabled by the parko-ros2 integration node and any deployment that persists
+# divergence/clearance. Not on the governor hot path.
+verifier-sink = ["dep:kirra-verifier", "dep:ed25519-dalek", "dep:base64"]
 
 [dev-dependencies]
 proptest = "1"
 # Durability + signing test for AuditChainLinkerDivergenceSink: a file-backed
 # SQLite audit chain.
 tempfile = "3"
+
+# R5: the clearance/audit example + integration test exercise the
+# `VerifierStore`-backed path, so they only build when `verifier-sink` is enabled.
+# Without the feature the default `cargo build/test -p parko-kirra` stays lean.
+[[example]]
+name = "deliver_clearance"
+required-features = ["verifier-sink"]
+
+[[test]]
+name = "clearance_e2e_integration"
+required-features = ["verifier-sink"]

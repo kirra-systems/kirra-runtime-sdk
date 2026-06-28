@@ -61,7 +61,7 @@ parko-core  = { path = "../parko-core" }
 # The dual-governor comparator that gates every command leaving the
 # loop. This is the safety bridge: Parko produces commands, parko-kirra
 # governs them, KirraGovernor enforces the same envelopes Occy uses.
-parko-kirra = { path = "../parko-kirra" }
+parko-kirra = { path = "../parko-kirra", features = ["verifier-sink"] }
 # The lean foundation (de-monolith Stage 5): FleetPosture + the shared PostureTracker
 # state machine the node reads posture through — serde-only, no heavy tree.
 kirra-core = { path = "../../../crates/kirra-core" }
