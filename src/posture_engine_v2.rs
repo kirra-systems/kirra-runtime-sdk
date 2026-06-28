@@ -460,20 +460,36 @@ pub fn start_posture_engine_worker(
                         );
                     }
 
-                    let now = now_ms_engine();
-                    for trigger in &batch {
-                        match *trigger {
-                            PostureRecalcTrigger::RssViolation(ref rss) => {
-                                apply_rss_state(&app, rss, now);
+                    // M1: the recalc body is BLOCKING — the per-batch `apply_*` store
+                    // writes plus `recalculate_and_broadcast`'s DAG traversal and
+                    // SQLite audit-chain write. Run it on the blocking pool so it never
+                    // pins a tokio worker for the (fleet-sized) recalc duration. We
+                    // AWAIT the join, so batches are still processed strictly
+                    // one-at-a-time — the single-consumer + generation-monotonic
+                    // ordering is unchanged; only the thread the work runs on moves.
+                    // A panic in the recalc surfaces as a `JoinError` and is
+                    // re-panicked here so the supervised worker's escalation
+                    // (supervisor_tripped + force_lockout) fires EXACTLY as it did when
+                    // the recalc ran inline on the worker future.
+                    let app_b = Arc::clone(&app);
+                    let cache_b = cache.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let now = now_ms_engine();
+                        for trigger in &batch {
+                            match *trigger {
+                                PostureRecalcTrigger::RssViolation(ref rss) => {
+                                    apply_rss_state(&app_b, rss, now);
+                                }
+                                PostureRecalcTrigger::FrameIntegrityChanged { trust } => {
+                                    apply_frame_integrity_state(&app_b, trust, now);
+                                }
+                                _ => {}
                             }
-                            PostureRecalcTrigger::FrameIntegrityChanged { trust } => {
-                                apply_frame_integrity_state(&app, trust, now);
-                            }
-                            _ => {}
                         }
-                    }
-
-                    recalculate_and_broadcast_with_context(&app, &cache, &trigger_summary);
+                        recalculate_and_broadcast_with_context(&app_b, &cache_b, &trigger_summary);
+                    })
+                    .await
+                    .expect("posture engine recalc task panicked");
                 }
             }
         },
@@ -843,5 +859,64 @@ mod posture_engine_v2_tests {
             "periodic refresh must re-stamp generated_at_ms (monotonic)");
         assert_eq!(second.posture, FleetPosture::Nominal,
             "PeriodicRefresh on unchanged state must NOT alter the cached posture");
+    }
+
+    /// M1: end-to-end worker path — a trigger sent to `start_posture_engine_worker`
+    /// must drive a recalculation (now on the blocking pool via `spawn_blocking`)
+    /// that POPULATES the shared cache. Proves the off-worker recalc still updates
+    /// state and preserves the coalescing single-consumer contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_recalc_runs_off_pool_and_populates_cache_m1() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use crate::verifier::{
+            AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
+        };
+        use crate::verifier_store::VerifierStore;
+        use crate::posture_cache::SharedPostureCache;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        app.persist_and_insert_node(RegisteredNode {
+            node_id: "node-1".to_string(),
+            status: NodeTrustState::Trusted,
+            registered_at_ms: 1,
+            last_trust_update_ms: 1,
+            ak_public_pem: None,
+            expected_pcr16_digest_hex: None,
+            site: None,
+            firmware_version: None,
+        })
+        .unwrap();
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        let tx = start_posture_engine_worker(Arc::clone(&app), cache.clone());
+
+        tx.send(PostureRecalcTrigger::DependencyGraphChanged)
+            .await
+            .expect("worker channel accepts the trigger");
+
+        // Poll the cache: the worker recv()s the trigger, then runs the recalc on
+        // the blocking pool and writes the cache. Bounded wait so a regression
+        // (recalc never reaching the cache) fails the test rather than hanging.
+        let mut cached = None;
+        for _ in 0..200 {
+            if let Ok(guard) = cache.read() {
+                if let Some(c) = guard.as_ref() {
+                    cached = Some(c.clone());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let cached = cached.expect(
+            "worker must populate the cache via the spawn_blocking recalc path within 2s",
+        );
+        assert_eq!(
+            cached.posture,
+            FleetPosture::Nominal,
+            "a single Trusted node must recalculate to Nominal through the off-pool worker"
+        );
     }
 }
