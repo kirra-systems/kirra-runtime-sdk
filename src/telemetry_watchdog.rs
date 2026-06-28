@@ -20,14 +20,14 @@
 //      A warning threshold (AV_TELEMETRY_WARN_MS) is introduced at 1s to give
 //      operators advance visibility before the node is dropped.
 //
-//   4. Watchdog updates last_seen timestamp on timeout (disk-first invariant).
-//      The doc's watchdog mutated trust state but never updated the telemetry
-//      timestamp, leaving `last_telemetry_ms` stale in av_subsystem_meta.
+//   4. Watchdog persists trust state on timeout (disk-first invariant).
+//      A silent sensor is written to SQLite as
+//      `Untrusted("TELEMETRY_TIMEOUT")` before the in-memory registry is updated,
+//      so a verifier restart cannot resurrect the node as Trusted.
 //
-//   5. Watchdog does NOT call reset_recovery_streak directly — that belongs in
-//      the fault handler. The watchdog's job is: detect silence → mark Untrusted
-//      → trigger recalculation. Recovery streak management is the fault handler's
-//      responsibility. Mixing them couples two separate concerns.
+//   5. Watchdog does NOT fabricate telemetry timestamps. The telemetry timestamp
+//      remains the last observed report; timeout handling records trust state and
+//      triggers recalculation.
 
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -97,9 +97,10 @@ pub(crate) struct WatchdogNodeEntry {
 ///   2. Every `AV_WATCHDOG_SWEEP_MS`, checks each node's last telemetry timestamp
 ///   3. At `AV_TELEMETRY_WARN_MS` silence: logs a structured warning
 ///   4. At `AV_TELEMETRY_TIMEOUT_MS` silence:
-///      a. Marks node `Untrusted("TELEMETRY_TIMEOUT")` in AppState.nodes (memory)
-///      b. Logs a structured error
-///      c. Sends `PostureRecalcTrigger::WatchdogTimeout` to the posture engine channel
+///      a. Persists node `Untrusted("TELEMETRY_TIMEOUT")` to SQLite
+///      b. Updates AppState.nodes via the same disk-first helper
+///      c. Logs a structured error
+///      d. Sends `PostureRecalcTrigger::WatchdogTimeout` to the posture engine channel
 ///      (NOT calling recalculate_and_broadcast directly — routes through the
 ///      serialized worker to prevent burst recalculations)
 ///   5. Every `AV_WATCHDOG_NODE_REFRESH_MS`, refreshes the node list from SQLite
@@ -108,10 +109,11 @@ pub(crate) struct WatchdogNodeEntry {
 ///      monitored within one sweep rather than after up to ~28 s.
 ///
 /// # Disk-first ordering
-/// Trust state mutation (memory) happens after the trigger is sent to the engine.
-/// The engine's recalculate_and_broadcast persists the posture event before
-/// updating the cache. The watchdog does not write to the audit chain directly —
-/// the posture engine's recalculation produces the audit entry.
+/// Trust state mutation flows through `AppState::mark_node_untrusted`, which
+/// persists to SQLite before replacing the in-memory node. The engine's
+/// `recalculate_and_broadcast` persists the posture event before updating the
+/// cache. The watchdog does not write to the audit chain directly — the posture
+/// engine's recalculation produces the audit entry.
 ///
 /// # Why PostureEngineSender and not direct recalculate_and_broadcast?
 /// Multiple nodes can time out simultaneously (e.g., a network partition drops
@@ -345,21 +347,54 @@ pub(crate) fn watchdog_sweep_once(
                     "Watchdog: sensor node silent beyond timeout — marking Untrusted"
                 );
 
-                if let Some(mut node) = app.nodes.get_mut(&entry.node_id) {
-                    node.status =
-                        NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string());
-                }
-
-                let trigger = PostureRecalcTrigger::WatchdogTimeout {
-                    node_id: entry.node_id.clone(),
-                    timeout_ms: silence_ms,
-                };
-                if let Err(e) = posture_engine_tx.try_send(trigger) {
-                    tracing::error!(
-                        error   = %e,
-                        node_id = %entry.node_id,
-                        "Watchdog: failed to send recalc trigger — engine channel full or closed"
-                    );
+                match app.mark_node_untrusted(&entry.node_id, "TELEMETRY_TIMEOUT", now) {
+                    Ok(true) => {
+                        let trigger = PostureRecalcTrigger::WatchdogTimeout {
+                            node_id: entry.node_id.clone(),
+                            timeout_ms: silence_ms,
+                        };
+                        if let Err(e) = posture_engine_tx.try_send(trigger) {
+                            tracing::error!(
+                                error   = %e,
+                                node_id = %entry.node_id,
+                                "Watchdog: failed to send recalc trigger — engine channel full or closed"
+                            );
+                        }
+                    }
+                    Ok(false) => {
+                        tracing::error!(
+                            node_id = %entry.node_id,
+                            "Watchdog: timed-out node missing from AppState.nodes — \
+                             enqueueing graph recalc (fail-closed)"
+                        );
+                        if let Err(e) =
+                            posture_engine_tx.try_send(PostureRecalcTrigger::DependencyGraphChanged)
+                        {
+                            tracing::error!(
+                                error   = %e,
+                                node_id = %entry.node_id,
+                                "Watchdog: failed to send missing-node recalc trigger"
+                            );
+                        }
+                    }
+                    Err(()) => {
+                        tracing::error!(
+                            node_id = %entry.node_id,
+                            "Watchdog: failed to persist telemetry-timeout trust state — \
+                             tripping supervisor lockout"
+                        );
+                        app.supervisor_tripped
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(e) =
+                            posture_engine_tx.try_send(PostureRecalcTrigger::PeriodicRefresh)
+                        {
+                            tracing::error!(
+                                error   = %e,
+                                node_id = %entry.node_id,
+                                "Watchdog: failed to send supervisor lockout recalc trigger"
+                            );
+                        }
+                    }
                 }
             }
         } else if silence_ms >= AV_TELEMETRY_WARN_MS && !entry.warn_logged {
@@ -545,6 +580,24 @@ mod watchdog_di_tests {
             status,
             NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
             "watchdog must mark a silent node Untrusted(TELEMETRY_TIMEOUT); got {status:?}"
+        );
+
+        // B1 regression: the timeout trust state must be durable before memory is
+        // trusted. A verifier restart hydrates from SQLite, so DashMap-only
+        // mutation would resurrect this node as Trusted.
+        let persisted = app
+            .store
+            .with(|store| store.load_node("lidar_front"))
+            .expect("load persisted node")
+            .expect("watchdog timeout must persist the node record");
+        assert_eq!(
+            persisted.status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "watchdog timeout must persist Untrusted(TELEMETRY_TIMEOUT) to SQLite"
+        );
+        assert_eq!(
+            persisted.last_trust_update_ms, now,
+            "persisted watchdog trust update must carry the timeout observation timestamp"
         );
 
         // (b) a WatchdogTimeout trigger landed on the engine channel.
