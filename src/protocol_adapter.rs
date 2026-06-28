@@ -179,9 +179,20 @@ pub fn evaluate_unified_industrial_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let value = req.message.get("value")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let value = match legacy_industrial_value(&req.message, &operation) {
+                Ok(v) => v,
+                Err(reason) => {
+                    return Ok(UnifiedEvaluationResult {
+                        protocol: format!("{:?}", req.protocol),
+                        command: OperationalCommand::Unknown,
+                        allowed: false,
+                        denial_reason: Some(format!("ADAPTER_TRANSLATION_FAILURE: {reason}")),
+                        posture_at_evaluation: posture_str,
+                        adapter_details: serde_json::json!({ "translation_error": reason }),
+                        triggers_recalculation: false,
+                    });
+                }
+            };
             let risk_class = req.message.get("risk_class")
                 .and_then(|v| v.as_str())
                 .unwrap_or("kinetic_write")
@@ -221,6 +232,22 @@ pub fn evaluate_unified_industrial_request(
         IndustrialProtocol::EthernetIp => dispatch_adapter::<EtherNetIpAdapter>(req.message, posture),
         IndustrialProtocol::CanOpen => dispatch_adapter::<CanOpenAdapter>(req.message, posture),
         IndustrialProtocol::Dnp3 => dispatch_adapter::<Dnp3Adapter>(req.message, posture),
+    }
+}
+
+fn legacy_industrial_value(
+    message: &serde_json::Value,
+    operation: &str,
+) -> Result<i64, &'static str> {
+    match operation {
+        "write_register" | "write_node" => message
+            .get("value")
+            .and_then(|v| v.as_i64())
+            .ok_or("MISSING_OR_NON_INTEGER_VALUE"),
+        // Reads do not carry a commanded magnitude. Keep the legacy placeholder
+        // off the safety path: `map_industrial_event_to_claim` uses it only as
+        // diagnostic `raw_value` for telemetry reads.
+        _ => Ok(0),
     }
 }
 
@@ -499,6 +526,25 @@ mod unified_tests {
         }
     }
 
+    fn legacy_modbus_request(operation: &str, message: serde_json::Value) -> UnifiedIndustrialRequest {
+        let mut message = message;
+        message["asset_id"] = serde_json::json!("asset-1");
+        message["operation"] = serde_json::json!(operation);
+        message["address"] = serde_json::json!("40001");
+        message["risk_class"] = if operation.starts_with("read_") {
+            serde_json::json!("read")
+        } else {
+            serde_json::json!("kinetic_write")
+        };
+        UnifiedIndustrialRequest {
+            protocol: IndustrialProtocol::Modbus,
+            message,
+            source_id: "plc_legacy".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
+        }
+    }
+
     #[test]
     fn test_unified_endpoint_routes_to_ethernet_ip() {
         let result = evaluate_unified_industrial_request(eip_request(), FleetPosture::Nominal);
@@ -549,6 +595,52 @@ mod unified_tests {
         let result = evaluate_unified_industrial_request(req, FleetPosture::Nominal);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("MALFORMED_ETHERNET_IP_MESSAGE"));
+    }
+
+    #[test]
+    fn legacy_modbus_write_missing_value_fails_closed_b7() {
+        let req = legacy_modbus_request("write_register", serde_json::json!({}));
+
+        let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
+
+        assert!(!r.allowed, "missing write value must not be fabricated as stop");
+        assert_eq!(r.command, crate::gateway::policy::OperationalCommand::Unknown);
+        assert_eq!(
+            r.denial_reason.as_deref(),
+            Some("ADAPTER_TRANSLATION_FAILURE: MISSING_OR_NON_INTEGER_VALUE")
+        );
+        assert_eq!(
+            r.adapter_details["translation_error"].as_str(),
+            Some("MISSING_OR_NON_INTEGER_VALUE")
+        );
+    }
+
+    #[test]
+    fn legacy_modbus_write_non_integer_value_fails_closed_b7() {
+        let req = legacy_modbus_request(
+            "write_register",
+            serde_json::json!({ "value": "0" }),
+        );
+
+        let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
+
+        assert!(!r.allowed, "string/non-integer write value must fail closed");
+        assert_eq!(
+            r.denial_reason.as_deref(),
+            Some("ADAPTER_TRANSLATION_FAILURE: MISSING_OR_NON_INTEGER_VALUE")
+        );
+    }
+
+    #[test]
+    fn legacy_modbus_read_may_omit_value() {
+        let req = legacy_modbus_request("read_register", serde_json::json!({}));
+
+        let r = evaluate_unified_industrial_request(req, FleetPosture::Degraded).unwrap();
+
+        assert!(
+            r.allowed,
+            "read_register carries no commanded magnitude and may omit value"
+        );
     }
 
     #[test]
