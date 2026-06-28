@@ -531,7 +531,11 @@ mod unified_tests {
         message["asset_id"] = serde_json::json!("asset-1");
         message["operation"] = serde_json::json!(operation);
         message["address"] = serde_json::json!("40001");
-        message["risk_class"] = serde_json::json!("kinetic_write");
+        message["risk_class"] = if operation.starts_with("read_") {
+            serde_json::json!("read")
+        } else {
+            serde_json::json!("kinetic_write")
+        };
         UnifiedIndustrialRequest {
             protocol: IndustrialProtocol::Modbus,
             message,
