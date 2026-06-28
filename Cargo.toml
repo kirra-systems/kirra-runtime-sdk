@@ -13,7 +13,7 @@
 # That separation keeps the ML inference pipeline (parko-core / parko-onnx /
 # parko-kirra) independent of the safety-kernel build.
 [workspace]
-members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
+members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-trajectory", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
 resolver = "2"
 
 [package]

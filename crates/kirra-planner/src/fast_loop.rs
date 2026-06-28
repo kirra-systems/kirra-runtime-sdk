@@ -3,7 +3,7 @@
 //! The slow loop (System-2 → Occy → KIRRA) authors and *admits* a whole trajectory now and
 //! then; the fast loop must turn that one committed trajectory into a command every tick, in
 //! between the slow loop's (infrequent) re-plans. The correct way — and what the production
-//! fast loop does (`kirra_ros2_adapter::check_command_conforms`) — is to sample the committed
+//! fast loop does (`kirra_trajectory::check_command_conforms`) — is to sample the committed
 //! trajectory at the **elapsed time since it was promoted** (`now − promoted_at`), advancing a
 //! monotonic cursor across many fast ticks. The ego then follows the trajectory's own velocity
 //! profile, so it accelerates from a standstill and tracks a curve instead of teleporting along

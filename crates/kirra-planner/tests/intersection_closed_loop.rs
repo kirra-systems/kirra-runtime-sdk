@@ -21,8 +21,8 @@ use kirra_planner::{
     LaneCorridor, LaneEdge, LaneGraph, LineType, MickDriver, MickIntent, PlanInput, Pose,
     ScriptedBrain, SignalState, TrajectoryVerdict, TurnDirection,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const FAST_DT_S: f64 = 0.1;
 const FAST_DT_MS: u64 = 100;
@@ -104,7 +104,7 @@ fn world<'a>(
     }
 }
 
-use kirra_ros2_adapter::state::PerceivedObject;
+use kirra_trajectory::state::PerceivedObject;
 
 #[test]
 fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {

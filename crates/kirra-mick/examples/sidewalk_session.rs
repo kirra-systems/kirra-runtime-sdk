@@ -18,9 +18,9 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, GeometricPlannerConfig, Goal,
     MickIntent, PlanInput, Pose, ProposalKind, TrajectoryPoint,
 };
-use kirra_ros2_adapter::corridor::{MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const DT: f64 = 0.2; // 5 Hz
 const CREEP_CRUISE_MPS: f64 = 1.5; // sidewalk creep

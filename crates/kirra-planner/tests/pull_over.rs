@@ -16,8 +16,8 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, LaneBoundary, LineType,
     MickIntent, PerceivedObject, PlanInput, Planner, Pose, ProposalKind, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// A straight corridor of a given half-width along +X (two-vertex polylines, the
 /// minimum the checker accepts). A 4.5 m half-width gives a 4.8 m vehicle the room

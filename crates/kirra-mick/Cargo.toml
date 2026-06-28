@@ -25,9 +25,9 @@ serde_json = "1"
 
 [dev-dependencies]
 # The live chauffeur example drives Occy + the #131 KIRRA checker against real Gemma.
-# default-features = false → no ROS/tokio; we only need validate_trajectory_slow +
-# VehicleConfig + the mock corridor.
-kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+# R1: depend on the lean `kirra-trajectory` checker crate (no ROS/tokio); we only need
+# validate_trajectory_slow + VehicleConfig + the mock corridor.
+kirra-trajectory = { path = "../kirra-trajectory" }
 kirra-core = { path = "../kirra-core" }
 # Taj (ADR-0015) perception for the `taj_occy_kirra_stack` example — the four-component
 # on-Orin stack (Taj → Mick → Occy → KIRRA). Taj is lean (kirra-core only, no ROS), so

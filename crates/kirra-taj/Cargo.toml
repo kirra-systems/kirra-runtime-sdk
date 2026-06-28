@@ -32,6 +32,7 @@ kirra-core = { path = "../kirra-core" }
 [dev-dependencies]
 # Integration tests only: prove Taj's corridor output feeds the real #131 checker.
 # FleetPosture lives in the verifier crate; the checker entry (`validate_trajectory_slow`)
-# + `VehicleConfig` in the adapter — both used solely by the tests, hence dev-deps.
+# + `VehicleConfig` now live in the lean `kirra-trajectory` crate (R1) — both used
+# solely by the tests, hence dev-deps. No ROS 2 integration crate is pulled.
 kirra-verifier = { path = "../.." }
-kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+kirra-trajectory = { path = "../kirra-trajectory" }

@@ -14,9 +14,9 @@ use kirra_planner::{
     plan_for_intent, EgoState, GeometricPlanner, Goal, MickIntent, PlanInput, PlanOutput, Planner,
     Pose, ProposalKind, TrajectoryPoint,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
-use kirra_ros2_adapter::state::{PerceivedObject, TrajectoryVerdict};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
+use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use kirra_core::FleetPosture;
 
 const MAX_TRAJECTORY_HORIZON: usize = 50;

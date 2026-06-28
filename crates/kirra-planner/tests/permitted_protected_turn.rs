@@ -15,8 +15,8 @@ use kirra_planner::{
     LaneGraph, LineType, MickIntent, PlanInput, PlanOutput, Pose, ProposalKind, SignalState,
     TurnDirection,
 };
-use kirra_ros2_adapter::corridor::Point;
-use kirra_ros2_adapter::state::PerceivedObject;
+use kirra_trajectory::corridor::Point;
+use kirra_trajectory::state::PerceivedObject;
 
 const R: f64 = 12.0;
 const HALF: f64 = 3.0;

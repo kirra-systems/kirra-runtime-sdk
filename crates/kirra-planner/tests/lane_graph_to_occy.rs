@@ -23,7 +23,7 @@ use kirra_planner::{
     EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType,
     PlanInput, Planner, Pose, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// Three-lane road, 3.5 m lanes (half-width 1.75): left lane at y=+3.5, center
 /// (ego) lane at y=0, right lane at y=-3.5. Right divider BROKEN, left divider

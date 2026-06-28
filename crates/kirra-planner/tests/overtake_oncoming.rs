@@ -17,8 +17,8 @@ use kirra_planner::{
     LaneGraph, LineType, MickIntent, PerceivedObject, PlanInput, Planner, Pose, ProposalKind,
     TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const LEN: f64 = 200.0;
 

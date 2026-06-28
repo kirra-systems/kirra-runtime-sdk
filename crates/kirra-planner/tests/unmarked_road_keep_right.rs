@@ -17,8 +17,8 @@ use kirra_planner::{
     EgoState, FleetPosture, GeometricPlanner, Goal, LaneGraph, PlanInput, Planner, Pose,
     TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource};
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 /// Plan straight ahead along `map`, ego starting on the road center (y=0), and
 /// return the most-rightward (min) `y` the path reaches + KIRRA's verdict.

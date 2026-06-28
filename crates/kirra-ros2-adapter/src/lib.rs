@@ -22,21 +22,22 @@
 // the alignment wins over the markdown-nesting pedantry.
 #![allow(clippy::doc_lazy_continuation)]
 
-pub mod config;
 mod control_ingress;
 pub mod corridor;
 pub mod geometry;
 pub mod state;
-pub mod validation;
-// Multi-modal predictive-RSS mode producer (gap #3) — rolls live perceived objects into
-// CV/CTRV `PredictedMode` hypotheses so the checker's multi-modal pass runs against real
-// perception. Pure, non-ros2-gated; tested under default features.
-pub mod prediction;
-// Perception redundancy cross-check (True-Redundancy analog) — pure, non-ros2-gated.
-pub mod perception_redundancy;
 // KIRRA-OCCY-PMON-003 slice-1 — pure perception-ingest shim/orchestration
 // (non-ros2-gated; safety logic tested under default features).
 pub mod perception_ingest;
+
+// R1: the trajectory CHECKER + its contract config/prediction/redundancy were
+// extracted to the lean `kirra-trajectory` crate. Re-export the modules here so
+// every existing `kirra_ros2_adapter::{config,validation,prediction,
+// perception_redundancy}` path AND the ros2/lanelet2 node code's
+// `crate::{config,validation,prediction,perception_redundancy}::*` imports resolve
+// unchanged. `state` stays local (it owns the ROS runtime `AdaptorState`) but
+// re-exports the relocated `AcceptedTrajectory` / `EgoOdom` contract types.
+pub use kirra_trajectory::{config, perception_redundancy, prediction, validation};
 
 // `posture_tracker` was relocated to the kernel
 // (`kirra_core::posture_tracker`) by M2b so the parko-ros2 node

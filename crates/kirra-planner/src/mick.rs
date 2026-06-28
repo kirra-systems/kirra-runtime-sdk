@@ -1166,8 +1166,8 @@ mod tests {
         EgoState, GeometricPlanner, LaneBoundary, LineType, PerceivedObject, ProposalKind,
         TrajectoryVerdict,
     };
-    use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource, Point};
-    use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+    use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
+    use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
     use kirra_core::FleetPosture;
 
     /// A perception-derived world: ego at x=5, a placeholder goal (the intent

@@ -28,40 +28,19 @@ use kirra_core::frame_integrity::{
 };
 use kirra_core::posture_tracker::PostureTracker;
 
-// The lean trajectory/perception data types now live in the `kirra-core` crate
-// (de-monolith Stage 6a); re-exported here so every existing `crate::state::*` /
-// `kirra_ros2_adapter::state::*` path keeps the SAME type. `AdaptorState` and
-// `AcceptedTrajectory` (below, both heavy/DashMap-coupled — they stay) consume them
-// unchanged.
+// The lean trajectory/perception data types live in `kirra-core` (de-monolith
+// Stage 6a); re-exported here so every existing `crate::state::*` /
+// `kirra_ros2_adapter::state::*` path keeps the SAME type.
 pub use kirra_core::trajectory::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
 
-// `Pose`, `TrajectoryPoint`, and `TrajectoryVerdict` were relocated verbatim to
-// `kirra_core::trajectory` (de-monolith Stage 6a) and are re-exported above.
-
-/// The per-asset accepted-trajectory record held in `AdaptorState`.
-#[derive(Debug, Clone)]
-pub struct AcceptedTrajectory {
-    pub asset_id: String,
-    /// Opaque monotonic id (planner-assigned or adapter-assigned). Used to
-    /// detect duplicate publications of the same candidate.
-    pub trajectory_id: u64,
-    pub points: Vec<TrajectoryPoint>,
-    pub verdict: TrajectoryVerdict,
-    /// Wall-clock ms when this trajectory was promoted into the slot. The
-    /// fast loop computes age against `now_ms` for staleness.
-    pub promoted_at_ms: u64,
-    /// Hard staleness cap. After `now_ms - promoted_at_ms >= max_age_ms`,
-    /// `is_stale()` returns true and `fail_closed()` collapses to MRC.
-    /// Default: one planning-cycle budget (~200 ms at 10 Hz, doubled for
-    /// jitter — see `DEFAULT_MAX_AGE_MS`).
-    pub max_age_ms: u64,
-}
-
-/// Default max age for an accepted trajectory: 200 ms. Sized so that one
-/// missed planning cycle (at the typical Autoware 10 Hz planning rate)
-/// still leaves headroom; a SECOND missed cycle exceeds it and the slot
-/// fails closed. The design's per-trajectory FTTI budget (§4).
-pub const DEFAULT_MAX_AGE_MS: u64 = 200;
+// R1: the trajectory CHECKER contract types `AcceptedTrajectory` / `EgoOdom` (+
+// `DEFAULT_MAX_AGE_MS`) were relocated to the lean `kirra-trajectory` crate so the
+// doer side depends on the contract, not this ROS integration crate. Re-exported
+// here so `crate::state::{AcceptedTrajectory, EgoOdom, DEFAULT_MAX_AGE_MS}` and
+// `kirra_ros2_adapter::state::*` resolve unchanged. The ROS RUNTIME store
+// (`AdaptorState`, subscription stamps, `monotonic_now_ms`, `IncomingTrajectory`,
+// `SUBSCRIPTION_STALENESS_TIMEOUT_MS`) stays below — it is adapter-only.
+pub use kirra_trajectory::state::{AcceptedTrajectory, EgoOdom, DEFAULT_MAX_AGE_MS};
 
 /// Default subscription-staleness timeout (ms). Phase 4: the adapter's
 /// own SG9 fail-closed path. If any of the REQUIRED upstream
@@ -74,80 +53,9 @@ pub const DEFAULT_MAX_AGE_MS: u64 = 200;
 /// `KIRRA_SUBSCRIPTION_STALENESS_MS`.
 pub const SUBSCRIPTION_STALENESS_TIMEOUT_MS: u64 = 500;
 
-impl AcceptedTrajectory {
-    /// Constructs a freshly-accepted trajectory record. The slow loop
-    /// calls this on a verdict::Accept; the fast loop only reads.
-    pub fn new_accepted(
-        asset_id: impl Into<String>,
-        trajectory_id: u64,
-        points: Vec<TrajectoryPoint>,
-        promoted_at_ms: u64,
-    ) -> Self {
-        Self {
-            asset_id: asset_id.into(),
-            trajectory_id,
-            points,
-            verdict: TrajectoryVerdict::Accept,
-            promoted_at_ms,
-            max_age_ms: DEFAULT_MAX_AGE_MS,
-        }
-    }
-
-    /// Constructs a record with a specific verdict (Accept / Clamp /
-    /// MRCFallback / Pending). Slow loop uses this to record the
-    /// derate-only path (`Clamp`) without losing the trajectory bytes
-    /// the audit chain needs.
-    pub fn with_verdict(
-        asset_id: impl Into<String>,
-        trajectory_id: u64,
-        points: Vec<TrajectoryPoint>,
-        verdict: TrajectoryVerdict,
-        promoted_at_ms: u64,
-    ) -> Self {
-        Self {
-            asset_id: asset_id.into(),
-            trajectory_id,
-            points,
-            verdict,
-            promoted_at_ms,
-            max_age_ms: DEFAULT_MAX_AGE_MS,
-        }
-    }
-
-    /// Wall-clock staleness check. Uses `saturating_sub` so a clock skew
-    /// that puts `now_ms` behind `promoted_at_ms` reads as "not yet
-    /// stale" (the only safe disposition; the fail-closed direction would
-    /// be a panic, which we never want on the fast loop).
-    #[must_use]
-    pub fn is_stale(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.promoted_at_ms) >= self.max_age_ms
-    }
-
-    /// The fail-closed collapse: anything other than a fresh Accept or
-    /// fresh Clamp returns `MRCFallback`. Used by the fast loop when
-    /// reading the slot; isolates the policy in one place so we never
-    /// silently leak a stale Accept into a verdict.
-    ///
-    /// Clamp is permitted because the slow loop only emits Clamp on a
-    /// trajectory that PASSED containment + RSS — the caller's per-pose
-    /// velocity is derated, but staying on the corridor + collision-free
-    /// at any speed ≤ derate is still safe. Phase 3 conformance enforces
-    /// the derate.
-    #[must_use]
-    pub fn fail_closed(&self, now_ms: u64) -> TrajectoryVerdict {
-        if self.is_stale(now_ms) {
-            return TrajectoryVerdict::MRCFallback;
-        }
-        match self.verdict {
-            TrajectoryVerdict::Accept => TrajectoryVerdict::Accept,
-            TrajectoryVerdict::Clamp  => TrajectoryVerdict::Clamp,
-            _ => TrajectoryVerdict::MRCFallback,
-        }
-    }
-}
-
-// `PerceivedObject` was relocated verbatim to `kirra_core::trajectory`
-// (de-monolith Stage 6a) and is re-exported above.
+// `AcceptedTrajectory`'s impl (constructors + `is_stale` / `fail_closed`) moved with
+// the type to `kirra_trajectory::state` (R1) and is re-exported above. `PerceivedObject`
+// lives in `kirra_core::trajectory` and is likewise re-exported above.
 
 /// Phase 4c — typed-payload envelope for a freshly-received trajectory
 /// after the r2r-side parser has extracted the planner-published points.
@@ -167,29 +75,8 @@ pub struct IncomingTrajectory {
     pub received_ms: u64,
 }
 
-/// Minimal ego-odometry snapshot. Phase 3 introduces this to fix the
-/// `current_steering_angle_deg = 0.0` approximation in
-/// `validate_trajectory_slow` AND to feed the fast-loop conformance
-/// check the current ego velocity for the staleness / nearest-point
-/// lookup.
-///
-/// `linear_x_mps` is the ego longitudinal velocity in the vehicle frame
-/// (from `nav_msgs::Odometry::twist.twist.linear.x`). `yaw_rate_rads`
-/// is the angular velocity around the vertical axis (from
-/// `twist.twist.angular.z`). `stamp_ms` is the message timestamp in
-/// wall-clock ms — used to detect a stale odom snapshot.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EgoOdom {
-    pub linear_x_mps: f64,
-    pub yaw_rate_rads: f64,
-    pub stamp_ms: u64,
-}
-
-impl Default for EgoOdom {
-    fn default() -> Self {
-        Self { linear_x_mps: 0.0, yaw_rate_rads: 0.0, stamp_ms: 0 }
-    }
-}
+// `EgoOdom` moved with the checker contract to `kirra_trajectory::state` (R1) and is
+// re-exported above.
 
 /// Per-asset accepted-trajectory store + perception cache + vehicle config.
 /// DashMap on the trajectory side fits the existing AppState concurrency

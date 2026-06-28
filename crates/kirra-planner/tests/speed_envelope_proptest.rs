@@ -17,7 +17,7 @@ use kirra_planner::{
     plan_for_intent, EgoState, FleetPosture, GeometricPlanner, Goal, MickIntent, PlanInput,
     PlanOutput, Pose,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, MockCorridorSource};
+use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource};
 use proptest::prelude::*;
 
 fn peak_speed(plan: &PlanOutput) -> f64 {

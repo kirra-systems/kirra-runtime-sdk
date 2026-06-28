@@ -16,9 +16,9 @@ use kirra_planner::{
     LaneCorridor, LaneEdge, LaneGraph, LineType, MickDriver, MickIntent, PlanInput, PlanOutput,
     Pose, ScriptedBrain, TrajectoryVerdict,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::state::PerceivedObject;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::state::PerceivedObject;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const FAST_DT_S: f64 = 0.1;
 const FAST_DT_MS: u64 = 100;
@@ -212,7 +212,7 @@ fn the_lane_follow_mode_bounds_a_curving_in_merger_on_the_route() {
         0.0,
         &[],
     ));
-    let corr = kirra_ros2_adapter::corridor::MockCorridorSource::straight_5m_half_width(100.0);
+    let corr = kirra_trajectory::corridor::MockCorridorSource::straight_5m_half_width(100.0);
     let obj = [PerceivedObject { id: 1, pos: Point { x_m: 20.0, y_m: 4.0 }, velocity_mps: 5.0, heading_rad: 0.0, vel: Point { x_m: 5.0, y_m: 0.0 } }];
     let intent = MickIntent::GoTo { x_m: 80.0, y_m: 0.0 };
     let reach = |o: &PlanOutput| o.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);

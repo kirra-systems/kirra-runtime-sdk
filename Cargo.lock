@@ -2021,8 +2021,8 @@ dependencies = [
  "kirra-capture-schema",
  "kirra-core",
  "kirra-planner",
- "kirra-ros2-adapter",
  "kirra-taj",
+ "kirra-trajectory",
  "reqwest",
  "serde",
  "serde_json",
@@ -2034,8 +2034,8 @@ version = "0.1.0"
 dependencies = [
  "kirra-core",
  "kirra-map",
- "kirra-ros2-adapter",
  "kirra-taj",
+ "kirra-trajectory",
  "proptest",
  "serde",
  "serde_json",
@@ -2058,6 +2058,7 @@ dependencies = [
  "dashmap",
  "futures",
  "kirra-core",
+ "kirra-trajectory",
  "parko-core",
  "r2r",
  "reqwest",
@@ -2073,8 +2074,18 @@ name = "kirra-taj"
 version = "0.1.0"
 dependencies = [
  "kirra-core",
- "kirra-ros2-adapter",
+ "kirra-trajectory",
  "kirra-verifier",
+]
+
+[[package]]
+name = "kirra-trajectory"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "parko-core",
+ "smallvec",
+ "tracing",
 ]
 
 [[package]]

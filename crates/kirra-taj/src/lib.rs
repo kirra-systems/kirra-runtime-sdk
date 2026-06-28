@@ -588,7 +588,7 @@ fn wrap_pi(a: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kirra_ros2_adapter::state::TrajectoryVerdict;
+    use kirra_trajectory::state::TrajectoryVerdict;
     use std::f64::consts::PI;
 
     /// Build a forward 180° scan (`-π/2 .. +π/2`, 1° steps) from a per-ray range
@@ -669,8 +669,8 @@ mod tests {
 
     #[test]
     fn taj_corridor_feeds_the_checker() {
-        use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
-        use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+        use kirra_trajectory::state::{Pose, TrajectoryPoint};
+        use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
         use kirra_verifier::verifier::FleetPosture;
 
         // A 3 m half-width corridor from walls; feed a short centered trajectory.
@@ -815,9 +815,9 @@ mod tests {
         // PARKED (velocity 0) is wrongly RSS-rejected, but with the tracked
         // velocity the checker correctly admits it. Same geometry, only the
         // object's velocity differs.
-        use kirra_ros2_adapter::corridor::MockCorridorSource;
-        use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
-        use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+        use kirra_trajectory::corridor::MockCorridorSource;
+        use kirra_trajectory::state::{Pose, TrajectoryPoint};
+        use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
         use kirra_verifier::verifier::FleetPosture;
 
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
@@ -897,9 +897,9 @@ mod tests {
         // drives into it and KIRRA ADMITS (it cannot see water). After semantic
         // fusion clips the corridor at the water edge, the SAME trajectory is
         // REJECTED — the hazard Phase A was blind to is now enforced.
-        use kirra_ros2_adapter::corridor::CorridorSource as _;
-        use kirra_ros2_adapter::state::{Pose, TrajectoryPoint};
-        use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+        use kirra_trajectory::corridor::CorridorSource as _;
+        use kirra_trajectory::state::{Pose, TrajectoryPoint};
+        use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
         use kirra_verifier::verifier::FleetPosture;
 
         let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });

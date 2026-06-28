@@ -45,9 +45,10 @@ serde_json = "1"
 # End-to-end stack integration test (tests/taj_occy_kirra_stack.rs):
 # scan → Taj perception → Occy plan → KIRRA verdict. Taj is NOT a normal
 # dependency of the planner — the two are wired together only in the test.
-# kirra-ros2-adapter is named here so the test can call the checker entry
-# (validate_trajectory_slow) + VehicleConfig directly.
+# R1: the lean `kirra-trajectory` crate is named here so the tests can call the
+# checker entry (validate_trajectory_slow) + VehicleConfig directly, WITHOUT pulling
+# the ROS 2 integration crate (kirra-ros2-adapter / r2r / tokio).
 kirra-taj = { path = "../kirra-taj" }
-kirra-ros2-adapter = { path = "../kirra-ros2-adapter", default-features = false }
+kirra-trajectory = { path = "../kirra-trajectory" }
 # Property-based tests of the planner's global invariants (tests/cruise_proptest.rs).
 proptest = "1"

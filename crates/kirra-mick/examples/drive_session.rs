@@ -21,9 +21,9 @@ use kirra_planner::{
     GeometricPlannerConfig, Goal, Lane, LaneEdge, LaneGraph, LineType, MickDecisionRecord,
     MickEvalSummary, MickIntent, PlanInput, Pose, ProposalKind,
 };
-use kirra_ros2_adapter::corridor::{CorridorSource, Point};
-use kirra_ros2_adapter::state::TrajectoryVerdict;
-use kirra_ros2_adapter::{validate_trajectory_slow, VehicleConfig};
+use kirra_trajectory::corridor::{CorridorSource, Point};
+use kirra_trajectory::state::TrajectoryVerdict;
+use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 const FAST_DT_MS: u64 = 100; // 10 Hz fast loop
 const FAST_DT_S: f64 = 0.1;
