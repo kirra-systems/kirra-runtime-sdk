@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use crate::security::constant_time_compare;
 use crate::verifier_store::VerifierStore;
 
 /// Maximum recursion depth for dependency graph traversal.
@@ -658,7 +659,7 @@ impl AppState {
         if now_ms > entry.expires_at_ms {
             return false;
         }
-        entry.nonce_hex == nonce_hex
+        constant_time_compare(entry.nonce_hex.as_bytes(), nonce_hex.as_bytes())
     }
 }
 
@@ -844,6 +845,65 @@ mod nonce_lifecycle_tests {
         app.issue_challenge("fresh", 2, later);
         assert!(!app.pending_challenges.contains_key("stale"), "expired entry pruned on issue");
         assert!(app.pending_challenges.contains_key("fresh"), "fresh entry retained");
+    }
+
+    #[test]
+    fn clearance_nonce_exact_match_is_accepted_once() {
+        let app = app();
+        let key = "alice|robot-01";
+        app.issue_clearance_challenge(key, "abcdef0123456789".to_string(), 1_000);
+
+        assert!(
+            app.consume_clearance_challenge(key, "abcdef0123456789", 1_100),
+            "exact clearance nonce must be accepted"
+        );
+        assert!(
+            !app.consume_clearance_challenge(key, "abcdef0123456789", 1_100),
+            "clearance nonce must be single-use"
+        );
+    }
+
+    #[test]
+    fn clearance_nonce_mismatch_is_rejected_and_consumed() {
+        let app = app();
+        let key = "alice|robot-01";
+        app.issue_clearance_challenge(key, "abcdef0123456789".to_string(), 1_000);
+
+        assert!(
+            !app.consume_clearance_challenge(key, "abcdef0123456788", 1_100),
+            "mismatched clearance nonce must be rejected"
+        );
+        assert!(
+            !app.consume_clearance_challenge(key, "abcdef0123456789", 1_100),
+            "a rejected clearance nonce attempt must still burn the challenge"
+        );
+    }
+
+    #[test]
+    fn expired_clearance_nonce_is_rejected() {
+        let app = app();
+        let key = "alice|robot-01";
+        app.issue_clearance_challenge(key, "abcdef0123456789".to_string(), 1_000);
+
+        assert!(
+            !app.consume_clearance_challenge(key, "abcdef0123456789", 1_000 + CHALLENGE_TTL_MS + 1),
+            "expired clearance nonce must be rejected"
+        );
+    }
+
+    #[test]
+    fn long_clearance_nonces_sharing_prefix_are_distinguished() {
+        let app = app();
+        let key = "alice|robot-01";
+        let prefix = "a".repeat(64);
+        let stored = format!("{prefix}1111111111111111");
+        let provided = format!("{prefix}2222222222222222");
+        app.issue_clearance_challenge(key, stored, 1_000);
+
+        assert!(
+            !app.consume_clearance_challenge(key, &provided, 1_100),
+            "clearance nonce comparison must distinguish bytes beyond a 64-byte shared prefix"
+        );
     }
 }
 
