@@ -389,10 +389,6 @@ impl AdaptorState {
         if let Ok(mut guard) = self.objects_cache.write() {
             *guard = objects;
         } else {
-            // RwLock poisoning is fail-closed-by-extension: a poisoned
-            // cache reads as an empty Vec next cycle (no objects → RSS is
-            // trivially safe, but containment + posture cache failures
-            // catch the bigger picture). Log loudly.
             tracing::error!(
                 "objects_cache RwLock POISONED — perception snapshot dropped"
             );
@@ -402,11 +398,26 @@ impl AdaptorState {
     /// Read-and-clone of the latest perception snapshot. The slow loop
     /// uses this exactly once per validation; never holds the lock
     /// across the computation.
-    pub fn snapshot_objects(&self) -> Vec<PerceivedObject> {
-        self.objects_cache
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+    ///
+    /// M7 (fail-closed): returns `None` when the lock is POISONED. An empty
+    /// `Some(vec![])` means "genuinely no objects" (RSS trivially clear is then
+    /// correct); a POISONED cache is NOT that — the object set is unknown, and
+    /// returning an empty Vec there would make RSS see no obstacles and pass an
+    /// unsafe trajectory (fail-OPEN). The caller MUST treat `None` as a
+    /// fail-closed MRC, never as "no objects". (Contrast `snapshot_objects_secondary`,
+    /// where a silent/empty channel B is already handled fail-closed by the
+    /// redundancy monitor's lost-channel → MRC-floor cap.)
+    pub fn snapshot_objects(&self) -> Option<Vec<PerceivedObject>> {
+        match self.objects_cache.read() {
+            Ok(guard) => Some(guard.clone()),
+            Err(_) => {
+                tracing::error!(
+                    "objects_cache RwLock POISONED — failing slow loop closed (MRC); \
+                     refusing to validate against a phantom-empty object set"
+                );
+                None
+            }
+        }
     }
 
     /// Replace the SECONDARY (redundant channel-B) perception snapshot and stamp its arrival at
@@ -587,7 +598,40 @@ mod tests {
         assert_eq!(got[0].id, 5);
         assert_eq!(state.last_objects_b_ms.load(Ordering::Relaxed), 7_000, "B arrival stamped");
         // The primary channel is untouched by a secondary write.
-        assert!(state.snapshot_objects().is_empty(), "channel A independent of channel B");
+        assert!(
+            state.snapshot_objects().expect("readable").is_empty(),
+            "channel A independent of channel B"
+        );
+    }
+
+    /// M7 (fail-closed): a POISONED primary objects cache must read as `None`
+    /// (→ the slow loop MRCs), NOT an empty Vec (which would make RSS see no
+    /// obstacles and pass an unsafe trajectory — fail-open). A non-poisoned
+    /// empty cache stays `Some(vec![])`.
+    #[test]
+    fn poisoned_objects_cache_snapshots_none_not_empty() {
+        use std::sync::Arc;
+
+        let state = Arc::new(AdaptorState::new());
+        // Healthy empty cache → Some(empty), distinct from the poisoned case.
+        assert_eq!(
+            state.snapshot_objects().map(|v| v.len()),
+            Some(0),
+            "a healthy empty cache must be Some(empty), not None"
+        );
+
+        // Poison the primary objects RwLock: panic while holding the write guard.
+        let poison = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.objects_cache.write().expect("acquire write before poison");
+            panic!("intentional poison for M7 fail-closed test");
+        })
+        .join();
+
+        assert!(
+            state.snapshot_objects().is_none(),
+            "a POISONED objects cache must snapshot None (fail-closed → MRC), never an empty Vec"
+        );
     }
 
     /// The per-object yaw-rate channel round-trips and stamps freshness, independent of the
