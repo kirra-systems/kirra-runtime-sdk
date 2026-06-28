@@ -5,6 +5,17 @@
 - Architecture: x86_64
 - QEMU: 8.2.2 installed (x86_64 + aarch64)
 
+## Cursor Cloud Agents
+- Repo-level environment config: `.cursor/environment.json`
+- Base image: `.cursor/Dockerfile`
+- Rust toolchain: `rust:1.96-bookworm`
+
+The locked dependency graph includes crates whose manifests require
+edition-2024-aware Cargo (for example `getrandom v0.4.2`). Cursor Cloud Agents
+therefore use the repo-level Dockerfile instead of relying on the platform
+default Rust/Cargo version. This lets plain `cargo test --locked` work without a
+per-agent `rustup toolchain install stable`.
+
 ## Cross-compilation Targets
 
 | Target | Status | Use |
