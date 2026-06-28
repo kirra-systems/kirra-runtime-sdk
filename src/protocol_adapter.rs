@@ -631,7 +631,7 @@ mod unified_tests {
     fn legacy_modbus_read_may_omit_value() {
         let req = legacy_modbus_request("read_register", serde_json::json!({}));
 
-        let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
+        let r = evaluate_unified_industrial_request(req, FleetPosture::Degraded).unwrap();
 
         assert!(
             r.allowed,
