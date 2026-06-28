@@ -126,8 +126,8 @@ impl VerifierStore {
     /// wedge at the fence boundary. Production code never deletes this row.
     #[cfg(test)]
     pub fn delete_ha_state_for_test(&mut self) {
-        let _ = self
-            .durable_mut()
-            .execute("DELETE FROM ha_state WHERE id = 1", []);
+        self.durable_mut()
+            .execute("DELETE FROM ha_state WHERE id = 1", [])
+            .expect("delete ha_state singleton row for test");
     }
 }
