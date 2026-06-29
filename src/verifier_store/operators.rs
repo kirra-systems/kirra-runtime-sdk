@@ -49,7 +49,7 @@ impl VerifierStore {
             "operator_key_fingerprint": operator_key_fingerprint,
         })
         .to_string();
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         tx.execute(
             "INSERT INTO clearance_grants
              (node_id, operator_id, granted_at_ms, delivery, created_at_ms,
@@ -156,7 +156,7 @@ impl VerifierStore {
         payload_json: &str,
         created_at_ms: u64,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
             &tx,
             event_type,
@@ -229,7 +229,7 @@ impl VerifierStore {
             "detail": detail,
         })
         .to_string();
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         tx.execute(
             "UPDATE clearance_grants SET outcome = ?2, outcome_detail = ?3 WHERE id = ?1",
             params![grant_rowid, outcome, detail],

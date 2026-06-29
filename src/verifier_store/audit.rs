@@ -1033,7 +1033,7 @@ impl VerifierStore {
             // Brand-new chain (rows already carry key_id) — nothing to backfill.
             return Ok(());
         }
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         tx.execute(
             "UPDATE audit_log_chain SET key_id = ?1 WHERE key_id IS NULL",
             params![genesis_id],
@@ -1156,7 +1156,7 @@ impl VerifierStore {
         let payload = format!(
             "{{\"v1_head_record_hash\":\"{v1_head}\",\"v1_total_count\":{v1_total},\"migrated_at_ms\":{now_ms}}}"
         );
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
             &tx,
             "HASH_V2_MIGRATION",

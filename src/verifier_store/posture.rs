@@ -142,7 +142,7 @@ impl VerifierStore {
         reason: Option<&str>,
         created_at_ms: u64,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
         tx.execute(
             "INSERT INTO posture_events
              (node_id, event_type, posture_json, reason, created_at_ms)

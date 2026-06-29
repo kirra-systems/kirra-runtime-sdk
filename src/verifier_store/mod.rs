@@ -814,6 +814,28 @@ impl VerifierStore {
         }
     }
 
+    /// Begin an `Immediate` transaction on the NORMAL connection for an
+    /// audit-chain append (#685).
+    ///
+    /// `audit_log_chain` / `audit_anchor_head` are written from BOTH this
+    /// NORMAL `conn` (per-command audit: posture events, operator grants,
+    /// attestation, migrations) AND the FULL `durable_conn` (`record_key_rotation`,
+    /// the federation commit — both already `Immediate`). `append_audit_event_tx`
+    /// reads the chain tail and then INSERTs; under a DEFERRED transaction the
+    /// read takes only a snapshot, so a write committed on the OTHER connection
+    /// between the tail read and the INSERT could leave the new row linked off a
+    /// stale `previous_hash`/`sequence` — a forked chain caught only later by
+    /// verify. `Immediate` takes SQLite's single-writer WAL lock at `BEGIN`, so
+    /// the tail read happens under the write lock and no other connection can
+    /// interleave a commit: chain integrity rests on the WAL write lock, not on
+    /// the process-wide store mutex. This does NOT change `synchronous` (the
+    /// NORMAL/FULL #74 durability split is preserved) — only the lock-acquisition
+    /// point. Takes `&mut self.conn` (a field borrow) so callers can still read
+    /// `self.signing_key` for the append.
+    fn audit_tx(conn: &mut Connection) -> Result<rusqlite::Transaction<'_>> {
+        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    }
+
     /// Force a durable checkpoint: `wal_checkpoint(TRUNCATE)` on the FULL
     /// connection fsyncs the shared WAL into the main DB file, making ALL
     /// committed data durable — including the per-command audit rows written on

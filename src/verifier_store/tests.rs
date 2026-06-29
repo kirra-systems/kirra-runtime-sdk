@@ -1250,6 +1250,53 @@ mod key_durability_165_tests {
         assert!(r.signature_valid, "all rows (A-signed AND B-signed) verify under the durable seed");
     }
 
+    // --- #685: cross-connection audit chain stays a single unforked line -----
+    // `audit_log_chain` is written from BOTH the NORMAL conn
+    // (`save_posture_event_chained`) and the FULL `durable_conn`
+    // (`record_key_rotation`). On a FILE-backed store the two are DISTINCT
+    // connections, so this exercises the exact two-connection path #685 is about.
+    // Interleave production writers from both connections and assert the chain is
+    // a single unbroken, CONTIGUOUS line — the fork a DEFERRED tail-read risked,
+    // now closed by the `Immediate` `audit_tx` (the tail read holds the WAL write
+    // lock, so the other connection cannot commit a new tail in between).
+    #[test]
+    fn cross_connection_audit_chain_is_unforked() {
+        let db = TmpDb::new("s685");
+        let (a, b) = (key(1), key(2));
+        let mut s = VerifierStore::new(db.path()).unwrap();
+        s.admit_signing_key(a.clone(), false, None, 1).unwrap();
+        let held = s.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
+
+        // NORMAL-conn audit writes (posture events) interleaved with a FULL-conn
+        // audit write (key rotation), all appending to the same audit_log_chain.
+        s.save_posture_event_chained("n1", "DEGRADED", "{}", None, 10).unwrap();
+        s.save_posture_event_chained("n1", "NOMINAL", "{}", None, 20).unwrap();
+        s.record_key_rotation(b.clone(), "scheduled", 30, held).unwrap(); // durable_conn
+        s.save_posture_event_chained("n2", "DEGRADED", "{}", None, 40).unwrap();
+        s.save_posture_event_chained("n2", "LOCKEDOUT", "{}", None, 50).unwrap();
+
+        // (1) The chain verifies end-to-end across the connection boundary and the
+        //     rotation (rows signed by A before, by B after).
+        let r = s.verify_audit_chain_full(Some(&a.verifying_key())).unwrap();
+        assert!(r.chain_intact, "hash chain intact across the NORMAL/FULL connection boundary");
+        assert!(r.signature_valid, "all rows verify (A-signed and B-signed)");
+        assert_eq!(r.first_invalid_signature_index, None);
+
+        // (2) NO FORK: sequences are contiguous 0..N with no gap, duplicate, or
+        //     branch — exactly what a tail read off a stale previous_hash breaks.
+        let seqs: Vec<i64> = {
+            let mut stmt = s
+                .conn
+                .prepare("SELECT sequence FROM audit_log_chain ORDER BY id ASC")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+            rows.map(|x| x.unwrap()).collect()
+        };
+        let expected: Vec<i64> = (0..seqs.len() as i64).collect();
+        assert_eq!(seqs, expected, "audit sequences are contiguous 0..N — chain did not fork");
+        assert_eq!(seqs.len(), 5, "two connections produced one 5-row chain");
+    }
+
     // --- Test 7: WCET — verdict path is independent of the key ledger --------
     #[test]
     fn wcet_verdict_path_does_not_touch_key_ledger() {
