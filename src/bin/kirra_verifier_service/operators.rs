@@ -39,18 +39,22 @@ pub(crate) async fn register_operator(
     };
     let now = now_ms();
     // The revoked-check + register + audit run under ONE acquisition (Rule 5).
-    // The closure returns the fully-built response (the early persist-failure
-    // path returns its 500 response from inside the closure — Rule 4).
-    svc.app.store.with(|store| {
+    // The closure returns the fully-built response; `call` offloads it off the
+    // worker pool (SAFETY: SG-HA-3).
+    let op_id = operator_id.to_string();
+    let pubkey = req.ed25519_pubkey_pem.clone();
+    let fp = fingerprint.clone();
+    let admin_fp = admin_token_fingerprint(&headers);
+    let resp = match svc.app.store.call(move |store| {
         // #327: detect a prior REVOKED row BEFORE registering — register_operator
         // silently clears revoked_at, so reactivation would otherwise be
         // invisible in the ledger. Record it as a distinct, attributed event.
         let was_revoked = store
-            .load_operator(operator_id)
+            .load_operator(&op_id)
             .ok()
             .flatten()
             .is_some_and(|o| o.revoked_at_ms.is_some());
-        if store.register_operator(operator_id, &req.ed25519_pubkey_pem, now).is_err() {
+        if store.register_operator(&op_id, &pubkey, now).is_err() {
             return (StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "persist failed" }))).into_response();
         }
@@ -60,31 +64,36 @@ pub(crate) async fn register_operator(
             let _ = store.append_clearance_audit_event(
                 "OperatorReactivated",
                 &json!({
-                    "operator_id": operator_id,
-                    "operator_key_fingerprint": fingerprint,
-                    "reactivated_by_admin_fingerprint": admin_token_fingerprint(&headers),
+                    "operator_id": op_id,
+                    "operator_key_fingerprint": fp,
+                    "reactivated_by_admin_fingerprint": admin_fp,
                 }).to_string(),
                 now,
             );
             (StatusCode::CREATED, Json(json!({
-                "operator_id": operator_id,
-                "operator_key_fingerprint": fingerprint,
+                "operator_id": op_id,
+                "operator_key_fingerprint": fp,
                 "status": "reactivated",
             }))).into_response()
         } else {
             let _ = store.append_clearance_audit_event(
                 "OperatorRegistered",
-                &json!({ "operator_id": operator_id, "operator_key_fingerprint": fingerprint })
+                &json!({ "operator_id": op_id, "operator_key_fingerprint": fp })
                     .to_string(),
                 now,
             );
             (StatusCode::CREATED, Json(json!({
-                "operator_id": operator_id,
-                "operator_key_fingerprint": fingerprint,
+                "operator_id": op_id,
+                "operator_key_fingerprint": fp,
                 "status": "registered",
             }))).into_response()
         }
-    })
+    }).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "error": "store task failed" }))).into_response(),
+    };
+    resp
 }
 
 /// POST /console/operators/{operator_id}/revoke — revoke an operator (#314).
@@ -96,14 +105,16 @@ pub(crate) async fn revoke_operator(
     let now = now_ms();
     // revoke + its audit event share one acquisition (Rule 5); the closure
     // returns the built response.
-    svc.app.store.with(|store| match store.revoke_operator(&operator_id, now) {
+    // SAFETY: SG-HA-3 — write off the worker pool.
+    let op_id = operator_id.to_string();
+    match svc.app.store.call(move |store| match store.revoke_operator(&op_id, now) {
         Ok(true) => {
             let _ = store.append_clearance_audit_event(
                 "OperatorRevoked",
-                &json!({ "operator_id": operator_id }).to_string(),
+                &json!({ "operator_id": op_id }).to_string(),
                 now,
             );
-            (StatusCode::OK, Json(json!({ "operator_id": operator_id, "status": "revoked" })))
+            (StatusCode::OK, Json(json!({ "operator_id": op_id, "status": "revoked" })))
                 .into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND,
@@ -111,7 +122,11 @@ pub(crate) async fn revoke_operator(
             .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "persist failed" }))).into_response(),
-    })
+    }).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "error": "store task failed" }))).into_response(),
+    }
 }
 
 /// GET /console/clearance-challenge?operator_id=&node_id= — issue a one-time nonce
@@ -137,12 +152,18 @@ pub(crate) async fn clearance_challenge(
         return (StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": "operator_id and node_id are required" }))).into_response();
     }
-    let active = svc.app.store.with(|store| store
-        .load_operator(operator_id)
-        .ok()
-        .flatten()
-        .map(|o| o.is_active())
-        .unwrap_or(false));
+    let op_id = operator_id.to_string();
+    let active = match svc.app.store.call_read(move |store| {
+        Ok::<bool, ()>(store
+            .load_operator(&op_id)
+            .ok()
+            .flatten()
+            .map(|o| o.is_active())
+            .unwrap_or(false))
+    }).await {
+        Ok(Ok(v)) => v,
+        _ => false,
+    };
     // Hex string (not a u64) so the in-browser signing flow never loses precision.
     let nonce_hex = format!("{:016x}", kirra_verifier::verifier::generate_challenge_nonce());
     // #325: store a REAL challenge only for an active operator; everyone else gets a
@@ -205,22 +226,26 @@ pub(crate) async fn console_clearance_grant(
         let nonce = req.nonce.clone().unwrap_or_default();
         let sig_b64 = req.signature_b64.clone().unwrap_or_default();
         if nonce.is_empty() {
-            audit_grant_rejection(&svc.app, "missing_nonce", &node_id, &operator_id, now);
+            audit_grant_rejection(&svc.app, "missing_nonce", &node_id, &operator_id, now).await;
             return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
                 "status": "rejected", "reason": "nonce required for an operator-signed grant"
             }))).into_response();
         }
         // 1. Load operator — unknown / revoked → 403, audited.
-        let operator = match svc.app.store.with(|s| s.load_operator(&operator_id).ok().flatten()) {
+        let op_id_c = operator_id.clone();
+        let maybe_op = svc.app.store.call_read(move |s| {
+            Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten())
+        }).await.ok().and_then(|r| r.ok()).flatten();
+        let operator = match maybe_op {
             Some(op) if op.is_active() => op,
             Some(_) => {
-                audit_grant_rejection(&svc.app, "revoked_operator", &node_id, &operator_id, now);
+                audit_grant_rejection(&svc.app, "revoked_operator", &node_id, &operator_id, now).await;
                 return (StatusCode::FORBIDDEN, Json(json!({
                     "status": "rejected", "reason": "operator is revoked"
                 }))).into_response();
             }
             None => {
-                audit_grant_rejection(&svc.app, "unknown_operator", &node_id, &operator_id, now);
+                audit_grant_rejection(&svc.app, "unknown_operator", &node_id, &operator_id, now).await;
                 return (StatusCode::FORBIDDEN, Json(json!({
                     "status": "rejected", "reason": "operator is not registered"
                 }))).into_response();
@@ -231,7 +256,7 @@ pub(crate) async fn console_clearance_grant(
         let sig_bytes = match b64e.decode(sig_b64.trim()) {
             Ok(b) => b,
             Err(_) => {
-                audit_grant_rejection(&svc.app, "malformed_signature", &node_id, &operator_id, now);
+                audit_grant_rejection(&svc.app, "malformed_signature", &node_id, &operator_id, now).await;
                 return (StatusCode::UNAUTHORIZED, Json(json!({
                     "status": "rejected", "reason": "signature is not valid base64"
                 }))).into_response();
@@ -243,7 +268,7 @@ pub(crate) async fn console_clearance_grant(
         if !kirra_verifier::attestation::verify_ed25519_pem_signature(
             &operator.pubkey_pem, &payload, &sig_bytes,
         ) {
-            audit_grant_rejection(&svc.app, "bad_signature", &node_id, &operator_id, now);
+            audit_grant_rejection(&svc.app, "bad_signature", &node_id, &operator_id, now).await;
             return (StatusCode::UNAUTHORIZED, Json(json!({
                 "status": "rejected", "reason": "signature verification failed"
             }))).into_response();
@@ -252,7 +277,7 @@ pub(crate) async fn console_clearance_grant(
         //    #326: same length-prefixed composite key the challenge issuer used.
         let key = composite_challenge_key(&operator_id, &node_id);
         if !svc.app.consume_clearance_challenge(&key, &nonce, now) {
-            audit_grant_rejection(&svc.app, "nonce_replay_or_expired", &node_id, &operator_id, now);
+            audit_grant_rejection(&svc.app, "nonce_replay_or_expired", &node_id, &operator_id, now).await;
             return (StatusCode::UNAUTHORIZED, Json(json!({
                 "status": "rejected",
                 "reason": "challenge nonce absent, expired, or already used (replay rejected)"
@@ -264,7 +289,7 @@ pub(crate) async fn console_clearance_grant(
         // === BREAK-GLASS PATH — the named, distinctly-audited supervisor fallback.
         if let Err(code) = check_supervisor_key(&headers) {
             if code == StatusCode::UNAUTHORIZED {
-                audit_grant_rejection(&svc.app, "supervisor_unauthorized", &node_id, &operator_id, now);
+                audit_grant_rejection(&svc.app, "supervisor_unauthorized", &node_id, &operator_id, now).await;
             }
             return (code, Json(json!({
                 "status": "rejected",
@@ -279,34 +304,46 @@ pub(crate) async fn console_clearance_grant(
 
     // Shared well-formedness (mirrors OperatorClearanceGrant::is_well_formed).
     if operator_id.is_empty() {
-        audit_grant_rejection(&svc.app, "empty_operator_id", &node_id, &operator_id, now);
+        audit_grant_rejection(&svc.app, "empty_operator_id", &node_id, &operator_id, now).await;
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "status": "rejected", "reason": "operator_id must be non-empty"
         }))).into_response();
     }
-    let registered = svc.app.store.with(|store| store.node_exists(&node_id).unwrap_or(false));
+    let node_id_c = node_id.clone();
+    let registered = svc.app.store.call_read(move |store| {
+        Ok::<bool, ()>(store.node_exists(&node_id_c).unwrap_or(false))
+    }).await.ok().and_then(|r| r.ok()).unwrap_or(false);
     if !registered {
-        audit_grant_rejection(&svc.app, "unregistered_node", &node_id, &operator_id, now);
+        audit_grant_rejection(&svc.app, "unregistered_node", &node_id, &operator_id, now).await;
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "status": "rejected", "reason": "node_id is not a registered node"
         }))).into_response();
     }
 
     // Record + sign — RECORD-ONLY. Delivery is Phase B; posture is untouched.
-    svc.app.store.with(|store| match store.save_clearance_grant_chained_with_auth(
-        &node_id, &operator_id, now, auth_method, fingerprint.as_deref(),
+    // SAFETY: SG-HA-3 — durable write off the worker pool.
+    let node_id_c = node_id.clone();
+    let op_id_c = operator_id.clone();
+    let auth_method_s = auth_method.to_string();
+    let fp_c = fingerprint.clone();
+    match svc.app.store.call(move |store| match store.save_clearance_grant_chained_with_auth(
+        &node_id_c, &op_id_c, now, &auth_method_s, fp_c.as_deref(),
     ) {
         Ok(_id) => (StatusCode::OK, Json(json!({
             "status": "recorded",
             "delivery": "pending-phase-b",
-            "node_id": node_id,
-            "operator_id": operator_id,
+            "node_id": node_id_c,
+            "operator_id": op_id_c,
             "granted_at_ms": now,
-            "auth_method": auth_method,
-            "operator_key_fingerprint": fingerprint,
+            "auth_method": auth_method_s,
+            "operator_key_fingerprint": fp_c,
             "note": "grant recorded and signed; the vehicle is NOT released — delivery to the node ClearanceLoop is Phase B",
         }))).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "status": "error", "reason": "persist failed" }))).into_response(),
-    })
+    }).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                   Json(json!({ "status": "error", "reason": "store task failed" }))).into_response(),
+    }
 }

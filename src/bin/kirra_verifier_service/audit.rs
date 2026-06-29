@@ -87,9 +87,15 @@ pub(crate) async fn handle_audit_rotate_key(
     // record_key_rotation result. The Fenced self-demote (a mode_active store)
     // happens OUTSIDE the closure — the lock is already released by then,
     // matching the prior `drop(store)`-before-self-demote ordering (Rule 4).
-    let rotation = svc.app.store.with(|store| {
+    // SAFETY: SG-HA-3 — durable write off the worker pool.
+    let rotation = svc.app.store.call(move |store| {
         store.record_key_rotation(new_signing_key, &req.reason, now_ms(), held_epoch)
-    });
+    }).await;
+    let rotation = match rotation {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
+                          Json(json!({ "error": "store task failed" }))).into_response(),
+    };
     match rotation {
         Ok(_) => Json(json!({ "recorded": true, "event_type": "KEY_ROTATION", "new_key_id": new_key_id })).into_response(),
         Err(DurableWriteError::Fenced(reason)) => {

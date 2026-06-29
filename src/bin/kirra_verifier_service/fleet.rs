@@ -30,10 +30,11 @@ pub(crate) async fn health() -> Json<HealthResponse> {
 }
 
 pub(crate) async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.with(|store| store.health_check()) {
-        Ok(()) => (StatusCode::OK, Json(HealthResponse { status: "ready".to_string() }))
+    // SAFETY: SG-HA-3 — lightweight health probe off the worker pool via read replica.
+    match svc.app.store.call_read(|store| store.health_check()).await {
+        Ok(Ok(())) => (StatusCode::OK, Json(HealthResponse { status: "ready".to_string() }))
             .into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
+        _ => (StatusCode::SERVICE_UNAVAILABLE,
                    Json(HealthResponse { status: "db_unavailable".to_string() }))
             .into_response(),
     }
@@ -80,8 +81,9 @@ pub(crate) async fn get_node_posture(
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,
 /// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
 pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.with(|store| store.load_av_subsystems()) {
-        Ok(rows) => {
+    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    match svc.app.store.call_read(|store| store.load_av_subsystems()).await {
+        Ok(Ok(rows)) => {
             let subsystems: Vec<AvSubsystemView> = rows
                 .into_iter()
                 .map(|r| AvSubsystemView {
@@ -97,7 +99,7 @@ pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> 
             let total = subsystems.len();
             Json(json!({ "subsystems": subsystems, "total": total })).into_response()
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to load av subsystems" }))).into_response(),
     }
 }
@@ -105,8 +107,9 @@ pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> 
 /// Read-only listing of registered operators. Admin-gated. Exposes only the
 /// public-key FINGERPRINT (never the PEM), matching the write-side convention. (#385)
 pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
-    match svc.app.store.with(|store| store.load_operators()) {
-        Ok(rows) => {
+    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    match svc.app.store.call_read(|store| store.load_operators()).await {
+        Ok(Ok(rows)) => {
             let operators: Vec<OperatorView> = rows
                 .into_iter()
                 .map(|r| {
@@ -125,7 +128,7 @@ pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl
             let total = operators.len();
             Json(json!({ "operators": operators, "total": total })).into_response()
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "failed to load operators" }))).into_response(),
     }
 }
@@ -209,20 +212,25 @@ pub(crate) async fn handle_sensor_fault_report(
 
     let now = now_ms();
 
-    let confidence_floor = svc.app.store.with(|store| {
-        store.load_av_confidence_floor(&req.source_node_id)
-            .unwrap_or(None)
-            .unwrap_or(0.70)
-    });
+    // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+    let node_id_cf = req.source_node_id.clone();
+    let confidence_floor = match svc.app.store.call_read(move |store| {
+        store.load_av_confidence_floor(&node_id_cf).unwrap_or(None).unwrap_or(0.70)
+    }).await {
+        Ok(v) => v,
+        Err(_) => 0.70,
+    };
 
     let is_degraded = req.hardware_fault_detected || req.confidence_score < confidence_floor;
 
     if is_degraded {
         let reason = if req.hardware_fault_detected { "hardware_fault" } else { "low_confidence" };
 
-        svc.app.store.with(|store| {
-            let _ = store.reset_recovery_streak(&req.source_node_id, now);
-        });
+        // SAFETY: SG-HA-3 — durable streak reset off the worker pool.
+        let node_id_rs = req.source_node_id.clone();
+        let _ = svc.app.store.call(move |store| {
+            let _ = store.reset_recovery_streak(&node_id_rs, now);
+        }).await;
 
         let updated = match svc.app.nodes.get(&req.source_node_id) {
             Some(n) => RegisteredNode {
@@ -281,9 +289,11 @@ pub(crate) async fn handle_sensor_fault_report(
         .unwrap_or(false);
 
     if !currently_untrusted {
-        svc.app.store.with(|store| {
-            let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
-        });
+        // SAFETY: SG-HA-3 — durable telemetry timestamp update off the worker pool.
+        let node_id_tt = req.source_node_id.clone();
+        let _ = svc.app.store.call(move |store| {
+            let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+        }).await;
         return (StatusCode::OK, Json(json!({
             "source_node_id": req.source_node_id,
             "accepted": true,
@@ -291,13 +301,22 @@ pub(crate) async fn handle_sensor_fault_report(
         }))).into_response();
     }
 
-    let decision = svc.app.store.with(|store| {
+    // SAFETY: SG-HA-3 — recovery-streak read+write off the worker pool.
+    // `evaluate_recovery_report` internally reads and writes streak state;
+    // it must run on the writer connection (via `call`) to keep the
+    // read-then-write atomic under one lock acquisition.
+    let node_id_rr = req.source_node_id.clone();
+    let decision = match svc.app.store.call(move |store| {
         // `&*store` dereferences to `&VerifierStore` so the generic
         // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
         // resolves correctly (S3 / #115 — trait seam, behavior unchanged:
         // the trait impl delegates verbatim).
-        evaluate_recovery_report(&*store, &req.source_node_id, now)
-    });
+        evaluate_recovery_report(&*store, &node_id_rr, now)
+    }).await {
+        Ok(d) => d,
+        // Task failure: treat as NotApplicable (fail-closed: no recovery confirmed).
+        Err(_) => HysteresisDecision::NotApplicable,
+    };
 
     match &decision {
         HysteresisDecision::RecoveryConfirmed { streak } => {
@@ -348,9 +367,11 @@ pub(crate) async fn handle_sensor_fault_report(
         }
         HysteresisDecision::StreakBuilding { .. } | HysteresisDecision::WindowExpired { .. } => {}
         HysteresisDecision::NotApplicable => {
-            svc.app.store.with(|store| {
-                let _ = store.touch_av_telemetry_timestamp(&req.source_node_id, now);
-            });
+            // SAFETY: SG-HA-3 — durable telemetry timestamp update off the worker pool.
+            let node_id_tt = req.source_node_id.clone();
+            let _ = svc.app.store.call(move |store| {
+                let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+            }).await;
         }
     }
 

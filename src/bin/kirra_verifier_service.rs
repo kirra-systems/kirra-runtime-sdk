@@ -860,12 +860,14 @@ async fn main() {
     }
 
     {
-        let (nodes, dependencies) = app_state.store.with(|store| {
-            let nodes = store.load_nodes().expect("failed to load persisted nodes");
+        let (nodes, dependencies) = app_state.store.call_read(|store| {
+            let nodes = store.load_nodes().map_err(|e| e.to_string())?;
             let dependencies = store.load_dependencies()
-                .expect("failed to load persisted dependencies");
-            (nodes, dependencies)
-        });
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((nodes, dependencies))
+        }).await
+            .expect("store task failed loading initial state")
+            .expect("failed to load persisted nodes/dependencies");
         for node in nodes {
             app_state.nodes.insert(node.node_id.clone(), node);
         }
@@ -899,7 +901,8 @@ async fn main() {
         // Load the assets under one acquisition; register them OUTSIDE the
         // closure (registration borrows svc_state and calls back into the store
         // via seed_local_asset_lockedout — keep it off the held guard).
-        let assets = svc_state.app.store.with(|store| store.load_fabric_assets().ok());
+        // SAFETY: SG-HA-3 — read off the worker pool via read replica.
+        let assets = svc_state.app.store.call_read(|store| store.load_fabric_assets()).await.ok().and_then(|r| r.ok());
         let assets_loaded = match assets {
             Some(assets) => {
                 let n = assets.len();
@@ -943,7 +946,8 @@ async fn main() {
     let effective_mode = match mode {
         VerifierOperationMode::PassiveStandby => VerifierOperationMode::PassiveStandby,
         VerifierOperationMode::Active => {
-            let arbitration = svc_state.app.store.with(|store| {
+            // SAFETY: SG-HA-3 — read probe off the worker pool via read replica.
+            let arbitration = svc_state.app.store.call_read(|store| {
                 let (epoch, holder) = store.current_active_holder().ok()?;
                 let hb_str = store.load_engine_state(HEARTBEAT_KEY).ok()?;
                 let now = now_ms();
@@ -953,7 +957,7 @@ async fn main() {
                     .map(|ts| now.saturating_sub(ts) < PROMOTION_TIMEOUT_MS)
                     .unwrap_or(false);
                 Some((epoch, holder, hb_fresh))
-            });
+            }).await.ok().flatten();
 
             match arbitration {
                 Some((epoch, Some(holder), true)) if holder != my_id => {
@@ -966,9 +970,11 @@ async fn main() {
                     VerifierOperationMode::PassiveStandby
                 }
                 Some((epoch, _holder, _stale_or_self)) => {
-                    let claim = svc_state.app.store.with(|s| {
-                        s.try_claim_epoch(epoch, &my_id, now_ms()).ok().flatten()
-                    });
+                    // SAFETY: SG-HA-3 — epoch claim is a durable write; off the worker pool.
+                    let my_id_c = my_id.clone();
+                    let claim = svc_state.app.store.call(move |s| {
+                        Ok::<_, ()>(s.try_claim_epoch(epoch, &my_id_c, now_ms()).ok().flatten())
+                    }).await.ok().and_then(|r| r.ok()).flatten();
                     match claim {
                         Some(new_epoch) => {
                             svc_state
@@ -1043,33 +1049,28 @@ async fn main() {
     // catch a missing call sits behind the build_app extraction follow-up
     // (#72). Do not remove the log lines.
     if svc_state.app.is_active() {
-        match svc_state.app.store.with(|store| store.ensure_hash_v2_migration_anchor(now_ms())) {
-            Ok(()) => tracing::info!("audit: hash-v2 migration anchor ensured"),
-            Err(e) => tracing::error!(
-                error = %e,
-                "audit: hash-v2 migration anchor FAILED at startup"
-            ),
+        // SAFETY: SG-HA-3 — startup writes off the worker pool.
+        match svc_state.app.store.call(|store| store.ensure_hash_v2_migration_anchor(now_ms())).await {
+            Ok(Ok(())) => tracing::info!("audit: hash-v2 migration anchor ensured"),
+            Ok(Err(e)) => tracing::error!(error = %e, "audit: hash-v2 migration anchor FAILED at startup"),
+            Err(_) => tracing::error!("audit: hash-v2 migration anchor FAILED — store task error"),
         }
         // Key-id backfill (#76): assign existing NULL-key_id rows the genesis
         // key's id so they verify after a future rotation. Idempotent; signed.
-        match svc_state.app.store.with(|store| store.ensure_key_id_backfill_migration(now_ms())) {
-            Ok(()) => tracing::info!("audit: key-id backfill migration ensured"),
-            Err(e) => tracing::error!(
-                error = %e,
-                "audit: key-id backfill migration FAILED at startup"
-            ),
+        match svc_state.app.store.call(|store| store.ensure_key_id_backfill_migration(now_ms())).await {
+            Ok(Ok(())) => tracing::info!("audit: key-id backfill migration ensured"),
+            Ok(Err(e)) => tracing::error!(error = %e, "audit: key-id backfill migration FAILED at startup"),
+            Err(_) => tracing::error!("audit: key-id backfill migration FAILED — store task error"),
         }
         // Anchor-head backfill (#77): a chain written by a pre-#77 binary has no
         // signed head; sign one from the current tail so an upgraded store
         // presents a head BEFORE serving /system/audit/verify (no false
         // HEAD_ABSENT). Idempotent. Log-and-continue: a missing head is itself
         // caught fail-closed at verify time (head_verified = false).
-        match svc_state.app.store.with(|store| store.ensure_audit_anchor_head(now_ms())) {
-            Ok(()) => tracing::info!("audit: anchor-head high-water mark ensured"),
-            Err(e) => tracing::error!(
-                error = %e,
-                "audit: anchor-head high-water mark FAILED at startup"
-            ),
+        match svc_state.app.store.call(|store| store.ensure_audit_anchor_head(now_ms())).await {
+            Ok(Ok(())) => tracing::info!("audit: anchor-head high-water mark ensured"),
+            Ok(Err(e)) => tracing::error!(error = %e, "audit: anchor-head high-water mark FAILED at startup"),
+            Err(_) => tracing::error!("audit: anchor-head high-water mark FAILED — store task error"),
         }
     } else {
         tracing::info!(
@@ -1212,7 +1213,7 @@ async fn main() {
         admin_token_present: std::env::var("KIRRA_ADMIN_TOKEN")
             .map(|v| !v.is_empty())
             .unwrap_or(false),
-        sqlite_wal: svc_state.app.store.with(|store| store.is_wal_mode()),
+        sqlite_wal: svc_state.app.store.call_read(|store| store.is_wal_mode()).await.ok().unwrap_or(false),
         mode_active: svc_state.app.is_active(),
         watchdog_spawned,
         posture_engine_running: svc_state.posture_engine_tx.get().is_some(),
@@ -1331,20 +1332,26 @@ fn check_supervisor_key(headers: &HeaderMap) -> Result<(), StatusCode> {
 // ---------------------------------------------------------------------------
 
 /// Audit a clearance-grant rejection (never records key bytes / signatures).
-fn audit_grant_rejection(
+/// SAFETY: SG-HA-3 — durable write offloaded via `call()` (caller must `.await`).
+async fn audit_grant_rejection(
     app: &kirra_verifier::verifier::AppState,
     reason: &str,
     node_id: &str,
     operator_id: &str,
     now: u64,
 ) {
-    app.store.with(|store| {
-        let _ = store.append_clearance_audit_event(
+    let store = app.store.clone();
+    let reason = reason.to_string();
+    let node_id = node_id.to_string();
+    let operator_id = operator_id.to_string();
+    let _ = store.call(move |s| {
+        let _ = s.append_clearance_audit_event(
             "OperatorClearanceGrantRejected",
-            &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id }).to_string(),
+            &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
+                .to_string(),
             now,
         );
-    });
+    }).await;
 }
 
 /// #326 — the operator clearance-challenge map key. Length-prefixing the
