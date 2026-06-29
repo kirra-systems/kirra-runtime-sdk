@@ -14,6 +14,11 @@ use crate::federation::FederatedTrustReport;
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
 
 pub struct AuditChainVerifyResult {
+    /// Hash-linkage integrity ONLY (recomputed record hash matches, prev-linkage
+    /// unbroken, no sequence gap). NOT sufficient on its own: the record hash does
+    /// not cover the row signature, so a tampered/invalid signature leaves this
+    /// `true` while `signature_valid` is `false` (#690). Gate trust on
+    /// [`verified()`](Self::verified), never on this field alone.
     pub chain_intact: bool,
     pub total_entries: u64,
     pub latest_hash: String,
@@ -36,6 +41,22 @@ pub struct AuditChainVerifyResult {
     pub head_status: String,
 }
 
+impl AuditChainVerifyResult {
+    /// THE authoritative verdict (#690). The chain is trustworthy only if ALL three
+    /// independent checks hold:
+    /// - `chain_intact` — no in-place row edit / broken prev-linkage / sequence gap;
+    /// - `signature_valid` — every signed row verifies under its key (a bad signature,
+    ///   e.g. a failed `KEY_ROTATION` row, sets this `false` even though the hashes
+    ///   still link, since the record hash does not cover the signature);
+    /// - `head_verified` — no tail truncation/deletion (the signed anchor-head matches
+    ///   the chain tail).
+    ///
+    /// Callers MUST gate trust on this, never on `chain_intact` alone.
+    pub fn verified(&self) -> bool {
+        self.chain_intact && self.signature_valid && self.head_verified
+    }
+}
+
 /// Verification verdict for the fabric causal-log forensic chain (#87).
 /// Same shape as [`AuditChainVerifyResult`]: `chain_intact` covers in-place
 /// row edits (recomputed record hash mismatch, broken prev-linkage, sequence
@@ -43,6 +64,11 @@ pub struct AuditChainVerifyResult {
 /// anchor-head high-water mark. Together they cover edit + truncation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CausalChainVerifyResult {
+    /// Hash-linkage integrity ONLY (recomputed record hash matches, prev-linkage
+    /// unbroken, no sequence gap). NOT sufficient on its own: the record hash does
+    /// not cover the row signature, so a tampered/invalid signature leaves this
+    /// `true` while `signature_valid` is `false` (#690). Gate trust on
+    /// [`verified()`](Self::verified), never on this field alone.
     pub chain_intact: bool,
     pub total_entries: u64,
     pub latest_hash: String,
@@ -55,6 +81,16 @@ pub struct CausalChainVerifyResult {
     pub public_key_b64: Option<String>,
     pub head_verified: bool,
     pub head_status: String,
+}
+
+impl CausalChainVerifyResult {
+    /// THE authoritative verdict (#690): `chain_intact && signature_valid &&
+    /// head_verified`. Like [`AuditChainVerifyResult::verified`], `chain_intact`
+    /// alone is NOT sufficient — a tampered signature leaves it `true` while
+    /// `signature_valid` is `false`. Gate trust on this.
+    pub fn verified(&self) -> bool {
+        self.chain_intact && self.signature_valid && self.head_verified
+    }
 }
 
 #[derive(serde::Serialize)]

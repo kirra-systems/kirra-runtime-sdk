@@ -33,9 +33,11 @@ pub(crate) async fn verify_audit_chain(
             // #77 anchor-head high-water mark: detects tail truncation/deletion.
             "head_verified": r.head_verified,
             "head_status": r.head_status,
-            // Overall verdict folds in the head check so a truncated chain
-            // (rows internally consistent but tail deleted) reads as not-verified.
-            "verified": r.chain_intact && r.signature_valid && r.head_verified,
+            // Overall verdict (#690): the single authoritative accessor folds in
+            // hash linkage, signatures, AND the head check, so a truncated chain
+            // (rows internally consistent but tail deleted) or a row with a valid
+            // hash but invalid signature both read as not-verified.
+            "verified": r.verified(),
         })).into_response(),
         Ok(Err(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
                        Json(json!({ "error": "audit chain query failed" }))).into_response(),

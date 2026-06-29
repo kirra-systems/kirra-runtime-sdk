@@ -256,7 +256,7 @@ pub(crate) async fn verify_causal_chain(
             "public_key_b64": r.public_key_b64,
             "head_verified": r.head_verified,
             "head_status": r.head_status,
-            "verified": r.chain_intact && r.signature_valid && r.head_verified,
+            "verified": r.verified(), // #690: single authoritative verdict
         })).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "causal chain query failed" }))).into_response(),
