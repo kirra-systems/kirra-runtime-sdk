@@ -38,7 +38,7 @@ jobs:
     # timeout-minutes; these are the previously-unbounded jobs).
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         # --locked: build the committed Cargo.lock exactly; never re-resolve on
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: llvm-tools-preview
@@ -80,7 +80,7 @@ jobs:
             --lcov --output-path lcov.info \
             -- --skip wcet_gate
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run WCET gate tests
         # Authoritative WCET measurement. Runs on stable, non-instrumented,
@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Runtime-isolation guard (#146)
         working-directory: parko
@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: build the onnx + tensorrt backend-selection lanes
         # `parko_ros2::backend_select` compiles exactly ONE backend per feature
@@ -163,7 +163,7 @@ jobs:
     name: Parko ONNX Backend Tests (ORT v1.23.2)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install ONNX Runtime v1.23.2
         # Exact version match: `ort 2.0.0-rc.11` (pinned in
@@ -257,7 +257,7 @@ jobs:
     # No continue-on-error anywhere in this job; `parko-safety` remains the
     # primary gating safety check.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install ONNX Runtime v1.23.2 (cross-backend equivalence test)
         # The OpenVINO test suite includes a cross-backend equivalence
@@ -380,7 +380,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -397,7 +397,7 @@ jobs:
       - name: Dependency audit
         run: cargo audit 2>&1 | tee audit-report.txt
       - name: Upload reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: static-analysis-reports
@@ -410,7 +410,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Framework self-test
         # Pure shell — no hardware, root, or network. Asserts the target-
         # parameterized installer's behavior: dispatch correctness, honest
@@ -426,7 +426,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: setup_ros
         uses: ros-tooling/setup-ros@v0.7
         with:
