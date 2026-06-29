@@ -387,13 +387,26 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
+        # --all-targets lints tests/benches/examples too — test-code lint debt
+        # had been slipping past the lib+bins-only default (review follow-up).
         run: |
-          cargo clippy --workspace -- \
+          cargo clippy --workspace --all-targets -- \
             -D warnings \
             -W clippy::all \
             -A clippy::module_name_repetitions \
             -A clippy::must_use_candidate \
             2>&1 | tee clippy-report.txt
+      - name: ShellCheck (shellcheck is preinstalled on the runner)
+        # -S error: gate on real bugs, not style. The whole tracked script set is
+        # error-clean today; a new error-level finding fails CI.
+        run: |
+          git ls-files '*.sh' | xargs -r shellcheck -S error 2>&1 | tee shellcheck-report.txt
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      - name: Lint the Helm chart
+        # Default values (ClusterIP, ingress disabled) do NOT trip the H-1
+        # fail-closed transport guards, so a clean chart lints green.
+        run: helm lint helm/kirra 2>&1 | tee helm-lint-report.txt
       - name: Dependency audit
         run: cargo audit 2>&1 | tee audit-report.txt
       - name: Upload reports
@@ -403,6 +416,8 @@ jobs:
           name: static-analysis-reports
           path: |
             clippy-report.txt
+            shellcheck-report.txt
+            helm-lint-report.txt
             audit-report.txt
 
   parko-install-framework:
