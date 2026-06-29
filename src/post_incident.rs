@@ -77,7 +77,7 @@ fn posture_str(p: &FleetPosture) -> &'static str {
 /// is NEVER left without a correlation id.
 fn new_correlation_id(ts: u64, generation: u64) -> String {
     let mut bytes = [0u8; 16];
-    if getrandom::getrandom(&mut bytes).is_ok() {
+    if getrandom::fill(&mut bytes).is_ok() {
         let mut s = String::with_capacity(4 + 32);
         s.push_str("inc-");
         for b in bytes {

@@ -82,8 +82,8 @@ kirra-capture-schema = { path = "crates/kirra-capture-schema" }
 # identity), so enabling it is benign here.
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 dashmap = "6"
 axum = "0.8"
@@ -99,7 +99,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 # OS CSPRNG primitive for attestation challenge nonces (#147). Already in the
 # tree transitively via ed25519-dalek's rand_core; declared directly so the
 # library can source unpredictable nonces (no weak/time-based RNG).
-getrandom = "0.2"
+getrandom = "0.3"
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

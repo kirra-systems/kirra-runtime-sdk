@@ -702,7 +702,7 @@ impl AppState {
 #[must_use]
 pub fn generate_challenge_nonce() -> u64 {
     let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .expect("OS CSPRNG (getrandom) unavailable — cannot issue a secure attestation nonce");
     u64::from_le_bytes(bytes)
 }
