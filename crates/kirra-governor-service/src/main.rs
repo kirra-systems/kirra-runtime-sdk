@@ -308,10 +308,19 @@ fn main() -> std::io::Result<()> {
             continue;
         }
 
-        let proposal: Proposal = match bincode::serde::decode_from_slice(body, wire_cfg())
-            .map(|(p, _len)| p)
-        {
-            Ok(p) => p,
+        // Strict framing: the decode MUST consume the whole authenticated body.
+        // A prefix that decodes while leaving trailing bytes is a malformed frame
+        // and is dropped fail-closed (never evaluated as a clean proposal).
+        let proposal: Proposal = match bincode::serde::decode_from_slice(body, wire_cfg()) {
+            Ok((p, len)) if len == body.len() => p,
+            Ok((_, len)) => {
+                eprintln!(
+                    "decode error from {peer}: trailing bytes ({} of {} consumed)",
+                    len,
+                    body.len()
+                );
+                continue;
+            }
             Err(e) => {
                 eprintln!("decode error from {peer}: {e}");
                 continue;
