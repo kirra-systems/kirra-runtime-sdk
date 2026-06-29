@@ -105,7 +105,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 proptest = "1"
 # File-backed temp DBs for tamper-detection tests: a SQLite :memory: database is
 # per-connection, so tampering a row written by one connection from a second

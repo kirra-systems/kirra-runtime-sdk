@@ -51,7 +51,7 @@ ed25519-dalek = { version = "2" }
 base64 = "0.22"
 # Per-grant nonce minting on the signing side (#322 replay defense): 16 random
 # bytes → hex, burned exactly once at ingest (verify-AND-consume).
-rand = "0.8"
+rand = "0.9"
 
 [dev-dependencies]
 # The reference `FleetTrustStore` impl is the verifier's SQLite `VerifierStore`;
