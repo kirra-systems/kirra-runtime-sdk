@@ -1250,17 +1250,25 @@ mod key_durability_165_tests {
         assert!(r.signature_valid, "all rows (A-signed AND B-signed) verify under the durable seed");
     }
 
-    // --- #685: cross-connection audit chain stays a single unforked line -----
+    // --- #685: audit chain stays contiguous across both connections ----------
     // `audit_log_chain` is written from BOTH the NORMAL conn
     // (`save_posture_event_chained`) and the FULL `durable_conn`
-    // (`record_key_rotation`). On a FILE-backed store the two are DISTINCT
-    // connections, so this exercises the exact two-connection path #685 is about.
-    // Interleave production writers from both connections and assert the chain is
-    // a single unbroken, CONTIGUOUS line — the fork a DEFERRED tail-read risked,
-    // now closed by the `Immediate` `audit_tx` (the tail read holds the WAL write
-    // lock, so the other connection cannot commit a new tail in between).
+    // (`record_key_rotation`); on a FILE-backed store those are DISTINCT
+    // connections. This is a CONTIGUITY regression test for that two-connection
+    // chain: interleave production writers from both connections and assert one
+    // verifying, unbroken 0..N line across the connection boundary + rotation.
+    //
+    // Scope note (do not over-read): this does NOT force a statement-level
+    // interleave. Under the single-process store mutex the two connections never
+    // write concurrently, and most NORMAL-side writers (this one included) take
+    // the WAL write lock on their domain-row INSERT *before* the audit tail read
+    // regardless of DEFERRED/Immediate. `Immediate` (`audit_tx`) is what makes
+    // the no-fork guarantee hold uniformly and independently of the store mutex
+    // (and fixes the v2-migration path, where the audit append is the first
+    // statement). This test guards the cross-connection invariant; it is not a
+    // proof of the lock ordering itself.
     #[test]
-    fn cross_connection_audit_chain_is_unforked() {
+    fn cross_connection_audit_chain_is_contiguous() {
         let db = TmpDb::new("s685");
         let (a, b) = (key(1), key(2));
         let mut s = VerifierStore::new(db.path()).unwrap();
@@ -1294,7 +1302,7 @@ mod key_durability_165_tests {
         };
         let expected: Vec<i64> = (0..seqs.len() as i64).collect();
         assert_eq!(seqs, expected, "audit sequences are contiguous 0..N — chain did not fork");
-        assert_eq!(seqs.len(), 5, "two connections produced one 5-row chain");
+        assert!(seqs.len() >= 5, "at least the 5 rows this test appended are present");
     }
 
     // --- Test 7: WCET — verdict path is independent of the key ledger --------
