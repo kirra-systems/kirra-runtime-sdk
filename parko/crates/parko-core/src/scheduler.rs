@@ -265,9 +265,16 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         // Clamp-only degraded mode — skipped when a governor is attached
         // because the governor's decision already constrains the command.
         let sanitized_command = if degraded && self.governor.is_none() {
-            let clamped_linear = proposed_cmd
-                .linear_velocity
-                .min(t.max_linear_velocity_mps);
+            // #693: clamp the MAGNITUDE. `.min(max)` bounded only the forward
+            // direction, so a large REVERSE command (e.g. -65 m/s) passed through
+            // unclamped. Bound both directions to ±max_linear_velocity_mps. Use
+            // `.max(-bound).min(bound)` rather than `f64::clamp` so the degraded
+            // fallback keeps the original `.min`'s NaN-tolerant, panic-free
+            // behaviour (clamp panics if the bound is NaN). Real physical-envelope
+            // enforcement is the attached KirraGovernor, used when present; this is
+            // only the governorless fallback.
+            let bound = t.max_linear_velocity_mps;
+            let clamped_linear = proposed_cmd.linear_velocity.max(-bound).min(bound);
             ControlCommand {
                 linear_velocity: clamped_linear,
                 angular_velocity: proposed_cmd.angular_velocity,
@@ -394,6 +401,36 @@ mod tests {
 
     }
 
+    /// Like `TestBackend` but emits a large NEGATIVE (reverse) command — the
+    /// geometry #693 is about. Also exceeds the latency threshold to force
+    /// degraded mode so the built-in clamp activates.
+    struct ReverseTestBackend;
+
+    impl InferenceBackend for ReverseTestBackend {
+        fn load_model(&self, _: &str) -> Result<ModelHandle, BackendError> {
+            let mut inputs = HashMap::new();
+            inputs.insert("image_input".to_string(), vec![1, 3, 224, 224]);
+            Ok(ModelHandle {
+                model_id: "reverse-test".to_string(),
+                input_shapes: inputs,
+                output_shapes: HashMap::new(),
+                expected_precision: PrecisionMode::FP32,
+            })
+        }
+
+        fn run(
+            &self,
+            _: &ModelHandle,
+            _: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, BackendError> {
+            std::thread::sleep(std::time::Duration::from_millis(200)); // force degraded
+            let mut map = HashMap::new();
+            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![-65.0]));
+            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0]));
+            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+        }
+    }
+
     struct SimpleStream {
         next_id: u64,
     }
@@ -515,6 +552,38 @@ mod tests {
             snapshot.active_command.linear_velocity,
             DegradationThresholds::default().max_linear_velocity_mps,
             "Built-in clamp must cap the 65.0 m/s command at max_linear_velocity_mps"
+        );
+    }
+
+    /// #693: the governorless built-in clamp must bound REVERSE commands too.
+    /// `.min(max)` only capped the forward direction, so a -65 m/s command passed
+    /// through unclamped. The magnitude clamp bounds it to -max_linear_velocity_mps.
+    #[tokio::test]
+    async fn test_builtin_clamp_bounds_reverse_velocity() {
+        let backend = Arc::new(ReverseTestBackend);
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx); // no governor
+        let mut stream = SimpleStream { next_id: 0 };
+
+        let _ = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        let snapshot = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+
+        assert!(snapshot.active_state_degraded, "200ms latency must trigger degraded mode");
+        let bound = DegradationThresholds::default().max_linear_velocity_mps;
+        assert_eq!(
+            snapshot.active_command.linear_velocity, -bound,
+            "the -65 m/s reverse command must be clamped to -max_linear_velocity_mps, not pass through"
+        );
+        assert!(
+            snapshot.active_command.linear_velocity.abs() <= bound,
+            "clamped reverse speed must be within the magnitude bound"
         );
     }
 
