@@ -22,8 +22,8 @@
 | `src/` (root `kirra-verifier`) | 38.3K | HTTP service, verifier core, posture engine, persistence, adapters, gateway, HA |
 | `crates/kirra-planner` | 12.1K | Occy geometric DOER + Mick intent seam |
 | `crates/kirra-core` | 6.5K | Lean shared types (corridor/trajectory/containment/kinematics) |
-| `crates/kirra-ros2-adapter` | 6.1K | **The CHECKER** (RSS validation) + ROS2 node |
-| `crates/kirra-trajectory` | 3.7K | |
+| `crates/kirra-ros2-adapter` | 6.1K | ROS2 integration layer + node; re-exports checker modules from `kirra-trajectory` |
+| `crates/kirra-trajectory` | 3.7K | **The CHECKER** (RSS validation core) + trajectory/state/validation primitives |
 | `crates/kirra-map` | 2.8K | Lanelet2-lite lane graph |
 | `crates/kirra-collector` | 2.4K | Capture/collector data path |
 | `crates/kirra-mick`, `kirra-taj`, `kirra-fleet-transport`, `kirra-contract-channel`, others | ~6K | |
