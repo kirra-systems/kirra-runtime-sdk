@@ -214,12 +214,9 @@ pub(crate) async fn handle_sensor_fault_report(
 
     // SAFETY: SG-HA-3 — read off the worker pool via read replica.
     let node_id_cf = req.source_node_id.clone();
-    let confidence_floor = match svc.app.store.call_read(move |store| {
+    let confidence_floor = svc.app.store.call_read(move |store| {
         store.load_av_confidence_floor(&node_id_cf).unwrap_or(None).unwrap_or(0.70)
-    }).await {
-        Ok(v) => v,
-        Err(_) => 0.70,
-    };
+    }).await.unwrap_or(0.70);
 
     let is_degraded = req.hardware_fault_detected || req.confidence_score < confidence_floor;
 

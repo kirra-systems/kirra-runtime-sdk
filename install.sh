@@ -317,16 +317,19 @@ else
     curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUMS}" || \
         fatal "Could not download SHA256SUMS (${CHECKSUM_URL}) — refusing to install an UNVERIFIED binary."
 
+    # Exact-field match on the SHA256SUMS filename column ($2), not a substring
+    # `grep -F` — so a sibling artifact (e.g. a future `…tar.gz.sig`) whose name
+    # contains the archive name cannot be matched in its place. Then compare the
+    # expected hash to the computed one directly.
     ARCHIVE_NAME=$(basename "${DOWNLOAD_URL}")
-    if ! grep -qF "${ARCHIVE_NAME}" "${CHECKSUMS}"; then
+    EXPECTED_HASH=$(awk -v n="${ARCHIVE_NAME}" '$2 == n { print $1; exit }' "${CHECKSUMS}")
+    if [ -z "${EXPECTED_HASH}" ]; then
         fatal "SHA256SUMS does not list ${ARCHIVE_NAME} — refusing to install an UNVERIFIED binary."
     fi
-
-    (cd "${TMPDIR}" && \
-        grep -F "${ARCHIVE_NAME}" SHA256SUMS | \
-        sed "s|${ARCHIVE_NAME}|kirra.tar.gz|" | \
-        sha256sum -c --quiet) || \
+    ACTUAL_HASH=$(sha256sum "${ARCHIVE}" | awk '{ print $1 }')
+    if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
         fatal "Checksum verification FAILED — download is corrupt or tampered. Aborting."
+    fi
     success "Checksum verified"
 
     # Extract

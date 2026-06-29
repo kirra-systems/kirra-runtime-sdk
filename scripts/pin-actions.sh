@@ -56,9 +56,12 @@ while IFS= read -r file; do
       fi
       if sha=$(resolve_sha "$repo" "$ref"); then
         # Rewrite this exact ref → sha, append the original ref as a comment.
-        # Escape sed-special chars in repo (dots/slashes are literal in our pattern).
-        esc_repo=${repo//\//\\/}
-        sed -i -E "s|uses:([[:space:]]*)${esc_repo}@${ref}([[:space:]]*)\$|uses:\1${esc_repo}@${sha} # ${ref}\2|" "$file"
+        # Escape regex-special chars in BOTH repo and ref before using them in the
+        # sed PATTERN (a ref like `v0.7` has a `.` that would otherwise match any
+        # char). The replacement side keeps the literal ref in the comment.
+        esc_repo=$(printf '%s' "$repo" | sed -E 's/[.[\*^$/]/\\&/g')
+        esc_ref=$(printf '%s' "$ref" | sed -E 's/[.[\*^$/]/\\&/g')
+        sed -i -E "s|uses:([[:space:]]*)${esc_repo}@${esc_ref}([[:space:]]*)\$|uses:\1${repo}@${sha} # ${ref}\2|" "$file"
         echo "PINNED:   ${file}: ${repo}@${ref} -> ${sha}"
         changed=$((changed + 1))
       else

@@ -35,12 +35,12 @@ pub(crate) async fn register_node(
         // SAFETY: SG-HA-3 — durable write off the async worker pool.
         let node_id_p = req.node_id.clone();
         let require = req.require_tpm_quote;
-        let policy_err = match svc.app.store.call(move |store| {
-            store.set_node_attestation_policy(&node_id_p, require)
-        }).await {
-            Ok(Ok(())) => false,
-            _ => true,
-        };
+        let policy_err = !matches!(
+            svc.app.store.call(move |store| {
+                store.set_node_attestation_policy(&node_id_p, require)
+            }).await,
+            Ok(Ok(()))
+        );
         if policy_err {
             return (StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "failed to persist attestation policy" }))).into_response();
