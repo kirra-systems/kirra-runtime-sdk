@@ -801,6 +801,8 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion audit event"
             );
+            // Fail-closed: do not remain Active if the required audit event cannot be persisted.
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
         Err(e) => {
@@ -810,6 +812,7 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion audit event"
             );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
     }
