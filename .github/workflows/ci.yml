@@ -408,7 +408,18 @@ jobs:
         # fail-closed transport guards, so a clean chart lints green.
         run: helm lint helm/kirra 2>&1 | tee helm-lint-report.txt
       - name: Dependency audit
-        run: cargo audit 2>&1 | tee audit-report.txt
+        # GATING (#687): `set -o pipefail` so `cargo audit`'s non-zero exit (a
+        # RUSTSEC advisory against a workspace dependency) FAILS the job — the
+        # `tee` pipe would otherwise return tee's exit code and mask it. Made
+        # explicit so the gate does not depend on the runner's implicit bash
+        # defaults or a future `shell:`/`defaults.run` override. The report is
+        # still captured for the `if: always()` upload step below, so a failing
+        # run still publishes the advisory details as an artifact. To accept a
+        # specific advisory deliberately, add an ignore entry in `.cargo/audit.toml`
+        # rather than removing this gate.
+        run: |
+          set -o pipefail
+          cargo audit 2>&1 | tee audit-report.txt
       - name: Upload reports
         uses: actions/upload-artifact@v7
         if: always()
