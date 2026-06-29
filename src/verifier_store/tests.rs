@@ -1688,6 +1688,42 @@ mod audit_anchor_head_77_tests {
         assert_eq!(r.total_entries, 3);
     }
 
+    /// #690: a row whose SIGNATURE is tampered (its signed payload / record hash
+    /// untouched) leaves the hash chain internally consistent — `chain_intact ==
+    /// true` — but the signature no longer verifies, so the AUTHORITATIVE verdict
+    /// `verified()` must be false. This is exactly the gap a caller keying off
+    /// `chain_intact` alone would miss (the motivating case being a failed
+    /// `KEY_ROTATION` row, which also strands every later row signed by the
+    /// un-absorbed rotated key).
+    #[test]
+    fn tampered_signature_keeps_chain_intact_but_fails_verified_690() {
+        let (mut s, vk) = signed_store();
+        append3(&mut s);
+        // Corrupt ONLY the signature of the middle row (sequence 1) by flipping its
+        // first base64 char to a guaranteed-different one. The record hash does not
+        // cover `signature_b64`, so the hash walk still links cleanly.
+        let changed = s
+            .raw_conn()
+            .execute(
+                "UPDATE audit_log_chain \
+                 SET signature_b64 = CASE WHEN substr(signature_b64,1,1)='A' THEN 'B' ELSE 'A' END \
+                                     || substr(signature_b64, 2) \
+                 WHERE sequence = 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "exactly the middle row's signature was altered");
+
+        let r = s.verify_audit_chain_full(Some(&vk)).unwrap();
+        assert!(r.chain_intact, "hash linkage is untouched — chain_intact stays true");
+        assert!(!r.signature_valid, "the tampered signature must fail to verify");
+        assert!(
+            !r.verified(),
+            "the authoritative verdict folds in signatures → a hash-intact, bad-signature chain is NOT verified"
+        );
+        assert!(r.first_invalid_signature_index.is_some(), "the offending row is named");
+    }
+
     /// EMPTY chain → no head required, clean.
     #[test]
     fn empty_chain_needs_no_head() {
