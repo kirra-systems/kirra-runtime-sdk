@@ -1,0 +1,47 @@
+# Supply-chain update automation (M-6 GitHub Actions, M-7 container base images).
+#
+# This keeps the pinned references CURRENT so they don't rot once pinned:
+#   - github-actions: once actions are SHA-pinned (scripts/pin-actions.sh),
+#     Dependabot bumps the SHA + version comment as new releases land, and
+#     surfaces new major versions to review before adopting.
+#   - docker: tracks base-image updates so digest pins can be refreshed
+#     deliberately rather than drifting on a floating tag.
+#   - cargo: routine dependency hygiene for the two workspaces.
+#
+# Dependabot maintains pins; it does NOT itself convert a tag ref to a SHA — the
+# one-time tag->SHA conversion is scripts/pin-actions.sh (see SECURITY.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # One docker entry per directory that contains a Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /dashboard
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+  - package-ecosystem: cargo
+    directory: /parko
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10

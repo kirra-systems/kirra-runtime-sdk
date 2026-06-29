@@ -28,3 +28,33 @@ Any bypass of these is a critical vulnerability:
 - `verify_attestation` uses real HMAC-SHA256 (never mocked)
 - DDS actuator topics use `Volatile` durability (never `TransientLocal`)
 - `OperationalCommand::Unknown` denied in all posture states
+
+## Supply-chain hardening
+
+### GitHub Actions are pinned to commit SHAs (M-6)
+
+Every third-party and first-party action referenced from `.github/workflows/`
+MUST be pinned to a **full 40-hex commit SHA**, not a mutable tag
+(`@v4`, `@stable`, …). A tag can be force-moved by a compromised action
+maintainer or a hijacked account to point at malicious code, which would then run
+in CI with this repo's `GITHUB_TOKEN` and secrets. A SHA is immutable.
+
+- **Apply the pins:** `scripts/pin-actions.sh` resolves each tag/branch ref to its
+  commit SHA (`git ls-remote`) and rewrites it as
+  `uses: owner/repo@<sha> # <tag>` (idempotent). Run it in a networked
+  environment — egress to `github.com` is required.
+- **Enforce:** `scripts/pin-actions.sh --check` exits non-zero if any mutable-tag
+  reference remains; wire it into CI once the initial pins are applied.
+- **Maintain:** Dependabot (`.github/dependabot.yml`, `github-actions`) bumps the
+  pinned SHA + version comment as new releases ship and surfaces new majors for
+  review.
+
+### Container base images are pinned by digest (M-7)
+
+Container base images (`Dockerfile`, `dashboard/Dockerfile`,
+`deploy/docker/*`) SHOULD be pinned by immutable digest
+(`FROM image:tag@sha256:…`), not a floating tag (`alpine:3`, `node:20-alpine`,
+`ros:jazzy-ros-base`, …) whose contents can change or be re-pushed under the same
+tag. Resolve a digest with
+`docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`
+and refresh it deliberately via Dependabot (`.github/dependabot.yml`, `docker`).
