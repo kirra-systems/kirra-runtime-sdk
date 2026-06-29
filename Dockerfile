@@ -14,7 +14,11 @@
 # gateway image + one target-parameterized backend flow.
 
 # ── Stage 1: build ───────────────────────────────────────────────────────────
-FROM rust:1-alpine AS builder
+# #686: digest-pinned (multi-arch index digest) so the build is reproducible and
+# a re-tagged upstream image can't silently change the build. The `:1-alpine` tag
+# is kept for readability; the `@sha256:` digest is authoritative. Bumped by
+# Dependabot (docker ecosystem) — see .github/dependabot.yml.
+FROM rust:1-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS builder
 
 RUN apk add --no-cache musl-dev gcc
 
@@ -24,7 +28,8 @@ COPY . .
 RUN cargo build --release --bin kirra_verifier_service
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM alpine:3
+# #686: digest-pinned (see Stage 1). Bumped by Dependabot (docker ecosystem).
+FROM alpine:3@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 RUN apk add --no-cache curl && \
     addgroup -S -g 1000 kirra && \

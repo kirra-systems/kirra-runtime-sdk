@@ -1,10 +1,12 @@
-FROM rust:1.96-slim-bookworm AS builder
+# #686: digest-pinned base image (Dependabot `docker` bumps it). Tag kept for readability.
+FROM rust:1.96-slim-bookworm@sha256:4732ca96fd086cb9be682050c3f0176288eebaac2b80aa2bcefccfaf198e1950 AS builder
 
 WORKDIR /build
 COPY . .
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+# #686: digest-pinned base image (Dependabot `docker` bumps it).
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
