@@ -520,19 +520,30 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
             // Closure returns Some(token) on a successful read; None signals
             // "skip this tick" (no key yet / read error) — the outer loop
             // `continue`s on None (Rule 4: `continue` cannot cross the closure).
-            let token = match app.store.with(|store| match store.load_engine_state(HEARTBEAT_KEY) {
-                Ok(Some(token)) => Some(token),
-                Ok(None) => {
-                    tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
-                    None
-                }
+            let token = match app
+                .store
+                .call_read(|store| match store.load_engine_state(HEARTBEAT_KEY) {
+                    Ok(Some(token)) => Some(token),
+                    Ok(None) => {
+                        tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
+                        None
+                    }
+                })
+                .await
+            {
+                Ok(Some(token)) => token,
+                Ok(None) => continue,
                 Err(e) => {
-                    tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
-                    None
+                    tracing::warn!(
+                        error = %e,
+                        "Promotion monitor: heartbeat read task failed — skipping tick (fail-closed)"
+                    );
+                    continue;
                 }
-            }) {
-                Some(token) => token,
-                None => continue,
             };
 
             let now = Instant::now();
@@ -599,8 +610,18 @@ async fn perform_promotion(
     // loser sees None and MUST abort — its in-memory mode_active stays
     // false and no audit/cache state is written. The previous in-memory
     // `compare_exchange` did NOT provide this guarantee: it was per-process.
-    let observed = match app.store.with(|store| store.current_epoch()) {
-        Ok(e) => e,
+    // SAFETY: SG-HA-3 — durable writes/reads must never block async runtime workers.
+    // SAFETY: SG-HA-4 — DB-access failures abort promotion and preserve fail-closed standby.
+    let observed = match app.store.call_read(|store| store.current_epoch()).await {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                "promotion: cannot read epoch — aborting"
+            );
+            return false;
+        }
         Err(e) => {
             tracing::error!(error = %e, instance_id = %id,
                 "promotion: cannot read epoch — aborting");
@@ -608,9 +629,16 @@ async fn perform_promotion(
         }
     };
 
-    let new_epoch = match app.store.with(|store| store.try_claim_epoch(observed, id, ts)) {
-        Ok(Some(e)) => e,
-        Ok(None) => {
+    // SAFETY: SG-HA-3 — durable epoch claim executes via async store actor path.
+    // SAFETY: SG-HA-4 — DB errors keep node PassiveStandby (fail-closed).
+    let id_owned = id.to_string();
+    let new_epoch = match app
+        .store
+        .call(move |store| store.try_claim_epoch(observed, &id_owned, ts))
+        .await
+    {
+        Ok(Ok(Some(e))) => e,
+        Ok(Ok(None)) => {
             // Fence held: another instance advanced the epoch between
             // our read and our write. We stay PassiveStandby.
             tracing::warn!(
@@ -619,6 +647,11 @@ async fn perform_promotion(
                 reason      = %reason,
                 "promotion ABORTED — epoch already advanced by another instance (durable fence held)"
             );
+            return false;
+        }
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, instance_id = %id,
+                "promotion: epoch claim execute failed — aborting");
             return false;
         }
         Err(e) => {
@@ -644,12 +677,26 @@ async fn perform_promotion(
     // than staying PassiveStandby (another instance, or a later retry once the
     // store is healthy, promotes instead). A newly-Active writer on an unanchored
     // chain is the worse state, so we fail closed to standby.
-    if let Err(e) = app.store.with(|store| store.ensure_hash_v2_migration_anchor(ts)) {
-        tracing::error!(
-            error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
-            "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
-        );
-        return false;
+    match app
+        .store
+        .call(move |store| store.ensure_hash_v2_migration_anchor(ts))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
+                "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
+                "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
+            );
+            return false;
+        }
     }
 
     // Step 2: Cache the won epoch in memory so the mutation gate can
@@ -691,29 +738,81 @@ async fn perform_promotion(
     // Step 4: Persist promotion record (disk-first).
     // save_engine_state takes &self; acquire lock once for that, then release
     // and re-acquire as mut for save_posture_event_chained (&mut self).
-    app.store.with(|store| {
-        let _ = store.save_engine_state(PROMOTION_RECORD_KEY, id);
-    });
+    // SAFETY: SG-HA-3 — durable promotion records are persisted via async store actor calls.
+    // SAFETY: SG-HA-4 — persistence failure aborts promotion path and preserves fail-closed behavior.
+    let id_owned = id.to_string();
+    match app
+        .store
+        .call(move |store| store.save_engine_state(PROMOTION_RECORD_KEY, &id_owned))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion record key"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion record key"
+            );
+            return false;
+        }
+    }
 
-    app.store.with(|store| {
-        // Tag the audit payload with `epoch` so a partitioned write is
-        // identifiable after the fact (the audit chain itself is
-        // monotonic; the epoch column adds the HA-generation linkage).
-        let audit = serde_json::json!({
-            "event":          "STANDBY_PROMOTED_TO_ACTIVE",
-            "instance_id":    id,
-            "reason":         reason,
-            "promoted_at_ms": ts,
-            "epoch":          new_epoch,
-        });
-        let _ = store.save_posture_event_chained(
-            "standby_monitor",
-            "STANDBY_PROMOTED_TO_ACTIVE",
-            &audit.to_string(),
-            Some(reason),
-            ts,
-        );
-    });
+    let id_owned = id.to_string();
+    let reason_owned = reason.to_string();
+    match app
+        .store
+        .call(move |store| {
+            // Tag the audit payload with `epoch` so a partitioned write is
+            // identifiable after the fact (the audit chain itself is
+            // monotonic; the epoch column adds the HA-generation linkage).
+            let reason_ref = reason_owned.as_str();
+            let audit = serde_json::json!({
+                "event":          "STANDBY_PROMOTED_TO_ACTIVE",
+                "instance_id":    id_owned,
+                "reason":         reason_ref,
+                "promoted_at_ms": ts,
+                "epoch":          new_epoch,
+            });
+            store.save_posture_event_chained(
+                "standby_monitor",
+                "STANDBY_PROMOTED_TO_ACTIVE",
+                &audit.to_string(),
+                Some(reason_ref),
+                ts,
+            )
+        })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion audit event"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion audit event"
+            );
+            return false;
+        }
+    }
 
     // #112: record the control-authority handoff provenance ALONGSIDE the
     // promotion event (complement, not a duplicate). A primary failure transfers
@@ -730,7 +829,17 @@ async fn perform_promotion(
     // Step 5: Initial recalculation as Active instance.
     // is_active() now returns true, so recalculate_and_broadcast will write
     // to the cache and emit broadcasts instead of returning early.
-    recalculate_and_broadcast(app, cache);
+    // SAFETY: SG-HA-3 — posture recompute can include durable DB writes; run off worker threads.
+    let app_b = Arc::clone(app);
+    let cache_b = cache.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || recalculate_and_broadcast(&app_b, &cache_b)).await {
+        tracing::error!(
+            error = %e,
+            instance_id = %id,
+            "promotion ABORTED — initial posture recompute task failed"
+        );
+        return false;
+    }
 
     // Step 6 (#83): posture-freshness gate. A freshly-promoted Active node must
     // hold a NON-stale posture before it serves commands. Reuse the single TTL

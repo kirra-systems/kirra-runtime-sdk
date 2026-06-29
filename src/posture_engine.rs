@@ -94,6 +94,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // is queued on it can self-deadlock (DashMap's per-shard RwLock is
     // writer-preferring) and hang the safety engine. Collecting the keys to an
     // owned Vec drops every iterator guard before any traversal begins.
+    // SAFETY: SG-RED-2 — snapshot iteration prevents nested DashMap locks.
+    // SAFETY: SG-RED-3 — posture DAG recalculation must be deadlock-free.
     let node_ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
     // P3: ONE shared `black` memo across the whole-fleet traversal. Each node's
     // fully-evaluated posture is root-independent, so a node depended on by K

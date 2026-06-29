@@ -1105,10 +1105,15 @@ async fn main() {
     // not require it there).
     let mut watchdog_spawned = false;
     if svc_state.app.is_active() {
-        kirra_verifier::posture_engine::recalculate_and_broadcast(
-            &svc_state.app,
-            &svc_state.posture_cache,
-        );
+        // SAFETY: SG-HA-3 — initial posture recompute includes durable DB writes;
+        // run it off tokio worker threads.
+        let app_b = Arc::clone(&svc_state.app);
+        let cache_b = Arc::clone(&svc_state.posture_cache);
+        tokio::task::spawn_blocking(move || {
+            kirra_verifier::posture_engine::recalculate_and_broadcast(&app_b, &cache_b);
+        })
+        .await
+        .expect("initial posture recalc task panicked");
         tracing::info!("posture: initial recalc complete; cache populated");
 
         let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
