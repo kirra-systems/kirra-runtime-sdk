@@ -449,18 +449,35 @@ pub async fn enforce_actuator_safety_envelope(
                 // entries still pass. Production main always installs the
                 // writer at startup; this branch is unreachable in deployment.
                 let event_json = serde_json::to_string(&job.payload).unwrap_or_default();
-                svc.app.store.with(|store| {
-                    if let Err(e) = store.save_posture_event_chained(
-                        job.node_id,
-                        job.event_type,
-                        &event_json,
-                        Some(job.reason),
-                        job.created_at_ms as u64,
-                    ) {
-                        tracing::error!(error = %e, reason = %code,
-                            "AUDIT-CHAIN WRITE FAILED (fallback path) for kinematic DenyBreach");
-                    }
-                });
+                // SAFETY: SG-HA-3 — durable writes must never block the async runtime.
+                let write_result = svc
+                    .app
+                    .store
+                    .call(move |store| {
+                        store.save_posture_event_chained(
+                            job.node_id,
+                            job.event_type,
+                            &event_json,
+                            Some(job.reason),
+                            job.created_at_ms as u64,
+                        )
+                    })
+                    .await;
+                match write_result {
+                    Ok(Ok(())) => {}
+                    // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
+                    Ok(Err(e)) => tracing::error!(
+                        error = %e,
+                        reason = %code,
+                        "AUDIT-CHAIN WRITE FAILED (fallback path) for kinematic DenyBreach"
+                    ),
+                    // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        reason = %code,
+                        "AUDIT-CHAIN WRITE OFFLOAD FAILED (fallback path) for kinematic DenyBreach"
+                    ),
+                }
             }
 
             Err(StatusCode::BAD_REQUEST)

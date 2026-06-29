@@ -94,6 +94,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // is queued on it can self-deadlock (DashMap's per-shard RwLock is
     // writer-preferring) and hang the safety engine. Collecting the keys to an
     // owned Vec drops every iterator guard before any traversal begins.
+    // SAFETY: SG-RED-2 — snapshot iteration prevents nested DashMap locks.
+    // SAFETY: SG-RED-3 — posture DAG recalculation must be deadlock-free.
     let node_ids: Vec<String> = app.nodes.iter().map(|e| e.key().clone()).collect();
     // P3: ONE shared `black` memo across the whole-fleet traversal. Each node's
     // fully-evaluated posture is root-independent, so a node depended on by K
@@ -127,6 +129,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // path takes no extra store lock.
     let empty_live_set = node_ids.is_empty();
     let empty_set_reason = if empty_live_set {
+        // SAFETY: SG-HA-3 — durable store reads on runtime paths must be offloaded by callers.
         let registered = app
             .store
             .with(|store| store.count_nodes())
@@ -229,6 +232,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         "POSTURE_CACHE_REFRESHED"
     };
 
+    // SAFETY: SG-HA-3 — durable writes must not execute on Tokio workers.
+    // `recalculate_and_broadcast` is run on blocking/offline paths when called from async workers.
     let audit_committed = app.store.with(|store| {
         match store.save_posture_event_chained(
             "posture_engine",
@@ -241,6 +246,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                 let _ = store.save_last_generation(generation);
                 true
             }
+            // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
             Err(e) => {
                 tracing::error!(
                     error      = %e,

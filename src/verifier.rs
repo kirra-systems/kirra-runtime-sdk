@@ -521,6 +521,8 @@ impl AppState {
     /// `/fleet/posture` handler iterated `nodes` while calling `calculate_posture`
     /// per entry, holding the iter guard across re-entrant gets.)
     pub fn calculate_fleet_posture(&self) -> Vec<FleetNodePosture> {
+        // SAFETY: SG-RED-2 — snapshot iteration prevents nested DashMap locks.
+        // SAFETY: SG-RED-3 — posture DAG recalculation must be deadlock-free.
         let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
         let mut black: HashMap<Arc<str>, Arc<FleetNodePosture>> = HashMap::new();
         ids.iter()
