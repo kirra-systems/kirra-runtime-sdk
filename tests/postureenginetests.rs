@@ -35,6 +35,48 @@ fn node(node_id: &str) -> RegisteredNode {
     }
 }
 
+#[tokio::test]
+async fn posture_recalc_remains_bounded_under_dashmap_contention() {
+    let app = app();
+    let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+
+    app.nodes.insert("root".into(), node("root"));
+    app.nodes.insert("dep_a".into(), node("dep_a"));
+    app.dependency_graph
+        .insert("root".into(), vec!["dep_a".into()]);
+
+    let writer_app = Arc::clone(&app);
+    let writer = tokio::spawn(async move {
+        for i in 0..250u32 {
+            let temp = format!("temp-{i}");
+            writer_app.nodes.insert(temp.clone(), node(&temp));
+            writer_app
+                .dependency_graph
+                .insert("root".into(), vec!["dep_a".into(), temp.clone()]);
+            writer_app.nodes.remove(temp.as_str());
+            tokio::task::yield_now().await;
+        }
+    });
+
+    for _ in 0..40 {
+        let app_b = Arc::clone(&app);
+        let cache_b = Arc::clone(&cache);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || recalculate_and_broadcast(&app_b, &cache_b)),
+        )
+        .await
+        .expect("recalc should not deadlock")
+        .expect("recalc task should not panic");
+    }
+
+    writer.await.expect("writer task should finish");
+    assert!(
+        cache.read().expect("cache lock").is_some(),
+        "at least one recalc should publish posture cache state"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn posture_worker_handles_burst_triggers_without_deadlock() {
     let app = app();

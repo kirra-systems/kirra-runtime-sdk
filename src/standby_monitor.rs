@@ -733,29 +733,88 @@ async fn perform_promotion(
     // Step 4: Persist promotion record (disk-first).
     // save_engine_state takes &self; acquire lock once for that, then release
     // and re-acquire as mut for save_posture_event_chained (&mut self).
+    // SAFETY: SG-HA-3 — durable promotion records are persisted via async store actor calls.
+    let id_owned = id.to_string();
+    match app
+        .store
+        .call(move |store| store.save_engine_state(PROMOTION_RECORD_KEY, &id_owned))
+        .await
+    {
+        Ok(Ok(())) => {}
+        // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion record key"
+            );
+            // Fail-closed: we already claimed the durable epoch; if we can't persist
+            // required promotion metadata, immediately self-demote so this instance
+            // does not serve writes as a partially-promoted Active.
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion record key"
+            );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+    }
+
     let id_owned = id.to_string();
     let reason_owned = reason.to_string();
-    if let Err(e) = app.store.call(move |store| {
-        let _ = store.save_engine_state(PROMOTION_RECORD_KEY, &id_owned);
-        // Tag the audit payload with `epoch` so a partitioned write is
-        // identifiable after the fact (the audit chain itself is
-        // monotonic; the epoch column adds the HA-generation linkage).
-        let audit = serde_json::json!({
-            "event":          "STANDBY_PROMOTED_TO_ACTIVE",
-            "instance_id":    id_owned,
-            "reason":         reason_owned,
-            "promoted_at_ms": ts,
-            "epoch":          new_epoch,
-        });
-        let _ = store.save_posture_event_chained(
-            "standby_monitor",
-            "STANDBY_PROMOTED_TO_ACTIVE",
-            &audit.to_string(),
-            Some(&reason_owned),
-            ts,
-        );
-    }).await {
-        tracing::error!(error = %e, "promotion: failed to persist promotion observability records");
+    match app
+        .store
+        .call(move |store| {
+            // Tag the audit payload with `epoch` so a partitioned write is
+            // identifiable after the fact (the audit chain itself is
+            // monotonic; the epoch column adds the HA-generation linkage).
+            let reason_ref = reason_owned.as_str();
+            let audit = serde_json::json!({
+                "event":          "STANDBY_PROMOTED_TO_ACTIVE",
+                "instance_id":    id_owned,
+                "reason":         reason_ref,
+                "promoted_at_ms": ts,
+                "epoch":          new_epoch,
+            });
+            store.save_posture_event_chained(
+                "standby_monitor",
+                "STANDBY_PROMOTED_TO_ACTIVE",
+                &audit.to_string(),
+                Some(reason_ref),
+                ts,
+            )
+        })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion audit event"
+            );
+            // Fail-closed: do not remain Active if the required audit event cannot be persisted.
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                instance_id = %id,
+                epoch = new_epoch,
+                "promotion ABORTED — failed to persist promotion audit event"
+            );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
     }
 
     // #112: record the control-authority handoff provenance ALONGSIDE the
@@ -781,7 +840,14 @@ async fn perform_promotion(
     })
     .await
     {
-        tracing::error!(error = %e, "promotion recalc task failed — continuing fail-closed");
+        tracing::error!(
+            error = %e,
+            instance_id = %id,
+            "promotion ABORTED — initial posture recompute task failed"
+        );
+        // Fail-closed: avoid remaining Active without a fresh posture cache.
+        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+        return false;
     }
 
     // Step 6 (#83): posture-freshness gate. A freshly-promoted Active node must

@@ -31,9 +31,11 @@ pub(crate) async fn handle_register_fabric_asset(
     // #88: if this IS the configured local asset, override the Degraded seed
     // with fail-closed LockedOut (the feed lifts it); a no-op for peers.
     seed_local_asset_lockedout(&svc, &req.asset_id);
-    svc.app.store.with(|store| {
-        let _ = store.save_fabric_asset(&asset);
-    });
+    // SAFETY: SG-HA-3 — durable fabric-asset write off the worker pool.
+    let asset_c = asset.clone();
+    let _ = svc.app.store.call(move |store| {
+        let _ = store.save_fabric_asset(&asset_c);
+    }).await;
     (StatusCode::CREATED, Json(json!({"asset_id": req.asset_id, "registered": true}))).into_response()
 }
 
@@ -238,9 +240,11 @@ pub(crate) async fn handle_fabric_causal_log(
 pub(crate) async fn verify_causal_chain(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
-    let vk = svc.audit_verifying_key.as_ref();
-    match svc.app.store.with(|store| store.verify_causal_chain_integrity(vk)) {
-        Ok(r) => Json(json!({
+    // SAFETY: SG-HA-3 — integrity scan off the worker pool via read replica
+    // (heavy sequential read; must not pin a tokio worker or contend the writer).
+    let vk = svc.audit_verifying_key;
+    match svc.app.store.call_read(move |store| store.verify_causal_chain_integrity(vk.as_ref())).await {
+        Ok(Ok(r)) => Json(json!({
             "chain_intact": r.chain_intact,
             "total_entries": r.total_entries,
             "latest_hash": r.latest_hash,
@@ -254,7 +258,7 @@ pub(crate) async fn verify_causal_chain(
             "head_status": r.head_status,
             "verified": r.chain_intact && r.signature_valid && r.head_verified,
         })).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+        _ => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "causal chain query failed" }))).into_response(),
     }
 }

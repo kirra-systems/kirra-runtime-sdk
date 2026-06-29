@@ -450,6 +450,7 @@ pub async fn enforce_actuator_safety_envelope(
                 // writer at startup; this branch is unreachable in deployment.
                 let event_json = serde_json::to_string(&job.payload).unwrap_or_default();
                 // SAFETY: SG-HA-3 — durable writes must never block the async runtime.
+                // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
                 let write_result = svc
                     .app
                     .store
@@ -465,7 +466,6 @@ pub async fn enforce_actuator_safety_envelope(
                     .await;
                 match write_result {
                     Ok(Ok(())) => {}
-                    // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
                     Ok(Err(e)) => tracing::error!(
                         error = %e,
                         reason = %code,

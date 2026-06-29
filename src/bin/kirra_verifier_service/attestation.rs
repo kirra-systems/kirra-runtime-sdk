@@ -32,9 +32,15 @@ pub(crate) async fn register_node(
     // (fail-closed: no window where the requirement silently does not apply). A
     // store error here fails the whole registration — the node is not inserted.
     {
-        let policy_err = svc.app.store.with(|store| {
-            store.set_node_attestation_policy(&req.node_id, req.require_tpm_quote).is_err()
-        });
+        // SAFETY: SG-HA-3 — durable write off the async worker pool.
+        let node_id_p = req.node_id.clone();
+        let require = req.require_tpm_quote;
+        let policy_err = match svc.app.store.call(move |store| {
+            store.set_node_attestation_policy(&node_id_p, require)
+        }).await {
+            Ok(Ok(())) => false,
+            _ => true,
+        };
         if policy_err {
             return (StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "failed to persist attestation policy" }))).into_response();
@@ -134,10 +140,12 @@ pub(crate) async fn verify_attestation(
     // Fail-closed: a policy-lookup error, a required-but-absent quote, an absent
     // expectation to check against, or an invalid quote all REJECT. Runs BEFORE
     // `consume_challenge`, so a quote failure does NOT burn the nonce (retry).
-    let require_quote = match svc.app.store.with(|store| store.node_requires_tpm_quote(&req.node_id)) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR,
-                          Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
+    // SAFETY: SG-HA-3 — read off the async worker pool via read replica.
+    let node_id_q = req.node_id.clone();
+    let require_quote = match svc.app.store.call_read(move |store| store.node_requires_tpm_quote(&node_id_q)).await {
+        Ok(Ok(v)) => v,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR,
+                     Json(json!({ "error": "attestation policy lookup failed" }))).into_response(),
     };
     match (&req.tpm_quote, require_quote) {
         (Some(quote), _) => {
