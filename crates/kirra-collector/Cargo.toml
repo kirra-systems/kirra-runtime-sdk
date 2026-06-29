@@ -16,7 +16,7 @@ arrow = "58"
 parquet = "58"
 sha2 = "0.10"
 # [C2] real rosbag2 db3 backend (Db3BagReader). bundled = vendored SQLite (no system dep).
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # [C2] real rosbag2 MCAP backend (McapBagReader). default features bring lz4+zstd
 # so real (compressed) bags read; the reader code is identical either way.
 mcap = "0.9"
