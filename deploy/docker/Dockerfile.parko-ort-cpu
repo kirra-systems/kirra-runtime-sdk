@@ -16,7 +16,8 @@
 # configure and no posture config file is added.
 
 # =============================== BUILD STAGE ===============================
-FROM ros:jazzy-ros-base AS build
+# #686: digest-pinned base image (Dependabot `docker` bumps it).
+FROM ros:jazzy-ros-base@sha256:6513503d0b10e919fbe8134981d4f9d19b5c1f9b045b87a9fe3b0b9e03e7c2a9 AS build
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -75,7 +76,8 @@ RUN set -euo pipefail; \
 
 # ============================== RUNTIME STAGE ==============================
 # ros:jazzy-ros-base again — r2r needs rcl/rmw/typesupport at runtime.
-FROM ros:jazzy-ros-base AS runtime
+# #686: digest-pinned base image (Dependabot `docker` bumps it).
+FROM ros:jazzy-ros-base@sha256:6513503d0b10e919fbe8134981d4f9d19b5c1f9b045b87a9fe3b0b9e03e7c2a9 AS runtime
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
