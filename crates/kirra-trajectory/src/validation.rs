@@ -470,7 +470,21 @@ pub fn validate_trajectory_slow_capped(
             // as ~0 and could miss the cut-in.
             let obj_lat_vel = -sin_h * obj.vel.x_m + cos_h * obj.vel.y_m;
             let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
-            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M && (lon_unsafe || lateral_cut_in) {
+            // #683/#684: scale the lateral-conflict longitudinal window by closing
+            // DISTANCE, floored at the 8 m urban minimum. A FIXED 8 m ceiling clipped
+            // (a) a high-speed cut-in originating farther ahead than 8 m — at the
+            // 22.35 m/s ODD cap, reaction-time travel alone is ~11 m — and (b) a cut-in
+            // in the 2.5–4.0 m lateral band (above the overlap gate, within the
+            // alignment tolerance) once it was >8 m ahead. `lon_required` is already
+            // computed and grows with closing speed, so the lateral risk is evaluated
+            // exactly as far ahead as longitudinal closing matters. This does NOT
+            // over-reject: the `(lon_unsafe || lateral_cut_in)` precondition plus a
+            // small zero-lateral-velocity `lat_required` (= 2·a_lat·ρ² ≈ 1.75 m at the
+            // 3.5 m/s² / 0.5 s defaults, below the overlap width) keep a longitudinally-
+            // unsafe but laterally-STILL in-band object admitted; the narrow overlap
+            // gate (overtaking) is untouched.
+            let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
+            if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
                 let ego_lat_vel = 0.0; // straight-following assumption per §3
                 let lat_required = lateral_safe_distance(
                     ego_lat_vel,
@@ -723,7 +737,10 @@ fn predictive_rss_breach(
             // gate skips.
             let obj_lat_v = -ovx * sin_h + ovy * cos_h;
             let lateral_cut_in = obj_lat_v.abs() > RSS_LATERAL_MOTION_EPS_MPS;
-            if dx_ego <= RSS_LONGITUDINAL_CONFLICT_M && (lon_unsafe || lateral_cut_in) {
+            // #683/#684: closing-speed-scaled lateral window (floored at the 8 m
+            // urban minimum), mirroring the snapshot pass — see its rationale.
+            let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
+            if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
                 let lat_required = lateral_safe_distance(
                     0.0, // straight-following assumption per §3 (ego lateral vel)
                     obj_lat_v,

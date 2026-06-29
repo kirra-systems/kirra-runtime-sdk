@@ -35,11 +35,15 @@ pub const RSS_FAILSAFE_DISTANCE_M: f64 = 1.0e6;
 /// rejects motions RSS deems safe.
 ///
 /// The checkers keep the lateral safe-distance as a fail-closed *defence-in-depth*
-/// layer (catching a cut-in beside the ego), but **gate** it on this longitudinal
-/// proximity: a lateral shortfall is dangerous only when the object is within
-/// `RSS_LONGITUDINAL_CONFLICT_M` longitudinally. The value is deliberately
-/// conservative — a passenger-vehicle length plus a reaction-time closing buffer —
-/// so an imminent cut-in is still caught while distant traffic no longer trips it.
+/// layer (catching a cut-in beside the ego), but **gate** it on longitudinal
+/// proximity. This constant is the **FLOOR** of that gate, not a fixed ceiling:
+/// the trajectory checker uses `RSS_LONGITUDINAL_CONFLICT_M.max(lon_required)` so
+/// the window grows with closing speed (#683/#684). A fixed 8 m ceiling clipped a
+/// high-speed cut-in originating farther ahead than 8 m — at the 22.35 m/s ODD cap
+/// reaction-time travel alone is ~11 m — and a cut-in in the 2.5–4.0 m lateral band
+/// once it was >8 m ahead. The floor keeps an urban-minimum conflict window for
+/// low-speed cases; above it, the longitudinal safe distance governs how far ahead
+/// a lateral shortfall is still considered a conflict.
 ///
 /// (The dominant longitudinal RSS — car-following / head-on — is UNCHANGED and
 /// fully governs any object that is longitudinally unsafe at any range.)
