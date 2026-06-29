@@ -292,25 +292,42 @@ else
     curl -fsSL --progress-bar "${DOWNLOAD_URL}" -o "${ARCHIVE}" || \
         fatal "Download failed. URL: ${DOWNLOAD_URL}"
 
-    # Verify checksum if available
-    if [ -n "${CHECKSUM_URL}" ]; then
-        info "Verifying checksum..."
-        CHECKSUMS="${TMPDIR}/SHA256SUMS"
-        curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUMS}" 2>/dev/null || \
-            warn "Checksum file unavailable — skipping verification"
-
-        if [ -f "${CHECKSUMS}" ]; then
-            ARCHIVE_NAME=$(basename "${DOWNLOAD_URL}")
-            if grep -q "${ARCHIVE_NAME}" "${CHECKSUMS}"; then
-                (cd "${TMPDIR}" && \
-                    grep "${ARCHIVE_NAME}" SHA256SUMS | \
-                    sed "s|${ARCHIVE_NAME}|kirra.tar.gz|" | \
-                    sha256sum -c --quiet) || \
-                    fatal "Checksum verification FAILED — download may be corrupt or tampered"
-                success "Checksum verified"
-            fi
-        fi
+    # Verify checksum — MANDATORY, fail-closed (H-4).
+    #
+    # A tampered or poisoned release that OMITS or STRIPS SHA256SUMS must NEVER
+    # result in an unverified binary being installed as root. The previous
+    # "verify if available" form skipped verification whenever the checksum asset
+    # was missing, its download failed, or the archive name was absent from it —
+    # so an attacker who served a malicious binary and simply withheld the
+    # checksum bypassed the check entirely. Every Kirra release publishes
+    # SHA256SUMS (see .github/workflows/release.yml), so each of those is now a
+    # hard failure, not a skip.
+    #
+    # NOTE — integrity, NOT authenticity: SHA256SUMS is fetched over the SAME
+    # channel as the binary, so this defends against corruption and a binary-only
+    # swap, but NOT against an attacker who can replace BOTH artifacts. Signed
+    # releases (cosign keyless over SHA256SUMS, verified against the repo's GitHub
+    # OIDC identity) are the tracked authenticity follow-up — see INSTALL.md.
+    if [ -z "${CHECKSUM_URL}" ]; then
+        fatal "No SHA256SUMS published for this release — refusing to install an UNVERIFIED binary. Every Kirra release publishes one; its absence indicates a tampered or incomplete release."
     fi
+
+    info "Verifying checksum..."
+    CHECKSUMS="${TMPDIR}/SHA256SUMS"
+    curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUMS}" || \
+        fatal "Could not download SHA256SUMS (${CHECKSUM_URL}) — refusing to install an UNVERIFIED binary."
+
+    ARCHIVE_NAME=$(basename "${DOWNLOAD_URL}")
+    if ! grep -qF "${ARCHIVE_NAME}" "${CHECKSUMS}"; then
+        fatal "SHA256SUMS does not list ${ARCHIVE_NAME} — refusing to install an UNVERIFIED binary."
+    fi
+
+    (cd "${TMPDIR}" && \
+        grep -F "${ARCHIVE_NAME}" SHA256SUMS | \
+        sed "s|${ARCHIVE_NAME}|kirra.tar.gz|" | \
+        sha256sum -c --quiet) || \
+        fatal "Checksum verification FAILED — download is corrupt or tampered. Aborting."
+    success "Checksum verified"
 
     # Extract
     info "Extracting..."

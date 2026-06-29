@@ -44,6 +44,29 @@ The installer will:
 
 **The whole process takes under 2 minutes.**
 
+### Download integrity (supply-chain)
+
+When the installer downloads the binary from GitHub releases it **verifies the
+`SHA256SUMS` checksum and refuses to install on any failure** (missing checksum
+file, download error, archive not listed, or a hash mismatch) — it never installs
+an unverified binary. Every release publishes `SHA256SUMS`.
+
+This is an **integrity** check: `SHA256SUMS` is fetched over the same channel as
+the binary, so it protects against corruption and a binary-only swap, but not
+against an adversary who can replace *both* artifacts. For stronger guarantees:
+
+- **Pin a known-good release** rather than installing whatever is latest, and
+  compare its `SHA256SUMS` against a copy obtained out-of-band.
+- **Installing from a downloaded release archive** (`sudo bash install.sh`):
+  verify the archive against its published `SHA256SUMS` *before* extracting —
+  the bundled-binary path trusts the archive you already have.
+- **Roadmap:** signed releases (cosign keyless over `SHA256SUMS`, verified
+  against the repo's GitHub OIDC identity) for end-to-end authenticity.
+
+> Note: `curl … | sudo bash` executes the installer as root over the network; its
+> only protection is TLS to `raw.githubusercontent.com`. To inspect first,
+> download `install.sh`, review it, then run `sudo bash install.sh`.
+
 ---
 
 ## What the Installer Asks
