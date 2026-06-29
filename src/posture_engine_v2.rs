@@ -903,7 +903,7 @@ mod posture_engine_v2_tests {
         for _ in 0..200 {
             if let Ok(guard) = cache.read() {
                 if let Some(c) = guard.as_ref() {
-                    cached = Some(c.clone());
+                    cached = Some(*c);
                     break;
                 }
             }

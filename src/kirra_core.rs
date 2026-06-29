@@ -155,6 +155,19 @@ impl<C: SafetyContract> KirraKernelGovernor<C> {
         // sentinel remains the right place to FAIL-FAST on such a config.
         let constraint_cap_min = cap_min.min(cap_max);
         let constraint_cap_max = cap_min.max(cap_max);
+        // A non-finite `initial_scalar` would poison `last_validated_scalar`: the
+        // Degraded decel-to-stop bound reads `current.signum()` / `current.abs()`
+        // (#410), so a NaN current emits a NaN setpoint. Normal flow washes it out
+        // on the first FullAutonomy tick before Degraded is reachable, but make the
+        // stored value finite-by-construction rather than rely on that ordering.
+        // Fall back to the contract's safe setpoint (then 0.0 if that is itself
+        // non-finite — a deeper config error the startup sentinel should reject).
+        let initial_scalar = if initial_scalar.is_finite() {
+            initial_scalar
+        } else {
+            let fb = contract.fallback();
+            if fb.is_finite() { fb } else { 0.0 }
+        };
         Self {
             contract,
             trust_engine: RuntimeTrustEngine::new(),

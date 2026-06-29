@@ -339,9 +339,20 @@ fn watchdog_sweep_once_inner(
                 );
             }
             Err(e) => {
+                // The dirty flag was already cleared by the swap above, but this
+                // refresh did NOT happen — re-arm it so the NEXT sweep retries the
+                // prompt refresh instead of dropping a freshly-registered node back
+                // into the ~30 s periodic window (which would re-open the H-3
+                // fail-open precisely while the store is unhealthy). Idempotent: a
+                // periodic refresh is unaffected (it re-fires on the 30 s timer),
+                // and a redundant set just triggers one extra refresh attempt.
+                if registry_dirty {
+                    app.av_registry_dirty
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
                 tracing::error!(
                     error = %e,
-                    "Watchdog: failed to refresh node list — using cached list"
+                    "Watchdog: failed to refresh node list — using cached list, re-armed prompt refresh"
                 );
             }
         }
