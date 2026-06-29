@@ -838,6 +838,8 @@ async fn perform_promotion(
             instance_id = %id,
             "promotion ABORTED — initial posture recompute task failed"
         );
+        // Fail-closed: avoid remaining Active without a fresh posture cache.
+        app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
         return false;
     }
 
