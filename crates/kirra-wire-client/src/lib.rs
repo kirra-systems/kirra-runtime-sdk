@@ -90,14 +90,34 @@ pub struct Verdict {
     pub reason_code: u32,
 }
 
-/// Encode a `Proposal` for the wire (matches the governor's `bincode::serialize`).
-pub fn encode_proposal(p: &Proposal) -> bincode::Result<Vec<u8>> {
-    bincode::serialize(p)
+// bincode 2.x defaults to VARINT encoding, which would change the wire bytes.
+// `legacy()` is the bincode-1.x-compatible config (fixint, little-endian, u32
+// enum tags), so the wire format — pinned byte-for-byte by the `wire_layout`
+// tests — is unchanged across the 1.x -> 2.x upgrade.
+#[inline]
+fn wire_cfg() -> impl bincode::config::Config {
+    bincode::config::legacy()
 }
 
-/// Decode a `Verdict` from the wire (matches the governor's `bincode::serialize`).
-pub fn decode_verdict(bytes: &[u8]) -> bincode::Result<Verdict> {
-    bincode::deserialize(bytes)
+/// Encode a `Proposal` for the wire (matches the governor's encoder).
+pub fn encode_proposal(p: &Proposal) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::serde::encode_to_vec(p, wire_cfg())
+}
+
+/// Decode a `Verdict` from the wire (matches the governor's encoder).
+///
+/// Strict framing: the decoded length MUST consume the WHOLE datagram. Trailing
+/// bytes (a truncated/over-long/corrupt frame whose prefix happens to decode)
+/// are rejected fail-closed rather than silently ignored — a malformed verdict
+/// must never be accepted as a clean one.
+pub fn decode_verdict(bytes: &[u8]) -> Result<Verdict, bincode::error::DecodeError> {
+    let (v, len) = bincode::serde::decode_from_slice(bytes, wire_cfg())?;
+    if len != bytes.len() {
+        return Err(bincode::error::DecodeError::Other(
+            "verdict frame has trailing bytes (length mismatch)",
+        ));
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -134,7 +154,7 @@ mod wire_layout {
              the enum order drifted from the core"
         );
         // Re-encode must reproduce the exact bytes (round-trip closes the loop).
-        assert_eq!(bincode::serialize(&v).unwrap(), DENY_VERDICT_BYTES);
+        assert_eq!(bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(), DENY_VERDICT_BYTES);
     }
 
     #[test]
@@ -145,7 +165,7 @@ mod wire_layout {
         assert_eq!(v.action, ClientEnforceAction::Allow, "index 0 must be Allow");
         assert_eq!(v.seq, 0);
         assert_eq!(v.reason_code, 0);
-        assert_eq!(bincode::serialize(&v).unwrap(), bytes);
+        assert_eq!(bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(), bytes);
     }
 
     #[test]
@@ -172,7 +192,7 @@ mod wire_layout {
                 action: ClientEnforceAction::DenyBreach(*code),
                 reason_code: 0,
             };
-            let bytes = bincode::serialize(&v).unwrap();
+            let bytes = bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap();
             assert_eq!(bytes[8], 3, "DenyBreach must be EnforceAction index 3");
             assert_eq!(
                 bytes[12], i as u8,
@@ -189,9 +209,24 @@ mod wire_layout {
             ClientEnforceAction::ClampSteering(-12.5),
         ] {
             let v = Verdict { seq: 99, action: action.clone(), reason_code: 0 };
-            let bytes = bincode::serialize(&v).unwrap();
+            let bytes = bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap();
             assert_eq!(decode_verdict(&bytes).unwrap(), v);
         }
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        // A well-formed allow verdict (16 bytes) with one extra byte appended must
+        // be refused — strict framing, fail-closed (a corrupt/over-long datagram
+        // is never accepted as a clean verdict).
+        let mut bytes = vec![0u8; 16];
+        bytes.push(0xAB);
+        assert!(
+            decode_verdict(&bytes).is_err(),
+            "a frame with trailing bytes must be rejected, not silently truncated"
+        );
+        // The exact-length frame still decodes.
+        assert!(decode_verdict(&bytes[..16]).is_ok());
     }
 
     #[test]

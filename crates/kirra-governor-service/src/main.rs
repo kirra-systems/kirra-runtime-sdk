@@ -40,6 +40,16 @@ use std::net::UdpSocket;
 
 type HmacSha256 = Hmac<Sha256>;
 
+// bincode 2.x defaults to varint; `legacy()` is the bincode-1.x-compatible
+// config (fixint, little-endian, u32 enum tags), keeping the UDP wire bytes
+// byte-identical across the 1.x -> 2.x upgrade. The client mirror
+// (`kirra-wire-client`) uses the same config; its `wire_layout` tests pin the
+// exact bytes both sides must agree on.
+#[inline]
+fn wire_cfg() -> impl bincode::config::Config {
+    bincode::config::legacy()
+}
+
 /// Length of the HMAC-SHA256 authentication tag prepended to every datagram.
 const MAC_LEN: usize = 32;
 
@@ -139,8 +149,8 @@ fn verify_mac(psk: &[u8], body: &[u8], tag: &[u8]) -> bool {
 
 /// Frame the wire response: `tag(32) || bincode(verdict)`, so the car can
 /// authenticate the verdict and reject a spoofed one.
-fn frame_response(psk: &[u8], verdict: &Verdict) -> Result<Vec<u8>, bincode::Error> {
-    let body = bincode::serialize(verdict)?;
+fn frame_response(psk: &[u8], verdict: &Verdict) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    let body = bincode::serde::encode_to_vec(verdict, wire_cfg())?;
     let tag = compute_mac(psk, &body);
     let mut out = Vec::with_capacity(MAC_LEN + body.len());
     out.extend_from_slice(&tag);
@@ -298,8 +308,19 @@ fn main() -> std::io::Result<()> {
             continue;
         }
 
-        let proposal: Proposal = match bincode::deserialize(body) {
-            Ok(p) => p,
+        // Strict framing: the decode MUST consume the whole authenticated body.
+        // A prefix that decodes while leaving trailing bytes is a malformed frame
+        // and is dropped fail-closed (never evaluated as a clean proposal).
+        let proposal: Proposal = match bincode::serde::decode_from_slice(body, wire_cfg()) {
+            Ok((p, len)) if len == body.len() => p,
+            Ok((_, len)) => {
+                eprintln!(
+                    "decode error from {peer}: trailing bytes ({} of {} consumed)",
+                    len,
+                    body.len()
+                );
+                continue;
+            }
             Err(e) => {
                 eprintln!("decode error from {peer}: {e}");
                 continue;
@@ -382,8 +403,8 @@ mod service_tests {
     fn proposal_round_trips_over_bincode() {
         // The decode side of the wire (Proposal: Deserialize) must round-trip.
         let p = steady(2.5, 3.0);
-        let bytes = bincode::serialize(&p).expect("encode");
-        let back: Proposal = bincode::deserialize(&bytes).expect("decode");
+        let bytes = bincode::serde::encode_to_vec(&p, wire_cfg()).expect("encode");
+        let back: Proposal = bincode::serde::decode_from_slice(&bytes, wire_cfg()).map(|(v,_)| v).expect("decode");
         assert_eq!(back.seq, p.seq);
         assert_eq!(back.command.linear_velocity_mps, p.command.linear_velocity_mps);
         assert_eq!(back.command.steering_angle_deg, p.command.steering_angle_deg);
@@ -396,8 +417,8 @@ mod service_tests {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let accept = decide(&steady(1.0, 0.0), &contract);
         let deny = decide(&steady(f64::INFINITY, 0.0), &contract);
-        assert!(bincode::serialize(&accept).is_ok());
-        assert!(bincode::serialize(&deny).is_ok());
+        assert!(bincode::serde::encode_to_vec(&accept, wire_cfg()).is_ok());
+        assert!(bincode::serde::encode_to_vec(&deny, wire_cfg()).is_ok());
     }
 
     #[test]
@@ -474,7 +495,7 @@ mod service_tests {
     #[test]
     fn mac_round_trips_and_rejects_tamper() {
         let psk = b"shared-bench-secret";
-        let body = bincode::serialize(&steady(1.0, 0.0)).expect("encode");
+        let body = bincode::serde::encode_to_vec(steady(1.0, 0.0), wire_cfg()).expect("encode");
         let tag = compute_mac(psk, &body);
         assert!(verify_mac(psk, &body, &tag), "a valid tag must verify");
 

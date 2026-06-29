@@ -12,8 +12,8 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 kirra-capture-schema = { path = "../kirra-capture-schema" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-arrow = "58"
-parquet = "58"
+arrow = "59"
+parquet = "59"
 sha2 = "0.11"
 # [C2] real rosbag2 db3 backend (Db3BagReader). bundled = vendored SQLite (no system dep).
 rusqlite = { version = "0.31", features = ["bundled"] }
