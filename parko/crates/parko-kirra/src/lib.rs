@@ -283,7 +283,15 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
         // checker's RSS-conjunction fix.
         let lat_safe = if !a.actual_lateral_separation_m.is_finite() {
             false
-        } else if a.actual_longitudinal_gap_m > RSS_LONGITUDINAL_CONFLICT_M {
+        // #683/#684: the lateral-conflict longitudinal window is the FLOOR
+        // `RSS_LONGITUDINAL_CONFLICT_M` scaled up by closing speed via `required_long`
+        // (the diverse-governor analog of the trajectory checker's `lon_required`). A
+        // FIXED 8 m ceiling deemed a high-speed cut-in originating farther ahead than
+        // 8 m "laterally safe" before `required_lat` was consulted — at the 22.35 m/s
+        // ODD cap reaction-time travel alone is ~11 m. No over-rejection: the
+        // `(lon_unsafe || lateral_cut_in)` precondition still admits a longitudinally-
+        // safe, laterally-still object inside the wider window.
+        } else if a.actual_longitudinal_gap_m > RSS_LONGITUDINAL_CONFLICT_M.max(required_long) {
             true
         } else {
             let lon_unsafe = a.actual_longitudinal_gap_m < required_long;
@@ -1800,6 +1808,50 @@ mod scene_rss_tests {
         assert!(
             !compute_scene_rss(&AgentScene::Agents(vec![abreast]), &params()).safe,
             "a longitudinally-unsafe (abreast) pair is still vetoed"
+        );
+    }
+
+    #[test]
+    fn scene_rss_catches_a_high_speed_cut_in_beyond_8m_dc2() {
+        // #684 in the diverse scene-RSS checker: a high-speed cut-in MORE than the
+        // old fixed 8 m ceiling ahead must be unsafe. ego 18 m/s; object 12 m ahead,
+        // 3 m to the side (lat_sep ≥ overlap → longitudinal axis clear), closing
+        // laterally. Pre-fix `gap > 8` short-circuited `lat_safe = true` → SAFE;
+        // post-fix the window is `max(8, required_long)` (~39 m at 18 m/s) → the
+        // lateral RSS binds → UNSAFE.
+        let cut_in = RssAgent {
+            ego_vel: 18.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 12.0, // beyond the old 8 m ceiling
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 3.0,                 // closing laterally (cut-in)
+            actual_lateral_separation_m: 3.0, // 2.5–4 band; ≥ overlap → no rear-end
+            oncoming: false,
+        };
+        assert!(
+            !compute_scene_rss(&AgentScene::Agents(vec![cut_in]), &params()).safe,
+            "an 18 m/s ego must flag a lateral cut-in 12 m ahead as unsafe (beyond the old 8 m ceiling)"
+        );
+    }
+
+    #[test]
+    fn scene_rss_admits_a_stationary_side_object_beyond_8m_683() {
+        // #683 guard: the widened window must NOT over-reject a longitudinally-unsafe
+        // but laterally-STILL object in the 2.5–4 band. Zero lateral velocity → small
+        // required_lat (= 2·a_lat·ρ² = 1.0 m here) < the 3 m separation → still safe.
+        // Same geometry as the cut-in test with zero object velocity.
+        let still = RssAgent {
+            ego_vel: 18.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 12.0,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0, // laterally still
+            actual_lateral_separation_m: 3.0,
+            oncoming: false,
+        };
+        assert!(
+            compute_scene_rss(&AgentScene::Agents(vec![still]), &params()).safe,
+            "a stationary object 3 m to the side stays admitted inside the widened window"
         );
     }
 

@@ -471,8 +471,8 @@ pub fn validate_trajectory_slow_capped(
             let obj_lat_vel = -sin_h * obj.vel.x_m + cos_h * obj.vel.y_m;
             let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
             // #683/#684: scale the lateral-conflict longitudinal window by closing
-            // DISTANCE, floored at the 8 m urban minimum. A FIXED 8 m ceiling clipped
-            // (a) a high-speed cut-in originating farther ahead than 8 m — at the
+            // SPEED (via `lon_required`), floored at the 8 m urban minimum. A FIXED 8 m
+            // ceiling clipped (a) a high-speed cut-in originating farther ahead than 8 m — at the
             // 22.35 m/s ODD cap, reaction-time travel alone is ~11 m — and (b) a cut-in
             // in the 2.5–4.0 m lateral band (above the overlap gate, within the
             // alignment tolerance) once it was >8 m ahead. `lon_required` is already
