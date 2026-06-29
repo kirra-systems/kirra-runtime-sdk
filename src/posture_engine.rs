@@ -129,6 +129,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // path takes no extra store lock.
     let empty_live_set = node_ids.is_empty();
     let empty_set_reason = if empty_live_set {
+        // SAFETY: SG-HA-3 — durable store reads on runtime paths must be offloaded by callers.
         let registered = app
             .store
             .with(|store| store.count_nodes())
@@ -231,6 +232,8 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         "POSTURE_CACHE_REFRESHED"
     };
 
+    // SAFETY: SG-HA-3 — durable writes must not execute on Tokio workers.
+    // `recalculate_and_broadcast` is run on blocking/offline paths when called from async workers.
     let audit_committed = app.store.with(|store| {
         match store.save_posture_event_chained(
             "posture_engine",
@@ -243,6 +246,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                 let _ = store.save_last_generation(generation);
                 true
             }
+            // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
             Err(e) => {
                 tracing::error!(
                     error      = %e,

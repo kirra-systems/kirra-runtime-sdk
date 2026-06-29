@@ -520,28 +520,25 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
             // Closure returns Some(token) on a successful read; None signals
             // "skip this tick" (no key yet / read error) — the outer loop
             // `continue`s on None (Rule 4: `continue` cannot cross the closure).
+            // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
             let token = match app
                 .store
-                .call_read(|store| match store.load_engine_state(HEARTBEAT_KEY) {
-                    Ok(Some(token)) => Some(token),
-                    Ok(None) => {
-                        tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
-                        None
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
-                        None
-                    }
-                })
+                .call_read(|store| store.load_engine_state(HEARTBEAT_KEY))
                 .await
             {
-                Ok(Some(token)) => token,
-                Ok(None) => continue,
+                Ok(Ok(Some(token))) => token,
+                Ok(Ok(None)) => {
+                    tracing::debug!("Promotion monitor: no heartbeat key yet — waiting for primary");
+                    continue;
+                }
+                // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Promotion monitor: failed to read heartbeat");
+                    continue;
+                }
+                // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Promotion monitor: heartbeat read task failed — skipping tick (fail-closed)"
-                    );
+                    tracing::warn!(error = %e, "Promotion monitor: heartbeat read offload failed");
                     continue;
                 }
             };
@@ -610,27 +607,23 @@ async fn perform_promotion(
     // loser sees None and MUST abort — its in-memory mode_active stays
     // false and no audit/cache state is written. The previous in-memory
     // `compare_exchange` did NOT provide this guarantee: it was per-process.
-    // SAFETY: SG-HA-3 — durable writes/reads must never block async runtime workers.
-    // SAFETY: SG-HA-4 — DB-access failures abort promotion and preserve fail-closed standby.
+    // SAFETY: SG-HA-3 — durable writes/reads must never block the async runtime.
     let observed = match app.store.call_read(|store| store.current_epoch()).await {
         Ok(Ok(e)) => e,
+        // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
         Ok(Err(e)) => {
-            tracing::error!(
-                error = %e,
-                instance_id = %id,
-                "promotion: cannot read epoch — aborting"
-            );
-            return false;
-        }
-        Err(e) => {
             tracing::error!(error = %e, instance_id = %id,
                 "promotion: cannot read epoch — aborting");
             return false;
         }
+        // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
+        Err(e) => {
+            tracing::error!(error = %e, instance_id = %id,
+                "promotion: epoch read offload failed — aborting");
+            return false;
+        }
     };
 
-    // SAFETY: SG-HA-3 — durable epoch claim executes via async store actor path.
-    // SAFETY: SG-HA-4 — DB errors keep node PassiveStandby (fail-closed).
     let id_owned = id.to_string();
     let new_epoch = match app
         .store
@@ -649,14 +642,16 @@ async fn perform_promotion(
             );
             return false;
         }
+        // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
         Ok(Err(e)) => {
             tracing::error!(error = %e, instance_id = %id,
                 "promotion: epoch claim execute failed — aborting");
             return false;
         }
+        // SAFETY: SG-HA-4 — DB actor/offload failure is fail-closed.
         Err(e) => {
             tracing::error!(error = %e, instance_id = %id,
-                "promotion: epoch claim execute failed — aborting");
+                "promotion: epoch claim offload failed — aborting");
             return false;
         }
     };
@@ -693,7 +688,7 @@ async fn perform_promotion(
         Err(e) => {
             tracing::error!(
                 error = %e, instance_id = %id, epoch = new_epoch, reason = %reason,
-                "promotion ABORTED — cannot ensure hash-v2 audit anchor; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
+                "promotion ABORTED — hash-v2 anchor offload failed; staying PassiveStandby (fail-closed, mode_active stays false, no promotion record)"
             );
             return false;
         }
@@ -739,7 +734,6 @@ async fn perform_promotion(
     // save_engine_state takes &self; acquire lock once for that, then release
     // and re-acquire as mut for save_posture_event_chained (&mut self).
     // SAFETY: SG-HA-3 — durable promotion records are persisted via async store actor calls.
-    // SAFETY: SG-HA-4 — persistence failure aborts promotion path and preserves fail-closed behavior.
     let id_owned = id.to_string();
     match app
         .store
@@ -747,6 +741,7 @@ async fn perform_promotion(
         .await
     {
         Ok(Ok(())) => {}
+        // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
         Ok(Err(e)) => {
             tracing::error!(
                 error = %e,
@@ -829,10 +824,14 @@ async fn perform_promotion(
     // Step 5: Initial recalculation as Active instance.
     // is_active() now returns true, so recalculate_and_broadcast will write
     // to the cache and emit broadcasts instead of returning early.
-    // SAFETY: SG-HA-3 — posture recompute can include durable DB writes; run off worker threads.
-    let app_b = Arc::clone(app);
-    let cache_b = cache.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || recalculate_and_broadcast(&app_b, &cache_b)).await {
+    // SAFETY: SG-HA-3 — durable writes in recalc must not pin tokio workers.
+    let app_for_recalc = Arc::clone(app);
+    let cache_for_recalc = cache.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        recalculate_and_broadcast(&app_for_recalc, &cache_for_recalc);
+    })
+    .await
+    {
         tracing::error!(
             error = %e,
             instance_id = %id,
