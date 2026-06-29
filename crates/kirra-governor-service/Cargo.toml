@@ -33,5 +33,5 @@ bincode = "1.3"
 # Message authentication for the UDP command path (HMAC-SHA256). Both are pure
 # Rust, no_std-capable, and async/ROS-free — consistent with the QNX/cert-target
 # dependency discipline above. Versions pinned to the workspace root.
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"

@@ -615,6 +615,7 @@ mod tests {
     /// and it is not a signature by the node's AK regardless.)
     #[test]
     fn legacy_admin_token_hmac_proof_is_rejected() {
+        use hmac::digest::KeyInit; // hmac 0.13: `new_from_slice` moved to `KeyInit`
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;

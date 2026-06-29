@@ -26,6 +26,9 @@
 // non-advancing sequence, and — when `KIRRA_GOVERNOR_FRESHNESS_MS` is set —
 // rejects stale / future-dated proposals, emitting a fail-closed safe-state verdict.
 
+// hmac 0.13 / digest 0.11: `Mac` brings update/finalize/verify; `new_from_slice`
+// now lives on `KeyInit` (it was reachable via `Mac` in hmac 0.12).
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use kirra_core::kinematics_contract::{
     validate_vehicle_command, DenyCode, EnforceAction, ProposedVehicleCommand,
