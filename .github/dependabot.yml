@@ -1,47 +1,81 @@
 # Supply-chain update automation (M-6 GitHub Actions, M-7 container base images).
 #
-# This keeps the pinned references CURRENT so they don't rot once pinned:
-#   - github-actions: once actions are SHA-pinned (scripts/pin-actions.sh),
-#     Dependabot bumps the SHA + version comment as new releases land, and
-#     surfaces new major versions to review before adopting.
-#   - docker: tracks base-image updates so digest pins can be refreshed
-#     deliberately rather than drifting on a floating tag.
-#   - cargo: routine dependency hygiene for the two workspaces.
+# Noise policy (so a first run doesn't open a dozen PRs):
+#   - minor + patch updates are GROUPED into a single PR per ecosystem;
+#   - MAJOR updates are IGNORED (opt-in). Cargo majors routinely break APIs —
+#     RustCrypto (sha2/hmac), rusqlite, bincode, getrandom/rand — and several sit
+#     under security-critical crypto/storage paths, so they are bumped DELIBERATELY
+#     with a manual build+test pass, not auto-opened. Remove the relevant `ignore`
+#     entry (or trigger Dependabot manually) when you want to take a major.
 #
-# Dependabot maintains pins; it does NOT itself convert a tag ref to a SHA — the
-# one-time tag->SHA conversion is scripts/pin-actions.sh (see SECURITY.md).
+# Dependabot maintains pins; it does NOT itself convert an action tag ref to a SHA
+# — the one-time tag->SHA conversion is scripts/pin-actions.sh (see SECURITY.md).
 version: 2
 updates:
+  # GitHub Actions: a single grouped PR for all action updates (low-risk; keeps
+  # the pinned versions current). Majors included — actions rarely break and one
+  # grouped PR is easy to review.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
       github-actions:
         patterns: ["*"]
 
-  # One docker entry per directory that contains a Dockerfile.
+  # Container base images: group minor/patch; ignore majors (e.g. node 20 -> 26).
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    groups:
+      docker:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /dashboard
     schedule:
       interval: weekly
+    groups:
+      docker:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /deploy/docker
     schedule:
       interval: weekly
+    groups:
+      docker:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
+  # Rust deps: one grouped minor/patch PR per workspace; majors are opt-in.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /parko
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

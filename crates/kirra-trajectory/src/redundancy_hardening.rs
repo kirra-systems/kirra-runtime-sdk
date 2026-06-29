@@ -122,6 +122,12 @@ pub fn ego_frame_velocity(vx: f64, vy: f64, ego_heading: f64) -> (f64, f64) {
 /// # Returns
 ///
 /// A detailed result indicating which divergences (if any) were detected.
+// Disposition (clippy::too_many_arguments): this is a flat scalar cross-check of
+// two perception objects (position/velocity/heading × two channels). Bundling the
+// scalars into a params struct is a reasonable future refactor for the
+// kirra-trajectory owner, but it is an API change with no safety benefit, so the
+// lint is allowed here rather than churned.
+#[allow(clippy::too_many_arguments)]
 pub fn objects_are_equivalent_extended(
     pos1_x: f64,
     pos1_y: f64,
@@ -199,6 +205,11 @@ pub fn objects_are_equivalent_extended(
 ///
 /// `Ok(elapsed_ms)` if within expected bounds.
 /// `Err(())` if wraparound or backward jump detected.
+// Disposition (clippy::result_unit_err): the `Err(())` is intentional — callers
+// only need the ok/not-ok distinction for the SG9 clock-monotonicity guard, and a
+// unit error keeps the type minimal. A typed error enum is a reasonable future
+// refactor for the kirra-trajectory owner; allowed here rather than churned.
+#[allow(clippy::result_unit_err)]
 pub fn checked_elapsed(start_ms: u64, end_ms: u64, max_expected_ms: u64) -> Result<u64, ()> {
     // Backward jump or equality → stale or same timestamp
     if end_ms <= start_ms {

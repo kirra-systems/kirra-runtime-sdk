@@ -37,12 +37,8 @@ use crate::state::TrajectoryPoint;
 /// assert!(validate_trajectory_time_monotonicity(&traj).is_some(), "non-monotonic!");
 /// ```
 pub fn validate_trajectory_time_monotonicity(trajectory: &[TrajectoryPoint]) -> Option<usize> {
-    for i in 0..trajectory.len().saturating_sub(1) {
-        if trajectory[i].time_from_start_s >= trajectory[i + 1].time_from_start_s {
-            return Some(i);
-        }
-    }
-    None
+    (0..trajectory.len().saturating_sub(1))
+        .find(|&i| trajectory[i].time_from_start_s >= trajectory[i + 1].time_from_start_s)
 }
 
 /// **Precondition: Trajectory time spacing is bounded**
