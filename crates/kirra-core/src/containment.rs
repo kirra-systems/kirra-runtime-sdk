@@ -428,15 +428,30 @@ fn polygon_vertex(corridor: &Corridor, idx: usize) -> Point {
 /// invariant to world rotation/translation and to corridor curvature (rigid
 /// motions preserve orientation), so a single fixed expected sign is valid for
 /// straight, curved, and lane-change corridors alike. O(N+M), no heap.
+///
+/// Vertices are shifted by the first polygon vertex before the cross products.
+/// The signed area is translation-invariant in exact arithmetic, but the raw
+/// `a.x * b.y` form loses precision when coordinates are large (a world frame —
+/// UTM ~1e6, ECEF ~6.4e6) relative to the corridor's own area; the rest of
+/// `containment` works in relative differences and is translation-stable
+/// (`verdict_is_translation_invariant`), so referencing to vertex 0 keeps this
+/// gate consistent with that discipline. Modeled offsets up to ~1e8 never flip
+/// the sign, but this removes the dependence entirely.
 #[inline]
 fn corridor_signed_area_2x(corridor: &Corridor) -> f64 {
     let n_total = corridor.left.len() + corridor.right.len();
+    if n_total == 0 {
+        return 0.0;
+    }
+    let origin = polygon_vertex(corridor, 0);
     let mut acc = 0.0;
     let mut k = 0;
     while k < n_total {
         let a = polygon_vertex(corridor, k);
         let b = polygon_vertex(corridor, (k + 1) % n_total);
-        acc += a.x_m * b.y_m - b.x_m * a.y_m;
+        let (ax, ay) = (a.x_m - origin.x_m, a.y_m - origin.y_m);
+        let (bx, by) = (b.x_m - origin.x_m, b.y_m - origin.y_m);
+        acc += ax * by - bx * ay;
         k += 1;
     }
     acc
@@ -818,6 +833,38 @@ mod tests {
             validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted),
             EnforceAction::Allow,
             "a consistently-wound curved corridor must still Allow (no over-rejection)"
+        );
+    }
+
+    /// Winding gate robustness: the same well-formed / swapped corridors at an
+    /// ECEF-scale world offset must still Allow / fail-closed respectively. Locks
+    /// the reference-origin shoelace (the naive absolute-coordinate form loses
+    /// precision far from the origin).
+    #[test]
+    fn containment_winding_stable_at_large_world_offset() {
+        let (ox, oy) = (4.5e6_f64, 4.5e6_f64); // ~ECEF magnitude
+        let (n, half_w, x_max) = (8usize, 3.0_f64, 100.0_f64);
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = ox + i as f64 * (x_max / (n as f64 - 1.0));
+            left.push(Point { x_m: x, y_m: oy + half_w });
+            right.push(Point { x_m: x, y_m: oy - half_w });
+        }
+        let traj = vec![pose(ox + 50.0, oy, 0.0)];
+
+        let corridor = healthy_corridor(&left, &right);
+        assert_eq!(
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted),
+            EnforceAction::Allow,
+            "a well-formed corridor at a large world offset must still Allow"
+        );
+
+        let swapped = healthy_corridor(&right, &left);
+        assert_eq!(
+            validate_trajectory_containment(&traj, &swapped, &sedan(), FrameTrust::Trusted),
+            EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
+            "a swapped corridor at a large world offset must still fail closed"
         );
     }
 

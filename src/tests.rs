@@ -98,6 +98,27 @@ fn test_degraded_refuses_reversal_through_zero() {
 }
 
 #[test]
+fn test_nonfinite_initial_scalar_is_normalized_to_finite() {
+    // A NaN initial_scalar would poison `last_validated_scalar`, and the Degraded
+    // decel-to-stop bound (`current.signum() * …`) would then emit NaN. The
+    // constructor normalizes it to the contract's finite safe setpoint.
+    let mut gov = KirraKernelGovernor::new(velocity_contract(), f64::NAN, -2.0, 2.0);
+    assert!(
+        gov.last_validated_scalar.is_finite(),
+        "non-finite initial_scalar must be normalized to a finite value"
+    );
+    assert_eq!(gov.last_validated_scalar, velocity_contract().fallback_linear_speed);
+
+    // A Degraded tick must therefore emit a finite setpoint, not NaN.
+    gov.trust_engine.decay_trust(30); // -> ConstrainedAdvisory (Degraded)
+    let res = gov.evaluate(1.0, 1.0);
+    assert!(
+        res.sanitized_scalar.is_finite(),
+        "Degraded output must be finite even after a non-finite initial_scalar"
+    );
+}
+
+#[test]
 fn test_type_safe_llm_parser_rejection_of_injections() {
     let parser = UnstructuredTextParser;
     let malicious_injection = r#"{
