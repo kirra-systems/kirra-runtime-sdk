@@ -29,7 +29,7 @@ path = "src/main.rs"
 # root `src/gateway/kinematics_contract.rs`; now a proper dependency on the same code.
 kirra-core = { path = "../kirra-core" }
 serde = { version = "1", features = ["derive"] }
-bincode = "1.3"
+bincode = { version = "2", features = ["serde"] }
 # Message authentication for the UDP command path (HMAC-SHA256). Both are pure
 # Rust, no_std-capable, and async/ROS-free — consistent with the QNX/cert-target
 # dependency discipline above. Versions pinned to the workspace root.

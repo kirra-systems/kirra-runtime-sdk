@@ -18,4 +18,4 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-bincode = "1.3"
+bincode = { version = "2", features = ["serde"] }
