@@ -749,6 +749,10 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion record key"
             );
+            // Fail-closed: we already claimed the durable epoch; if we can't persist
+            // required promotion metadata, immediately self-demote so this instance
+            // does not serve writes as a partially-promoted Active.
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
         Err(e) => {
@@ -758,6 +762,7 @@ async fn perform_promotion(
                 epoch = new_epoch,
                 "promotion ABORTED — failed to persist promotion record key"
             );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
             return false;
         }
     }
