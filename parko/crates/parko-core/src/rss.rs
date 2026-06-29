@@ -34,12 +34,20 @@ pub const RSS_FAILSAFE_DISTANCE_M: f64 = 1.0e6;
 /// traffic safely passing in the next lane) is therefore over-conservative: it
 /// rejects motions RSS deems safe.
 ///
-/// The checkers keep the lateral safe-distance as a fail-closed *defence-in-depth*
-/// layer (catching a cut-in beside the ego), but **gate** it on this longitudinal
-/// proximity: a lateral shortfall is dangerous only when the object is within
-/// `RSS_LONGITUDINAL_CONFLICT_M` longitudinally. The value is deliberately
-/// conservative — a passenger-vehicle length plus a reaction-time closing buffer —
-/// so an imminent cut-in is still caught while distant traffic no longer trips it.
+/// Both safety checkers keep the lateral safe-distance as a fail-closed
+/// *defence-in-depth* layer (catching a cut-in beside the ego) and **gate** it on
+/// longitudinal proximity. For those gates this constant is the **FLOOR** of the
+/// window, not a fixed ceiling: the trajectory checker
+/// (`kirra_trajectory::validation`) uses `RSS_LONGITUDINAL_CONFLICT_M.max(lon_required)`
+/// and the diverse scene-RSS checker (`parko_kirra`) uses
+/// `RSS_LONGITUDINAL_CONFLICT_M.max(required_long)`, so the window grows with closing
+/// speed (#683/#684). A fixed 8 m ceiling deemed a high-speed cut-in originating
+/// farther ahead than 8 m "laterally safe" — at the 22.35 m/s ODD cap reaction-time
+/// travel alone is ~11 m — and skipped a cut-in in the 2.5–4.0 m lateral band once it
+/// was >8 m ahead. The floor keeps an urban-minimum conflict window for low-speed
+/// cases; above it, the longitudinal safe distance governs how far ahead a lateral
+/// shortfall is still a conflict. (Non-gating references — e.g. a planner's test
+/// positioning — may still read the bare 8 m value.)
 ///
 /// (The dominant longitudinal RSS — car-following / head-on — is UNCHANGED and
 /// fully governs any object that is longitudinally unsafe at any range.)

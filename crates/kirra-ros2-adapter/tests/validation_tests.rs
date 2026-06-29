@@ -1269,3 +1269,59 @@ fn ackermann_degraded_has_no_angular_stop_gate() {
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "robotaxi (angular None) must carry no angular stop gate; got {verdict:?}");
 }
+
+// ---------------------------------------------------------------------------
+// #683/#684 — closing-speed-scaled lateral-conflict window
+// ---------------------------------------------------------------------------
+
+#[test]
+fn high_speed_cut_in_beyond_8m_is_caught_dc2() {
+    // #684: at highway-adjacent speed a lateral cut-in originating MORE than the
+    // old fixed 8 m ceiling ahead must still be refused. The ego runs at 18 m/s;
+    // the object sits ~12 m ahead at dy = 3 m (above the 2.5 m overlap gate, inside
+    // the 4 m alignment band) and is closing laterally into the ego lane. The poses
+    // barely advance (0.9 m each), so the object is ≥12 m ahead at EVERY pose —
+    // beyond the old 8 m lateral ceiling, which therefore skipped it (Accept). With
+    // the fix the window is RSS_LONGITUDINAL_CONFLICT_M.max(lon_required) (~50 m at
+    // 18 m/s), so the lateral RSS fires → MRC.
+    let trajectory = straight_trajectory(3, 18.0, 0.05); // poses x = 5.0, 5.9, 6.8
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban(); // ODD cap 22.35 > 18 → no kinematics clamp
+    let objects = vec![PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 19.0, y_m: 3.0 }, // ~12 m ahead, in the 2.5–4 m band
+        velocity_mps: 3.0,
+        heading_rad: -std::f64::consts::FRAC_PI_2, // facing its motion direction
+        vel: Point { x_m: 0.0, y_m: -3.0 },        // closing laterally toward y = 0
+    }];
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "an 18 m/s ego must refuse a lateral cut-in ~12 m ahead (beyond the old 8 m ceiling); got {verdict:?}");
+}
+
+#[test]
+fn stationary_side_object_in_band_beyond_8m_stays_admitted_683() {
+    // #683 regression guard: widening the lateral window must NOT start
+    // over-rejecting a longitudinally-unsafe but laterally-STILL object in the
+    // 2.5–4 m band. The zero-lateral-velocity required gap (= 2·a_lat·ρ² ≈ 1.75 m
+    // at the 3.5 m/s² / 0.5 s defaults) is below the 3 m offset, so the object —
+    // which the ego is closing on longitudinally — is still admitted. Same geometry
+    // as the cut-in test but with zero object velocity.
+    let trajectory = straight_trajectory(3, 18.0, 0.05);
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let objects = vec![PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 19.0, y_m: 3.0 }, // ~12 m ahead, 3 m to the side, STATIONARY
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let verdict = validate_trajectory_slow(
+        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+    );
+    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a stationary object 3 m to the side stays admitted inside the widened window; got {verdict:?}");
+}
