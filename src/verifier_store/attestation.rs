@@ -11,7 +11,7 @@ impl VerifierStore {
         source: &str,
         registered_at_ms: u64,
     ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
 
         tx.execute(
             "INSERT OR REPLACE INTO attestation_identity_registry
