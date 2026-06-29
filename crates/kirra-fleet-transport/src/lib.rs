@@ -693,11 +693,11 @@ mod core_tests {
     fn report_ingest_accepts_once_and_burns_nonce() {
         let (sk, pk) = keypair();
         let counter = RejectionCounter::new();
-        let mut store = VerifierStore::new(":memory:").unwrap();
+        let store = VerifierStore::new(":memory:").unwrap();
         let report = signed_report(&sk, "robot-01", Some(7)); // issued 1_000, expires 6_000
         let bytes = encode_report(&report).unwrap();
 
-        let got = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap();
+        let got = ingest_report(&store, &bytes, &pk, &counter, 1_001).unwrap();
         assert_eq!(got, report);
         assert_eq!(counter.snapshot().accepted, 1);
         // The accepted report burned its nonce — a manual re-burn now returns false.
@@ -715,14 +715,14 @@ mod core_tests {
         // would have replayed it forever; ingest_report does not.
         let (sk, pk) = keypair();
         let counter = RejectionCounter::new();
-        let mut store = VerifierStore::new(":memory:").unwrap();
+        let store = VerifierStore::new(":memory:").unwrap();
         let report = signed_report(&sk, "robot-07", None);
         let bytes = encode_report(&report).unwrap();
 
-        ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap();
+        ingest_report(&store, &bytes, &pk, &counter, 1_001).unwrap();
         assert_eq!(counter.snapshot().accepted, 1);
 
-        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_002).unwrap_err();
+        let err = ingest_report(&store, &bytes, &pk, &counter, 1_002).unwrap_err();
         assert_eq!(err, RejectReason::Replayed);
         assert_eq!(counter.snapshot().replayed, 1);
         assert_eq!(counter.snapshot().accepted, 1, "the replay must NOT count as accepted");
@@ -734,11 +734,11 @@ mod core_tests {
         // rejected and — crucially — does NOT burn its nonce (freshness gates first).
         let (sk, pk) = keypair();
         let counter = RejectionCounter::new();
-        let mut store = VerifierStore::new(":memory:").unwrap();
+        let store = VerifierStore::new(":memory:").unwrap();
         let report = signed_report(&sk, "robot-08", None); // expires_at_ms = 6_000
         let bytes = encode_report(&report).unwrap();
 
-        let err = ingest_report(&mut store, &bytes, &pk, &counter, 6_001).unwrap_err();
+        let err = ingest_report(&store, &bytes, &pk, &counter, 6_001).unwrap_err();
         assert_eq!(err, RejectReason::Expired);
         assert_eq!(counter.snapshot().expired, 1);
         assert!(
@@ -751,12 +751,12 @@ mod core_tests {
     fn report_with_empty_nonce_is_malformed() {
         let (sk, pk) = keypair();
         let counter = RejectionCounter::new();
-        let mut store = VerifierStore::new(":memory:").unwrap();
+        let store = VerifierStore::new(":memory:").unwrap();
         let mut report = signed_report(&sk, "robot-09", None);
         report.nonce_hex = String::new(); // strip the replay nonce
         let bytes = encode_report(&report).unwrap();
 
-        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap_err();
+        let err = ingest_report(&store, &bytes, &pk, &counter, 1_001).unwrap_err();
         assert_eq!(err, RejectReason::Malformed("empty nonce_hex".into()));
         assert_eq!(counter.snapshot().malformed, 1);
     }
@@ -769,12 +769,12 @@ mod core_tests {
         // substituting it breaks the signature → BadSignature, never a nonce burn.
         let (sk, pk) = keypair();
         let counter = RejectionCounter::new();
-        let mut store = VerifierStore::new(":memory:").unwrap();
+        let store = VerifierStore::new(":memory:").unwrap();
         let mut report = signed_report(&sk, "robot-A", None);
         report.source_controller_id = "controller-B".into(); // re-target after signing
         let bytes = encode_report(&report).unwrap();
 
-        let err = ingest_report(&mut store, &bytes, &pk, &counter, 1_001).unwrap_err();
+        let err = ingest_report(&store, &bytes, &pk, &counter, 1_001).unwrap_err();
         assert_eq!(err, RejectReason::BadSignature, "controller-id substitution must break the sig");
         assert_eq!(counter.snapshot().bad_signature, 1);
         assert!(
