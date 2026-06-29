@@ -400,7 +400,7 @@ jobs:
         # -S error: gate on real bugs, not style. The whole tracked script set is
         # error-clean today; a new error-level finding fails CI.
         run: |
-          git ls-files '*.sh' | xargs -r shellcheck -S error 2>&1 | tee shellcheck-report.txt
+          git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error 2>&1 | tee shellcheck-report.txt
       - name: Install Helm
         uses: azure/setup-helm@v4
       - name: Lint the Helm chart
