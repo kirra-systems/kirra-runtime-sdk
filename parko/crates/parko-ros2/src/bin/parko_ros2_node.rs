@@ -184,6 +184,22 @@ fn build_node_clearance(config: &ParkoNodeConfig) -> Option<NodeClearance> {
                      forces the MRC (stop) until fresh samples resume."
                 );
             }
+            // #309: arm the SG6 vanished-object detector when enabled AND object
+            // perception is configured (lidar + platform_profile → the Taj object
+            // snapshot the node sources the per-tick AgentScene from). Gated the
+            // SAME way as the node's scene sourcing: without object perception the
+            // detector would never be fed, so arming it would be misleading.
+            if config.vanished_detection_enabled
+                && config.lidar_topic.is_some()
+                && config.platform_profile.is_some()
+            {
+                c = c.with_vanished_detection(config.vanished_cfg());
+                tracing::info!(
+                    "parko-ros2: SG6 vanished-object detector ARMED (#309) — a close agent that \
+                     VANISHES between frames latches the clearance loop until an operator grant \
+                     clears it (the person-under-vehicle case)."
+                );
+            }
             Some(c)
         }
         Err(e) => {
