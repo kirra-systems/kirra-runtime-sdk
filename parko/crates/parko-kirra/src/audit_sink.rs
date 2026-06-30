@@ -24,8 +24,9 @@ use ed25519_dalek::SigningKey;
 use kirra_verifier::store_handle::StoreHandle;
 use kirra_verifier::verifier_store::VerifierStore;
 use parko_core::{
-    ClearanceLoop, ClearanceRejection, ClearanceState, ImpactCfg, ImpactEvidence, ImpactLatch,
-    OperatorClearanceGrant,
+    AuditClient, ClearanceLoop, ClearanceRejection, ClearanceState, DecisionRecord, FaultRecord,
+    HealthRecord, ImpactCfg, ImpactEvidence, ImpactLatch, NoopAuditClient, OperatorClearanceGrant,
+    OverrideRecord,
 };
 
 use crate::comparator::{DivergenceEvent, DivergenceEventSink, InMemoryDivergenceSink};
@@ -55,11 +56,15 @@ pub enum FatalAuditConfig {
 impl std::fmt::Display for FatalAuditConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Subsystem-neutral: this error type is shared by every audit-sink
+            // selector (divergence, impact, decision-path AuditClient), so the
+            // message names only the SHARED signing-key var, never one selector's
+            // DB var (the caller knows which DB env var it read).
             FatalAuditConfig::MissingSigningKey => write!(
                 f,
-                "PARKO_DIVERGENCE_AUDIT_DB is set but KIRRA_LOG_SIGNING_KEY is unset — \
-                 a durable divergence audit must be signed (tamper-evident); refusing to \
-                 persist an unsigned chain"
+                "a durable audit DB is configured but KIRRA_LOG_SIGNING_KEY is unset — \
+                 a durable audit must be signed (tamper-evident); refusing to persist an \
+                 unsigned chain"
             ),
             FatalAuditConfig::InvalidSigningKey(why) => write!(
                 f,
@@ -67,7 +72,7 @@ impl std::fmt::Display for FatalAuditConfig {
             ),
             FatalAuditConfig::StoreOpenFailed(why) => write!(
                 f,
-                "could not open the divergence audit store (PARKO_DIVERGENCE_AUDIT_DB): {why}"
+                "could not open the audit store at the configured path: {why}"
             ),
         }
     }
@@ -238,6 +243,122 @@ pub fn select_divergence_sink(
             None | Some("") => Err(FatalAuditConfig::MissingSigningKey),
             Some(key_b64) => Ok(Arc::new(AuditChainLinkerDivergenceSink::open(
                 db_path, key_b64,
+            )?)),
+        },
+    }
+}
+
+// ───────────────────── L5 AuditClient bridge (decision-path audit) ──────────
+//
+// The SDK-backed implementation of `parko_core::AuditClient`. It routes the
+// decision-path records (decision / override / fault / health) into the SAME
+// signed, hash-chained ledger via the shared `ChainedAuditWriter`, so the ML
+// decision path can record audit events through the SDK-free trait without
+// depending on `kirra-verifier` itself — only this adapter does.
+
+/// Audit-log event type for a normal governed decision. PascalCase, matching the
+/// `"ComparatorDivergence"` / `"ImpactDetected"` convention.
+pub const PARKO_DECISION_EVENT_TYPE: &str = "ParkoDecision";
+/// Audit-log event type for a governor override of the doer output.
+pub const PARKO_OVERRIDE_EVENT_TYPE: &str = "ParkoOverride";
+/// Audit-log event type for a decision-path fault.
+pub const PARKO_FAULT_EVENT_TYPE: &str = "ParkoFault";
+/// Audit-log event type for a periodic health/posture snapshot.
+pub const PARKO_HEALTH_EVENT_TYPE: &str = "ParkoHealth";
+
+/// Durable, signed implementation of [`parko_core::AuditClient`].
+///
+/// Persists every decision-path record to the SDK's hash-chained, Ed25519-signed
+/// ledger via the shared [`ChainedAuditWriter`] — same fail-closed contract as
+/// the divergence and impact sinks: a record detected-but-not-recorded increments
+/// [`write_failures`](Self::write_failures) and logs loudly; it never panics and
+/// never propagates an error onto the decision path.
+pub struct AuditChainLinkerAuditClient {
+    writer: ChainedAuditWriter,
+    source: String,
+}
+
+impl AuditChainLinkerAuditClient {
+    /// Build over an SDK store (must own the audit chain + a signing key). `source`
+    /// is the audit `source` column (e.g. the node id).
+    pub fn new(store: StoreHandle, source: impl Into<String>) -> Self {
+        Self {
+            writer: ChainedAuditWriter::new(store),
+            source: source.into(),
+        }
+    }
+
+    /// Open a durable, *signed* client from a DB path + base64 Ed25519 key.
+    /// Fail-closed: an unopenable store or undecodable key is a [`FatalAuditConfig`].
+    pub fn open(
+        db_path: &str,
+        key_b64: &str,
+        source: impl Into<String>,
+    ) -> Result<Self, FatalAuditConfig> {
+        Ok(Self {
+            writer: ChainedAuditWriter::open(db_path, key_b64)?,
+            source: source.into(),
+        })
+    }
+
+    /// Records detected but NOT durably + signed. MUST be `0` in a healthy
+    /// deployment; non-zero means the tamper-evident record is MISSING.
+    pub fn write_failures(&self) -> u64 {
+        self.writer.write_failures()
+    }
+
+    fn record_event<P: serde::Serialize>(&self, event_type: &str, payload: &P) {
+        match serde_json::to_string(payload) {
+            Ok(body) => self.writer.record(&self.source, event_type, &body),
+            Err(e) => {
+                self.writer.note_failure();
+                eprintln!(
+                    "[L5] {event_type} NOT recorded — JSON serialization failed: {e} \
+                     (decision-path record is UNAUDITED)"
+                );
+            }
+        }
+    }
+}
+
+impl AuditClient for AuditChainLinkerAuditClient {
+    fn record_decision(&self, record: DecisionRecord) {
+        self.record_event(PARKO_DECISION_EVENT_TYPE, &record);
+    }
+    fn record_override(&self, record: OverrideRecord) {
+        self.record_event(PARKO_OVERRIDE_EVENT_TYPE, &record);
+    }
+    fn record_fault(&self, record: FaultRecord) {
+        self.record_event(PARKO_FAULT_EVENT_TYPE, &record);
+    }
+    fn record_health(&self, record: HealthRecord) {
+        self.record_event(PARKO_HEALTH_EVENT_TYPE, &record);
+    }
+}
+
+/// Select the decision-path [`AuditClient`] from the deployment's two environment
+/// inputs, applying the SAME fail-closed contract as [`select_divergence_sink`]:
+///
+/// | `db` | `key` | result |
+/// |---|---|---|
+/// | unset | any   | `Ok` [`NoopAuditClient`] — caller MUST warn (decision path UNAUDITED) |
+/// | set   | set, valid, store opens | `Ok` durable + signed [`AuditChainLinkerAuditClient`] |
+/// | set   | unset | `Err(MissingSigningKey)` — would be unsigned |
+/// | set   | invalid key OR store unopenable | `Err(...)` — no silent fallback |
+///
+/// A durable audit *requested* (db set) that cannot be made tamper-evident is
+/// FATAL — the caller exits non-zero rather than run with an unsigned ledger.
+pub fn select_audit_client(
+    db: Option<String>,
+    key: Option<String>,
+    source: impl Into<String>,
+) -> Result<Arc<dyn AuditClient>, FatalAuditConfig> {
+    match db.as_deref() {
+        None | Some("") => Ok(Arc::new(NoopAuditClient)),
+        Some(db_path) => match key.as_deref() {
+            None | Some("") => Err(FatalAuditConfig::MissingSigningKey),
+            Some(key_b64) => Ok(Arc::new(AuditChainLinkerAuditClient::open(
+                db_path, key_b64, source,
             )?)),
         },
     }
@@ -687,6 +808,85 @@ mod tests {
             .expect("a ComparatorDivergence audit entry must exist");
         assert_eq!(div["posture"]["escalated_to_lockout"], true);
         assert_eq!(div["posture"]["accumulator"], 7);
+    }
+
+    /// L5 — the SDK-backed `AuditClient` writes all four record kinds into the
+    /// SAME hash-chained, Ed25519-signed ledger, and the chain verifies.
+    #[test]
+    fn audit_client_records_all_kinds_durably_signed_and_hash_linked() {
+        use parko_core::safety::SafetyPosture;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("parko_audit.sqlite");
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let vk = key.verifying_key();
+
+        let mut store = VerifierStore::new(db.to_str().unwrap()).expect("store");
+        store.set_signing_key(key);
+        let store = StoreHandle::new(store);
+
+        let client = AuditChainLinkerAuditClient::new(store.clone(), "parko-test");
+        client.record_decision(DecisionRecord {
+            tick_ms: 1,
+            proposed_linear_mps: 1.0,
+            proposed_angular_rps: 0.0,
+            commanded_linear_mps: 1.0,
+            commanded_angular_rps: 0.0,
+            posture: SafetyPosture::Nominal,
+        });
+        client.record_override(OverrideRecord {
+            tick_ms: 2,
+            reason: "envelope_clamp",
+            proposed_linear_mps: 5.0,
+            proposed_angular_rps: 0.0,
+            commanded_linear_mps: 2.0,
+            commanded_angular_rps: 0.0,
+            posture: SafetyPosture::Degraded,
+        });
+        client.record_fault(FaultRecord {
+            tick_ms: 3,
+            code: "nonfinite_command",
+            detail: "linear NaN".to_string(),
+            posture: SafetyPosture::LockedOut,
+        });
+        client.record_health(HealthRecord {
+            tick_ms: 4,
+            posture: SafetyPosture::Nominal,
+            inference_latency_ms: Some(7),
+            divergence_accumulator: 0,
+            ticks_processed: 4,
+        });
+        assert_eq!(client.write_failures(), 0, "all four records must be durably recorded");
+
+        let (v, events) = store.with(|guard| {
+            let v = guard.verify_audit_chain_full(Some(&vk)).expect("verify");
+            let events = guard.load_all_posture_events().expect("load events");
+            (v, events)
+        });
+        assert!(v.chain_intact, "audit chain must be hash-intact");
+        assert!(v.signature_valid, "the signatures must verify under the signing key");
+        assert!(v.signed_entries >= 4, "all four entries must be signed, got {}", v.signed_entries);
+
+        for et in [
+            PARKO_DECISION_EVENT_TYPE,
+            PARKO_OVERRIDE_EVENT_TYPE,
+            PARKO_FAULT_EVENT_TYPE,
+            PARKO_HEALTH_EVENT_TYPE,
+        ] {
+            assert!(
+                events.iter().any(|e| e["event_type"] == et),
+                "missing audit entry for event_type {et}"
+            );
+        }
+
+        // The fault body (under the `posture` column key) carries the code and the
+        // lowercase posture label from the SDK-free record.
+        let fault = events
+            .iter()
+            .find(|e| e["event_type"] == PARKO_FAULT_EVENT_TYPE)
+            .expect("a ParkoFault audit entry must exist");
+        assert_eq!(fault["posture"]["code"], "nonfinite_command");
+        assert_eq!(fault["posture"]["posture"], "locked_out");
     }
 
     /// DB-actor migration phase 1: `StoreHandle` RECOVERS a poisoned lock

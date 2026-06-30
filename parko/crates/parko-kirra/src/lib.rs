@@ -78,11 +78,13 @@ pub use angular_bound::{AngularVelocityBound, PlatformParams, ROLLOVER_MIN_LINEA
 pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 #[cfg(feature = "verifier-sink")]
 pub use audit_sink::{
-    select_divergence_sink, select_impact_sink, AuditChainLinkerDivergenceSink, FatalAuditConfig,
-    ImpactAuditSink, ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,
+    select_audit_client, select_divergence_sink, select_impact_sink, AuditChainLinkerAuditClient,
+    AuditChainLinkerDivergenceSink, FatalAuditConfig, ImpactAuditSink,
+    ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,
     ImpactEscalationPayload, ImpactEventSink, InMemoryImpactSink, RecordedClearanceLoop,
     RecordedImpactLatch, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE, IMPACT_CLEARED_EVENT_TYPE,
-    IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE,
+    IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE, PARKO_DECISION_EVENT_TYPE,
+    PARKO_FAULT_EVENT_TYPE, PARKO_HEALTH_EVENT_TYPE, PARKO_OVERRIDE_EVENT_TYPE,
 };
 pub use comparator::{GovernorComparator, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
