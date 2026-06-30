@@ -312,14 +312,14 @@ operational manual `GOVERNOR_SAFETY_MANUAL.md`):
 
 | Mechanism | Realizes | Source / code anchor |
 |---|---|---|
-| RSS over horizon (§4 conjunction, multi-modal predictive) | SG1 | `validate_trajectory_slow*`; ADR-0017 |
-| Per-step kinematics contract + drivable-space | SG2, SG3 | `validate_vehicle_command`; `gateway/kinematics_contract.rs` |
+| RSS over horizon (§4 conjunction, multi-modal predictive) | SG1 | `crates/kirra-trajectory/src/validation.rs` (`validate_trajectory_slow`, `validate_trajectory_slow_capped`); ADR-0017 |
+| Per-step kinematics contract + drivable-space | SG2, SG3 | `crates/kirra-core/src/kinematics_contract.rs` (`validate_vehicle_command`; `src/gateway/kinematics_contract.rs` is a re-export shim) |
 | Hard envelope cap before rate limiter | SG-001, SG-002 | `SAFETY_GOALS.md` SG-001 (INV-8) |
 | `WATER_UNTRAVERSABLE` / `COMMIT_ZONE_BLOCKED` | SG4, SG5 | `OCCY_DFA.md` §2 |
 | Post-collision latch + motion veto | SG6 | `OCCY_DFA.md` §2 |
 | Doer-agnostic check (command_source audit-only) | SG7 | `OCCY_SAFETY_GOALS.md` §4 SG7 |
 | Standing validated MRC + commit-on-failure | SG8 | `OCCY_SAFETY_GOALS.md` §4 SG8 |
-| NaN/Inf trap + bounded WCET + fail-closed timeout | SG9, SG-004 | `kinematics_contract.rs:139`; `src/wcet_gate.rs` |
+| NaN/Inf trap + bounded WCET + fail-closed timeout | SG9, SG-004 | `crates/kirra-core/src/kinematics_contract.rs` (Priority-0 non-finite guard); `src/wcet_gate.rs` |
 | Posture cache staleness → fail-closed | SG-005 | `should_route_command` (`src/posture_cache.rs`) |
 | `Unknown` command denial in all postures | SG-006 | `should_route_command` early-return (INV-9) |
 | Sensor-timeout watchdog → Degraded/MRC | SG-003 | `src/telemetry_watchdog.rs` |
