@@ -777,6 +777,13 @@ async fn main() {
     // faithfully decoded by its declared type and bounded (fail-closed on breach).
     kirra_verifier::adapters::ethernet_ip::init_cip_bounds_from_env();
 
+    // #312: select the deployment's vehicle class from KIRRA_VEHICLE_CLASS
+    // (courier | delivery-av | robotaxi). FAIL-CLOSED: unset/unknown aborts
+    // startup (there is no default class — a wrong class would pick another
+    // class's envelope). Drives the per-class kinematic contract in the actuator
+    // gate (`enforce_actuator_safety_envelope`).
+    kirra_verifier::gateway::contract_profiles::init_vehicle_class_from_env();
+
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
             .filter(|s| !s.is_empty())
