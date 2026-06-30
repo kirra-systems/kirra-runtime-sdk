@@ -25,7 +25,7 @@ Any bypass of these is a critical vulnerability:
 
 - `KIRRA_ADMIN_TOKEN` compared with `constant_time_compare` only
 - `require_admin_token` returns 503 on absent/empty token (never 200)
-- `verify_attestation` uses real HMAC-SHA256 (never mocked)
+- `verify_attestation` cryptographically verifies a per-node **Ed25519** signature over the `(node_id, nonce)` challenge against the registered `ak_public_pem` (never mocked; the prior admin-token HMAC proof was removed — INV-3)
 - DDS actuator topics use `Volatile` durability (never `TransientLocal`)
 - `OperationalCommand::Unknown` denied in all posture states
 
