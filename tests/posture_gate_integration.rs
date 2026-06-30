@@ -155,6 +155,31 @@ async fn test_unknown_method_returns_503_under_any_posture() {
 }
 
 // ---------------------------------------------------------------------------
+// #696 (HT1): a CORS preflight (OPTIONS) must NOT be 503'd by the posture gate
+// — it carries no command and authorizes nothing, and must reach the CorsLayer.
+// Before the fix, OPTIONS classified as Unknown → 503 in every posture. The test
+// app has no CorsLayer, so a gate-passed OPTIONS reaches the router and 405s
+// (no OPTIONS handler) — the point is only that it is NOT the gate's 503.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_options_preflight_not_blocked_by_posture_gate() {
+    for posture in [
+        FleetPosture::Nominal,
+        FleetPosture::Degraded,
+        FleetPosture::LockedOut,
+    ] {
+        let svc = build_state_with_posture(posture);
+        let status = req_status(build_test_app(svc), "OPTIONS", "/fleet/posture").await;
+        assert_ne!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a CORS preflight (OPTIONS) must pass the posture gate in {posture:?}, not 503; got {status}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 2. Cold start (posture_cache = None): a functional READ is denied 503;
 // /health is exempt and still passes (200).
 // ---------------------------------------------------------------------------

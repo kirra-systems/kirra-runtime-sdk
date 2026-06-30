@@ -1487,10 +1487,36 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fleet/flapping/{node_id}", get(get_node_flap_status))
         .route("/federation/reports/{asset_id}", get(get_federated_reports));
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // #696 (HT2): origins are restrictable to a configured allowlist via
+    // `KIRRA_CORS_ALLOWED_ORIGINS` (comma-separated). Default is `Any`
+    // (back-compat); auth is `Authorization: Bearer` (no cookies / no
+    // `allow_credentials`), so `Any` is not a CSRF vector — the allowlist is
+    // defense-in-depth controlling which web origins may READ responses. A set
+    // env with no parseable origin yields an empty allowlist (deny cross-origin),
+    // logged — fail-closed rather than silently reverting to permissive.
+    let cors = {
+        let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+        match std::env::var("KIRRA_CORS_ALLOWED_ORIGINS") {
+            Ok(v) if !v.trim().is_empty() => {
+                let origins: Vec<axum::http::HeaderValue> = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+                    .collect();
+                if origins.is_empty() {
+                    tracing::error!(
+                        value = %v,
+                        "KIRRA_CORS_ALLOWED_ORIGINS set but no valid origin parsed — \
+                         denying all cross-origin requests (fail-closed)"
+                    );
+                }
+                base.allow_origin(origins)
+            }
+            // Unset / empty → permissive default (unchanged behaviour).
+            _ => base.allow_origin(Any),
+        }
+    };
 
     // Operator console — Phase A (#103 SG6). Reads are QM; the one mutation
     // (clearance-grant recording) is gated by the supervisor key IN the handler,

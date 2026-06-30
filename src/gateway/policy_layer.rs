@@ -544,6 +544,16 @@ pub async fn enforce_posture_routing(
         return Ok(next.run(req).await);
     }
 
+    // #696 (HT1): let a CORS preflight (OPTIONS) through to the CorsLayer. A
+    // preflight carries no command and no body and authorizes nothing — the
+    // ACTUAL method (GET/POST/…) still hits this gate on the real request. Without
+    // this bypass, `classify_http_command` maps OPTIONS to `Unknown` (denied in
+    // every posture), so this OUTERMOST gate 503s every browser preflight to a
+    // non-exempt path. Not a posture/auth relaxation: nothing actionable runs.
+    if req.method() == axum::http::Method::OPTIONS {
+        return Ok(next.run(req).await);
+    }
+
     let method = req.method().as_str();
     let cmd = classify_http_command(method, path);
 
