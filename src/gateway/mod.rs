@@ -67,6 +67,19 @@ impl Drop for ThreadPoolGuard {
     }
 }
 
+/// The shared safety governor plus its governor-global dt anchor, guarded by a
+/// SINGLE mutex. Folding `last_eval` in here (instead of a separate
+/// `Arc<Mutex<Option<Instant>>>`) keeps the B4 invariant atomic — dt is measured
+/// against the very `last_validated_scalar` rate anchor it is then evaluated
+/// under — AND removes the one lock that used to be nested inside the governor
+/// critical section. With no other lock acquired while this guard is held,
+/// nothing can be poisoned-while-held and thereby poison the governor.
+struct GovernorState {
+    governor: KirraKernelGovernor<ContractProfile>,
+    /// Instant of the previous governed frame; `None` before the first frame.
+    last_eval: Option<Instant>,
+}
+
 pub struct KirraLiveGateway {
     pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16, pub metrics_port: u16,
     pub runtime_config: ContractProfile, pub system_auth_key: Vec<u8>,
@@ -109,13 +122,13 @@ impl KirraLiveGateway {
     }
 
     /// The admin-reset listener thread (extracted from `start_active_proxy_gateway`).
-    /// Lock behaviour is unchanged: a poisoned governor mutex leaves `auth_res` at
-    /// its `MUTEX_LOCK_FAIL` default (no reset), and the IO-writer lock keeps its
+    /// Lock behaviour is unchanged: a poisoned governor-state mutex leaves `auth_res`
+    /// at its `MUTEX_LOCK_FAIL` default (no reset), and the IO-writer lock keeps its
     /// `.unwrap()` — on this safety binary a poisoned lock panics → (release
     /// `panic=abort`) process death → fail-closed, the intended behaviour.
     fn spawn_admin_listener(
         admin_listener: TcpListener,
-        gov_admin_clone: Arc<Mutex<KirraKernelGovernor<ContractProfile>>>,
+        gov_admin_clone: Arc<Mutex<GovernorState>>,
         auth_key: Vec<u8>,
         log_dir: String,
         io_lock_admin: Arc<Mutex<()>>,
@@ -135,7 +148,8 @@ impl KirraLiveGateway {
                     let mut captured_attempts_count = tracking_attempts;
 
                     {
-                        if let Ok(mut gov) = gov_admin_clone.lock() {
+                        if let Ok(mut st) = gov_admin_clone.lock() {
+                            let gov = &mut st.governor;
                             gov.trust_engine.failed_reset_attempts = tracking_attempts;
                             auth_res = gov.trust_engine.authenticated_manual_reset(token, &auth_key, now);
                             captured_attempts_count = gov.trust_engine.failed_reset_attempts;
@@ -171,7 +185,7 @@ impl KirraLiveGateway {
     fn spawn_metrics_listener(
         metrics_bind_port: u16,
         metrics_http_clone: Arc<LockFreeMetricsAggregator>,
-        gov_http_clone: Arc<Mutex<KirraKernelGovernor<ContractProfile>>>,
+        gov_http_clone: Arc<Mutex<GovernorState>>,
         workers_http_clone: Arc<std::sync::atomic::AtomicU32>,
         max_workers_allowed: u32,
     ) {
@@ -205,8 +219,8 @@ impl KirraLiveGateway {
                         let _ = socket.write_all(response.as_bytes());
                     } else if first_line.starts_with("GET /health/ready") {
                         let mut is_ready = false;
-                        if let Ok(gov) = gov_http_clone.lock() {
-                            if gov.trust_mode() != TrustMode::LockedOut {
+                        if let Ok(st) = gov_http_clone.lock() {
+                            if st.governor.trust_mode() != TrustMode::LockedOut {
                                 let active_conns = workers_http_clone.load(Ordering::SeqCst);
                                 if active_conns < max_workers_allowed {
                                     is_ready = true;
@@ -254,11 +268,12 @@ impl KirraLiveGateway {
             self.runtime_config.constraint_cap_max,
         );
 
-        let shared_governor = Arc::new(Mutex::new(initial_gov));
-        // B4: the instant of the last governed frame, shared across worker threads.
-        // The rate limiter's `last_validated_scalar` anchor is governor-global, so
-        // the dt measured against it must be too (not per-connection).
-        let last_governed_eval = Arc::new(Mutex::new(None::<Instant>));
+        // B4: the governor and the instant of the last governed frame share ONE
+        // mutex. The rate limiter's `last_validated_scalar` anchor is
+        // governor-global, so the dt measured against it must be too — folding it
+        // into the same lock keeps that measurement atomic with evaluate and means
+        // the governor critical section nests no other (poisonable) lock.
+        let shared_governor = Arc::new(Mutex::new(GovernorState { governor: initial_gov, last_eval: None }));
         let flight_recorder = Arc::new(Mutex::new(CausalFlightRecorder::new()));
         let metrics = Arc::new(LockFreeMetricsAggregator::new());
         let active_workers = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -306,7 +321,6 @@ impl KirraLiveGateway {
             let mut mut_client = client;
             let plc_addr = format!("127.0.0.1:{}", self.plc_target_port);
             let gov_worker_clone = Arc::clone(&shared_governor);
-            let last_eval_clone = Arc::clone(&last_governed_eval);
             let recorder_worker_clone = Arc::clone(&flight_recorder);
             let metrics_clone = Arc::clone(&metrics);
             let workers_counter = Arc::clone(&active_workers);
@@ -337,23 +351,36 @@ impl KirraLiveGateway {
 
                     let out_bytes = match adapter_clone.decode_demand(raw_frame) {
                         Ok(demand) => {
-                            let mut gov = gov_worker_clone.lock().unwrap();
-                            // B4: feed the REAL elapsed dt since the previous governed
-                            // frame, not a fabricated constant. Measured under the
-                            // governor lock so it stays consistent with the shared
-                            // `last_validated_scalar` rate anchor; `saturating_*` so a
-                            // non-monotonic clock reads 0 (→ evaluate fail-closes) not a
-                            // negative dt.
-                            let now = Instant::now();
-                            let dt = {
-                                let mut last = last_eval_clone.lock().unwrap();
-                                let elapsed = last.map(|prev| now.saturating_duration_since(prev));
-                                *last = Some(now);
-                                governed_dt_secs(elapsed)
+                            // Worker-panic isolation (fail-closed): hold the shared
+                            // governor-state lock for ONLY the panic-free dt + `evaluate`
+                            // plus a snapshot of the values the bookkeeping below needs,
+                            // then release it BEFORE touching the recorder / io locks.
+                            // The governor critical section now nests NO other lock at all
+                            // (the dt anchor lives in the SAME mutex), so a panic on the
+                            // bookkeeping path can never be raised under the governor lock
+                            // and therefore can never poison the governor. (In release
+                            // `panic=abort` any panic aborts the process anyway —
+                            // fail-closed; the un-nesting is the unwind/test-build
+                            // guarantee, and also shortens the WCET-relevant hold.) The
+                            // `.unwrap()` is KEPT: a genuinely poisoned governor still
+                            // panics → fail-closed, never recovered onto corrupt state.
+                            let (intercept, trust_mode, trust_score) = {
+                                let mut st = gov_worker_clone.lock().unwrap();
+                                // B4: measure dt against the previous governed frame and
+                                // evaluate under the SAME guard, so dt stays consistent
+                                // with the `last_validated_scalar` rate anchor;
+                                // `saturating_*` so a non-monotonic clock reads 0 (→
+                                // evaluate fail-closes), never a negative dt.
+                                let now = Instant::now();
+                                let elapsed = st.last_eval.map(|prev| now.saturating_duration_since(prev));
+                                st.last_eval = Some(now);
+                                let dt = governed_dt_secs(elapsed);
+                                let intercept = st.governor.evaluate(demand, dt);
+                                (intercept, st.governor.trust_mode(), st.governor.trust_engine.current_score)
                             };
-                            let intercept = gov.evaluate(demand, dt);
+
                             let processed = metrics_clone.total_processed_frames.fetch_add(1, Ordering::Relaxed) + 1;
-                            metrics_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
+                            metrics_clone.trust_score.store(trust_score as u64, Ordering::Relaxed);
 
                             if intercept.was_unsafe_attempt {
                                 metrics_clone.envelope_clamping_events.fetch_add(1, Ordering::Relaxed);
@@ -363,6 +390,9 @@ impl KirraLiveGateway {
                             }
 
                             if processed.is_multiple_of(100) {
+                                // Recorder lock acquired with the governor guard already
+                                // released; the entry is built entirely from the snapshot
+                                // taken above, so it still reflects the evaluated frame.
                                 let mut rec = recorder_worker_clone.lock().unwrap();
                                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
@@ -372,7 +402,7 @@ impl KirraLiveGateway {
                                     "TRANSPARENT"
                                 };
 
-                                let system_state_enum = match gov.trust_mode() {
+                                let system_state_enum = match trust_mode {
                                     TrustMode::FullAutonomy => GlobalSystemState::Normal,
                                     _ => GlobalSystemState::Degraded,
                                 };
@@ -384,8 +414,8 @@ impl KirraLiveGateway {
                                     action: "MODBUS_WRITE",
                                     res: dynamic_resolution_text,
                                     state: system_state_enum,
-                                    mode: gov.trust_mode(),
-                                    score: gov.trust_engine.current_score,
+                                    mode: trust_mode,
+                                    score: trust_score,
                                     narrative: intercept.mitigation.to_string(),
                                 });
                                 flush_payload = Some(rec.clone());
@@ -418,7 +448,8 @@ impl KirraLiveGateway {
                 }
 
                 let summary_payload = {
-                    if let Ok(gov) = gov_worker_clone.lock() {
+                    if let Ok(st) = gov_worker_clone.lock() {
+                        let gov = &st.governor;
                         let total_traffic = metrics_clone.total_processed_frames.load(Ordering::Relaxed) as u32;
                         let clamp_events = metrics_clone.envelope_clamping_events.load(Ordering::Relaxed) as u32;
                         let rate_events = metrics_clone.rate_limiting_events.load(Ordering::Relaxed) as u32;
