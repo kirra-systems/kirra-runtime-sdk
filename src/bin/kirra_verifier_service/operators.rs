@@ -347,3 +347,192 @@ pub(crate) async fn console_clearance_grant(
                    Json(json!({ "status": "error", "reason": "store task failed" }))).into_response(),
     }
 }
+
+/// POST /console/estop-requests — a governor-routed authenticated EMERGENCY-STOP
+/// request (#412 / ADR-0013). The clearance verb INVERTED: an authenticated
+/// operator REQUESTS a stop and the governor, judging the request, commands the
+/// MRC under ITS OWN authority. The console asks; the governor acts — the QM-domain
+/// console NEVER touches the actuator (ADR-0006 boundary).
+///
+/// Operator-signed ONLY (no supervisor break-glass): ADR-0013 constraint #2
+/// requires the stop be NON-REPUDIABLE — provably the operator's in the chain —
+/// which a shared key cannot give. Handler order mirrors `console_clearance_grant`
+/// / `verify_attestation`: load operator (unknown/revoked → 403) → VERIFY the
+/// stop signature (domain-distinct from a clearance grant) → CONSUME the nonce
+/// (verify-then-consume; replay → 401) → node registered → chain
+/// `OperatorStopRequested`, command the MRC (sticky fleet LockedOut), chain
+/// `GovernorMRCCommanded`.
+///
+/// Unlike the RECORD-ONLY clearance grant, accepting this request DOES mutate
+/// posture — that is the point: the governor commands the MRC. Recovery is a
+/// deliberate supervisor reset (the clearance/release inverse), not automatic.
+pub(crate) async fn console_estop_request(
+    State(svc): State<Arc<ServiceState>>,
+    Json(req): Json<OperatorStopRequest>,
+) -> impl IntoResponse {
+    // HA split-brain guard: commanding the MRC is a posture mutation; a passive
+    // standby must not act and diverge from the primary (mirrors the clearance grant).
+    if !svc.app.is_active() {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+    }
+    let now = now_ms();
+    let operator_id = req.operator_id.trim().to_string();
+    let node_id = req.node_id.trim().to_string();
+    let nonce = req.nonce.trim().to_string();
+    let sig_b64 = req.signature_b64.trim().to_string();
+
+    if operator_id.is_empty() || node_id.is_empty() || nonce.is_empty() || sig_b64.is_empty() {
+        audit_estop_rejection(&svc.app, "malformed_request", &node_id, &operator_id, now).await;
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "status": "rejected",
+            "reason": "operator_id, node_id, nonce, and signature_b64 are all required"
+        }))).into_response();
+    }
+
+    // 1. Load operator — unknown / revoked → 403, audited.
+    let op_id_c = operator_id.clone();
+    let maybe_op = svc.app.store.call_read(move |s| {
+        Ok::<_, ()>(s.load_operator(&op_id_c).ok().flatten())
+    }).await.ok().and_then(|r| r.ok()).flatten();
+    let operator = match maybe_op {
+        Some(op) if op.is_active() => op,
+        Some(_) => {
+            audit_estop_rejection(&svc.app, "revoked_operator", &node_id, &operator_id, now).await;
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "status": "rejected", "reason": "operator is revoked"
+            }))).into_response();
+        }
+        None => {
+            audit_estop_rejection(&svc.app, "unknown_operator", &node_id, &operator_id, now).await;
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "status": "rejected", "reason": "operator is not registered"
+            }))).into_response();
+        }
+    };
+
+    // 2. VERIFY the stop signature FIRST (before the nonce is consumed). The
+    //    payload is under OPERATOR_STOP_DOMAIN — a clearance signature cannot
+    //    satisfy it, nor vice versa.
+    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+    let sig_bytes = match b64e.decode(sig_b64.as_str()) {
+        Ok(b) => b,
+        Err(_) => {
+            audit_estop_rejection(&svc.app, "malformed_signature", &node_id, &operator_id, now).await;
+            return (StatusCode::UNAUTHORIZED, Json(json!({
+                "status": "rejected", "reason": "signature is not valid base64"
+            }))).into_response();
+        }
+    };
+    let payload = kirra_verifier::attestation::operator_stop_signing_payload(
+        &operator_id, &node_id, &nonce,
+    );
+    if !kirra_verifier::attestation::verify_ed25519_pem_signature(
+        &operator.pubkey_pem, &payload, &sig_bytes,
+    ) {
+        audit_estop_rejection(&svc.app, "bad_signature", &node_id, &operator_id, now).await;
+        return (StatusCode::UNAUTHORIZED, Json(json!({
+            "status": "rejected", "reason": "signature verification failed"
+        }))).into_response();
+    }
+
+    // 3. CONSUME the nonce (verify-then-consume; replay/expired → 401). Reuses the
+    //    SAME challenge channel as clearance — the domain-distinct payload above is
+    //    what keeps the two verbs non-interchangeable.
+    let key = composite_challenge_key(&operator_id, &node_id);
+    if !svc.app.consume_clearance_challenge(&key, &nonce, now) {
+        audit_estop_rejection(&svc.app, "nonce_replay_or_expired", &node_id, &operator_id, now).await;
+        return (StatusCode::UNAUTHORIZED, Json(json!({
+            "status": "rejected",
+            "reason": "challenge nonce absent, expired, or already used (replay rejected)"
+        }))).into_response();
+    }
+
+    // 4. The target must be a registered node. A store/read FAILURE is NOT an
+    //    "unregistered node" — distinguish it: a genuine not-found → 422, but a
+    //    lookup error → 500 (still fail-closed: the MRC is never commanded, and the
+    //    audit reason is accurate rather than a misleading client-error). The
+    //    closure preserves the query Result (not `unwrap_or(false)`) so the two
+    //    cases are separable (Copilot PR #718).
+    let node_id_c = node_id.clone();
+    let lookup = svc.app.store.call_read(move |store| {
+        store.node_exists(&node_id_c).map_err(|_| ())
+    }).await;
+    let registered = match lookup {
+        Ok(Ok(exists)) => exists,
+        _ => {
+            audit_estop_rejection(&svc.app, "node_lookup_failed", &node_id, &operator_id, now).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "status": "error", "reason": "node registration lookup failed"
+            }))).into_response();
+        }
+    };
+    if !registered {
+        audit_estop_rejection(&svc.app, "unregistered_node", &node_id, &operator_id, now).await;
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "status": "rejected", "reason": "node_id is not a registered node"
+        }))).into_response();
+    }
+
+    let fingerprint = kirra_verifier::attestation::operator_key_fingerprint(&operator.pubkey_pem);
+
+    // 5a. Chain the authenticated REQUEST (who/when) — non-repudiable.
+    {
+        let node_id_c = node_id.clone();
+        let op_id_c = operator_id.clone();
+        let fp_c = fingerprint.clone();
+        let _ = svc.app.store.call(move |s| {
+            let _ = s.append_clearance_audit_event(
+                "OperatorStopRequested",
+                &json!({
+                    "node_id": node_id_c,
+                    "operator_id": op_id_c,
+                    "operator_key_fingerprint": fp_c,
+                    "auth_method": "operator-signed",
+                }).to_string(),
+                now,
+            );
+        }).await;
+    }
+
+    // 5b. Command the MRC under the GOVERNOR's own authority — sticky fleet
+    //     LockedOut. The exact escalation idiom (force_lockout doc / telemetry
+    //     watchdog): set the sticky flag THEN force the cache, so any surviving
+    //     recalc keeps producing LockedOut. The console asks; the governor acts.
+    svc.app.supervisor_tripped.store(true, std::sync::atomic::Ordering::SeqCst);
+    kirra_verifier::posture_engine::force_lockout(&svc.posture_cache, now);
+
+    // 5c. Chain what the governor DID (reconstructable after the fact).
+    {
+        let node_id_c = node_id.clone();
+        let op_id_c = operator_id.clone();
+        let _ = svc.app.store.call(move |s| {
+            let _ = s.append_clearance_audit_event(
+                "GovernorMRCCommanded",
+                &json!({
+                    "node_id": node_id_c,
+                    "operator_id": op_id_c,
+                    "mrc": "TRAJECTORY_MRC_FALLBACK",
+                    "posture": "LockedOut",
+                    "trigger": "operator-estop-request",
+                }).to_string(),
+                now,
+            );
+        }).await;
+    }
+
+    tracing::warn!(node_id = %node_id, operator_id = %operator_id,
+        "OPERATOR E-STOP REQUEST authenticated — governor commanded the MRC (sticky LockedOut). \
+         The console did not touch the actuator; recovery is a deliberate supervisor reset.");
+
+    (StatusCode::OK, Json(json!({
+        "status": "stop_commanded",
+        "node_id": node_id,
+        "operator_id": operator_id,
+        "operator_key_fingerprint": fingerprint,
+        "governor_action": "MRC_COMMANDED",
+        "posture": "LockedOut",
+        "requested_at_ms": now,
+        "note": "the governor commanded the MRC under its own authority; the console did not touch the actuator. Recovery requires a deliberate supervisor reset (the clearance inverse).",
+    }))).into_response()
+}
