@@ -37,7 +37,9 @@ use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CON
 use crate::imu_shim::imu_msg_to_sample;
 use crate::sensor_mapping::{ImuSample, SensorInputMapping};
 use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
-use crate::taj_objects::{apply_object_rss_gate, courier_rss_params, ObjectSnapshot};
+use crate::taj_objects::{
+    apply_object_rss_gate, courier_rss_params, object_snapshot_to_vanished_scene, ObjectSnapshot,
+};
 use crate::tick_pipeline::{current_time_ms, TickError};
 use parko_kirra::clearance_delivery::DeliveryOutcome;
 
@@ -162,13 +164,33 @@ where
                  coverage; the clearance loop will not latch on a contact-sensor hit."
             ),
         }
-        // The vanished-object trigger needs an AgentScene per tick; no scene
-        // source flows through the M2 tick yet (the #309 remainder). The node
-        // passes `scene = None`; the detector stays unfed.
-        tracing::warn!(
-            "parko-ros2: SG6 vanished-object detection NOT wired (no AgentScene source in the \
-             tick) — REDUCED detection coverage; tracked as the remainder of #309."
-        );
+        // #309: the SG6 vanished-object detector is fed an AgentScene per tick
+        // when armed (`vanished_detection_enabled`) AND object perception is
+        // available (lidar + platform_profile → the Taj object snapshot the scene
+        // is sourced from). Otherwise it stays unfed — reduced coverage, stated
+        // loudly. (Arming the latching auto-immobilizer happens in the bin's
+        // `build_node_clearance` via `with_vanished_detection`, gated the same way.)
+        if config.vanished_detection_enabled
+            && config.lidar_topic.is_some()
+            && config.platform_profile.is_some()
+        {
+            tracing::info!(
+                "parko-ros2: SG6 vanished-object detection ARMED (#309) — the node sources an \
+                 AgentScene from Taj objects each tick; a close agent that VANISHES between \
+                 frames latches the clearance loop (operator grant required to clear)."
+            );
+        } else if config.vanished_detection_enabled {
+            tracing::warn!(
+                "parko-ros2: SG6 vanished-object detection REQUESTED but object perception is \
+                 not configured (needs lidar_topic + platform_profile) — REDUCED coverage; the \
+                 detector stays unfed (#309)."
+            );
+        } else {
+            tracing::warn!(
+                "parko-ros2: SG6 vanished-object detection NOT enabled — REDUCED detection \
+                 coverage; set vanished_detection_enabled (with lidar + platform_profile) to arm (#309)."
+            );
+        }
     }
 
     // --- ADR-0029 Phase 3b: live SG2 containment (lidar → Taj corridor) ---
@@ -189,7 +211,9 @@ where
                 .subscribe::<r2r::sensor_msgs::msg::LaserScan>(topic, r2r::QosProfile::default())?;
             let cell = Arc::clone(&latest_corridor);
             let obj_cell = Arc::clone(&latest_objects);
-            let store_objects = config.object_rss_enabled;
+            // Populate the object slot when EITHER object-axis consumer needs it:
+            // the SG1 object-RSS gate or the SG6 vanished-object detector (#309).
+            let store_objects = config.needs_object_snapshot();
             // The TEMPORAL tracker (not the single-frame `TajPhaseA`): `track`
             // wraps `phase_a.process`, so the CORRIDOR is byte-identical, but it
             // also associates objects frame-to-frame and estimates each object's
@@ -256,6 +280,12 @@ where
         .as_ref()
         .filter(|_| config.object_rss_enabled && config.lidar_topic.is_some())
         .map(courier_rss_params);
+    // #309: SG6 vanished-object scene sourcing — armed under the SAME condition as
+    // the bin's `with_vanished_detection` (enabled + object perception present),
+    // so the per-tick scene is built only when the detector exists to consume it.
+    let drain_vanished_armed = config.vanished_detection_enabled
+        && config.platform_profile.is_some()
+        && config.lidar_topic.is_some();
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
@@ -301,6 +331,24 @@ where
                 }
             }
 
+            // #309: source the SG6 vanished-object scene from the latest Taj
+            // objects (the SAME snapshot the object-RSS gate uses below). A
+            // missing/stale snapshot → `AgentScene::Absent` (a gap; the detector
+            // never fabricates a latch). Only when armed; otherwise `None` (the
+            // detector stays unfed, byte-identical to pre-#309).
+            //
+            // Build the scene while holding the lock BRIEFLY (over an `&` borrow)
+            // rather than cloning the whole `ObjectSnapshot` — `object_snapshot_to_
+            // vanished_scene` returns an OWNED `AgentScene`, so no snapshot copy is
+            // needed (Copilot PR #716). The guard drops at the end of the closure,
+            // well before the `.await` below (no std-mutex held across await).
+            let vanished_scene = drain_vanished_armed.then(|| {
+                let now = current_time_ms();
+                let guard = drain_objects.lock().ok();
+                let snap: Option<&ObjectSnapshot> = guard.as_ref().and_then(|g| g.as_ref());
+                object_snapshot_to_vanished_scene(snap, drain_config.corridor_max_age_ms, now)
+            });
+
             let cleared = run_pipeline_tick_with_clearance(
                 &drain_config,
                 Arc::clone(&drain_infer),
@@ -308,7 +356,7 @@ where
                 posture,
                 clearance.as_mut(),
                 &impact_inputs,
-                None, // AgentScene source deferred (#309 remainder)
+                vanished_scene.as_ref(),
             ).await;
             let outcome = cleared.tick;
 

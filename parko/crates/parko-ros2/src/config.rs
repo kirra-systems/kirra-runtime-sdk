@@ -116,6 +116,18 @@ pub struct ParkoNodeConfig {
     /// and `corridor_max_age_ms` as the object-perception staleness budget.
     /// **Default `false`** → byte-identical to the corridor-only Phase 3b.
     pub object_rss_enabled: bool,
+
+    /// #309 remainder — enable the SG6 vanished-object detector. When `true` AND
+    /// lidar + `platform_profile` are configured, the node sources an
+    /// [`AgentScene`](parko_core::AgentScene) from Taj's perceived objects (the
+    /// SAME snapshot the object-RSS gate uses) and feeds it to the node-owned
+    /// `ClearanceLoop` each tick, so a close agent that VANISHES between frames
+    /// (the person-under-vehicle case) latches `Normal → Latched` and immobilizes
+    /// until an operator grant clears it. Opt-in and fail-safe: this arms a
+    /// *latching auto-immobilizer*, so it stays OFF by default and is never
+    /// silently enabled by `object_rss_enabled`. Missing/stale object perception →
+    /// `AgentScene::Absent` (a gap — never a fabricated latch). **Default `false`.**
+    pub vanished_detection_enabled: bool,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -153,6 +165,9 @@ impl Default for ParkoNodeConfig {
             // ADR-0029 Phase 3b (object axis): object RSS gate off by default.
             // Opt-in; byte-identical to corridor-only Phase 3b when disabled.
             object_rss_enabled: false,
+            // #309: SG6 vanished-object detection off by default — a latching
+            // auto-immobilizer is opt-in, never silently enabled.
+            vanished_detection_enabled: false,
         }
     }
 }
@@ -182,6 +197,24 @@ impl ParkoNodeConfig {
             // the node-config surface only tunes the threshold today.
             ..parko_core::ImpactCfg::default()
         }
+    }
+
+    /// The SG6 [`parko_core::VanishedCfg`] this node uses for the vanished-object
+    /// frame-diff. The conservative defaults (close range 2.0 m, agent speed cap
+    /// 3.0 m/s, 0.5 m band slack) are documented on `VanishedCfg`; the node-config
+    /// surface does not tune them today (deployment-tunable when a need is real).
+    #[must_use]
+    pub fn vanished_cfg(&self) -> parko_core::VanishedCfg {
+        parko_core::VanishedCfg::default()
+    }
+
+    /// Whether THIS node should source an object snapshot at all — true when the
+    /// object-RSS gate OR the SG6 vanished detector needs it. The lidar task uses
+    /// this to decide whether to populate the object slot (the vanished detector
+    /// reuses the object-RSS snapshot, so either consumer arms the feed).
+    #[must_use]
+    pub fn needs_object_snapshot(&self) -> bool {
+        self.object_rss_enabled || self.vanished_detection_enabled
     }
 }
 

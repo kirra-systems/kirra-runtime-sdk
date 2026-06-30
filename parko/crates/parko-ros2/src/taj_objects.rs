@@ -159,6 +159,47 @@ pub fn objects_to_agent_scene(objects: &[PerceivedObject], ego_vel_mps: f64) -> 
     }
 }
 
+/// Build the per-tick [`AgentScene`] from the latest object snapshot, applying
+/// the fail-closed freshness rule shared by BOTH object-axis consumers (the SG1
+/// object-RSS gate and the SG6 vanished-object detector): a missing OR stale
+/// snapshot is [`AgentScene::Absent`] — NEVER [`AgentScene::KnownEmpty`] — so
+/// "no/old perception" is never read as "verified clear". A fresh snapshot is
+/// converted via [`objects_to_agent_scene`].
+#[must_use]
+pub fn object_snapshot_to_scene(
+    objects: Option<&ObjectSnapshot>,
+    max_age_ms: u64,
+    now_ms: u64,
+    ego_vel_mps: f64,
+) -> AgentScene {
+    match objects {
+        Some(snap) if snap.age_ms(now_ms) <= max_age_ms => {
+            objects_to_agent_scene(snap.objects(), ego_vel_mps)
+        }
+        _ => AgentScene::Absent,
+    }
+}
+
+/// The [`AgentScene`] the SG6 vanished-object detector consumes (#309 remainder).
+///
+/// [`VanishedObjectDetector::observe`](parko_core::VanishedObjectDetector::observe)
+/// reads ONLY each agent's `actual_longitudinal_gap_m` (the proximity proxy) —
+/// the RSS kinematic fields (`ego_vel`, `lead_vel`, lateral, `oncoming`) are
+/// irrelevant to the vanish frame-diff — so the ego speed is immaterial here and
+/// is fixed at `0.0`. Freshness is the SAME fail-closed rule as the object-RSS
+/// gate: missing/stale perception → [`AgentScene::Absent`], which the detector
+/// treats as a GAP (it holds its close-agent obligation and never fabricates a
+/// vanish latch). A fresh, verified-clear frame is [`AgentScene::KnownEmpty`] —
+/// the strongest vanish evidence when a close agent was just present.
+#[must_use]
+pub fn object_snapshot_to_vanished_scene(
+    objects: Option<&ObjectSnapshot>,
+    max_age_ms: u64,
+    now_ms: u64,
+) -> AgentScene {
+    object_snapshot_to_scene(objects, max_age_ms, now_ms, 0.0)
+}
+
 /// Compose the RSS object-avoidance gate ONTO a [`TickOutcome`] — the node-side
 /// seam, parallel to [`apply_containment_gate`](crate::containment_gate::apply_containment_gate).
 /// Called after the tick (and after the containment gate) when object perception
@@ -190,13 +231,9 @@ pub fn apply_object_rss_gate(
     }
 
     let ego_vel = outcome.twist.linear_x_mps;
-    // Fail-closed on missing/stale perception: ABSENT, never KnownEmpty.
-    let scene = match objects {
-        Some(snap) if snap.age_ms(now_ms) <= max_age_ms => {
-            objects_to_agent_scene(snap.objects(), ego_vel)
-        }
-        _ => AgentScene::Absent,
-    };
+    // Fail-closed on missing/stale perception: ABSENT, never KnownEmpty (shared
+    // freshness helper, also used by the SG6 vanished-scene source).
+    let scene = object_snapshot_to_scene(objects, max_age_ms, now_ms, ego_vel);
 
     let state = parko_kirra::compute_scene_rss(&scene, params);
     if state.safe {
@@ -262,6 +299,46 @@ mod tests {
         // a forward-driving courier cannot forward-collide with it → KnownEmpty.
         let objs = [object(1, -2.0, 0.0, 0.0, 0.0)];
         assert!(matches!(objects_to_agent_scene(&objs, 1.0), AgentScene::KnownEmpty));
+    }
+
+    // ---- SG6 vanished-scene source (#309) ----------------------------------
+
+    #[test]
+    fn vanished_scene_fresh_empty_is_known_empty() {
+        // Perception ran and saw nothing → KnownEmpty, the strongest vanish
+        // evidence (a close agent that was just present is now gone).
+        let scene = object_snapshot_to_vanished_scene(Some(&snapshot(&[], 100)), 500, 200);
+        assert!(matches!(scene, AgentScene::KnownEmpty));
+    }
+
+    #[test]
+    fn vanished_scene_fresh_close_object_is_agents_with_gap() {
+        // A close object 1 m ahead → Agents, carrying the longitudinal gap the
+        // detector reads as proximity (ego speed is immaterial for the vanish path).
+        let objs = [object(1, 1.0, 0.0, 0.0, 0.0)];
+        let scene = object_snapshot_to_vanished_scene(Some(&snapshot(&objs, 100)), 500, 200);
+        match scene {
+            AgentScene::Agents(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].actual_longitudinal_gap_m, 1.0);
+            }
+            other => panic!("expected Agents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vanished_scene_absent_when_missing_or_stale() {
+        // No snapshot → Absent (a GAP — the detector never fabricates a latch).
+        assert!(matches!(
+            object_snapshot_to_vanished_scene(None, 500, 200),
+            AgentScene::Absent
+        ));
+        // Stale snapshot → Absent, even though it holds an (empty) clear frame —
+        // so a sensor dropout cannot be read as the verified-empty vanish trigger.
+        assert!(matches!(
+            object_snapshot_to_vanished_scene(Some(&snapshot(&[], 100)), 500, 5_000),
+            AgentScene::Absent
+        ));
     }
 
     // ---- the gate ----------------------------------------------------------

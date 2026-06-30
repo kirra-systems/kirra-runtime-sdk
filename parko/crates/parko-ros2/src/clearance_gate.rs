@@ -33,17 +33,18 @@
 // fresh grant against the NEW escalation. Releasing first then re-latching is the
 // safe direction; the reverse (latch then let a stale grant clear it) is not.
 //
-// WHAT IS ARMED vs DEFERRED (#309 remainder):
+// WHAT IS ARMED (#309 — all three triggers now wired):
 //   * decel (IMU)  — ARMED when `imu_topic` is configured (vector-magnitude
 //                    decel proxy vs `ImpactCfg::spike_threshold_mps2`).
 //   * contact      — ARMED when `contact_topic` is configured.
-//   * vanished     — DEFERRED: `VanishedObjectDetector` needs an `AgentScene`
-//                    per tick, and no scene source flows through the M2 tick yet
-//                    (scenes were always integrator/checker-side input). The
-//                    detector sits behind an `Option` gated on a per-tick scene;
-//                    the node passes `None` today. Sourcing the scene is the
-//                    named remainder of #309. We wire the two REAL triggers now
-//                    rather than block all three on perception plumbing.
+//   * vanished     — ARMED when `vanished_detection_enabled` AND object
+//                    perception (lidar + `platform_profile`) is configured: the
+//                    node sources an `AgentScene` per tick from Taj's perceived
+//                    objects (the SAME snapshot the object-RSS gate uses) and
+//                    passes `Some(&scene)` here. A missing/stale snapshot →
+//                    `AgentScene::Absent` (a gap; never a fabricated latch). The
+//                    seam was a per-tick scene `Option` (the node passed `None`);
+//                    sourcing that scene was the named remainder of #309, now done.
 //
 // HONESTY RULE: a missing sensor is REDUCED detection coverage, stated loudly at
 // startup — never a fabricated spike and never a fabricated veto. An absent IMU
@@ -280,9 +281,9 @@ pub struct NodeClearance {
     /// config; defaults to [`ImpactCfg::default`].
     cfg: ImpactCfg,
     /// The vanished-object detector, behind an `Option` GATED ON A SCENE SOURCE.
-    /// `None` today: no `AgentScene` flows through the M2 tick (the deferred
-    /// remainder of #309). When a scene source lands, this is `Some` and run per
-    /// tick against the supplied scene.
+    /// `Some` when armed via [`with_vanished_detection`](Self::with_vanished_detection):
+    /// the node sources an `AgentScene` per tick from Taj objects (#309) and the
+    /// detector runs against it; `None` leaves it unfed (reduced coverage).
     vanished: Option<VanishedObjectDetector>,
     /// Config for the vanished detector (parko-core default until tuned).
     vanished_cfg: VanishedCfg,
@@ -1048,6 +1049,81 @@ mod tests {
         assert!(nc.is_immobilized(), "contact=true is a definitive impact → latch");
         assert!(out.vetoed);
         assert_eq!(out.tick.twist.linear_x_mps, 0.0);
+    }
+
+    /// VANISHED (#309): with the detector ARMED and a scene sourced per tick, a
+    /// close agent that VANISHES between frames latches the loop and stops the
+    /// vehicle at Nominal — the end-to-end pure path the node's scene sourcing
+    /// drives (`Some(&scene)` instead of the old `None`).
+    #[tokio::test(start_paused = true)]
+    async fn vanished_object_latches_from_scene() {
+        let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03")
+            .with_vanished_detection(VanishedCfg::default());
+        let no_impact = ImpactInputs { imu: Some(imu_accel_mag(9.81)), contact: false };
+
+        // Tick 1 — a close agent 1 m ahead (gap ≤ r_close 2.0): opens the
+        // close-agent obligation; nothing has vanished yet → no latch.
+        let close = AgentScene::Agents(vec![parko_core::RssAgent {
+            ego_vel: 0.0,
+            lead_vel: 0.0,
+            actual_longitudinal_gap_m: 1.0,
+            ego_lat_vel: 0.0,
+            obj_lat_vel: 0.0,
+            actual_lateral_separation_m: 0.0,
+            oncoming: false,
+        }]);
+        let out1 = run_pipeline_tick_with_clearance(
+            &ParkoNodeConfig::default(),
+            build_loop(0.1, 0.2),
+            fresh_frame(20),
+            SafetyPosture::Nominal,
+            Some(&mut nc),
+            &no_impact,
+            Some(&close),
+        )
+        .await;
+        assert_eq!(nc.state(), ClearanceState::Normal, "a present close agent must not latch");
+        assert!(!out1.vetoed);
+
+        // Tick 2 — perception ran and is verified-empty (`KnownEmpty`): the close
+        // agent vanished within the plausibility horizon → latch + stop.
+        let out2 = run_pipeline_tick_with_clearance(
+            &ParkoNodeConfig::default(),
+            build_loop(0.1, 0.2),
+            fresh_frame(21),
+            SafetyPosture::Nominal,
+            Some(&mut nc),
+            &no_impact,
+            Some(&AgentScene::KnownEmpty),
+        )
+        .await;
+        assert!(nc.is_immobilized(), "a close agent that vanished must latch the loop");
+        assert!(out2.vetoed, "latched → stop regardless of posture");
+        assert_eq!(out2.tick.twist.linear_x_mps, 0.0);
+    }
+
+    /// VANISHED NEGATIVE (#309): the same armed loop, but with the detector fed
+    /// `None`/`Absent` scenes (the unarmed-source path) NEVER latches — a missing
+    /// scene is a gap, never a fabricated vanish.
+    #[tokio::test(start_paused = true)]
+    async fn vanished_detector_with_no_scene_never_latches() {
+        let mut nc = NodeClearance::from_store(store(), "KIRRA-DEMO-03")
+            .with_vanished_detection(VanishedCfg::default());
+        let no_impact = ImpactInputs { imu: Some(imu_accel_mag(9.81)), contact: false };
+        for i in 0..5 {
+            let out = run_pipeline_tick_with_clearance(
+                &ParkoNodeConfig::default(),
+                build_loop(0.1, 0.2),
+                fresh_frame(30 + i),
+                SafetyPosture::Nominal,
+                Some(&mut nc),
+                &no_impact,
+                None, // no scene source this tick
+            )
+            .await;
+            assert_eq!(nc.state(), ClearanceState::Normal, "tick {i}: no scene must never latch");
+            assert!(!out.vetoed);
+        }
     }
 
     /// NO-FALSE-LATCH: gravity-only IMU (≈9.81 m/s², below threshold) + no
