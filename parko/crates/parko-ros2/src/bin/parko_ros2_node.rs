@@ -319,6 +319,33 @@ fn build_config() -> ParkoNodeConfig {
         contact_topic,
         ..ParkoNodeConfig::default()
     };
+    // #312: select the SG6 impact threshold by vehicle class (KIRRA_VEHICLE_CLASS,
+    // the SAME env the verifier service reads). FAIL-CLOSED: unset/unknown aborts —
+    // there is no default class (a wrong class would select another class's SG6
+    // threshold). The per-class value is the default; PARKO_IMPACT_SPIKE_THRESHOLD_MPS2
+    // (below) may still fine-tune it for a deployment.
+    {
+        use std::str::FromStr;
+        let raw = std::env::var("KIRRA_VEHICLE_CLASS").unwrap_or_default();
+        let class = match parko_core::VehicleClass::from_str(&raw) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    value = %raw, error = %e,
+                    "parko-ros2: FATAL — KIRRA_VEHICLE_CLASS unset or unknown (no default class; a \
+                     wrong class would select another class's SG6 threshold). Set it to one of \
+                     courier | delivery-av | robotaxi. Refusing to start."
+                );
+                std::process::exit(1);
+            }
+        };
+        config.spike_threshold_mps2 = parko_core::impact_cfg_for_class(class).spike_threshold_mps2;
+        tracing::info!(
+            vehicle_class = class.as_str(),
+            spike_threshold_mps2 = config.spike_threshold_mps2,
+            "parko-ros2: SG6 impact threshold selected by vehicle class (#312)"
+        );
+    }
     if let Ok(raw) = std::env::var("PARKO_IMPACT_SPIKE_THRESHOLD_MPS2") {
         match raw.trim().parse::<f64>() {
             Ok(v) if v.is_finite() && v > 0.0 => config.spike_threshold_mps2 = v,

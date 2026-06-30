@@ -17,8 +17,9 @@ use crate::audit_writer::{
 };
 use crate::gateway::kinematics_contract::{
     enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction,
-    ProposedVehicleCommand, VehicleKinematicsContract,
+    ProposedVehicleCommand,
 };
+use crate::gateway::contract_profiles::{contract_for, global_vehicle_class, mrc_fallback_for};
 use crate::gateway::perception_monitor::{apply_perception_cap, resolve_perception_cap};
 use crate::gateway::policy::{classify_http_command, OperationalCommand};
 use crate::posture_cache::{
@@ -297,15 +298,19 @@ pub async fn enforce_actuator_safety_envelope(
                 &svc.perception_cap,
                 now,
             );
+            // #312: select the Nominal contract by the deployment's vehicle class
+            // (robotaxi = the frozen reference instance, byte-identical). Set once
+            // at startup, fail-closed; O(1) OnceLock read on the verdict path.
             let contract = apply_perception_cap(
-                &VehicleKinematicsContract::nominal_reference_profile(),
+                &contract_for(global_vehicle_class()),
                 eff_cap,
             );
             validate_vehicle_command(&proposed_cmd, &contract)
         }
+        // #312: the MRC fallback is the same class's degraded sibling.
         FleetPosture::Degraded => enforce_degraded_decel_to_stop(
             &proposed_cmd,
-            &VehicleKinematicsContract::mrc_fallback_profile(),
+            &mrc_fallback_for(global_vehicle_class()),
         ),
         FleetPosture::LockedOut => unreachable!("LockedOut short-circuited above"),
     };

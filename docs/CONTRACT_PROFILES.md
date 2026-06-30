@@ -142,14 +142,25 @@ instance is the zero-drift proof.
 typo'd class must **never** silently select another class's (e.g. faster) envelope.
 There is no default class.
 
-## Deployment note (named, not built)
+## Deployment note (binary wiring — landed, #312)
 
-Class **selection is integrator configuration** — the deployment chooses the class
-its vehicle belongs to, and the governor loads `contract_for(class)` /
-`impact_cfg_for_class(class)`. **Wiring class selection into the service / node
-binaries (an env var or config field) is a later step — named here, not built in
-this change.** This change delivers the profile *family* + the validation gate +
-the normative table; the binary plumbing is the remaining #312 work.
+Class **selection is integrator configuration** via the **`KIRRA_VEHICLE_CLASS`**
+env var (`courier` | `delivery-av` | `robotaxi`), read by BOTH binaries:
+
+- **Verifier service** — `gateway::contract_profiles::init_vehicle_class_from_env()`
+  at startup loads the process-wide class; `enforce_actuator_safety_envelope`
+  selects `contract_for(class)` (Nominal) / `mrc_fallback_for(class)` (Degraded).
+- **parko-ros2 node** — `build_config()` sets the SG6 threshold from
+  `impact_cfg_for_class(class).spike_threshold_mps2` (a `PARKO_IMPACT_SPIKE_THRESHOLD_MPS2`
+  value, if set, still fine-tunes it).
+
+**FAIL-CLOSED — there is no default class.** An unset / empty / unknown
+`KIRRA_VEHICLE_CLASS` is a FATAL startup error in both binaries (log + `exit(1)`):
+a wrong/typo'd class would select another class's (possibly faster) envelope or a
+weaker SG6 threshold, so it must never silently fall back. (In-process tests /
+library use that never call the startup init resolve to the frozen reference
+instance — `robotaxi` — so existing contract tests stay byte-identical; the
+fail-closed guarantee lives at the binary startup boundary.)
 
 ---
 

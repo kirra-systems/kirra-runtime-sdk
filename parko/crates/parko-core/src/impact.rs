@@ -112,6 +112,39 @@ pub enum VehicleClass {
     Robotaxi,
 }
 
+impl core::str::FromStr for VehicleClass {
+    type Err = String;
+
+    /// Case-insensitive `courier` | `delivery-av` | `robotaxi`. FAIL-CLOSED: any
+    /// other string (including a typo) is an `Err`, never a silent fallback —
+    /// a mis-typed class must NEVER select another class's SG6 threshold. Mirrors
+    /// the SDK `gateway::contract_profiles::VehicleClass::from_str` (both cite the
+    /// normative `docs/CONTRACT_PROFILES.md`; deliberate cited copy, not an import).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "courier" => Ok(VehicleClass::Courier),
+            "delivery-av" => Ok(VehicleClass::DeliveryAv),
+            "robotaxi" => Ok(VehicleClass::Robotaxi),
+            other => Err(format!(
+                "unknown vehicle class {other:?}; expected one of \
+                 courier | delivery-av | robotaxi (fail-closed — no default)"
+            )),
+        }
+    }
+}
+
+impl VehicleClass {
+    /// The class's canonical lowercase id (the inverse of [`from_str`](Self::from_str)).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VehicleClass::Courier => "courier",
+            VehicleClass::DeliveryAv => "delivery-av",
+            VehicleClass::Robotaxi => "robotaxi",
+        }
+    }
+}
+
 /// The SG6 [`ImpactCfg`] for `class`. **Does NOT touch [`ImpactCfg::default`]** —
 /// the robotaxi member delegates to it (the default IS the robotaxi-class value;
 /// zero new number), and the other members are siblings.
@@ -622,6 +655,23 @@ mod tests {
     }
 
     // --- Per-class ImpactCfg family (#312 / #313) --------------------------
+
+    #[test]
+    fn vehicle_class_from_str_is_fail_closed() {
+        use core::str::FromStr;
+        assert_eq!(VehicleClass::from_str("courier"), Ok(VehicleClass::Courier));
+        assert_eq!(VehicleClass::from_str("DELIVERY-AV"), Ok(VehicleClass::DeliveryAv));
+        assert_eq!(VehicleClass::from_str("  Robotaxi "), Ok(VehicleClass::Robotaxi));
+        // round-trip via as_str
+        for c in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+            assert_eq!(VehicleClass::from_str(c.as_str()), Ok(c));
+        }
+        // typos / empty / unknown → Err (never a silent fallback)
+        assert!(VehicleClass::from_str("").is_err());
+        assert!(VehicleClass::from_str("robotax").is_err());
+        assert!(VehicleClass::from_str("delivery_av").is_err());
+        assert!(VehicleClass::from_str("truck").is_err());
+    }
 
     #[test]
     fn impact_cfg_for_class_is_constructible_for_every_class() {

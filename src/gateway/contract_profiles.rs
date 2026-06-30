@@ -42,10 +42,16 @@
 // §3c (why the market needs the family), ADR-0001 (the ODD speed-cap framing).
 
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use crate::gateway::kinematics_contract::{
     VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS,
 };
+
+/// Env var selecting the deployment's vehicle class (#312). Parsed FAIL-CLOSED via
+/// [`VehicleClass::from_str`]: `courier` | `delivery-av` | `robotaxi`. There is NO
+/// default — an unset/empty/unknown value aborts startup (`init_vehicle_class_from_env`).
+pub const VEHICLE_CLASS_ENV: &str = "KIRRA_VEHICLE_CLASS";
 
 // ---------------------------------------------------------------------------
 // Per-class ODD operational speed caps
@@ -165,6 +171,78 @@ pub fn mrc_fallback_for(class: VehicleClass) -> VehicleKinematicsContract {
         VehicleClass::DeliveryAv => delivery_av_mrc(),
         VehicleClass::Courier => courier_mrc(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide selected vehicle class (#312 binary wiring)
+// ---------------------------------------------------------------------------
+
+/// The deployment's selected vehicle class, set once at startup from
+/// [`VEHICLE_CLASS_ENV`]. Mirrors the adapter-bounds `OnceLock` pattern
+/// (`global_sdo_bounds`) so the per-class contract selection needs no change to
+/// `ServiceState` / handler construction.
+static GLOBAL_VEHICLE_CLASS: OnceLock<VehicleClass> = OnceLock::new();
+
+/// Resolve `KIRRA_VEHICLE_CLASS` once at startup into the process-wide class.
+///
+/// FAIL-CLOSED (the user-confirmed disposition + `docs/CONTRACT_PROFILES.md`
+/// "there is no default class"): an unset / empty / unknown value is a FATAL
+/// configuration error — log and `exit(1)` rather than silently selecting a
+/// (possibly faster) envelope. A typo'd class must never pick another class's
+/// limits. Mirrors the parko node's `KIRRA_NODE_ID` "no safe default" handling.
+pub fn init_vehicle_class_from_env() {
+    let raw = std::env::var(VEHICLE_CLASS_ENV).unwrap_or_default();
+    match VehicleClass::from_str(&raw) {
+        Ok(class) => {
+            if GLOBAL_VEHICLE_CLASS.set(class).is_err() {
+                // Already initialized. A matching re-init is a benign idempotent
+                // no-op; a CONFLICTING second value must fail closed rather than
+                // be silently dropped (the selected envelope would then disagree
+                // with what this call requested).
+                let existing = GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(class);
+                if existing != class {
+                    tracing::error!(
+                        existing = existing.as_str(),
+                        attempted = class.as_str(),
+                        "FATAL: {VEHICLE_CLASS_ENV} initialized more than once with DIFFERENT \
+                         values — refusing to continue (the vehicle class must be unambiguous)."
+                    );
+                    std::process::exit(1);
+                }
+                tracing::debug!(
+                    vehicle_class = class.as_str(),
+                    "vehicle class re-init with the same value — idempotent no-op (#312)"
+                );
+                return;
+            }
+            tracing::info!(
+                vehicle_class = class.as_str(),
+                "vehicle class selected — per-class kinematic contract + ODD cap in effect (#312)"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                value = %raw, error = %e,
+                "FATAL: {VEHICLE_CLASS_ENV} unset or unknown — there is NO default vehicle class \
+                 (a wrong class would select another class's envelope). Set it to one of \
+                 courier | delivery-av | robotaxi. Refusing to start."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The process-wide selected vehicle class.
+///
+/// Production calls [`init_vehicle_class_from_env`] at startup (which aborts on an
+/// unset/unknown value), so the live request path always observes the configured
+/// class. When uninitialized — in-process tests / library embedding that never
+/// called init — this returns the **frozen reference instance** (`Robotaxi`), the
+/// documented baseline the existing contract tests encode, so those paths stay
+/// byte-identical. The fail-closed guarantee lives at the startup boundary.
+#[must_use]
+pub fn global_vehicle_class() -> VehicleClass {
+    GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(VehicleClass::Robotaxi)
 }
 
 // --- Courier (sidewalk, VRU-dense) — the #313 profile ----------------------
@@ -329,6 +407,22 @@ mod tests {
         assert_eq!(
             mrc_fallback_for(VehicleClass::Robotaxi),
             VehicleKinematicsContract::mrc_fallback_profile(),
+        );
+    }
+
+    #[test]
+    fn uninitialized_global_class_defaults_to_frozen_instance() {
+        // #312: production aborts at startup on an unset class (init_..._from_env),
+        // but the uninitialized getter (tests / library use that never called init)
+        // must resolve to the frozen reference instance so the live gate's default
+        // path is byte-identical. (This test does not set the env — INV-13 — and
+        // relies on the OnceLock being unset in the test binary.)
+        let class = global_vehicle_class();
+        assert_eq!(class, VehicleClass::Robotaxi);
+        assert_eq!(
+            contract_for(class),
+            VehicleKinematicsContract::nominal_reference_profile(),
+            "the uninitialized default must select the frozen instance verbatim"
         );
     }
 
