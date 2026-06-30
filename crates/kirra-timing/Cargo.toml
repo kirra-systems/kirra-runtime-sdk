@@ -1,0 +1,43 @@
+# kirra-timing — certifiable WCET timing-instrumentation primitives (#274 / L1).
+#
+# A lean, `no_std`, zero-dependency, zero-alloc timing library for the QNX-target
+# WCET measurement campaign. It provides the measurement TYPES (channels,
+# percentile/jitter capture, environment tagging, report rendering) and a
+# zero-overhead-when-disabled instrumentation macro. It deliberately does NOT
+# read any clock itself: the monotonic clock is supplied by the caller via the
+# `MonotonicClock` trait, so the target binds the boundary-domain counter
+# (HVCHAN-001 §5) at the integration seam — exactly the contract-channel
+# "the target binds the region" discipline.
+#
+# Normative rule baked into the types (WCET_MEASUREMENT_METHODOLOGY.md): host
+# numbers are INDICATIVE, never WCET. `MeasurementEnv::is_certified_wcet()` is the
+# single source of truth, and reports print an INDICATIVE banner unless the
+# environment is the QNX target under FIFO scheduling.
+[package]
+name = "kirra-timing"
+version = "0.1.0"
+edition = "2021"
+description = "Certifiable no_std/zero-alloc WCET timing-instrumentation primitives (min/avg/max/jitter + percentiles, env-tagged reports) for the QNX target campaign (#274)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+
+[dependencies]
+# INTENTIONALLY EMPTY. Like kirra-contract-channel: the certifiable measurement
+# primitives are integer-only and self-contained (no float, no libm, no serde,
+# no transport). The clock is injected via a trait; the only place a concrete
+# clock lives is the caller / target integration shim.
+
+[features]
+default = []
+# `instrument` makes `wcet_measure!` actually read the clock and record. With it
+# OFF (the production default) the macro expands to JUST the measured block — no
+# clock read, no record call, no overhead. This is the certifiable
+# "instrumentation is campaign-only, never the shipped hot path" property.
+instrument = []
+# `std` provides `StdMonotonicClock` (an `Instant`-backed `MonotonicClock`) for
+# host campaigns and CI. Off by default so the crate stays `no_std` for the QNX
+# target, which supplies its own boundary-domain clock.
+std = []
+
+[lints.rust]
+unsafe_code = "forbid"
