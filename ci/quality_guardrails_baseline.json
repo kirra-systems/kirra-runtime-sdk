@@ -1,19 +1,22 @@
 {
-  "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). Reconciled 2026-06-30 to merged main: PRs #719 (gateway listener extraction + fail-closed exit binds) and #720 (startup fail-down: panic!/expect → tracing::error!+exit(1) match arms + subscriber init) legitimately grew the two line ceilings; the same work LOWERED the panic budgets, tightened here to lock the gain. When #721 (startup.rs extraction) merges, the bin line ceiling can be tightened again and startup.rs added to ownership_scope.",
+  "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). #721 (startup.rs extraction) then merged, removing ~227 lines from the bin — bin line ceiling tightened 4186→3959 to lock that gain, and the new SG-008 startup.rs is now tracked (line ceiling + panic_budget 0, keeping the fail-closed predicate panic-free) and added to ownership_scope. When a refactor legitimately raises a ceiling, bump it with a justification in the PR; when it lowers one, tighten it here.",
   "max_lines": {
-    "src/bin/kirra_verifier_service.rs": 4186,
+    "src/bin/kirra_verifier_service.rs": 3959,
+    "src/bin/kirra_verifier_service/startup.rs": 248,
     "src/gateway/mod.rs": 507,
     "src/verifier.rs": 1092,
     "src/gateway/policy_layer.rs": 1036
   },
   "panic_budget": {
     "src/bin/kirra_verifier_service.rs": 117,
+    "src/bin/kirra_verifier_service/startup.rs": 0,
     "src/gateway/mod.rs": 7,
     "src/verifier.rs": 27,
     "src/gateway/policy_layer.rs": 14
   },
   "ownership_scope": [
     "src/bin/kirra_verifier_service.rs",
+    "src/bin/kirra_verifier_service/startup.rs",
     "src/bin/kirra_verifier_service/attestation.rs",
     "src/bin/kirra_verifier_service/fleet.rs",
     "src/bin/kirra_verifier_service/audit.rs",
