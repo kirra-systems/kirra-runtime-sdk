@@ -1,0 +1,30 @@
+{
+  "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). Seeded 2026-06-30 from the then-current tree. When a refactor legitimately raises a ceiling, bump it here with a justification in the PR; when it lowers one, tighten it here to lock the gain.",
+  "max_lines": {
+    "src/bin/kirra_verifier_service.rs": 3953,
+    "src/gateway/mod.rs": 434,
+    "src/verifier.rs": 1092,
+    "src/gateway/policy_layer.rs": 1036
+  },
+  "panic_budget": {
+    "src/bin/kirra_verifier_service.rs": 128,
+    "src/gateway/mod.rs": 10,
+    "src/verifier.rs": 27,
+    "src/gateway/policy_layer.rs": 14
+  },
+  "ownership_scope": [
+    "src/bin/kirra_verifier_service.rs",
+    "src/bin/kirra_verifier_service/attestation.rs",
+    "src/bin/kirra_verifier_service/fleet.rs",
+    "src/bin/kirra_verifier_service/audit.rs",
+    "src/bin/kirra_verifier_service/action_filter.rs",
+    "src/bin/kirra_verifier_service/industrial.rs",
+    "src/bin/kirra_verifier_service/federation.rs",
+    "src/bin/kirra_verifier_service/actuator.rs",
+    "src/bin/kirra_verifier_service/fabric.rs",
+    "src/bin/kirra_verifier_service/console.rs",
+    "src/bin/kirra_verifier_service/operators.rs",
+    "src/gateway/mod.rs",
+    "src/gateway/policy_layer.rs"
+  ]
+}
