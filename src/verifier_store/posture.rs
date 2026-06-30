@@ -167,20 +167,30 @@ impl VerifierStore {
         }
     }
 
-    pub fn save_last_generation(&self, generation: u64) -> Result<()> {
+    /// Persist the posture generation high-water mark, monotonically.
+    ///
+    /// Returns `Ok(true)` if `generation` was PERSISTED (it was strictly greater
+    /// than the stored value, or the row was created), `Ok(false)` if it was
+    /// REJECTED as stale/regressing (a lower-or-equal generation). #695: the
+    /// monotonic UPSERT silently no-ops on a stale write, so returning the
+    /// rows-affected lets the caller distinguish a benign concurrent-recalc race
+    /// from a genuine generation regression/time-reversal it may want to log.
+    pub fn save_last_generation(&self, generation: u64) -> Result<bool> {
         // Monotonic max-write: never persist a generation lower than the one
         // already stored. Concurrent recalculations each claim a generation
         // then race to persist; a blind INSERT OR REPLACE let a slower thread
         // overwrite a higher value with its lower one, regressing the
         // cross-restart monotonicity that federation peers depend on.
-        self.conn.execute(
+        let changed = self.conn.execute(
             "INSERT INTO posture_engine_state (key, value)
              VALUES ('last_generation', ?1)
              ON CONFLICT(key) DO UPDATE SET value = ?1
              WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
             params![generation.to_string()],
         )?;
-        Ok(())
+        // `changed` is 1 when the row was inserted (first write) or updated
+        // (strictly-greater generation), 0 when the `WHERE` rejected a stale write.
+        Ok(changed > 0)
     }
 
     /// Reads an arbitrary key from the posture_engine_state key-value store.
