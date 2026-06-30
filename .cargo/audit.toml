@@ -1,0 +1,26 @@
+# cargo-audit configuration (read by the CI "Dependency audit" gate; see
+# .github/workflows/ci.yml). Ignored advisories are EXPLICIT, TRACKED exceptions
+# — never a way to silence the gate wholesale. Each entry MUST carry a rationale
+# and a tracking issue, and MUST be revisited on every dependency bump.
+#
+# Vulnerabilities with an in-range upgrade are FIXED by bumping, not ignored:
+#   - RUSTSEC-2026-0185 (quinn-proto): fixed by Cargo.lock bump to 0.11.15.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0041 — lz4_flex 0.10.0: "Decompressing invalid data can leak
+    # information from uninitialized memory or reused output buffer" (high, 8.2).
+    # Pulled ONLY transitively by zenoh-transport 1.9.0, which pins
+    # `lz4_flex ^0.10.0`. The fix versions (>=0.11.6) are OUT of that range, so
+    # there is no in-semver-range upgrade, and 1.9.0 is the latest zenoh release
+    # (nothing newer relaxes the pin) — i.e. no fix is reachable without an
+    # upstream zenoh change or a forked [patch].
+    #
+    # Exposure is bounded: lz4 is used for zenoh transport-frame decompression of
+    # fleet peers, and the federation payloads it carries are Ed25519-authenticated
+    # at the application layer — a crafted frame yields a report that fails
+    # signature verification, not a leak reflected back to the attacker.
+    #
+    # Tracked in #713. REMOVE this entry once zenoh bumps lz4_flex to a fixed line.
+    "RUSTSEC-2026-0041",
+]
