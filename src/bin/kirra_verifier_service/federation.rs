@@ -170,6 +170,7 @@ pub(crate) async fn get_federated_reports(
 ) -> impl IntoResponse {
     // Both reads share ONE acquisition (Rule 5). The closure returns a Result so
     // the per-read error responses are produced OUTSIDE the closure (Rule 4).
+    let now = now_ms();
     let loaded = svc.app.store.with_read(|store| {
         let reports = store.load_federated_reports_for_asset(&asset_id)
             .map_err(|_| "failed to load reports")?;
@@ -178,13 +179,20 @@ pub(crate) async fn get_federated_reports(
         // ties fall back to issued_at_ms, then fail closed to the more restrictive
         // posture). `null` when no reports exist for the asset. This is a read-time
         // view only — it does NOT feed the local posture engine that gates actuators.
-        let authoritative = store.load_federated_report_v2s_for_asset(&asset_id)
-            .map(|v2s| authoritative_posture(&v2s))
+        let v2s = store.load_federated_report_v2s_for_asset(&asset_id)
             .map_err(|_| "failed to reconcile reports")?;
-        Ok::<_, &'static str>((reports, authoritative))
+        let authoritative = authoritative_posture(&v2s);
+        // CR1 (#692) dissent overlay: the gen-ordered `authoritative` can mask a
+        // lagging peer's genuine LockedOut. Surface the most restrictive posture
+        // among still-FRESH reports that is strictly above the authoritative one,
+        // so an operator is never blind to a live lockout. Additive + advisory:
+        // never relaxes the authoritative value, never feeds the actuator gate.
+        let dissent = authoritative
+            .and_then(|auth| dissenting_restriction(&v2s, auth, now));
+        Ok::<_, &'static str>((reports, authoritative, dissent))
     });
-    let (reports, authoritative) = match loaded {
-        Ok(pair) => pair,
+    let (reports, authoritative, dissent) = match loaded {
+        Ok(triple) => triple,
         Err(msg) => return (StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({ "error": msg }))).into_response(),
     };
@@ -193,5 +201,7 @@ pub(crate) async fn get_federated_reports(
         "asset_id": asset_id,
         "reports": reports,
         "authoritative_posture": authoritative,
+        // `null` when no fresh report dissents above the authoritative posture.
+        "dissenting_restriction": dissent,
     })).into_response()
 }

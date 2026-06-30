@@ -38,7 +38,7 @@ use kirra_verifier::federation::{
     ReportEvaluation,
 };
 use kirra_verifier::federation_reconciliation::{
-    authoritative_posture, evaluate_federated_report_v2,
+    authoritative_posture, dissenting_restriction, evaluate_federated_report_v2,
     verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
 use kirra_verifier::standby_monitor::{
