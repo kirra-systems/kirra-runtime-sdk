@@ -150,6 +150,17 @@ What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verd
 
 **Feasibility signal (INDICATIVE — never WCET; see Hard boundaries).** The host harness already runs the verdict per-call in the **sub-microsecond** range (`QNX_MAPPING.md` regression rows: p50 ≈ 0.5 µs, p99 ≈ 0.5 µs on the OK row), with even the scheduling-noise-inflated host *max* ≈ 27 µs — all comfortably under the 100 µs target. So the Phase-I target-FIFO measurement is expected to **confirm** feasibility, not discover a problem: the risk is "produce the certifiable number on the right OS," not "find out whether the bound is met." This is why Objective 1 is a **defined build, not research** — only a QNX target (the #274 blocker) stands between the recipe and the row.
 
+**Phase-I status (KVM, 2026-06-30).** Criteria 1, 2, and 4 are met on a QNX SDP 8.0
+x86_64 `mkqnximage`/QEMU VM under **KVM**: the judge cross-compiles, the FDIT matrix
+passes byte-identically (`GATE: PASS`, all 9 rows), and **`max = 21.0 µs < 100 µs`**
+(median 40 ns, p99.9 76 ns) — see `QNX_MAPPING.md` §6.2 and
+`tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt`. **Criterion 3 is
+deliberately NOT met by this run:** the `QNX-TARGET-MEASURED` token is gated behind
+an explicit `KIRRA_WCET_CERTIFIED` operator assertion (the #274 cert gate) that a
+KVM VM must not set, so the row honestly self-declares `INDICATIVE-NOT-WCET`. A KVM
+VM is feasibility-grade; the certified token is reserved for the Phase-II hardware
+(NVIDIA DRIVE + QNX OS for Safety + Ferrocene), where criterion 3 is satisfied.
+
 ## Done vs. remaining
 
 | | State |

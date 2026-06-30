@@ -216,8 +216,26 @@ emulation), NOT KVM** (the dev laptop has VT-x disabled in firmware). A represen
 `SCHED_FIFO` WCET requires KVM (near-native) or hardware; under TCG the absolute
 numbers carry full interpreter + VM-deschedule overhead (observed: median ≈ 3.6 µs,
 p99.9 ≈ 10.6 µs, **max ≈ 2.2 ms** — the millisecond max is emulation jitter, not the
-judge). So the `max < 100 µs` criterion is **deferred** to a KVM/hardware run; the
+judge). So the `max < 100 µs` criterion was **deferred** to a KVM/hardware run; the
 typical-case single-digit-µs figure even under heavy emulation is feasibility-positive.
+
+### 6.2 On-target result — KVM (acceptance-#4 met, INDICATIVE)
+
+Re-run on the same `mkqnximage`/QEMU VM with **VT-x enabled → QEMU KVM**
+(`-enable-kvm -cpu host`). **GATE: PASS (all 9 rows)** again — verdict correctness
+is unaffected by the accelerator. Timing collapses ~100× vs TCG and the deferred
+`max < 100 µs` acceptance-#4 target is now **met as a KVM-INDICATIVE result**:
+
+```
+WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=76ns  MAX=21001ns  [INDICATIVE — platform=kvm]
+kirra_judge_assess,other,host-default,1000000,31,41,21001,70,40,48,76,INDICATIVE-NOT-WCET
+```
+
+median 40 ns, p99.9 **76 ns**, **max 21.0 µs** (vs TCG max 2.20 ms). Full evidence:
+`results/qnx800-x86_64-vm-kvm.txt`. This is **Phase-I feasibility, not cert-grade** —
+a VM on an x86_64 laptop is not the deployment ISA, and the post-#274 cert gate
+correctly emits `INDICATIVE-NOT-WCET` (the operator did not assert
+`KIRRA_WCET_CERTIFIED`). Cert-grade WCET remains Phase-II (§7).
 
 ## 7. WCET — Phase-I indicative, cert-grade TBD
 
@@ -227,3 +245,23 @@ emulation it is INDICATIVE, never a WCET**. The harness CSV still carries the
 NVIDIA DRIVE (Orin/Thor) + QNX OS for Safety + Ferrocene-qualified Rust under FIFO —
 that number, not a VM figure, backs the FTTI claim. The PASS gate remains **verdict
 correctness**, which is now demonstrated on a real QNX target.
+
+**`wcet_measure` CSV schema (#274).** The row is now the **canonical
+`kirra_timing::report::CSV_HEADER`** schema
+(`metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status`),
+byte-identical to the host `kirra-wcet-bench` output, so the two union into one
+table joinable on `(metric, env)`. `env`/`wcet_status` map onto
+`kirra_timing::MeasurementEnv`: the certified `qnx-target-fifo` /
+`QNX-TARGET-MEASURED` pair is emitted **only** under a **three-way conjunction** —
+the binary was built for the QNX target (`kIsQnxTarget`), `SCHED_FIFO` was actually
+granted at runtime (`fifo_granted`), **and** the operator explicitly asserted the
+certified Phase-II hardware platform via `KIRRA_WCET_CERTIFIED=1`. The third term
+is mandatory because the binary **cannot** tell certified DRIVE + QNX OS for Safety
+hardware from a QNX **VM** under KVM/TCG (both are `__QNXNTO__` with FIFO) — so the
+VM-vs-hardware (Phase-I-vs-Phase-II) distinction is folded **into the gate**, not
+left to prose. Without the assertion every QNX run — including a near-native KVM
+VM — self-declares `other` / `INDICATIVE-NOT-WCET`; a host smoke build declares
+`host` / `INDICATIVE-NOT-WCET`. A VM thus **cannot** mint a certified figure by
+accident (fail-honest, `AOU-HW-QNX-TARGET-001`). Provenance (e.g. `kvm` vs `tcg`)
+is carried in the human banner via the free-form `KIRRA_WCET_PLATFORM` label, which
+never changes the verdict.
