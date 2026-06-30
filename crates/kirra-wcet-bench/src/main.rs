@@ -28,7 +28,7 @@
 use std::hint::black_box;
 
 use kirra_core::kinematics_contract::{
-    validate_vehicle_command, ProposedVehicleCommand, VehicleKinematicsContract,
+    validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
 use kirra_timing::{stage, MeasurementEnv, MonotonicClock, Report, StageReport, StdMonotonicClock};
 
@@ -64,21 +64,58 @@ fn parse_count(name: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// The full-depth Allow command: every P0..P6 guard runs to completion (the
-/// worst-case verdict path), matching the `wcet_gate.rs` `nominal_cmd` shape.
-fn nominal_cmd() -> ProposedVehicleCommand {
+/// Full-depth **Allow** command under the NOMINAL profile (max_accel 2.5,
+/// max_steering_rate 45 °/s, max_speed 35): accel `(10.1-10.0)/0.05 = 2.0 ≤ 2.5`,
+/// steering rate `(1.5-1.0)/0.05 = 10 ≤ 45`, speed `10.1 ≤ 35`, lateral accel ≪
+/// 3.5 — so NO guard clamps and every P0..P6 check runs to completion. That
+/// full-pipeline Allow is the worst-case (longest) verdict path; an early clamp
+/// or deny returns sooner and would UNDER-report WCET. `assert_allow` verifies
+/// this at runtime so a contract change can't silently turn it into an
+/// early-return measurement.
+fn nominal_allow_cmd() -> ProposedVehicleCommand {
     ProposedVehicleCommand {
-        linear_velocity_mps: 10.0,
-        current_velocity_mps: 9.0,
+        linear_velocity_mps: 10.1,
+        current_velocity_mps: 10.0,
         delta_time_s: 0.05,
-        steering_angle_deg: 5.0,
-        current_steering_angle_deg: 0.0,
+        steering_angle_deg: 1.5,
+        current_steering_angle_deg: 1.0,
+    }
+}
+
+/// Full-depth **Allow** command under the MRC profile (max_accel 1.0,
+/// max_steering_rate 20 °/s, max_speed 5): accel `(3.04-3.0)/0.05 = 0.8 ≤ 1.0`,
+/// rate `(0.7-0.5)/0.05 = 4 ≤ 20`, speed `3.04 ≤ 5` — Allow, full pipeline. The
+/// previous bench reused the nominal 10 m/s command here, which exceeds the MRC
+/// 5 m/s ceiling and returned an immediate P2 clamp (not the full MRC pipeline).
+fn mrc_allow_cmd() -> ProposedVehicleCommand {
+    ProposedVehicleCommand {
+        linear_velocity_mps: 3.04,
+        current_velocity_mps: 3.0,
+        delta_time_s: 0.05,
+        steering_angle_deg: 0.7,
+        current_steering_angle_deg: 0.5,
+    }
+}
+
+/// Verify a command actually reaches [`EnforceAction::Allow`] under `contract`
+/// before it is used to characterize the worst-case Allow path. Fail loudly
+/// (exit 2) rather than silently measure a shorter early-return path.
+fn assert_allow(label: &str, cmd: &ProposedVehicleCommand, contract: &VehicleKinematicsContract) {
+    let verdict = validate_vehicle_command(cmd, contract);
+    if verdict != EnforceAction::Allow {
+        eprintln!(
+            "[kirra-wcet-bench] FATAL: the '{label}' command does not reach EnforceAction::Allow \
+             (got {verdict:?}); the bench would measure an early-return path, not the worst-case \
+             full pipeline. Adjust the command shape to the current contract limits."
+        );
+        std::process::exit(2);
     }
 }
 
 /// Measure `f` over `warmup` (discarded) + `iters` (recorded) iterations into a
-/// fresh channel, returning the snapshot. The per-iteration clock read is
-/// included in each sample — conservatively counted as observer overhead
+/// fresh channel, returning the snapshot. Each sample includes the TWO
+/// per-iteration monotonic clock reads (`now_nanos` at the start and again
+/// inside `elapsed_nanos_since`) — conservatively counted as observer overhead
 /// (methodology §2: include rather than subtract).
 fn measure(
     clock: &StdMonotonicClock,
@@ -113,16 +150,26 @@ fn main() {
     let clock = StdMonotonicClock::new();
 
     // Stage: governor verdict — the host-buildable SG9 safety check, worst-case
-    // Allow path (all P0..P6 guards), plus the MRC-contract variant.
+    // (full-pipeline) Allow path under the Nominal profile and under the MRC
+    // profile. Each command is verified to actually reach Allow before measuring.
     let nominal_contract = VehicleKinematicsContract::nominal_reference_profile();
     let mrc_contract = VehicleKinematicsContract::mrc_fallback_profile();
-    let cmd = nominal_cmd();
+    let nominal_command = nominal_allow_cmd();
+    let mrc_command = mrc_allow_cmd();
+    assert_allow("governor_exec (nominal)", &nominal_command, &nominal_contract);
+    assert_allow("governor_exec_mrc", &mrc_command, &mrc_contract);
 
     let governor = measure(&clock, warmup, iters, || {
-        let _ = black_box(validate_vehicle_command(black_box(&cmd), black_box(&nominal_contract)));
+        let _ = black_box(validate_vehicle_command(
+            black_box(&nominal_command),
+            black_box(&nominal_contract),
+        ));
     });
     let governor_mrc = measure(&clock, warmup, iters, || {
-        let _ = black_box(validate_vehicle_command(black_box(&cmd), black_box(&mrc_contract)));
+        let _ = black_box(validate_vehicle_command(
+            black_box(&mrc_command),
+            black_box(&mrc_contract),
+        ));
     });
 
     let stages = [
