@@ -152,10 +152,19 @@ impl FrozenFault {
             | FrozenFault::Replay
             | FrozenFault::GenerationRegress => {
                 let mut wm = AcceptedWatermark::new();
-                // A seed view only needs its generation+sequence recorded.
-                let seed =
-                    GovernorContractView::new_command(SEED_GENERATION, SEED_SEQUENCE, 0, 0, b"seed")
-                        .unwrap();
+                // Only the seed's generation+sequence are used by the watermark,
+                // but `record`'s documented precondition is that `validate()` would
+                // pass for the recorded view — so seed with a fully-valid command
+                // (future deadline), not a deadline-0 view that would fail at
+                // LOGICAL_NOW. Keeps the test aligned with the production contract.
+                let seed = GovernorContractView::new_command(
+                    SEED_GENERATION,
+                    SEED_SEQUENCE,
+                    0,
+                    FUTURE_DEADLINE_NANOS,
+                    b"seed",
+                )
+                .unwrap();
                 wm.record(&seed);
                 wm
             }
@@ -275,8 +284,9 @@ impl FrozenChannel {
         sample.send()?;
         let mut received = None;
         while let Some(sample) = self.subscriber.receive()? {
-            // `sample` derefs to the `WireView` payload; `.0` is the frozen view.
-            received = Some(sample.0);
+            // `sample` derefs to the `WireView` payload; destructure to the view.
+            let WireView(view) = *sample;
+            received = Some(view);
         }
         received.ok_or_else(|| "no sample received over iceoryx2".into())
     }

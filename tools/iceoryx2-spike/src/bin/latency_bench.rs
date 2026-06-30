@@ -216,7 +216,7 @@ fn bench_iceoryx2_pingpong(
         while !stop_r.load(Ordering::Acquire) {
             match req_sub.receive() {
                 Ok(Some(sample)) => {
-                    let echo = sample.0;
+                    let WireView(echo) = *sample;
                     if let Ok(s) = resp_pub.loan_uninit() {
                         let _ = s.write_payload(WireView(echo)).send();
                     }
@@ -261,7 +261,8 @@ fn bench_iceoryx2_pingpong(
         let mut spins = 0u64;
         let received = loop {
             if let Some(sample) = resp_sub.receive()? {
-                break sample.0;
+                let WireView(v) = *sample;
+                break v;
             }
             core::hint::spin_loop();
             spins += 1;
