@@ -107,19 +107,23 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
     consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
 }
 
-/// #689: enforce the split-brain inequality on the ENV-derived HA timings. The
+/// #689: enforce a safe split-brain margin on the ENV-derived HA timings. The
 /// compile-time `const _` assert above only guards the DEFAULT constants; the
 /// runtime `KIRRA_HEARTBEAT_INTERVAL` / `KIRRA_PROMOTION_TIMEOUT` overrides are
 /// read independently with no cross-check. A wedged primary self-demotes after
 /// `MAX_CONSECUTIVE_HEARTBEAT_FAILURES × interval`; the standby promotes at
-/// `promotion_timeout`. If an operator sets `MAX × interval >= promotion_timeout`,
-/// the standby promotes before (or as) the old primary self-demotes — a transient
-/// two-`mode_active` window before the durable epoch fence catches the old primary
-/// on its next tick.
+/// `promotion_timeout`. Two cases are unsafe-or-fragile:
+/// - `promotion_timeout <= MAX × interval` — the standby promotes *before (or as)*
+///   the old primary self-demotes: an outright transient two-`mode_active` window
+///   (until the durable epoch fence catches the old primary on its next tick);
+/// - `MAX × interval < promotion_timeout < (MAX+1) × interval` — strictly safe, but
+///   with **less than one heartbeat interval** of slack, fragile against scheduling
+///   / disk jitter (the same robustness margin the default constants carry).
 ///
-/// Clamp the promotion timeout UP to strictly exceed the self-demote threshold,
-/// with one interval of margin (`floor = (MAX + 1) × interval`). Clamping UP is
-/// the SAFE direction: the standby waits longer, never promotes early. Returns
+/// So the floor enforced is `(MAX + 1) × interval` — i.e. the clamp fires whenever
+/// `promotion_timeout < (MAX + 1) × interval`, covering BOTH cases and guaranteeing
+/// at least one full heartbeat interval between self-demote and promotion. Clamping
+/// UP is the SAFE direction: the standby waits longer, never promotes early. Returns
 /// `(resolved_timeout_ms, clamped)`; the caller logs loudly when `clamped` so the
 /// misconfiguration is visible rather than silently changing failover latency.
 // #707: pub(crate) — internal helper (promotion loop + same-module tests), not a
@@ -505,8 +509,10 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(PROMOTION_TIMEOUT_MS);
         // #689: cross-check the ENV timeout against the ENV heartbeat interval (the
-        // const assert only guards the defaults). Clamp UP if the operator's value
-        // would let the standby promote before a wedged primary self-demotes.
+        // const assert only guards the defaults). Clamp UP to the (MAX+1)×interval
+        // floor so there is at least one full heartbeat interval between the
+        // primary's self-demote and the standby's promotion (see
+        // `enforce_promotion_timeout_floor`).
         let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -519,9 +525,10 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
                 interval_ms,
                 resolved_timeout_ms = timeout_ms,
                 max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                "KIRRA_PROMOTION_TIMEOUT too small for KIRRA_HEARTBEAT_INTERVAL \
-                 (timeout < (MAX+1)×interval): clamped UP so the primary self-demotes before \
-                 the standby promotes (#689 split-brain guard). Fix the env config to silence this."
+                "KIRRA_PROMOTION_TIMEOUT below the safe floor for KIRRA_HEARTBEAT_INTERVAL \
+                 (timeout < (MAX+1)×interval): clamped UP to keep ≥1 heartbeat interval between \
+                 the primary's self-demote and the standby's promotion (#689 split-brain margin). \
+                 Fix the env config to silence this."
             );
         }
 
