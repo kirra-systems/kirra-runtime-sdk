@@ -6,7 +6,7 @@
 | Date | 2026-06-11 (updated 2026-06-30 — see §*Update 2026-06-30*) |
 | Deciders | Project owner |
 | Issues | #275 (this ADR); EPIC #270; evidence #273 / PR #277; **production carrier + latency PR #736**; validating condition #274; support posture #276; boundary design #278 |
-| Doc | `tools/iceoryx2-spike/README.md` (the #273 host spike + the #736 frozen-contract carrier & latency bench); `docs/adr/KIRRA_QNX_CROSSCOMPILE.md` (toolchain notes) |
+| Doc | `tools/iceoryx2-spike/README.md` (the #273 host spike; **PR #736 adds** the frozen-contract carrier & latency bench); `docs/adr/KIRRA_QNX_CROSSCOMPILE.md` (toolchain notes) |
 | Builds on | ADR-0004 (independent safety channel / doer–checker) |
 
 ## Context
@@ -93,8 +93,9 @@ toolchain-gated), so the Status stays *Accepted (direction)*.
 
 ### 1. The carrier now rides the PRODUCTION frozen contract (PR #736)
 
-The #273 spike carried an ad-hoc `CommandFrame`. `tools/iceoryx2-spike/src/frozen.rs`
-now publishes the **production** `kirra_contract_channel::GovernorContractView` (the
+The #273 spike carried an ad-hoc `CommandFrame`. **In PR #736**, the new
+`tools/iceoryx2-spike/src/frozen.rs` publishes the **production**
+`kirra_contract_channel::GovernorContractView` (the
 frozen 176-byte `#[repr(C)]`, by-value image — Clause 2's layout) over a real
 iceoryx2 zero-copy channel and validates every received owned sample with the
 **production** `kirra_contract_channel::validate()`. All nine transport-contract
@@ -115,8 +116,9 @@ layout is library-independent).
 The driving requirement is the **lowest-latency way to cross the mandatory
 doer↔checker isolation boundary** (freedom-from-interference forbids co-locating
 them — so the boundary cannot be deleted to save latency).
-`tools/iceoryx2-spike/src/bin/latency_bench.rs` times the 176-byte contract handoff
-three ways (host-**INDICATIVE** — shared dev box, no core isolation / FIFO; 100k iters):
+**In PR #736**, `tools/iceoryx2-spike/src/bin/latency_bench.rs` times the 176-byte
+contract handoff three ways (host-**INDICATIVE** — shared dev box, no core isolation /
+FIFO; 100k iters):
 
 ```
 transport                  p50_ns     p99_ns    p999_ns     max_ns
@@ -144,7 +146,7 @@ stay network transport. This bounds Clause 1's reach:
 
 | Class | Boundaries | Verdict |
 |---|---|---|
-| iceoryx2 (cross-partition, same SoC) | governor contract channel (Clause 2 layout) | the carrier (this ADR) |
+| iceoryx2 (intra-partition, cross-process) | governor-side contract handoff reusing the Clause 2 frozen layout (`GovernorContractView`) as payload | the carrier (this ADR) |
 | iceoryx2 candidate (intra-host) | local actuator / sensor DDS hops | bypass DDS → the latency win |
 | already in-process (no gain) | parko inference loop, posture engine, capture/audit mpsc, impact latch, Taj corridor, RSS gates | leave as-is |
 | cross-host (NOT iceoryx2) | fleet transport (Zenoh, ADR-0007), two-box UDP governor | network — stays Zenoh/DDS |
@@ -152,12 +154,12 @@ stay network transport. This bounds Clause 1's reach:
 
 ### 4. Dependency / condition progress
 
-- **Pin moved `=0.9.1` → `=0.9.2`.** The `0.9.1` umbrella no longer composes with its
-  `0.9.2` sub-crates on a fresh resolve (`ZeroCopySendError::NoConnectedReceiver`
+- **PR #736 moves the pin `=0.9.1` → `=0.9.2`.** The `0.9.1` umbrella no longer composes
+  with its `0.9.2` sub-crates on a fresh resolve (`ZeroCopySendError::NoConnectedReceiver`
   missing); the spike code compiles unchanged at `0.9.2`. (`Cargo.lock` is gitignored
-  in the isolated spike, so the pin is the control.) A **dedicated CI lane** now gates
-  the spike + carrier (full + minimal configs + clippy) — previously nothing ran it,
-  which is exactly how the `0.9.1` breakage went unnoticed.
+  in the isolated spike, so the pin is the control.) PR #736 also adds a **dedicated CI
+  lane** to gate the spike + carrier (full + minimal configs + clippy) — previously
+  nothing ran it, which is exactly how the `0.9.1` breakage went unnoticed.
 - **#274 advanced (judge, not iceoryx2 yet).** The QNX 8.0 cross-build + FDIT
   **verdict-correctness gate now PASSES on a `mkqnximage`/QEMU QNX 8.0 KVM VM**
   (`max ≈ 20 µs < 100 µs`, KVM-indicative; `tools/qnx-rtm-harness/results/`). This
