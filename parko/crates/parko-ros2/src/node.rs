@@ -336,13 +336,17 @@ where
             // missing/stale snapshot → `AgentScene::Absent` (a gap; the detector
             // never fabricates a latch). Only when armed; otherwise `None` (the
             // detector stays unfed, byte-identical to pre-#309).
-            let obj_snap = drain_objects.lock().ok().and_then(|g| g.clone());
+            //
+            // Build the scene while holding the lock BRIEFLY (over an `&` borrow)
+            // rather than cloning the whole `ObjectSnapshot` — `object_snapshot_to_
+            // vanished_scene` returns an OWNED `AgentScene`, so no snapshot copy is
+            // needed (Copilot PR #716). The guard drops at the end of the closure,
+            // well before the `.await` below (no std-mutex held across await).
             let vanished_scene = drain_vanished_armed.then(|| {
-                object_snapshot_to_vanished_scene(
-                    obj_snap.as_ref(),
-                    drain_config.corridor_max_age_ms,
-                    current_time_ms(),
-                )
+                let now = current_time_ms();
+                let guard = drain_objects.lock().ok();
+                let snap: Option<&ObjectSnapshot> = guard.as_ref().and_then(|g| g.as_ref());
+                object_snapshot_to_vanished_scene(snap, drain_config.corridor_max_age_ms, now)
             });
 
             let cleared = run_pipeline_tick_with_clearance(
