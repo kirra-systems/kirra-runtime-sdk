@@ -25,6 +25,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include <ctime>
@@ -182,23 +184,45 @@ int main() {
                           / (static_cast<__uint128_t>(n) * n);
     const std::uint64_t stddev = isqrt_u128(var);
 
-    // Certified iff on the QNX target AND FIFO actually granted (conjunction —
-    // mirrors MeasurementEnv::is_certified_wcet). Everything else is INDICATIVE.
-    const bool certified = kIsQnxTarget && fifo_granted;
+    // Certified WCET requires THREE things, ALL of which must hold:
+    //   (1) compiled for the QNX target (kIsQnxTarget),
+    //   (2) SCHED_FIFO actually granted at runtime (fifo_granted),
+    //   (3) an EXPLICIT operator assertion that this is the certified Phase-II
+    //       hardware platform: KIRRA_WCET_CERTIFIED=1 (or =true).
+    // (3) is mandatory because the binary CANNOT distinguish certified DRIVE +
+    // QNX OS for Safety hardware from a QNX VM under KVM/TCG — both are __QNXNTO__
+    // with FIFO. Defaulting to INDICATIVE makes an accidental overclaim from a VM
+    // IMPOSSIBLE (fail-honest, AOU-HW-QNX-TARGET-001): a VM operator simply does
+    // not set the flag, so a near-native KVM number stays INDICATIVE. The free-form
+    // KIRRA_WCET_PLATFORM (e.g. "kvm", "tcg", "drive-agx") is echoed into the human
+    // banner for provenance only — it never changes the verdict.
+    const char *cert_env = std::getenv("KIRRA_WCET_CERTIFIED");
+    const bool cert_asserted = cert_env != nullptr
+        && (std::strcmp(cert_env, "1") == 0 || std::strcmp(cert_env, "true") == 0);
+    const char *platform = std::getenv("KIRRA_WCET_PLATFORM");
+    const bool certified = kIsQnxTarget && fifo_granted && cert_asserted;
 
-    std::printf("WCET kirra_judge_assess  n=%zu  min=%lluns  med=%lluns  p99.9=%lluns  MAX=%lluns%s\n",
-                MEASURE_ITERS,
-                (unsigned long long)mn, (unsigned long long)p50,
-                (unsigned long long)p999, (unsigned long long)mx,
-                certified ? "" : "  [INDICATIVE — not a WCET claim]");
+    if (certified) {
+        std::printf("WCET kirra_judge_assess  n=%zu  min=%lluns  med=%lluns  p99.9=%lluns  "
+                    "MAX=%lluns  [CERTIFIED — QNX target, FIFO, operator-asserted Phase-II HW]\n",
+                    MEASURE_ITERS, (unsigned long long)mn, (unsigned long long)p50,
+                    (unsigned long long)p999, (unsigned long long)mx);
+    } else {
+        std::printf("WCET kirra_judge_assess  n=%zu  min=%lluns  med=%lluns  p99.9=%lluns  "
+                    "MAX=%lluns  [INDICATIVE — not a WCET claim%s%s]\n",
+                    MEASURE_ITERS, (unsigned long long)mn, (unsigned long long)p50,
+                    (unsigned long long)p999, (unsigned long long)mx,
+                    platform ? "; platform=" : "", platform ? platform : "");
+    }
 
     // CSV row in the CANONICAL schema — byte-identical to
     // kirra_timing::report::CSV_HEADER and kirra_timing::MeasurementEnv tokens, so
     // a host kirra-wcet-bench report and this on-target row union into one table
-    // joinable on (metric, env). `env`/`sched`/`wcet_status` map exactly onto the
-    // MeasurementEnv variants: QNX+FIFO → qnx-target-fifo / QNX-TARGET-MEASURED;
-    // QNX without FIFO → other; a host smoke build → host. Only the certified
-    // conjunction emits QNX-TARGET-MEASURED, never a fabricated figure.
+    // joinable on (metric, env). `env`/`sched`/`wcet_status` map onto the
+    // MeasurementEnv variants: certified → qnx-target-fifo / QNX-TARGET-MEASURED;
+    // any QNX run that is NOT operator-asserted-certified (incl. a KVM/TCG VM, or
+    // no FIFO) → other / INDICATIVE-NOT-WCET; a host smoke build → host. Provenance
+    // (KVM vs hardware) lives in the human banner above, not the canonical token.
     const char *env    = certified ? "qnx-target-fifo" : (kIsQnxTarget ? "other" : "host");
     const char *sched  = certified ? "SCHED_FIFO" : "host-default";
     const char *status = certified ? "QNX-TARGET-MEASURED" : "INDICATIVE-NOT-WCET";

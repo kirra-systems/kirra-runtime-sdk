@@ -121,7 +121,14 @@ cd /tmp
 
 # 3) The WCET row. Run as ROOT so SCHED_FIFO is granted; otherwise the row
 #    self-declares INDICATIVE (see §5).
-./wcet_measure
+#
+#    On a VM (KVM/TCG), tag the provenance but DO NOT assert certification —
+#    a VM is Phase-I feasibility, never cert-grade:
+KIRRA_WCET_PLATFORM=kvm ./wcet_measure
+#
+#    ONLY on the certified Phase-II hardware (DRIVE AGX + QNX OS for Safety +
+#    Ferrocene under FIFO) does the operator assert certification:
+#    KIRRA_WCET_CERTIFIED=1 KIRRA_WCET_PLATFORM=drive-agx ./wcet_measure
 ```
 
 ---
@@ -142,12 +149,17 @@ The `env` / `wcet_status` columns map onto `kirra_timing::MeasurementEnv` and ar
 
 | Where it ran | `env` | `wcet_status` |
 |---|---|---|
-| QNX target, `SCHED_FIFO` granted (root) | `qnx-target-fifo` | `QNX-TARGET-MEASURED` |
+| Certified HW + FIFO + `KIRRA_WCET_CERTIFIED=1` | `qnx-target-fifo` | `QNX-TARGET-MEASURED` |
+| QNX **VM** (KVM/TCG), FIFO, no assertion | `other` | `INDICATIVE-NOT-WCET` |
 | QNX target, no FIFO (not root) | `other` | `INDICATIVE-NOT-WCET` |
 | A host smoke build | `host` | `INDICATIVE-NOT-WCET` |
 
-The certified pair is emitted **only** under the `kIsQnxTarget && fifo_granted`
-conjunction (a host build cannot mint it even if the host grants `SCHED_FIFO`).
+The certified pair is emitted **only** under the three-way conjunction
+`kIsQnxTarget && fifo_granted && KIRRA_WCET_CERTIFIED=1`. The explicit operator
+assertion is mandatory because the binary cannot distinguish certified DRIVE/QNX-OS
+hardware from a QNX VM — so a near-native KVM run stays `INDICATIVE` unless someone
+deliberately asserts certified hardware. `KIRRA_WCET_PLATFORM` (e.g. `kvm`) is a
+provenance label echoed in the human banner only; it never changes the verdict.
 
 **Phase-I acceptance** (`WCET_QNX_BRINGUP.md` §4): `rtm_harness` PASSes
 byte-identically on-target, and `wcet_measure`'s **`MAX < 100 µs`**. That replaces

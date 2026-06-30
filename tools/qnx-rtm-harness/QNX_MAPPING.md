@@ -234,11 +234,16 @@ correctness**, which is now demonstrated on a real QNX target.
 byte-identical to the host `kirra-wcet-bench` output, so the two union into one
 table joinable on `(metric, env)`. `env`/`wcet_status` map onto
 `kirra_timing::MeasurementEnv`: the certified `qnx-target-fifo` /
-`QNX-TARGET-MEASURED` pair is emitted **only** when the binary was built for the
-QNX target *and* `SCHED_FIFO` was actually granted (the `kIsQnxTarget &&
-fifo_granted` conjunction); a host smoke build self-declares `host` /
-`INDICATIVE-NOT-WCET`, and a QNX run without FIFO privilege declares `other` /
-`INDICATIVE-NOT-WCET` — neither can mint a certified figure. The VM-vs-hardware
-(Phase-I-vs-Phase-II) distinction above is **orthogonal** to this gate and remains
-an assumption-of-use (AOU-HW-QNX-TARGET-001): a `QNX-TARGET-MEASURED` row from a
-KVM/TCG VM is feasibility-grade, not the cert-grade Phase-II number.
+`QNX-TARGET-MEASURED` pair is emitted **only** under a **three-way conjunction** —
+the binary was built for the QNX target (`kIsQnxTarget`), `SCHED_FIFO` was actually
+granted at runtime (`fifo_granted`), **and** the operator explicitly asserted the
+certified Phase-II hardware platform via `KIRRA_WCET_CERTIFIED=1`. The third term
+is mandatory because the binary **cannot** tell certified DRIVE + QNX OS for Safety
+hardware from a QNX **VM** under KVM/TCG (both are `__QNXNTO__` with FIFO) — so the
+VM-vs-hardware (Phase-I-vs-Phase-II) distinction is folded **into the gate**, not
+left to prose. Without the assertion every QNX run — including a near-native KVM
+VM — self-declares `other` / `INDICATIVE-NOT-WCET`; a host smoke build declares
+`host` / `INDICATIVE-NOT-WCET`. A VM thus **cannot** mint a certified figure by
+accident (fail-honest, `AOU-HW-QNX-TARGET-001`). Provenance (e.g. `kvm` vs `tcg`)
+is carried in the human banner via the free-form `KIRRA_WCET_PLATFORM` label, which
+never changes the verdict.
