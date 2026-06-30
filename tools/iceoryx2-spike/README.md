@@ -17,13 +17,46 @@ labels its own envelope numbers as **PROXIES**.
 ## Pinned version
 
 ```
-iceoryx2 = "=0.9.1"
+iceoryx2 = "=0.9.2"
 ```
 
-> The host spike pins **0.9.1** (latest at authoring; host Linux is iceoryx2
-> tier-1). The EPIC notes QNX 7.1 landed as tier-3 in v0.7.0. **#274 must
-> re-confirm the feature subset against whatever version targets QNX 8.0** — the
-> methodology transfers even if exact flags shift between versions.
+> The host spike pins **0.9.2**. It was authored against `=0.9.1`, but that pin no
+> longer builds on a fresh resolve: the `iceoryx2 0.9.1` umbrella crate pulls its
+> `iceoryx2-*` sub-crates at `0.9.2` (newer patch in their `^` range), and `0.9.1`
+> main + `0.9.2` subs do not compose (`ZeroCopySendError::NoConnectedReceiver`
+> missing). Bumping the umbrella to `=0.9.2` realigns the whole set; the spike code
+> compiles and runs unchanged. (`Cargo.lock` is gitignored here, so the pin is the
+> only control.) Host Linux is iceoryx2 tier-1; **#274 must re-confirm the feature
+> subset against whatever version targets QNX 8.0** — the methodology transfers
+> even if exact flags shift between versions.
+
+## Frozen-contract carrier (#275 / L2) — `src/frozen.rs`
+
+The original spike (`wire.rs`/`judge.rs`) proved iceoryx2's feature subset over an
+**ad-hoc** `CommandFrame`. `frozen.rs` **promotes** that to the **production
+frozen contract**: it carries `kirra_contract_channel::GovernorContractView` (the
+176-byte `#[repr(C)]`, by-value, freeze-pinned image) over the same real iceoryx2
+zero-copy channel and validates every received owned sample with the **production**
+`kirra_contract_channel::validate()` — the same transport-contract checks the QNX
+harness and the hypervisor-SHM seam use, not a spike-local copy.
+
+- A `#[repr(transparent)] WireView(GovernorContractView)` newtype carries the one
+  audited `unsafe impl ZeroCopySend` (the orphan rule forbids impl-ing the foreign
+  trait on the foreign view directly; `transparent` keeps the wire bytes identical
+  to the frozen image). This is the ADR-0006 Clause 3 integration `unsafe`.
+- `tests/frozen_fault_matrix.rs` drives all nine transport-contract fault classes
+  (valid, layout-version, magic, oversize, CRC, sequence-regress, replay,
+  generation-regress, deadline) through the live channel and asserts each maps to
+  exactly its `validate()` `ContractFault` — over the **full** and **minimal**
+  (`--no-default-features`) iceoryx2 configs.
+- **Isolation holds (#275 gate).** The dependency direction is **spike →
+  `kirra-contract-channel`** (a path dep on the lean, no_std, zero-dep,
+  forbid-unsafe core), never the reverse — so iceoryx2 still **never** enters the
+  SDK/parko dependency tree. This is the iceoryx2 path *using* the production
+  contract, not an SDK adoption of iceoryx2 (that remains the #275 decision).
+- **Scope:** `validate()` is the *transport-contract* checker; the kinematic
+  envelope is a separate downstream governor step (the talisman
+  `VehicleKinematicsContract`) and is intentionally out of scope here.
 
 ## How to run
 

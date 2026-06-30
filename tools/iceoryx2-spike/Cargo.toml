@@ -20,7 +20,12 @@ repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 #   cargo test                       -> "full"    config (iceoryx2 std + console)
 #   cargo test --no-default-features -> "minimal" config (iceoryx2 NO features)
 [dependencies]
-iceoryx2 = { version = "=0.9.1", default-features = false }
+iceoryx2 = { version = "=0.9.2", default-features = false }
+# The FROZEN cross-partition contract (the lean, no_std, zero-dep, forbid-unsafe
+# core). A PATH dep on the SDK crate — the direction is spike -> core, so iceoryx2
+# never enters the core/SDK tree (the #275 isolation holds). `frozen.rs` carries
+# this crate's GovernorContractView over iceoryx2 and validates with its validate().
+kirra-contract-channel = { path = "../../crates/kirra-contract-channel" }
 
 [features]
 # DEFAULT (host full): mirror iceoryx2's own default feature set (std + console).
