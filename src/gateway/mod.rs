@@ -239,7 +239,12 @@ impl KirraLiveGateway {
                     "[CRITICAL] Failed to bind proxy listener on port {}: {err}. Gateway startup aborted.",
                     self.proxy_port
                 );
-                return;
+                // Fail-closed: exit non-zero so a supervisor (systemd
+                // Restart=on-failure / k8s) treats the bind failure as a real
+                // startup failure and restarts. A bare `return` here would let
+                // `main` exit 0 and suppress the restart (regression from the
+                // prior `.expect()` panic, which aborted non-zero).
+                std::process::exit(1);
             }
         };
         let initial_gov = KirraKernelGovernor::new(
@@ -265,7 +270,9 @@ impl KirraLiveGateway {
                     "[CRITICAL] Failed to bind admin reset listener on port {}: {err}. Gateway startup aborted.",
                     self.admin_reset_port
                 );
-                return;
+                // Fail-closed: exit non-zero (same rationale as the proxy bind
+                // above) so the bind failure is not masked as a clean exit.
+                std::process::exit(1);
             }
         };
         Self::spawn_admin_listener(
@@ -309,10 +316,11 @@ impl KirraLiveGateway {
 
             thread::spawn(move || {
                 let _guard = ThreadPoolGuard::new(workers_counter, Arc::clone(&metrics_clone));
-                let mut plc_socket = match TcpStream::connect(plc_addr) {
+                // Borrow (not move) so `plc_addr` can be named in the error log.
+                let mut plc_socket = match TcpStream::connect(&plc_addr) {
                     Ok(s) => s,
                     Err(err) => {
-                        eprintln!("[WARN] Unable to connect proxy worker to PLC target: {err}");
+                        eprintln!("[WARN] Unable to connect proxy worker to PLC target {plc_addr}: {err}");
                         return;
                     }
                 };
