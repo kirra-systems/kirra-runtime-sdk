@@ -255,11 +255,21 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 self.tick_period_s,
                 posture,
             );
-            // Capture the doer/ML proposal (Copy reads — zero cost) and the audit
-            // reason BEFORE the match consumes `action`. `override_reason` returns
-            // a `'static` code, so `reason` does not borrow `action`.
-            let reason = override_reason(&action);
-            let (ml_lin, ml_ang) = (proposed_cmd.linear_velocity, proposed_cmd.angular_velocity);
+            // Compute the audit inputs ONLY when a client is attached AND the
+            // governor actually overrode (`override_reason` is `None` for Allow),
+            // so the hot path is byte-identical when auditing is disabled — nothing
+            // here runs if `self.audit` is `None`. Captured BEFORE the match
+            // consumes `action`; the proposal fields are Copy reads.
+            let audit_override = self.audit.as_ref().and_then(|client| {
+                override_reason(&action).map(|reason| {
+                    (
+                        client,
+                        reason,
+                        proposed_cmd.linear_velocity,
+                        proposed_cmd.angular_velocity,
+                    )
+                })
+            });
             let commanded = match action {
                 EnforcementAction::Allow => proposed_cmd,
                 EnforcementAction::ClampLinearVelocity(v) => ControlCommand {
@@ -286,10 +296,10 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 }
             };
             // Audit the override (the governor changed the doer's command). Sparse
-            // and safety-relevant; `Allow` (reason == None) is the common no-op
-            // and is not recorded.
-            if let (Some(a), Some(reason)) = (&self.audit, reason) {
-                a.record_override(OverrideRecord {
+            // and safety-relevant; `Allow` is the common no-op and was already
+            // filtered out above (so `audit_override` is `None` for it).
+            if let Some((client, reason, ml_lin, ml_ang)) = audit_override {
+                client.record_override(OverrideRecord {
                     tick_ms: loop_start_ms,
                     reason,
                     proposed_linear_mps: ml_lin,
