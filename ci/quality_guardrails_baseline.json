@@ -3,14 +3,14 @@
   "max_lines": {
     "src/bin/kirra_verifier_service.rs": 3959,
     "src/bin/kirra_verifier_service/startup.rs": 248,
-    "src/gateway/mod.rs": 528,
+    "src/gateway/mod.rs": 538,
     "src/verifier.rs": 1092,
     "src/gateway/policy_layer.rs": 1036
   },
   "panic_budget": {
     "src/bin/kirra_verifier_service.rs": 117,
     "src/bin/kirra_verifier_service/startup.rs": 0,
-    "src/gateway/mod.rs": 7,
+    "src/gateway/mod.rs": 6,
     "src/verifier.rs": 27,
     "src/gateway/policy_layer.rs": 14
   },
