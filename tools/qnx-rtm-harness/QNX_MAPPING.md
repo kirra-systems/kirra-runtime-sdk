@@ -227,11 +227,11 @@ is unaffected by the accelerator. Timing collapses ~100× vs TCG and the deferre
 `max < 100 µs` acceptance-#4 target is now **met as a KVM-INDICATIVE result**:
 
 ```
-WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=76ns  MAX=21001ns  [INDICATIVE — platform=kvm]
-kirra_judge_assess,other,host-default,1000000,31,41,21001,70,40,48,76,INDICATIVE-NOT-WCET
+WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=79ns  MAX=19962ns  [INDICATIVE — platform=kvm]
+kirra_judge_assess,other,SCHED_FIFO,1000000,31,41,19962,81,40,47,79,INDICATIVE-NOT-WCET
 ```
 
-median 40 ns, p99.9 **76 ns**, **max 21.0 µs** (vs TCG max 2.20 ms). Full evidence:
+median 40 ns, p99.9 **79 ns**, **max 20.0 µs** (vs TCG max 2.20 ms). Full evidence:
 `results/qnx800-x86_64-vm-kvm.txt`. This is **Phase-I feasibility, not cert-grade** —
 a VM on an x86_64 laptop is not the deployment ISA, and the post-#274 cert gate
 correctly emits `INDICATIVE-NOT-WCET` (the operator did not assert
