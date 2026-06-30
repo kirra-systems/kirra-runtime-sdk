@@ -29,7 +29,7 @@ diagnostic coverage and **PO-2** independence (the DFA). Per-goal enforcement
 | Goal | What | Disposition |
 |---|---|---|
 | SG1 longitudinal collision (RSS) | ASIL D | enforced (per-command; per-horizon pending #131) |
-| SG2 road/lane departure | ASIL D | check built, **PENDING-WIRING** (#131) |
+| SG2 road/lane departure | ASIL D | **enforced** (per-trajectory; Option-B adapter slow loop, #128/#131) |
 | SG3 dynamic envelope | ASIL D | enforced |
 | SG4 water / SG5 commit-zone / SG6 post-collision | B/B/A-elevated | **delegated** (AoU / #126), D1 closes omission |
 | SG7 teleop parity | ASIL D | enforced (structural, doer-agnostic) |
@@ -95,16 +95,19 @@ ADR-0001/0002.
 
 ## 7. Limitations & open evidence (honest residual map)
 
-- Enforcement is currently **per-command**; per-trajectory checking (SG2 live +
-  RSS-over-horizon) pends **#131** — the largest open item.
-- SG2 drivable-space check is built and tested but **not wired live** (#131).
+- Per-command enforcement plus the per-trajectory Option-B adapter path (#131);
+  any remaining RSS-over-horizon hardening continues under **#131**.
+- SG2 drivable-space containment is **enforced live** — wired into the Option-B
+  adapter slow loop (`kirra-trajectory` validation; a containment failure
+  collapses the per-asset slot so the fast loop publishes MRC) (#128/#131).
 - Base-tier **omission** common-cause is **delegated** (an AoU); the D1 add-on
   (#124) closes it unilaterally.
 - Coverage gap: **G1 occlusion-aware caution** (#122).
 - Common-cause: **G2 localization integrity** (#123).
-- **Placeholder values pending S8 (#120):** the SG2 lateral margin, IDC detection
-  ranges, the speed-cap range assumption, and the quantitative metrics
-  (SPFM/LFM/PMHF).
+- **Placeholder values pending S8 (#120):** IDC detection ranges, the speed-cap
+  range assumption, and the quantitative metrics (SPFM/LFM/PMHF). (The SG2
+  lateral margin is now characterized — `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m`,
+  KIRRA-OCCY-SG2-MARGIN-001 / `docs/safety/OCCY_SG2_MARGIN.md`.)
 - **Pending integrity evidence:** MC/DC, the FFI doc, Ferrocene adoption.
 - **AoU contracts written:** perception (#126) and actuation (#127) are filed in
   the AoU register (`ASSUMPTIONS_OF_USE.md`): `AOU-PERCEPTION-RANGE-001`,

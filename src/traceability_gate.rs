@@ -10,9 +10,11 @@
 //
 //     // SAFETY: SG3 SG9 | REQ: <kebab-id> | TEST: test_a,test_b
 //
-// DELEGATED and PENDING SGs are recorded exceptions — their absence from the
-// ENFORCED-tag set is not a gate failure; they're tracked elsewhere (the
-// SEooC contract #126 for delegated; the dedicated PENDING issue for SG2).
+// DELEGATED SGs are recorded exceptions — their absence from the ENFORCED-tag
+// set is not a gate failure; they're tracked elsewhere (the SEooC contract #126).
+// There are no PENDING SGs at present: SG2 (drivable-space containment) is now
+// ENFORCED — its check is built (`kirra_core::containment`) and wired live into
+// the Option-B adapter slow loop (`kirra-trajectory` validation; #128/#131).
 
 use std::path::{Path, PathBuf};
 
@@ -27,10 +29,14 @@ pub struct SafetyTag {
 }
 
 /// Governor-enforced safety goals — each MUST have at least one tagged site.
-pub const ENFORCED_SGS: &[u8] = &[1, 3, 7, 8, 9];
+/// SG2 (drivable-space containment) joined this set once its check landed in
+/// `kirra_core::containment` and was wired live (kirra-trajectory slow loop;
+/// #128/#131) — it is tagged at `src/wcet_gate.rs` (SG2 WCET) and enforced live.
+pub const ENFORCED_SGS: &[u8] = &[1, 2, 3, 7, 8, 9];
 
 /// Pending (coverage hole tracked in its own issue) — absent from tags is OK.
-pub const PENDING_SGS: &[u8] = &[2];
+/// Empty: SG2 graduated to ENFORCED (#128); no SG is currently a coverage hole.
+pub const PENDING_SGS: &[u8] = &[];
 
 /// Delegated by design (integrator perception / map prior / control adapter) —
 /// absent from Governor tags is OK; tracked in the SEooC contract (#126).

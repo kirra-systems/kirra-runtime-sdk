@@ -84,13 +84,13 @@ verifies at runtime and fails safe — derate/MRC — when unmet):
   indicators live and derates when they fail; assumptions it cannot verify at
   runtime are documented assumptions-of-use in the safety case.
 
-### 4.1 SG2 drivable-space containment inputs (Option-B; pending live wiring)
+### 4.1 SG2 drivable-space containment inputs (Option-B; wired live, #128/#131)
 
 The SG2 corridor-containment check (`gateway::containment::validate_trajectory_containment`,
 KIRRA-OCCY-FAULT-001 / OCCY_SAFETY_GOALS.md SG2) requires three inputs that
-the integrator's perception / map layer must supply through the Option-B
-trajectory + corridor wiring (the follow-up issue tracks the live wire-up;
-the check itself is built and unit-tested today):
+the integrator's perception / map layer supplies through the Option-B
+trajectory + corridor wiring — now live in the adapter slow loop (`kirra-trajectory`
+validation; #128/#131):
 
 - **Planned trajectory** — sequence of poses (`x`, `y`, `heading`) over a
   bounded look-ahead horizon (≤ `MAX_TRAJECTORY_HORIZON = 50` per call); pose
