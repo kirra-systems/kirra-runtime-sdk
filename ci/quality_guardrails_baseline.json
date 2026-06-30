@@ -14,6 +14,16 @@
   },
   "ownership_scope": [
     "src/bin/kirra_verifier_service.rs",
+    "src/bin/kirra_verifier_service/attestation.rs",
+    "src/bin/kirra_verifier_service/fleet.rs",
+    "src/bin/kirra_verifier_service/audit.rs",
+    "src/bin/kirra_verifier_service/action_filter.rs",
+    "src/bin/kirra_verifier_service/industrial.rs",
+    "src/bin/kirra_verifier_service/federation.rs",
+    "src/bin/kirra_verifier_service/actuator.rs",
+    "src/bin/kirra_verifier_service/fabric.rs",
+    "src/bin/kirra_verifier_service/console.rs",
+    "src/bin/kirra_verifier_service/operators.rs",
     "src/gateway/mod.rs",
     "src/gateway/policy_layer.rs"
   ]
