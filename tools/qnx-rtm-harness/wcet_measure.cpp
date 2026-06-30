@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <string_view>
 #include <vector>
 
 #include <ctime>
@@ -63,15 +64,19 @@ std::uint64_t now_ns() {
          + static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
-// Raise to SCHED_FIFO max priority and pin to one isolated core.
+// Raise to SCHED_FIFO max priority and pin to one isolated core. Returns TRUE
+// iff SCHED_FIFO was actually granted — the caller uses this to label the row
+// honestly (FIFO is REQUIRED for a WCET claim; without it the run is INDICATIVE).
 //   * POSIX form (works on a Linux eval VM; isolate the core with isolcpus=<cpu>).
 //   * On QNX, ALSO set the runmask via
 //       ThreadCtl(_NTO_TCTL_RUNMASK_GET_AND_SET_INHERIT, &mask)
 //     and SchedSet() the FIFO priority. SCHED_FIFO requires privilege.
-void enter_rt(int cpu) {
+bool enter_rt(int cpu) {
     struct sched_param sp{};
     sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
+    const bool fifo_granted =
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0;
+    if (!fifo_granted) {
         std::fprintf(stderr,
             "WARN: SCHED_FIFO not granted (need privilege) — timing is INDICATIVE only\n");
     }
@@ -83,12 +88,17 @@ void enter_rt(int cpu) {
 #else
     (void)cpu;  // QNX: pin via ThreadCtl(_NTO_TCTL_RUNMASK_GET_AND_SET_INHERIT, ...)
 #endif
+    return fifo_granted;
 }
 
 } // namespace
 
-int main() {
-    enter_rt(/*cpu=*/1);
+int main(int argc, char **argv) {
+    // The target triple is passed in (e.g. `x86_64-pc-nto-qnx800`) so the emitted
+    // row names the ACTUAL target, never a placeholder. Absent → flagged below.
+    const char *target = (argc > 1) ? argv[1] : "<TARGET_TRIPLE_TBD>";
+
+    const bool fifo_granted = enter_rt(/*cpu=*/1);
 
     static const std::uint8_t payload[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     KirraContractView v = make_admissible_view(payload, sizeof(payload));
@@ -126,11 +136,31 @@ int main() {
                 (unsigned long long)mn, (unsigned long long)med,
                 (unsigned long long)p999, (unsigned long long)mx);
 
+    // Honest status token (the methodology's INVARIANT: host timing is INDICATIVE,
+    // never WCET — only a QNX-target run UNDER FIFO is a WCET claim):
+    //   * non-QNX build           → HOST-INDICATIVE        (never a WCET number)
+    //   * QNX build, FIFO denied   → QNX-TARGET-INDICATIVE  (FIFO is required)
+    //   * QNX build, FIFO granted  → QNX-TARGET-MEASURED    (the real row)
+    // The `sched` column reflects what was ACTUALLY granted, not what we asked for.
+    const char *sched = fifo_granted ? "SCHED_FIFO" : "SCHED_OTHER";
+#if defined(__QNXNTO__)
+    const char *status = fifo_granted ? "QNX-TARGET-MEASURED" : "QNX-TARGET-INDICATIVE";
+#else
+    const char *status = "HOST-INDICATIVE";
+#endif
+
+    // A MEASURED row with a placeholder triple would be unfilable — warn loudly.
+    if (std::string_view(status) == "QNX-TARGET-MEASURED"
+        && std::string_view(target) == "<TARGET_TRIPLE_TBD>") {
+        std::fprintf(stderr,
+            "WARN: target triple not supplied — pass it as argv[1] "
+            "(e.g. x86_64-pc-nto-qnx800) so the MEASURED row names the real target\n");
+    }
+
     // CSV row — replaces the harness placeholder `wcet_status = TBD-QNX-TARGET`.
-    // Substitute <TARGET_TRIPLE_TBD> with the confirmed nto-qnx800 tuple.
     std::printf("metric,target,sched,n,warmup,max_ns,p999_ns,wcet_status\n");
-    std::printf("kirra_judge_assess,<TARGET_TRIPLE_TBD>,SCHED_FIFO,%zu,%zu,%llu,%llu,QNX-TARGET-MEASURED\n",
-                MEASURE_ITERS, WARMUP_ITERS,
-                (unsigned long long)mx, (unsigned long long)p999);
+    std::printf("kirra_judge_assess,%s,%s,%zu,%zu,%llu,%llu,%s\n",
+                target, sched, MEASURE_ITERS, WARMUP_ITERS,
+                (unsigned long long)mx, (unsigned long long)p999, status);
     return 0;
 }
