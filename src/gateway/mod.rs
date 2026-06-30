@@ -337,23 +337,41 @@ impl KirraLiveGateway {
 
                     let out_bytes = match adapter_clone.decode_demand(raw_frame) {
                         Ok(demand) => {
-                            let mut gov = gov_worker_clone.lock().unwrap();
-                            // B4: feed the REAL elapsed dt since the previous governed
-                            // frame, not a fabricated constant. Measured under the
-                            // governor lock so it stays consistent with the shared
-                            // `last_validated_scalar` rate anchor; `saturating_*` so a
-                            // non-monotonic clock reads 0 (→ evaluate fail-closes) not a
-                            // negative dt.
-                            let now = Instant::now();
-                            let dt = {
-                                let mut last = last_eval_clone.lock().unwrap();
-                                let elapsed = last.map(|prev| now.saturating_duration_since(prev));
-                                *last = Some(now);
-                                governed_dt_secs(elapsed)
+                            // Worker-panic isolation (fail-closed): hold the shared
+                            // governor lock for ONLY the panic-free `evaluate` plus a
+                            // snapshot of the values the bookkeeping below needs, then
+                            // release it BEFORE touching the recorder / io locks. This
+                            // keeps the safety core's lock UN-NESTED — no other
+                            // poisonable lock is acquired while the governor guard is
+                            // held — so a panic on the bookkeeping path can never be
+                            // raised under the governor lock and therefore can never
+                            // poison the governor. (In release `panic=abort` any panic
+                            // aborts the process anyway — fail-closed; the un-nesting is
+                            // the unwind/test-build guarantee, and also shortens the
+                            // WCET-relevant governor hold.) The `.unwrap()`s are KEPT: a
+                            // genuinely poisoned governor still panics → fail-closed,
+                            // never recovered onto corrupt safety state.
+                            let (intercept, trust_mode, trust_score) = {
+                                let mut gov = gov_worker_clone.lock().unwrap();
+                                // B4: feed the REAL elapsed dt since the previous governed
+                                // frame, not a fabricated constant. Measured under the
+                                // governor lock so it stays consistent with the shared
+                                // `last_validated_scalar` rate anchor; `saturating_*` so a
+                                // non-monotonic clock reads 0 (→ evaluate fail-closes) not a
+                                // negative dt.
+                                let now = Instant::now();
+                                let dt = {
+                                    let mut last = last_eval_clone.lock().unwrap();
+                                    let elapsed = last.map(|prev| now.saturating_duration_since(prev));
+                                    *last = Some(now);
+                                    governed_dt_secs(elapsed)
+                                };
+                                let intercept = gov.evaluate(demand, dt);
+                                (intercept, gov.trust_mode(), gov.trust_engine.current_score)
                             };
-                            let intercept = gov.evaluate(demand, dt);
+
                             let processed = metrics_clone.total_processed_frames.fetch_add(1, Ordering::Relaxed) + 1;
-                            metrics_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
+                            metrics_clone.trust_score.store(trust_score as u64, Ordering::Relaxed);
 
                             if intercept.was_unsafe_attempt {
                                 metrics_clone.envelope_clamping_events.fetch_add(1, Ordering::Relaxed);
@@ -363,6 +381,9 @@ impl KirraLiveGateway {
                             }
 
                             if processed.is_multiple_of(100) {
+                                // Recorder lock acquired with the governor guard already
+                                // released; the entry is built entirely from the snapshot
+                                // taken above, so it still reflects the evaluated frame.
                                 let mut rec = recorder_worker_clone.lock().unwrap();
                                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
@@ -372,7 +393,7 @@ impl KirraLiveGateway {
                                     "TRANSPARENT"
                                 };
 
-                                let system_state_enum = match gov.trust_mode() {
+                                let system_state_enum = match trust_mode {
                                     TrustMode::FullAutonomy => GlobalSystemState::Normal,
                                     _ => GlobalSystemState::Degraded,
                                 };
@@ -384,8 +405,8 @@ impl KirraLiveGateway {
                                     action: "MODBUS_WRITE",
                                     res: dynamic_resolution_text,
                                     state: system_state_enum,
-                                    mode: gov.trust_mode(),
-                                    score: gov.trust_engine.current_score,
+                                    mode: trust_mode,
+                                    score: trust_score,
                                     narrative: intercept.mitigation.to_string(),
                                 });
                                 flush_payload = Some(rec.clone());
