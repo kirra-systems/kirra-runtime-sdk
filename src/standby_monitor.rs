@@ -122,8 +122,10 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
 /// the SAFE direction: the standby waits longer, never promotes early. Returns
 /// `(resolved_timeout_ms, clamped)`; the caller logs loudly when `clamped` so the
 /// misconfiguration is visible rather than silently changing failover latency.
+// #707: pub(crate) — internal helper (promotion loop + same-module tests), not a
+// supported external API.
 #[must_use]
-pub fn enforce_promotion_timeout_floor(env_timeout_ms: u64, interval_ms: u64) -> (u64, bool) {
+pub(crate) fn enforce_promotion_timeout_floor(env_timeout_ms: u64, interval_ms: u64) -> (u64, bool) {
     let floor = (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 + 1).saturating_mul(interval_ms);
     if env_timeout_ms < floor {
         (floor, true)
@@ -239,6 +241,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
         let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0) // #707: reject 0 — disables the #689 clamp AND panics tokio::interval
             .unwrap_or(HEARTBEAT_INTERVAL_MS);
 
         let mut tick = interval(Duration::from_millis(interval_ms));
@@ -507,6 +510,7 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
         let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v > 0) // #707: reject 0 — disables the #689 clamp AND panics tokio::interval
             .unwrap_or(HEARTBEAT_INTERVAL_MS);
         let (timeout_ms, clamped) = enforce_promotion_timeout_floor(env_timeout_ms, interval_ms);
         if clamped {
@@ -515,9 +519,9 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
                 interval_ms,
                 resolved_timeout_ms = timeout_ms,
                 max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                "KIRRA_PROMOTION_TIMEOUT too small for KIRRA_HEARTBEAT_INTERVAL (MAX×interval ≥ \
-                 timeout): clamped UP so the primary self-demotes before the standby promotes \
-                 (#689 split-brain guard). Fix the env config to silence this."
+                "KIRRA_PROMOTION_TIMEOUT too small for KIRRA_HEARTBEAT_INTERVAL \
+                 (timeout < (MAX+1)×interval): clamped UP so the primary self-demotes before \
+                 the standby promotes (#689 split-brain guard). Fix the env config to silence this."
             );
         }
 
