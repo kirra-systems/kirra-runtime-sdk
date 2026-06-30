@@ -130,6 +130,14 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
 // supported external API.
 #[must_use]
 pub(crate) fn enforce_promotion_timeout_floor(env_timeout_ms: u64, interval_ms: u64) -> (u64, bool) {
+    // Contract: callers pass a positive interval (both env reads filter `> 0`).
+    // `interval_ms == 0` would make the floor 0 and silently disable the
+    // split-brain guard — fail fast on misuse in debug/test builds without
+    // changing release behaviour (Copilot PR #707).
+    debug_assert!(
+        interval_ms > 0,
+        "interval_ms must be > 0 (0 would disable the split-brain promotion floor)"
+    );
     let floor = (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 + 1).saturating_mul(interval_ms);
     if env_timeout_ms < floor {
         (floor, true)
