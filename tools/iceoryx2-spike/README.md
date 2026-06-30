@@ -83,6 +83,29 @@ floor is what the mandatory isolation costs; iceoryx2 holds the crossing
 under FIFO (#274); the deployment lowest-latency mode pairs iceoryx2 with
 **busy-wait polling on an isolated core** → toward the published ~100 ns.
 
+**Busy-wait / pinned-core ping-pong** (the deployment lowest-latency *mode*).
+`latency_bench` also runs a two-thread ping-pong — a responder busy-polls
+(`spin_loop`, no event wakeup) on one pinned core and echoes; the requester
+busy-polls on another — i.e. the *real* cross-core round-trip a doer↔checker hop
+pays (`KIRRA_LAT_FIFO=1 KIRRA_LAT_REQ_CPU=2 KIRRA_LAT_RESP_CPU=3 cargo run
+--release --bin latency_bench`). Host-indicative result on this shared,
+**non-isolated, virtualized** sandbox:
+
+```
+mode                       p50_ns     p99_ns    p999_ns     max_ns
+iox2 ping-pong (RTT)        ~1400      ~1900      ~15000      ~90000
+```
+
+Two honest reads: (1) the **~1.4 µs RTT (~700 ns one-way)** is the *true*
+cross-core handoff — the single-thread row above (347 ns) understated it because
+publish+receive in one thread never actually waits across a boundary. (2) The
+**tail (~15 µs p99.9) is host/hypervisor jitter, not iceoryx2**: these cores are
+not `isolcpus`-isolated, so pinning removes migration but not preemption — and
+`SCHED_FIFO` here *worsened* the tail (a busy-spinning FIFO thread fights the
+system scheduler on a shared core). The published ~100 ns floor needs an
+**isolated core on a low-jitter target**, which is precisely the QNX-under-FIFO
+measurement (#274) — the mechanism is in place; the target supplies the number.
+
 ## How to run
 
 ```sh

@@ -26,8 +26,40 @@ use std::hint::black_box;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use iceoryx2_spike::frozen::FrozenChannel;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+use iceoryx2::prelude::*;
+use iceoryx2_spike::frozen::{FrozenChannel, WireView};
 use kirra_contract_channel::GovernorContractView;
+
+/// Pin the CALLING thread to one CPU (`sched_setaffinity`). Returns whether it
+/// took. On a target this core would be `isolcpus`-isolated; on a shared host it
+/// only removes migration, not preemption — the residual jitter is the host's.
+fn pin_to_cpu(cpu: usize) -> bool {
+    // SAFETY: a zeroed cpu_set_t is valid; we set exactly one bit and pass the
+    // set's size. pid 0 = the calling thread. No aliasing, no invariants touched.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+/// Raise the CALLING thread to `SCHED_FIFO` at max priority. Returns whether it
+/// was granted (needs privilege; without it the run stays time-shared and is
+/// INDICATIVE — same discipline as `tools/qnx-rtm-harness/wcet_measure.cpp`).
+fn try_fifo() -> bool {
+    // SAFETY: a zeroed sched_param is valid; we set only sched_priority and pass
+    // SCHED_FIFO. pid 0 = the calling thread.
+    unsafe {
+        let mut p: libc::sched_param = std::mem::zeroed();
+        p.sched_priority = libc::sched_get_priority_max(libc::SCHED_FIFO);
+        libc::sched_setscheduler(0, libc::SCHED_FIFO, &p) == 0
+    }
+}
 
 fn parse_iters() -> usize {
     std::env::var("KIRRA_LAT_ITERS")
@@ -131,6 +163,126 @@ fn bench_iceoryx2(iters: usize, warmup: usize) -> Result<Stats, Box<dyn core::er
     Ok(summarize(samples))
 }
 
+/// 4. iceoryx2 **busy-wait ping-pong** — the deployment lowest-latency shape:
+///    a responder thread busy-polls a request channel (pinned to `resp_cpu`,
+///    optionally `SCHED_FIFO`) and echoes; the requester (this thread, pinned to
+///    `req_cpu`) publishes and busy-polls for the echo, timing the round trip.
+///    No blocking, no event wakeup — only `spin_loop()` between samples.
+///
+/// On a target the two cores are `isolcpus`-isolated under FIFO → deterministic
+/// sub-µs; on a shared host pinning only removes migration, so the tail still
+/// carries the host's preemption (INDICATIVE).
+fn bench_iceoryx2_pingpong(
+    iters: usize,
+    warmup: usize,
+    req_cpu: Option<usize>,
+    resp_cpu: Option<usize>,
+    fifo: bool,
+) -> Result<Stats, Box<dyn core::error::Error>> {
+    const SPIN_BUDGET: u64 = 200_000_000; // generous; guards against a lost sample
+    let stop = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicBool::new(false));
+
+    // Responder: busy-poll the request channel, echo to the response channel.
+    let stop_r = Arc::clone(&stop);
+    let ready_r = Arc::clone(&ready);
+    let responder = thread::spawn(move || -> Result<(), String> {
+        if let Some(c) = resp_cpu {
+            pin_to_cpu(c);
+        }
+        if fifo {
+            try_fifo();
+        }
+        let node = NodeBuilder::new()
+            .create::<ipc::Service>()
+            .map_err(|e| e.to_string())?;
+        let req_sub = node
+            .service_builder(&"kirra-lat-req".try_into().map_err(|_| "svc name")?)
+            .publish_subscribe::<WireView>()
+            .open_or_create()
+            .map_err(|e| e.to_string())?
+            .subscriber_builder()
+            .create()
+            .map_err(|e| e.to_string())?;
+        let resp_pub = node
+            .service_builder(&"kirra-lat-resp".try_into().map_err(|_| "svc name")?)
+            .publish_subscribe::<WireView>()
+            .open_or_create()
+            .map_err(|e| e.to_string())?
+            .publisher_builder()
+            .create()
+            .map_err(|e| e.to_string())?;
+        ready_r.store(true, Ordering::Release);
+        while !stop_r.load(Ordering::Acquire) {
+            match req_sub.receive() {
+                Ok(Some(sample)) => {
+                    let echo = sample.0;
+                    if let Ok(s) = resp_pub.loan_uninit() {
+                        let _ = s.write_payload(WireView(echo)).send();
+                    }
+                }
+                _ => core::hint::spin_loop(),
+            }
+        }
+        Ok(())
+    });
+
+    // Requester (this thread).
+    if let Some(c) = req_cpu {
+        pin_to_cpu(c);
+    }
+    if fifo {
+        try_fifo();
+    }
+    let node = NodeBuilder::new().create::<ipc::Service>()?;
+    let req_pub = node
+        .service_builder(&"kirra-lat-req".try_into()?)
+        .publish_subscribe::<WireView>()
+        .open_or_create()?
+        .publisher_builder()
+        .create()?;
+    let resp_sub = node
+        .service_builder(&"kirra-lat-resp".try_into()?)
+        .publish_subscribe::<WireView>()
+        .open_or_create()?
+        .subscriber_builder()
+        .create()?;
+    while !ready.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    let mut samples = Vec::with_capacity(iters);
+    for i in 0..(iters + warmup) {
+        let v = well_formed(i as u64);
+        let t0 = Instant::now();
+        // publish the request…
+        req_pub.loan_uninit()?.write_payload(WireView(v)).send()?;
+        // …busy-wait for the echo (one in flight → the next response is ours).
+        let mut spins = 0u64;
+        let received = loop {
+            if let Some(sample) = resp_sub.receive()? {
+                break sample.0;
+            }
+            core::hint::spin_loop();
+            spins += 1;
+            if spins > SPIN_BUDGET {
+                stop.store(true, Ordering::Release);
+                let _ = responder.join();
+                return Err("ping-pong spin budget exceeded (lost sample?)".into());
+            }
+        };
+        let dt = t0.elapsed();
+        black_box(received.sequence);
+        if i >= warmup {
+            samples.push(dt);
+        }
+    }
+
+    stop.store(true, Ordering::Release);
+    let _ = responder.join();
+    Ok(summarize(samples))
+}
+
 fn ns(d: Duration) -> u128 {
     d.as_nanos()
 }
@@ -190,8 +342,48 @@ fn main() {
            serialize + 2 syscalls + a kernel copy. A real DDS hop adds RTPS /\n\
            discovery / typed-CDR overhead on top (tens of us..ms; see README refs).\n\
          * iceoryx2 crosses the SAME isolation boundary as the socket, but with NO\n\
-           serialization and NO kernel data copy (only an 8-byte offset moves). The\n\
-           deployment lowest-latency mode pairs it with busy-wait polling on an\n\
-           isolated core under SCHED_FIFO -> deterministic sub-microsecond on target."
+           serialization and NO kernel data copy (only an 8-byte offset moves)."
     );
+
+    // ---- the deployment lowest-latency mode: busy-wait ping-pong on pinned cores
+    // (optionally SCHED_FIFO). Two threads, two iceoryx2 services, no event wakeup.
+    let n_cpus = thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    let env_cpu = |k: &str, dflt: usize| {
+        std::env::var(k).ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(dflt)
+    };
+    // Default to the two highest logical cores; override with KIRRA_LAT_REQ_CPU /
+    // KIRRA_LAT_RESP_CPU. KIRRA_LAT_FIFO=1 attempts SCHED_FIFO (needs privilege).
+    let req_cpu = if n_cpus >= 2 { Some(env_cpu("KIRRA_LAT_REQ_CPU", n_cpus - 2)) } else { None };
+    let resp_cpu = if n_cpus >= 2 { Some(env_cpu("KIRRA_LAT_RESP_CPU", n_cpus - 1)) } else { None };
+    let want_fifo = matches!(std::env::var("KIRRA_LAT_FIFO").as_deref(), Ok("1") | Ok("true"));
+    let fifo_granted = want_fifo && try_fifo();
+    if want_fifo && !fifo_granted {
+        eprintln!("[latency_bench] WARN: SCHED_FIFO not granted (need privilege) — ping-pong is time-shared / INDICATIVE");
+    }
+
+    eprintln!(
+        "\n=== iceoryx2 busy-wait ping-pong (the deployment lowest-latency mode) ===\n\
+         requester core={req_cpu:?}  responder core={resp_cpu:?}  SCHED_FIFO={fifo_granted}\n\
+         Two threads busy-poll (spin_loop, no event wakeup) on pinned cores; this is\n\
+         the round-trip a doer<->checker hop pays. On a target the cores are\n\
+         isolcpus-isolated under FIFO -> deterministic sub-us; on this shared host\n\
+         pinning removes migration but not preemption, so the tail is still host jitter."
+    );
+
+    match bench_iceoryx2_pingpong(iters, warmup, req_cpu, resp_cpu, fifo_granted) {
+        Ok(pp) => {
+            println!(
+                "\n{:<22} {:>10} {:>10} {:>10} {:>10}   p50 vs floor",
+                "mode", "p50_ns", "p99_ns", "p999_ns", "max_ns"
+            );
+            println!("{}", "-".repeat(86));
+            print_row("iox2 ping-pong (RTT)", &pp, Some(&in_proc));
+            println!(
+                "\n(RTT = full round trip across two busy-polling threads; halve for a\n\
+                 rough one-way estimate. Compare the p99.9 tail against the single-thread\n\
+                 iceoryx2 row above — pinning + busy-wait is the jitter lever.)"
+            );
+        }
+        Err(e) => eprintln!("[latency_bench] ping-pong skipped: {e}"),
+    }
 }
