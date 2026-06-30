@@ -264,8 +264,9 @@ impl FrozenChannel {
     }
 
     /// Publish one frozen view and return the RECEIVED owned copy (proves the
-    /// zero-copy round-trip — the bytes crossed the transport intact).
-    fn round_trip(
+    /// zero-copy round-trip — the bytes crossed the transport intact). Public so
+    /// the latency benchmark can time the bare transport hop.
+    pub fn round_trip(
         &self,
         view: GovernorContractView,
     ) -> Result<GovernorContractView, Box<dyn core::error::Error>> {

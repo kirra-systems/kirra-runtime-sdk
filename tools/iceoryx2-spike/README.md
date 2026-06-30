@@ -58,6 +58,31 @@ harness and the hypervisor-SHM seam use, not a spike-local copy.
   envelope is a separate downstream governor step (the talisman
   `VehicleKinematicsContract`) and is intentionally out of scope here.
 
+### Latency — why iceoryx2 for the doer→checker hop (`src/bin/latency_bench.rs`)
+
+The QM-planner (doer) ↔ ASIL-governor (checker) **partition boundary is a
+mandatory safety boundary** (freedom-from-interference) — you cannot delete it for
+latency. The question is the *lowest-latency way to cross it*. `latency_bench`
+times the 176-byte frozen `GovernorContractView` handoff three ways
+(`KIRRA_LAT_ITERS=100000 cargo run --release --bin latency_bench`):
+
+```
+transport                  p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+in-process (floor)             28         37         60      69069     (floor)
+socket+serde (proxy)          976       1901      13934      83820     34.9x
+iceoryx2 (zero-copy)          309        424        995      46083     11.0x
+```
+
+INDICATIVE (shared host, no core isolation / FIFO) — the comparative **ratio** is
+the takeaway. iceoryx2 is ~3× faster than a bare UDP+serialize hop at the median
+and ~14× tighter at **p99.9 (995 ns vs 13.9 µs)** — and `socket+serde` is a
+*conservative* proxy: a real DDS hop adds RTPS/discovery/typed-CDR overhead (tens
+of µs–ms → 100–1000×; see the RMW refs in the #275 scope). The in-process **28 ns**
+floor is what the mandatory isolation costs; iceoryx2 holds the crossing
+**sub-microsecond**, where sockets/DDS do not. Certified numbers are QNX-target
+under FIFO (#274); the deployment lowest-latency mode pairs iceoryx2 with
+**busy-wait polling on an isolated core** → toward the published ~100 ns.
+
 ## How to run
 
 ```sh
