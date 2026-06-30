@@ -17,7 +17,7 @@
 //!
 //! ## Configuration (env vars)
 //!
-//! - `KIRRA_WCET_ENV`    — `host` (default) | `ci-runner` | `other`.
+//! - `KIRRA_WCET_ENV`    — `host` (default) | `ci-runner` (alias `ci`) | `other`.
 //! - `KIRRA_WCET_ITERS`  — measured iterations per stage (default 100_000).
 //! - `KIRRA_WCET_WARMUP` — warm-up iterations per stage, not recorded (default 10_000).
 //!
@@ -174,7 +174,7 @@ fn main() {
 
     let stages = [
         StageReport::new(stage::GOVERNOR_EXEC, governor),
-        StageReport::new("governor_exec_mrc", governor_mrc),
+        StageReport::new(stage::GOVERNOR_EXEC_MRC, governor_mrc),
     ];
     let report = Report::new(env, "host-default", &stages);
 
