@@ -224,7 +224,11 @@ int main() {
     // no FIFO) → other / INDICATIVE-NOT-WCET; a host smoke build → host. Provenance
     // (KVM vs hardware) lives in the human banner above, not the canonical token.
     const char *env    = certified ? "qnx-target-fifo" : (kIsQnxTarget ? "other" : "host");
-    const char *sched  = certified ? "SCHED_FIFO" : "host-default";
+    // `sched` reflects the ACTUAL scheduler obtained at runtime (an objective
+    // fact), independent of the cert assertion — a non-certified QNX VM run under
+    // root still genuinely ran under SCHED_FIFO; only `env`/`wcet_status` carry the
+    // certified-vs-indicative verdict.
+    const char *sched  = fifo_granted ? "SCHED_FIFO" : "host-default";
     const char *status = certified ? "QNX-TARGET-MEASURED" : "INDICATIVE-NOT-WCET";
     std::printf("metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status\n");
     std::printf("kirra_judge_assess,%s,%s,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s\n",

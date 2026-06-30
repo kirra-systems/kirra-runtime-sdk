@@ -216,8 +216,26 @@ emulation), NOT KVM** (the dev laptop has VT-x disabled in firmware). A represen
 `SCHED_FIFO` WCET requires KVM (near-native) or hardware; under TCG the absolute
 numbers carry full interpreter + VM-deschedule overhead (observed: median ≈ 3.6 µs,
 p99.9 ≈ 10.6 µs, **max ≈ 2.2 ms** — the millisecond max is emulation jitter, not the
-judge). So the `max < 100 µs` criterion is **deferred** to a KVM/hardware run; the
+judge). So the `max < 100 µs` criterion was **deferred** to a KVM/hardware run; the
 typical-case single-digit-µs figure even under heavy emulation is feasibility-positive.
+
+### 6.2 On-target result — KVM (acceptance-#4 met, INDICATIVE)
+
+Re-run on the same `mkqnximage`/QEMU VM with **VT-x enabled → QEMU KVM**
+(`-enable-kvm -cpu host`). **GATE: PASS (all 9 rows)** again — verdict correctness
+is unaffected by the accelerator. Timing collapses ~100× vs TCG and the deferred
+`max < 100 µs` acceptance-#4 target is now **met as a KVM-INDICATIVE result**:
+
+```
+WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=76ns  MAX=21001ns  [INDICATIVE — platform=kvm]
+kirra_judge_assess,other,host-default,1000000,31,41,21001,70,40,48,76,INDICATIVE-NOT-WCET
+```
+
+median 40 ns, p99.9 **76 ns**, **max 21.0 µs** (vs TCG max 2.20 ms). Full evidence:
+`results/qnx800-x86_64-vm-kvm.txt`. This is **Phase-I feasibility, not cert-grade** —
+a VM on an x86_64 laptop is not the deployment ISA, and the post-#274 cert gate
+correctly emits `INDICATIVE-NOT-WCET` (the operator did not assert
+`KIRRA_WCET_CERTIFIED`). Cert-grade WCET remains Phase-II (§7).
 
 ## 7. WCET — Phase-I indicative, cert-grade TBD
 

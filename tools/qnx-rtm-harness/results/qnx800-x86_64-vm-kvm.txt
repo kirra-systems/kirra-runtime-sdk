@@ -1,0 +1,53 @@
+KIRRA #274 — on-target FDIT + WCET evidence (Phase-I feasibility, KVM)
+=====================================================================
+Target : QNX SDP 8.0, x86_64, mkqnximage/QEMU VM
+Accel  : QEMU KVM (near-native) — VT-x ENABLED on dev laptop (-enable-kvm -cpu host)
+Build  : judge x86_64-pc-nto-qnx800 (cargo -Zbuild-std=core, no QNX std);
+         C++ via q++ (QCC 12.2.0). Binaries baked into the IFS, auto-run at boot.
+Date   : 2026-06-30
+
+GATE  : verdict correctness — the ONLY pass criterion. Result: PASS (all 9 rows).
+WCET  : INDICATIVE-KVM. KVM is near-native, so the absolute numbers are far
+        cleaner than the TCG run (max 21 us vs 2.2 ms) and the `max < 100 us`
+        acceptance-#4 target is now MET — but a VM on an x86_64 laptop is still
+        NOT the deployment ISA. This is Phase-I feasibility, not cert-grade.
+        Cert-grade WCET is Phase-II (NVIDIA DRIVE + QNX OS for Safety + Ferrocene
+        under SCHED_FIFO); that number, not a VM figure, backs the FTTI claim.
+
+--- FDIT / RTM matrix (verbatim, on QNX) ----------------------------------------
+row    fault class            rtm            ok     verdict             p50(ns)    p99(ns)    max(ns)
+-------------------------------------------------------------------------------------------------
+SG-00  valid                  CONTROL        PASS   Ok                      786        882      21126
+SG-01  bad-magic              NO-RTM-ID      PASS   StaleHeader             786        810      21235
+SG-02  sequence-regress       NO-RTM-ID      PASS   SequenceRegress         786        884      19745
+SG-03  deadline-missed        NO-RTM-ID      PASS   DeadlineMissed          786        868      18536
+SG-04  payload-corrupt (CRC)  NO-RTM-ID      PASS   PayloadCorrupt          786        807      18065
+SG-05  payload-oversize       NO-RTM-ID      PASS   PayloadOversize          80         96       4181
+SG-06  over-envelope          SG-001/TR-001  PASS   KinematicLimit          786        813      23802
+SG-07  replay (seq==last)     NO-RTM-ID      PASS   SequenceRegress         786        880      19827
+SG-08  torn-write (odd gen)   NO-RTM-ID      PASS   StaleHeader             104        124      17971
+
+GATE (verdict correctness): PASS
+FDIT_EXIT=0
+
+--- wcet_measure (INDICATIVE-KVM — canonical schema, post-#734 cert gate) --------
+WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=76ns  MAX=21001ns  [INDICATIVE — not a WCET claim; platform=kvm]
+metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status
+kirra_judge_assess,other,host-default,1000000,31,41,21001,70,40,48,76,INDICATIVE-NOT-WCET
+WCET_EXIT=0
+
+Acceptance #4 (`max < 100 us`): MET as a KVM-INDICATIVE result (max = 21.0 us).
+Contrast the TCG run (qnx800-x86_64-vm-tcg.txt): max 2.20 ms — KVM is ~100x cleaner.
+
+Notes:
+- Unlike the TCG run, the binary did NOT need a manual downgrade: with the #274
+  cert gate (`kIsQnxTarget && fifo_granted && KIRRA_WCET_CERTIFIED`) the row
+  self-declares `INDICATIVE-NOT-WCET` because the VM operator did not assert
+  certified hardware (`KIRRA_WCET_CERTIFIED` unset). `platform=kvm` (banner)
+  records the provenance. A VM can no longer mint `QNX-TARGET-MEASURED`.
+- The CSV above reads `sched=host-default`, but the run genuinely ran under
+  SCHED_FIFO (root auto-run context; no "SCHED_FIFO not granted" WARN was
+  emitted). That label was tied to the cert flag in the binary that produced this
+  row; the accompanying sched-label fix decouples `sched` from the cert verdict
+  (`sched = fifo_granted ? "SCHED_FIFO" : "host-default"`), so a re-run emits
+  `sched=SCHED_FIFO`. The `INDICATIVE-NOT-WCET` verdict is unchanged.
