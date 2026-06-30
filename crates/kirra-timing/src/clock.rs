@@ -27,6 +27,16 @@ pub trait MonotonicClock {
     }
 }
 
+/// Blanket impl so a `&Clock` is itself a [`MonotonicClock`]. This lets
+/// [`crate::wcet_measure!`] accept either an owned clock or a reference without
+/// the caller worrying about `&&T` mismatches.
+impl<T: MonotonicClock + ?Sized> MonotonicClock for &T {
+    #[inline]
+    fn now_nanos(&self) -> u64 {
+        (**self).now_nanos()
+    }
+}
+
 /// An [`Instant`]-backed monotonic clock for host and CI campaigns.
 ///
 /// Indicative-only by construction: pair it with [`crate::MeasurementEnv::Host`]

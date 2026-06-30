@@ -54,7 +54,13 @@ impl<'a> Report<'a> {
     }
 
     /// Write the machine-readable CSV (header + one row per stage). Stable column
-    /// order, aligned with `tools/qnx-rtm-harness/wcet_measure.cpp`.
+    /// order. This is an **extended superset** of the
+    /// `tools/qnx-rtm-harness/wcet_measure.cpp` row
+    /// (`metric,target,sched,n,warmup,max_ns,p999_ns,wcet_status`): it shares
+    /// `metric,sched,n,max_ns,p999_ns,wcet_status` and adds
+    /// `env,min_ns,mean_ns,stddev_ns,p50_ns,p99_ns` (and uses `env` where the
+    /// harness uses `target`). It is NOT byte-identical — downstream tooling that
+    /// expects the exact harness header must map columns, not assume equality.
     ///
     /// # Errors
     /// Propagates any [`fmt::Error`] from the writer.

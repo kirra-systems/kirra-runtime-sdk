@@ -36,6 +36,7 @@
 //!
 //! let clock = FakeClock(core::cell::Cell::new(0));
 //! // 256 buckets × 100 ns = 0..25.6 µs histogram; samples beyond go to overflow.
+//! #[allow(unused_mut)] // `mut` is used only when the `instrument` feature is on
 //! let mut governor: WcetChannel<256> = WcetChannel::new(100);
 //!
 //! // With `instrument` ON this brackets the block with clock reads and records
@@ -45,6 +46,7 @@
 //!     true
 //! });
 //! assert!(verdict);
+//! let _stats = governor.snapshot(); // consume off the hot path at campaign end
 //! ```
 //!
 //! Scope note: this increment delivers the library and its tests. Wiring it into
@@ -52,6 +54,10 @@
 //! follow-up (it needs CI / target validation, per the methodology).
 
 #![cfg_attr(not(test), no_std)]
+// Enforce the minimal-TCB guarantee at the crate root too (not only via the
+// Cargo `[lints]` table) — robust even if lint settings change or are bypassed,
+// matching `kirra-contract-channel`.
+#![forbid(unsafe_code)]
 
 // The crate is `no_std` for the target; the optional `std` feature (host/CI
 // clock) needs `std` explicitly linked when not already the test sysroot.
@@ -89,32 +95,36 @@ pub mod stage {
 /// Measure `block`, recording its elapsed nanoseconds into `channel` using
 /// `clock` — **only when the `instrument` feature is enabled**.
 ///
-/// With `instrument` OFF (the production default) this expands to exactly
-/// `{ block }`: no clock read, no record call, no branch — the certifiable
-/// "instrumentation is campaign-only, never the shipped hot path" property. The
-/// macro evaluates to the block's value either way.
+/// Two cfg-gated definitions exist; exactly one is compiled:
+/// - `instrument` ON — brackets `block` with monotonic clock reads via UFCS
+///   (`MonotonicClock::now_nanos(&clock)`, so the trait need not be imported at
+///   the call site, and a `&clock` works via the blanket `&T` impl) and records
+///   the elapsed time. Evaluates to the block's value.
+/// - `instrument` OFF (production default) — expands to **exactly `{ block }`**:
+///   `channel` and `clock` are not evaluated or touched at all, so there is no
+///   clock read, no record call, no branch. This is the certifiable
+///   "instrumentation is campaign-only, never the shipped hot path" property.
 ///
 /// `clock` must implement [`MonotonicClock`]; `channel` must be a mutable
 /// [`WcetChannel`].
+#[cfg(feature = "instrument")]
 #[macro_export]
 macro_rules! wcet_measure {
     ($channel:expr, $clock:expr, $block:block) => {{
-        #[cfg(feature = "instrument")]
-        {
-            let __wcet_start = $crate::MonotonicClock::now_nanos(&$clock);
-            let __wcet_result = $block;
-            let __wcet_elapsed =
-                $crate::MonotonicClock::elapsed_nanos_since(&$clock, __wcet_start);
-            $channel.record_nanos(__wcet_elapsed);
-            __wcet_result
-        }
-        #[cfg(not(feature = "instrument"))]
-        {
-            // Zero overhead: the channel/clock are not touched at all.
-            let _ = (&$channel, &$clock);
-            $block
-        }
+        let __wcet_start = $crate::MonotonicClock::now_nanos(&$clock);
+        let __wcet_result = $block;
+        let __wcet_elapsed = $crate::MonotonicClock::elapsed_nanos_since(&$clock, __wcet_start);
+        $channel.record_nanos(__wcet_elapsed);
+        __wcet_result
     }};
+}
+
+/// Disabled form — see the enabled definition's docs. Expands to exactly the
+/// measured block; `channel`/`clock` are not referenced.
+#[cfg(not(feature = "instrument"))]
+#[macro_export]
+macro_rules! wcet_measure {
+    ($channel:expr, $clock:expr, $block:block) => {{ $block }};
 }
 
 #[cfg(test)]
@@ -163,6 +173,20 @@ mod tests {
         let s = ch.snapshot();
         assert_eq!(s.mean_ns, 5);
         assert_eq!(s.stddev_ns, 2);
+    }
+
+    #[test]
+    fn variance_uses_exact_moments_not_truncated() {
+        // [10, 11]: true population variance is 0.25 → integer floor 0 → stddev 0.
+        // The OLD truncated-moment form (mean=10, mean_of_sq=110) gave variance 10
+        // → stddev 3, a gross over-estimate. The exact (n·Σx²−(Σx)²)/n² form must
+        // floor to 0 here. Regression guard for the deferred-division fix.
+        let mut ch: WcetChannel<64> = WcetChannel::new(1);
+        ch.record_nanos(10);
+        ch.record_nanos(11);
+        let s = ch.snapshot();
+        assert_eq!(s.mean_ns, 10); // 21/2 truncated
+        assert_eq!(s.stddev_ns, 0, "exact variance floors to 0, not the truncated 3");
     }
 
     #[test]
@@ -270,7 +294,9 @@ mod tests {
     #[test]
     fn macro_disabled_is_zero_overhead_passthrough() {
         // Without the `instrument` feature the macro must not touch the channel.
+        // `mut` is only exercised on the enabled path, hence the allow.
         let clock = StepClock::new();
+        #[allow(unused_mut)]
         let mut ch: WcetChannel<8> = WcetChannel::new(1);
         let out = wcet_measure!(ch, clock, {
             clock.set(999);

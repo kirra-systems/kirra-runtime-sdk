@@ -65,7 +65,10 @@ report.write_csv(&mut csv).unwrap();             // machine CSV
 3. **Run the worst-case load** (methodology §3): max-size payload, max rate,
    concurrent fault injection; warm-up separated from the measured set.
 4. **Export** the CSV (`write_csv`) as the campaign artifact and the table for
-   humans. Columns: `metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status`.
+   humans. Columns: `metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status`
+   — an **extended superset** of the `wcet_measure.cpp` row (shares
+   `metric,sched,n,max_ns,p999_ns,wcet_status`; adds `env` + the lower
+   percentiles/moments). Not byte-identical; map columns if joining.
 5. **Gate on the tail** (`p999_ns`), not `max` — the `wcet_gate.rs` precedent:
    `max` is dominated by scheduler/hypervisor jitter on shared hosts.
 

@@ -120,9 +120,13 @@ impl<const BUCKETS: usize> WcetChannel<BUCKETS> {
         self.sum_ns += ns128;
         self.sum_sq_ns += ns128 * ns128;
 
-        let bucket = (ns / self.bucket_width_ns) as usize;
-        if bucket < BUCKETS {
-            self.buckets[bucket] += 1;
+        // Compute the bucket index in u64 and cast to usize ONLY after the range
+        // check: on a 32-bit target (some QNX/ARM configs) a large sample would
+        // otherwise truncate in the `as usize` cast and be mis-binned into an
+        // in-range bucket instead of `overflow`, skewing the percentiles.
+        let bucket = ns / self.bucket_width_ns;
+        if bucket < BUCKETS as u64 {
+            self.buckets[bucket as usize] += 1;
         } else {
             self.overflow += 1;
         }
@@ -179,12 +183,18 @@ impl<const BUCKETS: usize> WcetChannel<BUCKETS> {
         if self.count == 0 {
             return ChannelStats::EMPTY;
         }
-        let count128 = self.count as u128;
-        let mean = self.sum_ns / count128; // integer-truncated
-        // Population variance = E[x^2] - (E[x])^2, computed from exact integer
-        // moments; saturating so truncation in `mean` can't underflow it.
-        let mean_of_sq = self.sum_sq_ns / count128;
-        let variance = mean_of_sq.saturating_sub(mean * mean);
+        let n = self.count as u128;
+        let mean = self.sum_ns / n; // integer-truncated (fine for the reported mean)
+        // Exact population variance = (n·Σx² − (Σx)²) / n². The division is
+        // deferred to the very end so it is NOT pre-truncated — the moment form
+        // (Σx²/n − (Σx/n)²) truncates BEFORE subtracting and under-estimates
+        // (e.g. samples [10,11] would read stddev 3 instead of ~0). Overflow-safe:
+        // for an extreme campaign size where n·Σx² or (Σx)² exceeds u128, fall
+        // back to the moment form (a conservative, slightly-low estimate).
+        let variance = match (self.sum_sq_ns.checked_mul(n), self.sum_ns.checked_mul(self.sum_ns)) {
+            (Some(n_sum_sq), Some(sum_squared)) => n_sum_sq.saturating_sub(sum_squared) / (n * n),
+            _ => (self.sum_sq_ns / n).saturating_sub(mean * mean),
+        };
         ChannelStats {
             count: self.count,
             min_ns: self.min_ns,
