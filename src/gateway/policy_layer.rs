@@ -544,13 +544,25 @@ pub async fn enforce_posture_routing(
         return Ok(next.run(req).await);
     }
 
-    // #696 (HT1): let a CORS preflight (OPTIONS) through to the CorsLayer. A
-    // preflight carries no command and no body and authorizes nothing — the
-    // ACTUAL method (GET/POST/…) still hits this gate on the real request. Without
-    // this bypass, `classify_http_command` maps OPTIONS to `Unknown` (denied in
-    // every posture), so this OUTERMOST gate 503s every browser preflight to a
-    // non-exempt path. Not a posture/auth relaxation: nothing actionable runs.
-    if req.method() == axum::http::Method::OPTIONS {
+    // #696 (HT1): let a CORS preflight through to the CorsLayer. A preflight
+    // carries no command and no body and authorizes nothing — the ACTUAL method
+    // (GET/POST/…) still hits this gate on the real request. Without this bypass,
+    // `classify_http_command` maps OPTIONS to `Unknown` (denied in every posture),
+    // so this OUTERMOST gate 503s every browser preflight to a non-exempt path.
+    // Not a posture/auth relaxation: nothing actionable runs.
+    //
+    // Scope the bypass to an ACTUAL CORS preflight — OPTIONS *plus* both the
+    // `Origin` and `Access-Control-Request-Method` headers a browser preflight
+    // always sends (CORS spec §4.8). A bare OPTIONS without those headers is not a
+    // preflight and stays subject to the posture gate, so the exemption can't
+    // widen into a hole if a route ever serves OPTIONS via `any(...)` /
+    // `MethodFilter::all` (Copilot PR #710).
+    let is_cors_preflight = req.method() == axum::http::Method::OPTIONS
+        && req.headers().contains_key(axum::http::header::ORIGIN)
+        && req
+            .headers()
+            .contains_key(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD);
+    if is_cors_preflight {
         return Ok(next.run(req).await);
     }
 

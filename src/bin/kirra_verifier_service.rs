@@ -1498,12 +1498,26 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
         match std::env::var("KIRRA_CORS_ALLOWED_ORIGINS") {
             Ok(v) if !v.trim().is_empty() => {
-                let origins: Vec<axum::http::HeaderValue> = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
-                    .collect();
+                // Partition rather than silently dropping: an UNPARSEABLE token is a
+                // likely typo, and silently discarding it would let a misconfigured
+                // allowlist look healthy in production. Collect the rejects and log
+                // them explicitly so the misconfiguration is visible (Copilot #710).
+                let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+                let mut invalid: Vec<&str> = Vec::new();
+                for tok in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    match tok.parse::<axum::http::HeaderValue>() {
+                        Ok(hv) => origins.push(hv),
+                        Err(_) => invalid.push(tok),
+                    }
+                }
+                if !invalid.is_empty() {
+                    tracing::warn!(
+                        invalid = ?invalid,
+                        accepted = origins.len(),
+                        "KIRRA_CORS_ALLOWED_ORIGINS contained unparseable origin(s) — \
+                         dropped (likely a typo); the remaining origins are enforced"
+                    );
+                }
                 if origins.is_empty() {
                     tracing::error!(
                         value = %v,
