@@ -744,13 +744,37 @@ fn spawn_systemd_watchdog(svc: Arc<ServiceState>) {
 
 #[tokio::main]
 async fn main() {
+    // Install a tracing subscriber FIRST, before any fallible startup step, so
+    // the fail-closed startup diagnostics below (and all runtime logs) are
+    // actually emitted. Without an installed subscriber, tracing events are
+    // dropped on the floor and a fail-closed `exit(1)` would be SILENT — the
+    // prior `.expect()`/`panic!` always reached stderr, so the conversion to
+    // `tracing::error!` must be backed by a subscriber to preserve startup
+    // diagnosability. Honors `RUST_LOG`; defaults to `info`. `try_init` tolerates
+    // a subscriber already installed by an embedding harness instead of panicking.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let db_path = std::env::var("KIRRA_DB_PATH")
         .unwrap_or_else(|_| "kirra_verifier.sqlite".to_string());
     let listen_addr = std::env::var("KIRRA_VERIFIER_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8090".to_string());
 
-    let mut store = VerifierStore::new(&db_path)
-        .expect("failed to initialize verifier store");
+    let mut store = match VerifierStore::new(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                db_path = %db_path,
+                "startup failed: unable to initialize verifier store (fail-closed)"
+            );
+            std::process::exit(1);
+        }
+    };
 
     let mode = VerifierOperationMode::from_env();
     println!("Kirra Verifier starting in {mode:?} mode (db: {db_path})");
@@ -809,39 +833,62 @@ async fn main() {
         let pinned = std::env::var("KIRRA_LOG_SIGNING_GENESIS_PIN")
             .ok()
             .filter(|s| !s.is_empty());
-        let admission = store
-            .admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms())
-            .expect("failed to admit audit signing key against the durable trust map");
+        let admission = match store.admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms()) {
+            Ok(admission) => admission,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "FAIL-CLOSED (#165): failed to admit audit signing key against the durable trust map"
+                );
+                std::process::exit(1);
+            }
+        };
         use kirra_verifier::verifier_store::KeyAdmission;
+        // Each rejection is a fail-closed startup REFUSAL — keep the full operator
+        // remediation guidance (HOW to recover) in the message, not just the cause.
         match admission {
             KeyAdmission::Resumed
             | KeyAdmission::BackfilledGenesis
             | KeyAdmission::AdoptedReanchor => {
                 println!("Audit signing key admitted ({admission:?}).");
             }
-            KeyAdmission::RetiredKeyRejected => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a RETIRED audit key \
-                 (a later rotation is the durable active key). Refusing to sign under \
-                 a retired key. Provide the current active private key, or perform an \
-                 explicit rotation."
-            ),
-            KeyAdmission::UnadoptedNewKeyRejected => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a NEW key not in the durable \
-                 ledger and no adopt signal was given. Refusing to silently re-root audit \
-                 trust. Set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to adopting it."
-            ),
-            KeyAdmission::GenesisPinMismatch => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_GENESIS_PIN does not match the durable \
-                 trust anchor's genesis. Refusing to start."
-            ),
-            KeyAdmission::MigrationReversionRejected { chain_latest_key_id, env_key_id } => panic!(
-                "FAIL-CLOSED (#165 migration): the audit chain's latest rotation is to key \
-                 {chain_latest_key_id} but KIRRA_LOG_SIGNING_KEY supplied {env_key_id}. The env \
-                 key has reverted to a pre-rotation (or foreign) key; anchoring on it would \
-                 re-root audit trust. RESOLUTION — supply the correct active key in \
-                 KIRRA_LOG_SIGNING_KEY, OR set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to \
-                 anchoring on the env key (recorded as a consented reanchor)."
-            ),
+            KeyAdmission::RetiredKeyRejected => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a RETIRED audit key \
+                     (a later rotation is the durable active key). Refusing to sign under \
+                     a retired key. Provide the current active private key, or perform an \
+                     explicit rotation."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::UnadoptedNewKeyRejected => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a NEW key not in the durable \
+                     ledger and no adopt signal was given. Refusing to silently re-root audit \
+                     trust. Set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to adopting it."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::GenesisPinMismatch => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_GENESIS_PIN does not match the durable \
+                     trust anchor's genesis. Refusing to start."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::MigrationReversionRejected { chain_latest_key_id, env_key_id } => {
+                tracing::error!(
+                    chain_latest_key_id = %chain_latest_key_id,
+                    env_key_id = %env_key_id,
+                    "FAIL-CLOSED (#165 migration): the audit chain's latest rotation is to key \
+                     {chain_latest_key_id} but KIRRA_LOG_SIGNING_KEY supplied {env_key_id}. The env \
+                     key has reverted to a pre-rotation (or foreign) key; anchoring on it would \
+                     re-root audit trust. RESOLUTION — supply the correct active key in \
+                     KIRRA_LOG_SIGNING_KEY, OR set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to \
+                     anchoring on the env key (recorded as a consented reanchor)."
+                );
+                std::process::exit(1);
+            }
         }
     }
 
@@ -867,14 +914,29 @@ async fn main() {
     }
 
     {
-        let (nodes, dependencies) = app_state.store.call_read(|store| {
+        let load_initial = app_state.store.call_read(|store| {
             let nodes = store.load_nodes().map_err(|e| e.to_string())?;
             let dependencies = store.load_dependencies()
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>((nodes, dependencies))
-        }).await
-            .expect("store task failed loading initial state")
-            .expect("failed to load persisted nodes/dependencies");
+        }).await;
+        let (nodes, dependencies) = match load_initial {
+            Ok(Ok(data)) => data,
+            Ok(Err(err)) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: unable to load persisted nodes/dependencies (fail-closed)"
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: store task failed loading initial state (fail-closed)"
+                );
+                std::process::exit(1);
+            }
+        };
         for node in nodes {
             app_state.nodes.insert(node.node_id.clone(), node);
         }
@@ -1117,21 +1179,29 @@ async fn main() {
         // run it off tokio worker threads.
         let app_b = Arc::clone(&svc_state.app);
         let cache_b = Arc::clone(&svc_state.posture_cache);
-        tokio::task::spawn_blocking(move || {
+        let initial_recalc = tokio::task::spawn_blocking(move || {
             kirra_verifier::posture_engine::recalculate_and_broadcast(&app_b, &cache_b);
         })
-        .await
-        .expect("initial posture recalc task panicked");
+        .await;
+        if let Err(err) = initial_recalc {
+            tracing::error!(
+                error = %err,
+                "startup failed: initial posture recalc task panicked (fail-closed)"
+            );
+            std::process::exit(1);
+        }
         tracing::info!("posture: initial recalc complete; cache populated");
 
         let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
             Arc::clone(&svc_state.app),
             Arc::clone(&svc_state.posture_cache),
         );
-        svc_state
-            .posture_engine_tx
-            .set(posture_tx.clone())
-            .expect("posture_engine_tx must not be set before startup wiring");
+        if svc_state.posture_engine_tx.set(posture_tx.clone()).is_err() {
+            tracing::error!(
+                "startup failed: posture_engine_tx already initialized before startup wiring (fail-closed)"
+            );
+            std::process::exit(1);
+        }
         tracing::info!("posture: serialized worker started");
 
         // SAFETY: SG9 | REQ: sensor-liveness-watchdog | TEST: test_watchdog_dead_mans_switch_fires_after_telemetry_timeout
@@ -1235,8 +1305,17 @@ async fn main() {
     tracing::info!("SG-008: startup invariants satisfied; binding listener");
 
     println!("Kirra Verifier Service listening on {listen_addr} (db: {db_path})");
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await
-        .expect("failed to bind listener");
+    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                listen_addr = %listen_addr,
+                "startup failed: failed to bind listener (fail-closed)"
+            );
+            std::process::exit(1);
+        }
+    };
 
     // #46: the listener is bound and startup invariants passed (SG-008) — tell
     // systemd we are READY (Type=notify) and start the watchdog keepalive
@@ -1262,10 +1341,13 @@ async fn main() {
         }
     };
 
-    axum::serve(listener, app)
+    if let Err(err) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .expect("server error");
+    {
+        tracing::error!(error = %err, "server exited with error");
+        std::process::exit(1);
+    }
 }
 
 // ===========================================================================
