@@ -22,5 +22,5 @@ ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
 tracing = "0.1"
 # Engine fingerprinting for warm_up() → TrtPosture.engine_sha (PARK-021 #2). SHA-256
 # of the serialized TRT engine cached on disk; same versions as the workspace root.
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
