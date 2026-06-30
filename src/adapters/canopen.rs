@@ -276,8 +276,19 @@ impl CanOpenAdapter {
             .expedited_value
             .ok_or("CANOPEN_SDO_SEGMENTED_UNBOUNDABLE")?;
         // Cross-check the frame's declared width against the configured type.
+        let w = spec.ty.width();
         if let Some(indicated) = dl.indicated_width {
-            if indicated != spec.ty.width() {
+            if indicated != w {
+                return Err("CANOPEN_SDO_WIDTH_MISMATCH");
+            }
+        } else {
+            // #694: s=0 (size NOT indicated). The frame declares no value width,
+            // so `decode_le` would read only the leading `w` bytes and silently
+            // ignore the rest — letting an attacker smuggle hidden, device-
+            // interpretable bytes past `[w..]` while the bounded prefix stays
+            // benign. Fail closed: any non-zero byte beyond the configured type
+            // width is an undeclared payload, never faithfully bound here.
+            if value.len() > w && value[w..].iter().any(|&b| b != 0) {
                 return Err("CANOPEN_SDO_WIDTH_MISMATCH");
             }
         }
@@ -473,6 +484,45 @@ mod sdo_bounds_tests {
             CanOpenAdapter::bound_sdo_download(&msg, &b),
             Err("CANOPEN_SDO_UNDECODABLE")
         );
+    }
+
+    #[test]
+    fn s0_hidden_trailing_bytes_past_configured_width_are_denied() {
+        // #694: NON-size-indicated (s=0) expedited download. The configured type
+        // is i16 (width 2). The leading 2 value bytes are a benign in-range 100,
+        // but bytes [2..4] carry undeclared attacker-controlled data. `decode_le`
+        // reads only the leading width and would silently ignore the rest, so the
+        // bound must reject the hidden payload as a width mismatch.
+        let b = bounds("5:0x6042:0=i16:-500:500", false);
+        let idx = 0x6042u16.to_le_bytes();
+        // ccs=1, e=1, s=0 → command byte 0x22; value = 100 (LE) + hidden 0xFFFF.
+        let msg = CanOpenMessage {
+            node_id: 5,
+            function_code: 0xA,
+            data: vec![0x22, idx[0], idx[1], 0x00, 0x64, 0x00, 0xFF, 0xFF],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(
+            CanOpenAdapter::bound_sdo_download(&msg, &b),
+            Err("CANOPEN_SDO_WIDTH_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn s0_zero_padded_trailing_bytes_are_admitted() {
+        // #694 companion: an s=0 expedited frame whose bytes beyond the configured
+        // width are all zero carries no hidden payload — the in-range setpoint is
+        // still admitted (the check fails closed only on a NON-zero tail).
+        let b = bounds("5:0x6042:0=i16:-500:500", false);
+        let idx = 0x6042u16.to_le_bytes();
+        // ccs=1, e=1, s=0 → 0x22; value = 100 (LE) then zero padding to 8 bytes.
+        let msg = CanOpenMessage {
+            node_id: 5,
+            function_code: 0xA,
+            data: vec![0x22, idx[0], idx[1], 0x00, 0x64, 0x00, 0x00, 0x00],
+            source_node: "rtu-1".into(),
+        };
+        assert_eq!(CanOpenAdapter::bound_sdo_download(&msg, &b), Ok(()));
     }
 }
 
