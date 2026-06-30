@@ -66,6 +66,9 @@ nightly/rust-src are not needed. The script tries direct first, then build-std.)
   KVM can run the QNX guest. (HP: Esc → F10; most others: F2 or Del.)
 - Build/boot a QNX SDP 8.0 x86-64 guest image (`mkqnximage` or a prebuilt SDP VM
   image — this is a QNX SDP step, **outside** this harness; see the QNX SDP docs).
+  A concrete, reproducible `mkqnximage`/QEMU recipe (bridge net, the IFS bake-in +
+  auto-run overlay, the KVM-vs-TCG acceleration check) lives in
+  `tools/qnx-rtm-harness/QNX_VM_RELAUNCH.md`.
 - Note the guest's IP (`ifconfig` inside QNX) for the `scp` in §3. The default QNX
   image logs in as **root**, which you want for `SCHED_FIFO`.
 
