@@ -121,6 +121,24 @@ mod attestation_registry_tests {
         store.save_last_generation(42).unwrap();
         assert_eq!(store.load_last_generation().unwrap(), 42);
     }
+
+    /// #695: save_last_generation reports whether the write was ACCEPTED, so a
+    /// caller can distinguish a persisted generation from one rejected as stale.
+    #[test]
+    fn test_save_last_generation_reports_acceptance() {
+        let store = in_memory();
+        // First write creates the row → accepted.
+        assert!(store.save_last_generation(10).unwrap(), "first write must be accepted");
+        // Strictly greater → accepted.
+        assert!(store.save_last_generation(11).unwrap(), "a higher generation is accepted");
+        assert_eq!(store.load_last_generation().unwrap(), 11);
+        // Lower → REJECTED (returns false), high-water unchanged.
+        assert!(!store.save_last_generation(5).unwrap(), "a lower generation is rejected");
+        assert_eq!(store.load_last_generation().unwrap(), 11, "stale write must not regress the high-water");
+        // Equal → REJECTED (strict > required).
+        assert!(!store.save_last_generation(11).unwrap(), "an equal generation is rejected (strict >)");
+        assert_eq!(store.load_last_generation().unwrap(), 11);
+    }
 }
 
 #[cfg(test)]

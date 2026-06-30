@@ -243,7 +243,20 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
             ts,
         ) {
             Ok(()) => {
-                let _ = store.save_last_generation(generation);
+                // #695: a `false` here means the generation high-water rejected this
+                // write as stale. In normal operation that's a benign concurrent-
+                // recalc race (another recalc already persisted a higher generation),
+                // so it is logged at debug; a PERSISTENT rejection of the latest
+                // generation would indicate a regression/time-reversal worth
+                // investigating. An Err is a real DB failure.
+                match store.save_last_generation(generation) {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!(
+                        generation,
+                        "Generation high-water rejected a stale persist (benign race unless persistent) — #695"
+                    ),
+                    Err(e) => tracing::error!(error = %e, generation, "Failed to persist last generation"),
+                }
                 true
             }
             // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
