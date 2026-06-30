@@ -28,7 +28,7 @@ diagnostic coverage and **PO-2** independence (the DFA). Per-goal enforcement
 
 | Goal | What | Disposition |
 |---|---|---|
-| SG1 longitudinal collision (RSS) | ASIL D | enforced (per-command; per-horizon pending #131) |
+| SG1 longitudinal collision (RSS) | ASIL D | enforced (per-command kinematics + per-horizon RSS via the Option-B adapter slow loop, #131) |
 | SG2 road/lane departure | ASIL D | **enforced** (per-trajectory; Option-B adapter slow loop, #128/#131) |
 | SG3 dynamic envelope | ASIL D | enforced |
 | SG4 water / SG5 commit-zone / SG6 post-collision | B/B/A-elevated | **delegated** (AoU / #126), D1 closes omission |
@@ -64,7 +64,7 @@ corresponding claim.
 
 | Element | Status |
 |---|---|
-| Bounded WCET → SG9 timeout (+ CI regression gate) | **done** (S3; re-derive for the trajectory verdict at #131) |
+| Bounded WCET → SG9 timeout (+ CI regression gate) | **done** (S3; the trajectory-verdict containment WCET gate landed with #131 — `GOVERNOR_CONTAINMENT_WCET_CI_THRESHOLD_MICROS`, CI-relative; target-SoC re-measure for the SG9 timeout setting pends S8/#120) |
 | panic=abort → death ⇒ fail-closed | **done** (structurally confirmed) |
 | Requirements traceability matrix + CI gate | **done** |
 | MC/DC structural coverage | pending |
@@ -95,11 +95,12 @@ ADR-0001/0002.
 
 ## 7. Limitations & open evidence (honest residual map)
 
-- Per-command enforcement plus the per-trajectory Option-B adapter path (#131);
-  any remaining RSS-over-horizon hardening continues under **#131**.
-- SG2 drivable-space containment is **enforced live** — wired into the Option-B
-  adapter slow loop (`kirra-trajectory` validation; a containment failure
-  collapses the per-asset slot so the fast loop publishes MRC) (#128/#131).
+- Enforcement is both per-command (the SDK HTTP path) **and** per-trajectory:
+  the Option-B adapter slow loop runs SG2 drivable-space containment **and**
+  per-horizon RSS over the planned trajectory (#131, landed). A containment or
+  RSS failure collapses the per-asset slot so the fast loop publishes MRC.
+- The honest WCET residual is the **target-SoC re-measurement** (S8/#120) that
+  sets the SG9 fail-closed timeout; the CI regression gate is in place.
 - Base-tier **omission** common-cause is **delegated** (an AoU); the D1 add-on
   (#124) closes it unilaterally.
 - Coverage gap: **G1 occlusion-aware caution** (#122).
