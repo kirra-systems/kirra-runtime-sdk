@@ -10,6 +10,19 @@ use crate::commands::ControlCommand;
 use crate::sensor::SensorFrame;
 use crate::telemetry::{CumulativeJitterEvaluator, PostureSnapshot, RuntimeTelemetry, ThermalState};
 use crate::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
+use crate::audit::{AuditClient, FaultRecord, OverrideRecord};
+
+/// The stable audit reason code for a governor override, or `None` for `Allow`
+/// (the common no-op, which is not recorded).
+fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
+    match action {
+        EnforcementAction::Allow => None,
+        EnforcementAction::ClampLinearVelocity(_) => Some("clamp_linear"),
+        EnforcementAction::ClampAngularVelocity(_) => Some("clamp_angular"),
+        EnforcementAction::ClampMotion { .. } => Some("clamp_motion"),
+        EnforcementAction::Deny { .. } => Some("deny"),
+    }
+}
 
 /// Thresholds for degraded-mode detection.
 ///
@@ -50,6 +63,11 @@ pub struct InferenceLoop<B: InferenceBackend> {
     cached_descriptor: BackendDescriptor,
     governor: Option<Box<dyn SafetyGovernor>>,
     tick_period_s: f64,
+    /// Optional SDK-free audit sink (L5). Default `None` → no records emitted
+    /// (byte-identical behaviour). When set, the decision path reports governor
+    /// overrides and non-finite faults through the `AuditClient` trait, keeping
+    /// it independent of any concrete (e.g. SDK-backed) audit implementation.
+    audit: Option<Arc<dyn AuditClient>>,
 }
 
 fn capabilities_precision(caps: &BackendCapabilities) -> PrecisionMode {
@@ -95,7 +113,18 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             cached_descriptor,
             governor: None,
             tick_period_s: 0.05,
+            audit: None,
         }
+    }
+
+    /// Attach an [`AuditClient`] so the decision path records governor overrides
+    /// and non-finite faults to a caller-chosen audit sink. Default: none → no
+    /// records emitted (byte-identical). The SDK-free trait keeps the decision
+    /// path independent of the verifier crate (the concrete sink is injected).
+    #[must_use]
+    pub fn with_audit_client(mut self, audit: Arc<dyn AuditClient>) -> Self {
+        self.audit = Some(audit);
+        self
     }
 
     /// Attach a safety governor to this loop. The governor's evaluation
@@ -185,7 +214,17 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         // the error and crashing the loop.
         let proposed_cmd = match self.parse_inference_to_command(&processed_outputs, loop_start_ms) {
             Ok(cmd) => cmd,
-            Err(_) => {
+            Err(parse_err) => {
+                // Non-finite (NaN/Inf) inference output → fail-closed stopped
+                // command. Audit it as a decision-path fault before returning.
+                if let Some(a) = &self.audit {
+                    a.record_fault(FaultRecord {
+                        tick_ms: loop_start_ms,
+                        code: "nonfinite_command",
+                        detail: parse_err,
+                        posture,
+                    });
+                }
                 let telemetry = RuntimeTelemetry {
                     inference_latency_ms,
                     rolling_jitter_ms,
@@ -216,7 +255,12 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 self.tick_period_s,
                 posture,
             );
-            match action {
+            // Capture the doer/ML proposal (Copy reads — zero cost) and the audit
+            // reason BEFORE the match consumes `action`. `override_reason` returns
+            // a `'static` code, so `reason` does not borrow `action`.
+            let reason = override_reason(&action);
+            let (ml_lin, ml_ang) = (proposed_cmd.linear_velocity, proposed_cmd.angular_velocity);
+            let commanded = match action {
                 EnforcementAction::Allow => proposed_cmd,
                 EnforcementAction::ClampLinearVelocity(v) => ControlCommand {
                     linear_velocity: v,
@@ -240,7 +284,22 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 EnforcementAction::Deny { reason: _ } => {
                     ControlCommand::stopped(proposed_cmd.timestamp_ms)
                 }
+            };
+            // Audit the override (the governor changed the doer's command). Sparse
+            // and safety-relevant; `Allow` (reason == None) is the common no-op
+            // and is not recorded.
+            if let (Some(a), Some(reason)) = (&self.audit, reason) {
+                a.record_override(OverrideRecord {
+                    tick_ms: loop_start_ms,
+                    reason,
+                    proposed_linear_mps: ml_lin,
+                    proposed_angular_rps: ml_ang,
+                    commanded_linear_mps: commanded.linear_velocity,
+                    commanded_angular_rps: commanded.angular_velocity,
+                    posture,
+                });
             }
+            commanded
         } else {
             proposed_cmd
         };
@@ -604,6 +663,68 @@ mod tests {
 
         let flushed = rx.recv().await.unwrap();
         assert_eq!(flushed.linear_velocity, 2.0);
+    }
+
+    /// L5 — an attached AuditClient records a governor override (and nothing else)
+    /// when the governor changes the doer's command.
+    #[tokio::test]
+    async fn audit_client_records_governor_override() {
+        use crate::audit::MockAuditClient;
+        let backend = Arc::new(ConfigurableBackend { linear: 10.0 });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        let mock = Arc::new(MockAuditClient::new());
+
+        let mut loop_engine = InferenceLoop::new(backend, model, tx)
+            .with_governor(ClampToTwoGovernor)
+            .with_audit_client(mock.clone());
+        let mut stream = SimpleStream { next_id: 0 };
+
+        let snap = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert_eq!(snap.active_command.linear_velocity, 2.0, "governor clamps 10 → 2");
+
+        let (decisions, overrides, faults, health) = mock.counts();
+        assert_eq!(
+            (decisions, faults, health),
+            (0, 0, 0),
+            "only an override should be recorded on a clamped tick"
+        );
+        assert_eq!(overrides, 1, "the governor override must be audited");
+        let ov = &mock.overrides()[0];
+        assert_eq!(ov.reason, "clamp_linear");
+        assert_eq!(ov.proposed_linear_mps, 10.0);
+        assert_eq!(ov.commanded_linear_mps, 2.0);
+        assert_eq!(ov.posture, SafetyPosture::Nominal);
+    }
+
+    /// L5 — an attached AuditClient records a non-finite-inference fault and the
+    /// loop still fail-closes to a stopped command.
+    #[tokio::test]
+    async fn audit_client_records_nonfinite_fault() {
+        use crate::audit::MockAuditClient;
+        let backend = Arc::new(ConfigurableBackend { linear: f32::NAN });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        let mock = Arc::new(MockAuditClient::new());
+
+        let mut loop_engine =
+            InferenceLoop::new(backend, model, tx).with_audit_client(mock.clone());
+        let mut stream = SimpleStream { next_id: 0 };
+
+        let snap = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert!(snap.active_state_degraded, "nonfinite output → degraded snapshot");
+        assert_eq!(snap.active_command.linear_velocity, 0.0, "fail-closed stop");
+
+        let (decisions, overrides, faults, health) = mock.counts();
+        assert_eq!((decisions, overrides, health), (0, 0, 0));
+        assert_eq!(faults, 1, "the non-finite fault must be audited");
+        assert_eq!(mock.faults()[0].code, "nonfinite_command");
     }
 
     #[tokio::test]
