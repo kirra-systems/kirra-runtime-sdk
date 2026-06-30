@@ -226,8 +226,9 @@ mod sg_008_cert_tests {
         );
     }
 
-    /// Order stability: when multiple invariants are violated, the admin-token
-    /// check (first/highest-priority) wins — deterministic diagnosis.
+    /// Order stability: when multiple invariants are violated (with a trusted
+    /// hardware root, which is checked first), the admin-token check wins —
+    /// deterministic diagnosis.
     #[test]
     fn test_invariant_check_order_is_stable() {
         let ctx = StartupContext {
