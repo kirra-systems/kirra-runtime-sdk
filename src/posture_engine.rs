@@ -249,13 +249,27 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                 // so it is logged at debug; a PERSISTENT rejection of the latest
                 // generation would indicate a regression/time-reversal worth
                 // investigating. An Err is a real DB failure.
+                //
+                // We deliberately DO NOT fail the transition closed on this Err
+                // (unlike the audit-chain write below, SG-HA-4). Failing closed
+                // here would not restore the cross-restart monotonicity invariant
+                // anyway: the in-memory `generation` was already claimed by
+                // `next_generation()` (an irreversible `fetch_add`) AND the audit
+                // chain above already committed durably AT this generation. So the
+                // persisted high-water is equally behind whether we proceed or
+                // suppress — suppressing only drops a live, already-audited posture
+                // transition (possibly a safety ESCALATION), which is the wrong
+                // trade. The high-water is a self-healing monotonic max-write (the
+                // next successful recalc re-persists it), and a SYSTEMIC DB failure
+                // is still caught fail-closed by the audit-chain write on the next
+                // cycle. So: log loudly and let the live broadcast proceed.
                 match store.save_last_generation(generation) {
                     Ok(true) => {}
                     Ok(false) => tracing::debug!(
                         generation,
                         "Generation high-water rejected a stale persist (benign race unless persistent) — #695"
                     ),
-                    Err(e) => tracing::error!(error = %e, generation, "Failed to persist last generation"),
+                    Err(e) => tracing::error!(error = %e, generation, "Failed to persist last generation (high-water self-heals on next recalc; live transition not suppressed) — #695"),
                 }
                 true
             }
