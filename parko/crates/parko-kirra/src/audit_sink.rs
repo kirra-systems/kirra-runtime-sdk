@@ -56,11 +56,15 @@ pub enum FatalAuditConfig {
 impl std::fmt::Display for FatalAuditConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Subsystem-neutral: this error type is shared by every audit-sink
+            // selector (divergence, impact, decision-path AuditClient), so the
+            // message names only the SHARED signing-key var, never one selector's
+            // DB var (the caller knows which DB env var it read).
             FatalAuditConfig::MissingSigningKey => write!(
                 f,
-                "PARKO_DIVERGENCE_AUDIT_DB is set but KIRRA_LOG_SIGNING_KEY is unset — \
-                 a durable divergence audit must be signed (tamper-evident); refusing to \
-                 persist an unsigned chain"
+                "a durable audit DB is configured but KIRRA_LOG_SIGNING_KEY is unset — \
+                 a durable audit must be signed (tamper-evident); refusing to persist an \
+                 unsigned chain"
             ),
             FatalAuditConfig::InvalidSigningKey(why) => write!(
                 f,
@@ -68,7 +72,7 @@ impl std::fmt::Display for FatalAuditConfig {
             ),
             FatalAuditConfig::StoreOpenFailed(why) => write!(
                 f,
-                "could not open the divergence audit store (PARKO_DIVERGENCE_AUDIT_DB): {why}"
+                "could not open the audit store at the configured path: {why}"
             ),
         }
     }
