@@ -194,7 +194,27 @@ pub fn init_vehicle_class_from_env() {
     let raw = std::env::var(VEHICLE_CLASS_ENV).unwrap_or_default();
     match VehicleClass::from_str(&raw) {
         Ok(class) => {
-            let _ = GLOBAL_VEHICLE_CLASS.set(class);
+            if GLOBAL_VEHICLE_CLASS.set(class).is_err() {
+                // Already initialized. A matching re-init is a benign idempotent
+                // no-op; a CONFLICTING second value must fail closed rather than
+                // be silently dropped (the selected envelope would then disagree
+                // with what this call requested).
+                let existing = GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(class);
+                if existing != class {
+                    tracing::error!(
+                        existing = existing.as_str(),
+                        attempted = class.as_str(),
+                        "FATAL: {VEHICLE_CLASS_ENV} initialized more than once with DIFFERENT \
+                         values — refusing to continue (the vehicle class must be unambiguous)."
+                    );
+                    std::process::exit(1);
+                }
+                tracing::debug!(
+                    vehicle_class = class.as_str(),
+                    "vehicle class re-init with the same value — idempotent no-op (#312)"
+                );
+                return;
+            }
             tracing::info!(
                 vehicle_class = class.as_str(),
                 "vehicle class selected — per-class kinematic contract + ODD cap in effect (#312)"
