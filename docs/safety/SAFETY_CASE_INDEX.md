@@ -31,6 +31,7 @@ Date: 2026-05-23
 | KIRRA-OCCY-SPEED-001 | Occy speed-envelope analysis (SSD / breaking-point / derate) | 0.1 | Draft | docs/safety/SPEED_ENVELOPE.md | 2026-05-31 |
 | KIRRA-OCCY-ADR-001 | ADR-0001: Occy ODD speed cap = 50 mph / 80 km/h | 1.0 | Accepted | docs/adr/0001-occy-odd-speed-cap.md | 2026-05-31 |
 | KIRRA-OCCY-DFA-001 | Occy ASIL decomposition + Dependent Failure Analysis | 0.1 | Draft | docs/safety/OCCY_DFA.md | 2026-05-31 |
+| KIRRA-OCCY-ASIL-DECOMP-001 | Consolidated ISO 26262-9 ASIL decomposition work product (navigable synthesis of DFA + SGs + FFI + fault model + timing + AoU) | 0.1 | Draft | docs/safety/ASIL_DECOMPOSITION.md | 2026-06-30 |
 | KIRRA-OCCY-IDC-001 | Occy focused Independent Detection Channel (IDC) design | 0.1 | Draft | docs/safety/OCCY_INDEPENDENT_DETECTOR.md | 2026-05-31 |
 | KIRRA-OCCY-ADR-002 | ADR-0002: Condition-dependent speed cap + sub-ODD partition | 1.0 | Accepted | docs/adr/0002-condition-dependent-cap-subodds.md | 2026-05-31 |
 | KIRRA-OCCY-ARCH-001 | Occy two-tier architecture (base Governor SEooC + optional D1 add-on) | 0.1 | Draft | docs/safety/OCCY_ARCHITECTURE_TIERS.md | 2026-05-31 |
