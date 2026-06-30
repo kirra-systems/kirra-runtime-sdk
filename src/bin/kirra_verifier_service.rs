@@ -744,6 +744,21 @@ fn spawn_systemd_watchdog(svc: Arc<ServiceState>) {
 
 #[tokio::main]
 async fn main() {
+    // Install a tracing subscriber FIRST, before any fallible startup step, so
+    // the fail-closed startup diagnostics below (and all runtime logs) are
+    // actually emitted. Without an installed subscriber, tracing events are
+    // dropped on the floor and a fail-closed `exit(1)` would be SILENT — the
+    // prior `.expect()`/`panic!` always reached stderr, so the conversion to
+    // `tracing::error!` must be backed by a subscriber to preserve startup
+    // diagnosability. Honors `RUST_LOG`; defaults to `info`. `try_init` tolerates
+    // a subscriber already installed by an embedding harness instead of panicking.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let db_path = std::env::var("KIRRA_DB_PATH")
         .unwrap_or_else(|_| "kirra_verifier.sqlite".to_string());
     let listen_addr = std::env::var("KIRRA_VERIFIER_ADDR")
