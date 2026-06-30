@@ -291,7 +291,16 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Two recalcs can race (promotion path + Step-C worker), and a SLOWER
     // one carrying a LOWER generation must not clobber a newer posture.
     let new_cached = CachedFleetPosture::new_with_generation(new_posture, generation, ts);
-    let cache_written = replace_cache_if_newer(cache, new_cached);
+    // #688: read the sticky-lockout flags HERE (after the generation grab, just
+    // before the write) so a recalc that predates a supervisor/frame trip cannot
+    // clobber the forced LockedOut — see `replace_cache_if_newer`.
+    let sticky_lockout = app
+        .supervisor_tripped
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .frame_lockout_active
+            .load(std::sync::atomic::Ordering::SeqCst);
+    let cache_written = replace_cache_if_newer(cache, new_cached, sticky_lockout);
 
     // Step 7: Broadcast ONLY if we actually wrote a newer entry AND it's a
     // transition. A broadcast without a corresponding cache update would
@@ -325,7 +334,10 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
 pub fn force_lockout(cache: &SharedPostureCache, ts_ms: u64) {
     let candidate =
         CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, next_generation(), ts_ms);
-    let wrote = replace_cache_if_newer(cache, candidate);
+    // sticky_lockout = true: this IS the supervisor escalation. The guard only
+    // blocks NON-LockedOut candidates, so a LockedOut candidate is unaffected;
+    // passing true documents intent and is correct under the gen CAS.
+    let wrote = replace_cache_if_newer(cache, candidate, true);
     tracing::error!(
         wrote_cache = wrote,
         "C2 escalation: posture cache forced to LockedOut (critical safety loop wedged)"
@@ -340,9 +352,32 @@ pub fn force_lockout(cache: &SharedPostureCache, ts_ms: u64) {
 fn replace_cache_if_newer(
     cache: &SharedPostureCache,
     candidate: CachedFleetPosture,
+    sticky_lockout: bool,
 ) -> bool {
     match cache.write() {
         Ok(mut guard) => {
+            // #688: a supervisor / frame-integrity sticky LockedOut has ABSOLUTE
+            // priority. Without this guard, a recalc that computed a non-LockedOut
+            // posture BEFORE the trip — but grabbed a HIGHER generation (the trip
+            // landing between its flag read and its generation grab) — could win the
+            // generation CAS and clobber `force_lockout`'s LockedOut, so the
+            // supervisor escalation was not guaranteed to be IMMEDIATE (only
+            // eventually re-forced by the next recalc). While the sticky flag is set
+            // we refuse any non-LockedOut candidate, so a stale-posture recalc can
+            // never downgrade the forced lockout. (`sticky_lockout` is read by the
+            // caller from `supervisor_tripped || frame_lockout_active`; the residual
+            // read-vs-trip micro-window is closed by the generation CAS below, since
+            // `force_lockout`'s generation is always grabbed after the racing
+            // recalc's.) Recovery from a sticky lockout is a human/HA reset that
+            // clears the flag, after which a normal recalc resumes writing.
+            if sticky_lockout && candidate.posture != FleetPosture::LockedOut {
+                tracing::warn!(
+                    candidate_posture = ?candidate.posture,
+                    candidate_gen = candidate.generation,
+                    "Refusing to downgrade a supervisor/frame sticky LockedOut (#688)"
+                );
+                return false;
+            }
             let cur_gen = guard.as_ref().map(|c| c.generation).unwrap_or(0);
             if candidate.generation > cur_gen {
                 *guard = Some(candidate);
@@ -694,25 +729,25 @@ mod posture_engine_tests {
 
         // Seed with generation 10.
         let g10 = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 10, 1_000);
-        assert!(replace_cache_if_newer(&cache, g10));
+        assert!(replace_cache_if_newer(&cache, g10, false));
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal));
 
         // Lower generation 9 must be rejected, cache unchanged.
         let g9 = CachedFleetPosture::new_with_generation(FleetPosture::Degraded, 9, 2_000);
-        assert!(!replace_cache_if_newer(&cache, g9),
+        assert!(!replace_cache_if_newer(&cache, g9, false),
             "lower generation must NOT replace the cache");
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal),
             "older recalc must NOT have clobbered the newer posture");
 
         // Equal generation 10 must also be rejected (strictly greater).
         let g10_eq = CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 10, 3_000);
-        assert!(!replace_cache_if_newer(&cache, g10_eq),
+        assert!(!replace_cache_if_newer(&cache, g10_eq, false),
             "equal generation must NOT replace (strict > required)");
         assert_eq!(snapshot(&cache), (10, FleetPosture::Nominal));
 
         // Strictly greater generation 11 wins.
         let g11 = CachedFleetPosture::new_with_generation(FleetPosture::Degraded, 11, 4_000);
-        assert!(replace_cache_if_newer(&cache, g11));
+        assert!(replace_cache_if_newer(&cache, g11, false));
         assert_eq!(snapshot(&cache), (11, FleetPosture::Degraded));
     }
 
@@ -724,10 +759,64 @@ mod posture_engine_tests {
 
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
         let g1 = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 1, 0);
-        assert!(replace_cache_if_newer(&cache, g1),
+        assert!(replace_cache_if_newer(&cache, g1, false),
             "generation > 0 must populate an empty cache");
         let snap_gen = cache.read().unwrap().as_ref().unwrap().generation;
         assert_eq!(snap_gen, 1);
+    }
+
+    /// #688: while a sticky lockout is in effect, `replace_cache_if_newer` must
+    /// REFUSE a non-LockedOut candidate even with a STRICTLY HIGHER generation —
+    /// the race where an in-flight recalc that predates the supervisor trip (but
+    /// grabbed a later generation) would otherwise win the CAS and clobber the
+    /// forced LockedOut. A LockedOut candidate is still accepted under the normal
+    /// generation CAS, and once the flag clears, recovery recalcs resume writing.
+    #[test]
+    fn test_sticky_lockout_refuses_higher_gen_downgrade_688() {
+        use std::sync::Arc;
+        use crate::posture_cache::CachedFleetPosture;
+
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        // force_lockout writes LockedOut at gen 10.
+        let locked = CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 10, 1_000);
+        assert!(replace_cache_if_newer(&cache, locked, true));
+
+        // A racing recalc: HIGHER generation (11) but non-LockedOut. Without #688 it
+        // wins the generation CAS and downgrades the lockout. With the guard it is
+        // refused while the sticky flag holds.
+        let stale_nominal =
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 11, 2_000);
+        assert!(
+            !replace_cache_if_newer(&cache, stale_nominal, true),
+            "a higher-gen non-LockedOut recalc must NOT downgrade a sticky LockedOut"
+        );
+        {
+            let g = cache.read().unwrap();
+            let e = g.as_ref().unwrap();
+            assert_eq!(e.posture, FleetPosture::LockedOut, "lockout preserved");
+            assert_eq!(e.generation, 10);
+        }
+
+        // A LockedOut candidate with a higher generation is still accepted (a later
+        // recalc that honored supervisor_tripped and re-emitted LockedOut).
+        let locked_newer =
+            CachedFleetPosture::new_with_generation(FleetPosture::LockedOut, 12, 3_000);
+        assert!(
+            replace_cache_if_newer(&cache, locked_newer, true),
+            "a newer LockedOut is still accepted"
+        );
+
+        // Once the sticky flag clears (human/HA reset → sticky_lockout=false), a
+        // higher-gen recovery recalc is admitted again.
+        let recovery = CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 13, 4_000);
+        assert!(
+            replace_cache_if_newer(&cache, recovery, false),
+            "after the sticky flag clears, a normal recalc resumes writing"
+        );
+        assert_eq!(
+            cache.read().unwrap().as_ref().unwrap().posture,
+            FleetPosture::Nominal
+        );
     }
 
     // ── #99 flood-condition → FleetPosture coupling ──────────────────────────
