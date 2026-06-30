@@ -17,13 +17,94 @@ labels its own envelope numbers as **PROXIES**.
 ## Pinned version
 
 ```
-iceoryx2 = "=0.9.1"
+iceoryx2 = "=0.9.2"
 ```
 
-> The host spike pins **0.9.1** (latest at authoring; host Linux is iceoryx2
-> tier-1). The EPIC notes QNX 7.1 landed as tier-3 in v0.7.0. **#274 must
-> re-confirm the feature subset against whatever version targets QNX 8.0** — the
-> methodology transfers even if exact flags shift between versions.
+> The host spike pins **0.9.2**. It was authored against `=0.9.1`, but that pin no
+> longer builds on a fresh resolve: the `iceoryx2 0.9.1` umbrella crate pulls its
+> `iceoryx2-*` sub-crates at `0.9.2` (newer patch in their `^` range), and `0.9.1`
+> main + `0.9.2` subs do not compose (`ZeroCopySendError::NoConnectedReceiver`
+> missing). Bumping the umbrella to `=0.9.2` realigns the whole set; the spike code
+> compiles and runs unchanged. (`Cargo.lock` is gitignored here, so the pin is the
+> only control.) Host Linux is iceoryx2 tier-1; **#274 must re-confirm the feature
+> subset against whatever version targets QNX 8.0** — the methodology transfers
+> even if exact flags shift between versions.
+
+## Frozen-contract carrier (#275 / L2) — `src/frozen.rs`
+
+The original spike (`wire.rs`/`judge.rs`) proved iceoryx2's feature subset over an
+**ad-hoc** `CommandFrame`. `frozen.rs` **promotes** that to the **production
+frozen contract**: it carries `kirra_contract_channel::GovernorContractView` (the
+176-byte `#[repr(C)]`, by-value, freeze-pinned image) over the same real iceoryx2
+zero-copy channel and validates every received owned sample with the **production**
+`kirra_contract_channel::validate()` — the same transport-contract checks the QNX
+harness and the hypervisor-SHM seam use, not a spike-local copy.
+
+- A `#[repr(transparent)] WireView(GovernorContractView)` newtype carries the one
+  audited `unsafe impl ZeroCopySend` (the orphan rule forbids impl-ing the foreign
+  trait on the foreign view directly; `transparent` keeps the wire bytes identical
+  to the frozen image). This is the ADR-0006 Clause 3 integration `unsafe`.
+- `tests/frozen_fault_matrix.rs` drives all nine transport-contract fault classes
+  (valid, layout-version, magic, oversize, CRC, sequence-regress, replay,
+  generation-regress, deadline) through the live channel and asserts each maps to
+  exactly its `validate()` `ContractFault` — over the **full** and **minimal**
+  (`--no-default-features`) iceoryx2 configs.
+- **Isolation holds (#275 gate).** The dependency direction is **spike →
+  `kirra-contract-channel`** (a path dep on the lean, no_std, zero-dep,
+  forbid-unsafe core), never the reverse — so iceoryx2 still **never** enters the
+  SDK/parko dependency tree. This is the iceoryx2 path *using* the production
+  contract, not an SDK adoption of iceoryx2 (that remains the #275 decision).
+- **Scope:** `validate()` is the *transport-contract* checker; the kinematic
+  envelope is a separate downstream governor step (the talisman
+  `VehicleKinematicsContract`) and is intentionally out of scope here.
+
+### Latency — why iceoryx2 for the doer→checker hop (`src/bin/latency_bench.rs`)
+
+The QM-planner (doer) ↔ ASIL-governor (checker) **partition boundary is a
+mandatory safety boundary** (freedom-from-interference) — you cannot delete it for
+latency. The question is the *lowest-latency way to cross it*. `latency_bench`
+times the 176-byte frozen `GovernorContractView` handoff three ways
+(`KIRRA_LAT_ITERS=100000 cargo run --release --bin latency_bench`):
+
+```
+transport                  p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+in-process (floor)             28         37         60      69069     (floor)
+socket+serde (proxy)          976       1901      13934      83820     34.9x
+iceoryx2 (zero-copy)          309        424        995      46083     11.0x
+```
+
+INDICATIVE (shared host, no core isolation / FIFO) — the comparative **ratio** is
+the takeaway. iceoryx2 is ~3× faster than a bare UDP+serialize hop at the median
+and ~14× tighter at **p99.9 (995 ns vs 13.9 µs)** — and `socket+serde` is a
+*conservative* proxy: a real DDS hop adds RTPS/discovery/typed-CDR overhead (tens
+of µs–ms → 100–1000×; see the RMW refs in the #275 scope). The in-process **28 ns**
+floor is what the mandatory isolation costs; iceoryx2 holds the crossing
+**sub-microsecond**, where sockets/DDS do not. Certified numbers are QNX-target
+under FIFO (#274); the deployment lowest-latency mode pairs iceoryx2 with
+**busy-wait polling on an isolated core** → toward the published ~100 ns.
+
+**Busy-wait / pinned-core ping-pong** (the deployment lowest-latency *mode*).
+`latency_bench` also runs a two-thread ping-pong — a responder busy-polls
+(`spin_loop`, no event wakeup) on one pinned core and echoes; the requester
+busy-polls on another — i.e. the *real* cross-core round-trip a doer↔checker hop
+pays (`KIRRA_LAT_FIFO=1 KIRRA_LAT_REQ_CPU=2 KIRRA_LAT_RESP_CPU=3 cargo run
+--release --bin latency_bench`). Host-indicative result on this shared,
+**non-isolated, virtualized** sandbox:
+
+```
+mode                       p50_ns     p99_ns    p999_ns     max_ns
+iox2 ping-pong (RTT)        ~1400      ~1900      ~15000      ~90000
+```
+
+Two honest reads: (1) the **~1.4 µs RTT (~700 ns one-way)** is the *true*
+cross-core handoff — the single-thread row above (347 ns) understated it because
+publish+receive in one thread never actually waits across a boundary. (2) The
+**tail (~15 µs p99.9) is host/hypervisor jitter, not iceoryx2**: these cores are
+not `isolcpus`-isolated, so pinning removes migration but not preemption — and
+`SCHED_FIFO` here *worsened* the tail (a busy-spinning FIFO thread fights the
+system scheduler on a shared core). The published ~100 ns floor needs an
+**isolated core on a low-jitter target**, which is precisely the QNX-under-FIFO
+measurement (#274) — the mechanism is in place; the target supplies the number.
 
 ## How to run
 

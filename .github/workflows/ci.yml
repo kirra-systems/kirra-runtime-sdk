@@ -119,6 +119,31 @@ jobs:
         # instrumentation overhead invalidates wall-clock thresholds.
         run: cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests
 
+  iceoryx2-spike:
+    name: iceoryx2 carrier (frozen contract, isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: iceoryx2 frozen-contract carrier (full + minimal feature configs)
+        # `tools/iceoryx2-spike` is its OWN workspace (own Cargo.lock, gitignored)
+        # so the root `cargo test --workspace` never descends into it, and iceoryx2
+        # never enters the SDK/parko dependency tree (the #275 isolation). Without
+        # this lane the spike + the frozen-contract carrier (frozen.rs, which rides
+        # the production GovernorContractView over iceoryx2 and validates with the
+        # production validate()) compile/run for nobody — exactly how the upstream
+        # iceoryx2 0.9.1->0.9.2 sub-crate skew silently broke the build. This lane
+        # gates both the feature subset (#273) and the carrier (#275 / L2) on the
+        # full AND minimal (--no-default-features) iceoryx2 configs, plus clippy.
+        working-directory: tools/iceoryx2-spike
+        run: |
+          cargo test
+          cargo test --no-default-features
+          cargo clippy --all-targets -- -D warnings
+
   parko-safety:
     name: Parko Safety Tests (no ROS, no ORT)
     runs-on: ubuntu-latest

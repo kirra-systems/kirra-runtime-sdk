@@ -11,6 +11,7 @@
 // `src/gateway/kinematics_contract.rs`; this crate imports NOTHING from it and
 // labels its own envelope numbers as PROXIES.
 
+pub mod frozen;
 pub mod harness;
 pub mod judge;
 pub mod wire;
