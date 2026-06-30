@@ -64,6 +64,35 @@ KirraContractView make_admissible_view(const std::uint8_t *payload, std::uint32_
     return v;
 }
 
+// Floor integer sqrt of a 128-bit value via Newton's method — the same fast
+// O(log) algorithm as kirra_timing's `isqrt_u128` (NOT an O(sqrt(var)) linear
+// scan, which can run billions of iterations on the large variance that
+// emulation jitter produces).
+std::uint64_t isqrt_u128(__uint128_t n) {
+    if (n == 0) return 0;
+    __uint128_t x = n, y = (x + 1) >> 1;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) >> 1;
+    }
+    return static_cast<std::uint64_t>(x);
+}
+
+// Nearest-rank percentile matching kirra_timing's "ceil threshold" semantics:
+// the smallest sample value v such that at least `num/den` of the samples are
+// <= v. Rank = ceil(n · num / den) (1-based), clamped to [1, n]; index = rank-1.
+// This avoids the off-by-one of `sorted[(n·p)/den]` (which, e.g. for n=100,
+// reads the max for p99) and is comparable to the host kirra-timing output.
+std::uint64_t percentile(const std::vector<std::uint64_t> &sorted,
+                         std::uint64_t num, std::uint64_t den) {
+    const std::size_t n = sorted.size();
+    if (n == 0) return 0;
+    __uint128_t rank = (static_cast<__uint128_t>(n) * num + (den - 1)) / den; // ceil
+    if (rank < 1) rank = 1;
+    if (rank > n) rank = n;
+    return sorted[static_cast<std::size_t>(rank) - 1];
+}
+
 // Monotonic nanoseconds. clock_gettime self-overhead (~tens of ns) is inside each
 // sample and is roughly constant, so the reported MAX is a CONSERVATIVE (slightly
 // over) WCET — safe for a bound. On QNX prefer ClockCycles() + SYSPAGE
@@ -134,13 +163,14 @@ int main() {
 
     std::sort(samples.begin(), samples.end());
     const std::uint64_t mn   = samples.front();
-    const std::uint64_t p50  = samples[samples.size() / 2];
-    const std::uint64_t p99  = samples[(samples.size() * 99) / 100];
-    const std::uint64_t p999 = samples[(samples.size() * 999) / 1000];
+    const std::uint64_t p50  = percentile(samples, 50, 100);
+    const std::uint64_t p99  = percentile(samples, 99, 100);
+    const std::uint64_t p999 = percentile(samples, 999, 1000);
     const std::uint64_t mx   = samples.back();
 
     // Mean + population stddev (integer, matching kirra_timing::ChannelStats: the
-    // exact (n·Σx²−(Σx)²)/n² variance form, floor-rooted). Σx² fits in u128.
+    // exact (n·Σx²−(Σx)²)/n² variance form, floor-rooted via Newton's isqrt). Σx²
+    // fits in u128.
     __uint128_t sum = 0, sum_sq = 0;
     for (const std::uint64_t s : samples) {
         sum += s;
@@ -150,8 +180,7 @@ int main() {
     const std::uint64_t mean = static_cast<std::uint64_t>(sum / n);
     const __uint128_t var = (static_cast<__uint128_t>(n) * sum_sq - sum * sum)
                           / (static_cast<__uint128_t>(n) * n);
-    std::uint64_t stddev = 0;
-    while ((static_cast<__uint128_t>(stddev) + 1) * (stddev + 1) <= var) ++stddev;
+    const std::uint64_t stddev = isqrt_u128(var);
 
     // Certified iff on the QNX target AND FIFO actually granted (conjunction —
     // mirrors MeasurementEnv::is_certified_wcet). Everything else is INDICATIVE.
