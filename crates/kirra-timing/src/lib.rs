@@ -82,8 +82,12 @@ pub use report::{Report, StageReport};
 pub mod stage {
     /// Perception input ingest (e.g. trajectory/odometry arrival → validation entry).
     pub const PERCEPTION_INPUT: &str = "perception_input";
-    /// Governor / checker execution (the verdict path).
+    /// Governor / checker execution (the verdict path) under the Nominal contract.
     pub const GOVERNOR_EXEC: &str = "governor_exec";
+    /// Governor / checker execution under the MRC fallback contract (the
+    /// decel-to-stop envelope verdict path) — a distinct label from
+    /// [`GOVERNOR_EXEC`] so downstream tooling can join on either profile.
+    pub const GOVERNOR_EXEC_MRC: &str = "governor_exec_mrc";
     /// Parko (ML) evaluation tick.
     pub const PARKO_EVAL: &str = "parko_eval";
     /// Actuator command publication.
