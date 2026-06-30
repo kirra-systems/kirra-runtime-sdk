@@ -384,6 +384,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Quality guardrails (ratchet — line count / panic budget / ownership)
+        # Pure-Python, no toolchain needed, so it runs first and fails fast/cheap.
+        # Pins per-file line count, code-only panic/unwrap/expect counts, and the
+        # State<Arc<AppState>> ownership rule (CLAUDE.md #11) to the recorded
+        # baseline; only a regression past the ceiling fails. See
+        # ci/check_quality_guardrails.py for the update protocol.
+        #
+        # `set -o pipefail` so the script's non-zero exit (a guardrail
+        # regression) FAILS the job — without it the `tee` pipe returns tee's
+        # exit code and masks the violation (mirrors the Dependency audit step).
+        run: |
+          set -o pipefail
+          python3 ci/check_quality_guardrails.py | tee quality-guardrails-report.txt
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy
@@ -430,6 +443,7 @@ jobs:
             shellcheck-report.txt
             helm-lint-report.txt
             audit-report.txt
+            quality-guardrails-report.txt
 
   parko-install-framework:
     name: Parko Multi-Backend Install Framework (shell, no hardware)
