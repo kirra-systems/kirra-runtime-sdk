@@ -2224,6 +2224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-wcet-bench"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-timing",
+]
+
+[[package]]
 name = "kirra-wire-client"
 version = "0.1.0"
 dependencies = [
