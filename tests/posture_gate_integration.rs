@@ -131,6 +131,23 @@ async fn req_status(app: Router, method: &str, path: &str) -> StatusCode {
         .status()
 }
 
+// An OPTIONS request carrying the two headers a browser CORS preflight always
+// sends (`Origin` + `Access-Control-Request-Method`) — what the posture-gate
+// bypass keys on (#696 / Copilot PR #710).
+async fn options_preflight_status(app: Router, path: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri(path)
+        .header("origin", "https://dashboard.example")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .expect("build request");
+    app.oneshot(req)
+        .await
+        .expect("router service should not panic")
+        .status()
+}
+
 // ---------------------------------------------------------------------------
 // 1. Unknown METHOD on any gated route → 503 (fail-closed) regardless of
 // posture. Confirms the SG-006 invariant ("Unknown denied in all postures
@@ -150,6 +167,55 @@ async fn test_unknown_method_returns_503_under_any_posture() {
             status,
             StatusCode::SERVICE_UNAVAILABLE,
             "Unknown HTTP method must be denied in posture {posture:?}; got {status}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #696 (HT1): a CORS preflight (OPTIONS) must NOT be 503'd by the posture gate
+// — it carries no command and authorizes nothing, and must reach the CorsLayer.
+// Before the fix, OPTIONS classified as Unknown → 503 in every posture. The test
+// app has no CorsLayer, so a gate-passed OPTIONS reaches the router and 405s
+// (no OPTIONS handler) — the point is only that it is NOT the gate's 503.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_options_preflight_not_blocked_by_posture_gate() {
+    for posture in [
+        FleetPosture::Nominal,
+        FleetPosture::Degraded,
+        FleetPosture::LockedOut,
+    ] {
+        let svc = build_state_with_posture(posture);
+        let status = options_preflight_status(build_test_app(svc), "/fleet/posture").await;
+        assert_ne!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a CORS preflight (OPTIONS) must pass the posture gate in {posture:?}, not 503; got {status}"
+        );
+    }
+}
+
+// #696 / Copilot PR #710: the bypass is scoped to an ACTUAL preflight. A bare
+// OPTIONS WITHOUT the preflight headers is not a CORS preflight and must stay
+// subject to the posture gate (OPTIONS classifies as Unknown → 503 in every
+// posture), so the exemption can't widen into a posture-gate hole if a route
+// ever serves OPTIONS directly.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_bare_options_without_preflight_headers_is_gated() {
+    for posture in [
+        FleetPosture::Nominal,
+        FleetPosture::Degraded,
+        FleetPosture::LockedOut,
+    ] {
+        let svc = build_state_with_posture(posture);
+        let status = req_status(build_test_app(svc), "OPTIONS", "/fleet/posture").await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a non-preflight OPTIONS must remain posture-gated in {posture:?}; got {status}"
         );
     }
 }
