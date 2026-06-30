@@ -30,6 +30,9 @@ tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"
 [dev-dependencies]
 parko-kirra = { path = "../parko-kirra" }
 proptest = "1"
+# L5: serde round-trip test for the SDK-free audit records (the durable
+# parko-kirra impl serializes these into JSON audit bodies).
+serde_json = "1"
 
 [[test]]
 name = "test_posture_divergence"

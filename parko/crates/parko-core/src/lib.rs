@@ -10,6 +10,8 @@
 //! Backends such as parko-onnx, parko-qnn, parko-eiq, etc.
 //! depend on this crate and implement the `InferenceBackend` trait.
 
+// L5 — SDK-free audit seam for the ML decision path (AuditClient + Noop/Mock).
+pub mod audit;
 pub mod backend;
 // PARK-022 — descriptor → backend resolution (factory registry + stub fallback).
 pub mod backend_selector;
@@ -33,6 +35,11 @@ pub mod safety;
 pub mod scheduler;
 pub mod sensor;
 pub mod telemetry;
+
+pub use audit::{
+    AuditClient, DecisionRecord, FaultRecord, HealthRecord, MockAuditClient, NoopAuditClient,
+    OverrideRecord,
+};
 
 pub use backend::{
     BackendCapabilities,
