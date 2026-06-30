@@ -107,6 +107,31 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
     consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
 }
 
+/// #689: enforce the split-brain inequality on the ENV-derived HA timings. The
+/// compile-time `const _` assert above only guards the DEFAULT constants; the
+/// runtime `KIRRA_HEARTBEAT_INTERVAL` / `KIRRA_PROMOTION_TIMEOUT` overrides are
+/// read independently with no cross-check. A wedged primary self-demotes after
+/// `MAX_CONSECUTIVE_HEARTBEAT_FAILURES × interval`; the standby promotes at
+/// `promotion_timeout`. If an operator sets `MAX × interval >= promotion_timeout`,
+/// the standby promotes before (or as) the old primary self-demotes — a transient
+/// two-`mode_active` window before the durable epoch fence catches the old primary
+/// on its next tick.
+///
+/// Clamp the promotion timeout UP to strictly exceed the self-demote threshold,
+/// with one interval of margin (`floor = (MAX + 1) × interval`). Clamping UP is
+/// the SAFE direction: the standby waits longer, never promotes early. Returns
+/// `(resolved_timeout_ms, clamped)`; the caller logs loudly when `clamped` so the
+/// misconfiguration is visible rather than silently changing failover latency.
+#[must_use]
+pub fn enforce_promotion_timeout_floor(env_timeout_ms: u64, interval_ms: u64) -> (u64, bool) {
+    let floor = (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 + 1).saturating_mul(interval_ms);
+    if env_timeout_ms < floor {
+        (floor, true)
+    } else {
+        (env_timeout_ms, false)
+    }
+}
+
 /// SQLite key for the primary heartbeat timestamp.
 pub const HEARTBEAT_KEY: &str = "primary_heartbeat_ms";
 
@@ -472,10 +497,29 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(PROMOTION_POLL_MS);
 
-        let timeout_ms = std::env::var("KIRRA_PROMOTION_TIMEOUT")
+        let env_timeout_ms = std::env::var("KIRRA_PROMOTION_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(PROMOTION_TIMEOUT_MS);
+        // #689: cross-check the ENV timeout against the ENV heartbeat interval (the
+        // const assert only guards the defaults). Clamp UP if the operator's value
+        // would let the standby promote before a wedged primary self-demotes.
+        let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(HEARTBEAT_INTERVAL_MS);
+        let (timeout_ms, clamped) = enforce_promotion_timeout_floor(env_timeout_ms, interval_ms);
+        if clamped {
+            tracing::error!(
+                env_timeout_ms,
+                interval_ms,
+                resolved_timeout_ms = timeout_ms,
+                max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                "KIRRA_PROMOTION_TIMEOUT too small for KIRRA_HEARTBEAT_INTERVAL (MAX×interval ≥ \
+                 timeout): clamped UP so the primary self-demotes before the standby promotes \
+                 (#689 split-brain guard). Fix the env config to silence this."
+            );
+        }
 
         let force_promote = std::env::var("KIRRA_FORCE_PROMOTE")
             .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -969,6 +1013,38 @@ mod standby_monitor_tests {
             demote_at_ms < PROMOTION_TIMEOUT_MS,
             "self-demote at {demote_at_ms} ms must precede promotion at {PROMOTION_TIMEOUT_MS} ms"
         );
+    }
+
+    #[test]
+    fn test_enforce_promotion_timeout_floor_689() {
+        // A coherent ENV config (the inequality already holds) is passed through
+        // unchanged — no clamp, operator's value respected.
+        let (t, clamped) = enforce_promotion_timeout_floor(10_000, 2_000);
+        assert_eq!((t, clamped), (10_000, false), "a safe config must not be clamped");
+
+        // The DEFAULTS must never trip the runtime clamp (they satisfy the const assert).
+        let (t, clamped) = enforce_promotion_timeout_floor(PROMOTION_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS);
+        assert!(!clamped, "default config must pass the runtime check too");
+        assert_eq!(t, PROMOTION_TIMEOUT_MS);
+
+        // The HA4 misconfig: MAX×interval ≥ timeout. With interval=5s the primary
+        // self-demotes at 3×5=15s but the operator set promotion=10s → standby
+        // promotes BEFORE the demote → two-active window. Clamp UP to (MAX+1)×interval.
+        let (t, clamped) = enforce_promotion_timeout_floor(10_000, 5_000);
+        assert!(clamped, "MAX×interval (15s) ≥ timeout (10s) must be clamped");
+        assert_eq!(t, (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 + 1) * 5_000);
+        // Post-clamp the split-brain inequality holds: self-demote < promote.
+        assert!(
+            MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 * 5_000 < t,
+            "after clamping, the primary self-demotes strictly before the standby promotes"
+        );
+
+        // Boundary: timeout exactly == MAX×interval is still unsafe (needs STRICT <)
+        // → clamped up past it.
+        let interval = 2_000;
+        let exactly = MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64 * interval;
+        let (t, clamped) = enforce_promotion_timeout_floor(exactly, interval);
+        assert!(clamped && t > exactly, "timeout == MAX×interval must be clamped strictly above");
     }
 }
 
