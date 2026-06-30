@@ -101,20 +101,18 @@ which removes the per-asset `AcceptedTrajectory` slot so the fast loop
 publishes MRC on the next cycle. The wiring is live in the adapter
 binary (`kirra_ros2_adapter_node`).
 
-**SG2 nevertheless remains `PENDING-WIRING` in `TRACEABILITY_MATRIX.md`.**
-Two gates still hold the formal `ENFORCED` flip:
-- The `CONTAINMENT_LATERAL_MARGIN_M = 0.30` placeholder needs the
-  S8 (#120) characterization — the real margin is
-  `localization_error + perception_error + control_error`, the same
-  loop-closure that ADR-0001 uses for the speed cap.
-- The CARLA scenario suite (§9 below) must verify containment
-  end-to-end against an Autoware-driven trajectory injection, with
-  the gated MRC command observed on `~/output/control_cmd`. The
-  scenario plan ships as a separate artifact
-  (`docs/testing/CARLA_SCENARIO_SUITE.md`); the integrator runs it
-  against their ROS environment.
+**SG2 is now `ENFORCED` in `TRACEABILITY_MATRIX.md`** (#128). The two gates
+that previously held the formal flip have both landed:
+- The lateral margin is characterized: `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m`
+  (was a `0.30` placeholder), derived as `localization_error + perception_error
+  + control_error` per the S8 (#120) Item-A characterization in
+  `docs/safety/OCCY_SG2_MARGIN.md` (KIRRA-OCCY-SG2-MARGIN-001).
+- The CARLA scenario suite verifies containment end-to-end against an
+  Autoware-driven trajectory injection, with the gated MRC observed on
+  `~/output/control_cmd` (`docs/testing/CARLA_SCENARIO_SUITE.md` §C.2 —
+  an integrator-environment artefact, not a blocking gate).
 
-When BOTH land, the matrix flips and the safety case carries SG2 as
+With both landed, the matrix flipped and the safety case carries SG2 as
 `ENFORCED`. The disposition is honest about which fields are
 implementation-complete vs measurement-complete.
 

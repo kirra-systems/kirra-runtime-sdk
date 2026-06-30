@@ -50,10 +50,10 @@ if !cmd.linear_velocity_mps.is_finite() {
 
 | Status | Meaning | Applies to |
 |---|---|---|
-| **ENFORCED** | At least one Governor code site is tagged and tested, AND the check is wired into the live request path | SG1, SG3, SG7, SG8 (Governor side), SG9 |
-| **PENDING-WIRING** | Tagged + tested in isolation, but the live request path doesn't yet feed the inputs the check needs; live enforcement gated on a wiring follow-up issue | SG2 (the drivable-space containment check is built; Option-B trajectory + corridor wiring is the gate) |
+| **ENFORCED** | At least one Governor code site is tagged and tested, AND the check is wired into the live request path | SG1, SG2, SG3, SG7, SG8 (Governor side), SG9 |
+| **PENDING-WIRING** | Tagged + tested in isolation, but the live request path doesn't yet feed the inputs the check needs; live enforcement gated on a wiring follow-up issue | (none currently — SG2 graduated to ENFORCED once the Option-B adapter wiring landed, #128/#131) |
 | **DELEGATED** | The safety goal is realized outside the Governor — integrator perception, map prior, control adapter; the residual is carried as an SEooC assumption-of-use | SG4, SG5, SG6, SG8 (standing-MRC half) |
-| **PENDING** | Coverage hole with no in-tree check: a real implementation gap, tracked in its own issue | (none currently — SG2 moved to PENDING-WIRING) |
+| **PENDING** | Coverage hole with no in-tree check: a real implementation gap, tracked in its own issue | (none currently) |
 | **STRUCTURAL** | Enforced by absence of a parameter / by type signature; a test pins the property | SG7 (doer-agnostic property) — coexists with ENFORCED if the SG also has tagged sites |
 
 ### Recorded exceptions (the CI gate consults these)
@@ -63,7 +63,6 @@ explicit non-violations:
 
 | SG | Status | Tracked by |
 |---|---|---|
-| SG2 | PENDING-WIRING | The check is built + tested in isolation (`gateway::containment::validate_trajectory_containment`); the Option-B trajectory+corridor wiring (filed as a dedicated follow-up issue) gates live enforcement. The gate's `PENDING_SGS` constant still excludes SG2 from the ENFORCED-must-have-tags requirement, but the check itself contributes tags (CI verifies REQ+TEST as for any tagged site). |
 | SG4 | DELEGATED | OCCY_INDEPENDENT_DETECTOR.md (D1 add-on); #126 (Perception Input Contract) |
 | SG5 | DELEGATED | map-anchored, integrator side; #126 |
 | SG6 | DELEGATED | impact detection PC1 / #102; #126 / #127 |

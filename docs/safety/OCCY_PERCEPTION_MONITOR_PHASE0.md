@@ -299,7 +299,8 @@ the `DenyCode` design exactly (`gateway/kinematics_contract.rs`):
 | `wcet_gate.rs` | add both guards to the WCET budget set | bounded-WCET evidence |
 
 **Live-wiring** of the derate onto real command traffic is a **follow-up issue**
-(same staging as SG2 containment's "PENDING-WIRING"): Phase-0 lands the guards as
+(the same staging SG2 containment went through before it graduated to ENFORCED,
+#128/#131): Phase-0 lands the guards as
 unit-tested pure functions against contract/synthetic inputs; activation on live
 `ProposedVehicleCommand` traffic + the Track-B `R_obs` feed is filed separately.
 
