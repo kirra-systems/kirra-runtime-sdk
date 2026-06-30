@@ -10,9 +10,13 @@ Three guardrails, all read from ``ci/quality_guardrails_baseline.json``:
 * ``max_lines``      — per-file line-count ceiling (keeps the entry-point
                        monolith from regrowing after it is split up).
 * ``panic_budget``   — per-file ceiling on ``unwrap(`` / ``expect(`` /
-                       ``panic!(`` occurrences in *code* (comments and string
-                       literals are stripped before counting, so prose that
-                       merely mentions these never trips the gate). This is an
+                       ``panic!(`` occurrences in *code* (comments and escaped
+                       double-quoted string-literal contents are stripped before
+                       counting, so prose in those never trips the gate; raw
+                       strings are intentionally NOT stripped — see
+                       ``strip_rust_noise`` — so editing a raw-string body that
+                       contains one of these tokens can still move the count).
+                       This is an
                        interim ratchet; the strategic replacement is clippy's
                        ``unwrap_used`` / ``expect_used`` / ``panic`` lints with a
                        justified ``#[allow]`` at each sanctioned fail-closed
@@ -55,10 +59,14 @@ def strip_rust_noise(text: str) -> str:
 
     This is an approximate lexer, not a full Rust parser: it handles ``//`` line
     comments, ``/* ... */`` block comments (non-nested — the dominant case), and
-    ``"..."`` strings with backslash escapes. Raw strings (``r"..."``) are left
-    as-is; they are vanishingly rare for these patterns and erring toward
-    *counting* a possible occurrence keeps the ratchet fail-safe (it can only
-    over-count, never hide a real call)."""
+    ``"..."`` strings with backslash escapes. Raw strings (e.g. ``r#"..."#``) are
+    deliberately left as-is to avoid the added complexity of matching variable
+    hash-delimiters. Note raw strings ARE common in the guarded files (HTTP/JSON
+    response bodies), so a raw-string body that happens to contain ``unwrap(`` /
+    ``expect(`` / ``panic!(`` would be counted. This is conservative (fail-safe):
+    it can only over-count, never hide a real call — but it does mean editing
+    such a raw-string literal can change the counted total even when no
+    executable code changed."""
     out: list[str] = []
     i = 0
     n = len(text)
