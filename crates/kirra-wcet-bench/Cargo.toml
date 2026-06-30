@@ -1,0 +1,30 @@
+# crates/kirra-wcet-bench/Cargo.toml
+#
+# L1 / #274 host-side WCET REPORT GENERATOR. A lean, std bench binary that drives
+# the host-buildable governor verdict path (`kirra_core::kinematics_contract::
+# validate_vehicle_command`) through the `kirra-timing` primitives and emits a
+# deterministic, environment-tagged report (human table → stderr, CSV → stdout).
+#
+# INDICATIVE BY CONSTRUCTION: it uses `StdMonotonicClock` (an `Instant`-backed
+# host clock), so it can NEVER mint a certified-WCET tag — the env is clamped to
+# host/ci-runner/other. Certified WCET still comes only from the QNX target under
+# FIFO via `tools/qnx-rtm-harness/wcet_measure.cpp` (the methodology's rule).
+#
+# Depends ONLY on the two lean crates (kirra-core + kirra-timing) — not the heavy
+# verifier service. Mirrors the `kirra-proposal-bench` dev-bench precedent.
+[package]
+name = "kirra-wcet-bench"
+version = "0.1.0"
+edition = "2021"
+description = "DEV host-indicative WCET report generator: measures the governor verdict path via kirra-timing and emits an env-tagged CSV/table. Not a certified-WCET artifact (#274)."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[[bin]]
+name = "kirra-wcet-bench"
+path = "src/main.rs"
+
+[dependencies]
+kirra-core = { path = "../kirra-core" }
+kirra-timing = { path = "../kirra-timing", features = ["std"] }
