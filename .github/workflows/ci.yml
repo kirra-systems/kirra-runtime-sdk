@@ -56,7 +56,11 @@ jobs:
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Bumped 30→45: when --mcdc is unsupported the instrumented workspace test
+    # suite runs TWICE (mcdc attempt, then branch fallback). Instrumented runs
+    # carry 20–50% overhead, so a single 30-min budget could time out on the
+    # double run and red the job falsely.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -65,9 +69,17 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
       - name: Run MC/DC coverage
-        # TODO: restore `--mcdc` once cargo-llvm-cov and rustc nightly realign on
-        # the coverage-options value. Current nightly accepts only block|branch|
-        # condition; --branch is the closest substitute that compiles today.
+        # Prefer MC/DC (issue #65 / CERT-001) when the installed cargo-llvm-cov +
+        # nightly support it; fall back to branch coverage only when the toolchain
+        # rejects `--mcdc`. Historically nightly accepted only block|branch|
+        # condition for the coverage-options value and `--mcdc` would not compile,
+        # so branch was the closest substitute; this opportunistically uses MC/DC
+        # once the toolchain realigns, without breaking CI before then.
+        #
+        # The `if` swallows a non-zero `--mcdc` exit (set -e is suppressed in an
+        # if-condition) and falls back; a genuine deterministic failure also fails
+        # the branch run, so it still reds the job. The fallback rewrites the same
+        # lcov.info, so the Codecov upload is unaffected either way.
         #
         # `--skip wcet_gate` excludes WCET timing assertions from the
         # instrumented run. llvm-cov instrumentation adds 20–50% overhead on
@@ -75,10 +87,19 @@ jobs:
         # WCET measurement runs in the dedicated `wcet-gate` job below on a
         # clean stable toolchain.
         run: |
-          cargo llvm-cov --workspace --branch \
+          set -euo pipefail
+          if cargo llvm-cov --workspace --mcdc \
             --ignore-filename-regex='/.cargo/registry' \
             --lcov --output-path lcov.info \
-            -- --skip wcet_gate
+            -- --skip wcet_gate; then
+            echo "MC/DC coverage completed."
+          else
+            echo "MC/DC unsupported on current nightly/tooling; falling back to branch coverage."
+            cargo llvm-cov --workspace --branch \
+              --ignore-filename-regex='/.cargo/registry' \
+              --lcov --output-path lcov.info \
+              -- --skip wcet_gate
+          fi
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
