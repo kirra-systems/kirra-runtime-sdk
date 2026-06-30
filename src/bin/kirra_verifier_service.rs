@@ -1361,6 +1361,30 @@ async fn audit_grant_rejection(
     }).await;
 }
 
+/// #412 / ADR-0013 — audit a REJECTED operator e-stop request to the signed
+/// chain (distinct event type from a clearance rejection). A rejected stop never
+/// commanded the MRC; the record is the non-repudiable trail of the attempt.
+async fn audit_estop_rejection(
+    app: &kirra_verifier::verifier::AppState,
+    reason: &str,
+    node_id: &str,
+    operator_id: &str,
+    now: u64,
+) {
+    let store = app.store.clone();
+    let reason = reason.to_string();
+    let node_id = node_id.to_string();
+    let operator_id = operator_id.to_string();
+    let _ = store.call(move |s| {
+        let _ = s.append_clearance_audit_event(
+            "OperatorStopRequestRejected",
+            &json!({ "reason": reason, "node_id": node_id, "operator_id": operator_id })
+                .to_string(),
+            now,
+        );
+    }).await;
+}
+
 /// #326 — the operator clearance-challenge map key. Length-prefixing the
 /// `operator_id` makes the `operator/node` split UNAMBIGUOUS regardless of any
 /// delimiter characters in either id: `("a|b","c")` → `"3:a|b:c"` and
@@ -1417,6 +1441,20 @@ struct ClearanceGrantRequest {
     nonce: Option<String>,
     #[serde(default)]
     signature_b64: Option<String>,
+}
+
+/// #412 / ADR-0013 — a governor-routed authenticated EMERGENCY-STOP request. The
+/// operator signs `operator_stop_signing_payload(operator_id, node_id, nonce)`
+/// (domain-distinct from a clearance grant, so the two verbs are not
+/// interchangeable). Unlike the RECORD-ONLY clearance grant, accepting this
+/// REQUEST drives the governor to command the MRC (sticky fleet LockedOut) under
+/// its own authority — the console never touches the actuator.
+#[derive(Deserialize)]
+struct OperatorStopRequest {
+    node_id: String,
+    operator_id: String,
+    nonce: String,
+    signature_b64: String,
 }
 
 
@@ -1559,7 +1597,12 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // #314 Phase 1 — operator clearance-challenge (unauthenticated; the nonce
         // alone grants nothing — only a valid signature over it does).
         .route("/console/clearance-challenge", get(clearance_challenge))
-        .route("/console/clearance-grants", post(console_clearance_grant));
+        .route("/console/clearance-grants", post(console_clearance_grant))
+        // #412 / ADR-0013 — governor-routed authenticated emergency-stop REQUEST
+        // (the clearance verb inverted). Operator-signed over the same challenge
+        // nonce; accepting it makes the GOVERNOR command the MRC (sticky LockedOut)
+        // under its own authority — the console never touches the actuator.
+        .route("/console/estop-requests", post(console_estop_request));
 
     Router::new()
         .merge(probe_routes)
@@ -3231,6 +3274,15 @@ mod console_phase_a_tests {
         b64e.encode(sk.sign(&payload).to_bytes())
     }
 
+    /// #412 — sign the EMERGENCY-STOP payload (domain-distinct from a grant).
+    fn sign_stop_b64(sk: &SigningKey, operator_id: &str, node_id: &str, nonce: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+        let payload = kirra_verifier::attestation::operator_stop_signing_payload(
+            operator_id, node_id, nonce,
+        );
+        b64e.encode(sk.sign(&payload).to_bytes())
+    }
+
     fn register_op(svc: &Arc<ServiceState>, operator_id: &str, pem: &str) {
         svc.app.store.with(|s| s.register_operator(operator_id, pem, 1)).unwrap();
     }
@@ -3553,6 +3605,105 @@ mod console_phase_a_tests {
         let (s, _b) = post_json(svc, "/console/clearance-grants", body, None).await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
             "a passive-standby instance must not accept grant writes (split-brain guard)");
+    }
+
+    // ----- #412 / ADR-0013 governor-routed authenticated e-stop request --------
+
+    /// HAPPY PATH: an operator-signed stop request makes the GOVERNOR command the
+    /// MRC under its own authority — supervisor_tripped is set and BOTH chain
+    /// events (request + governor action) are recorded.
+    #[tokio::test]
+    async fn estop_request_commands_mrc_and_chains_both_events() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        let (sk, pem) = operator_keypair(31);
+        register_op(&svc, "alice", &pem);
+        let (_c, cb) = get(svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let nonce = parse_nonce(&cb);
+        let sig = sign_stop_b64(&sk, "alice", "robot-01", &nonce);
+        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+
+        let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
+        assert_eq!(s, StatusCode::OK, "operator-signed stop accepted; body={b}");
+        assert!(b.contains("stop_commanded") && b.contains("MRC_COMMANDED"), "body={b}");
+
+        // The governor commanded the sticky MRC under its own authority.
+        assert!(svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            "an accepted e-stop must set the sticky supervisor_tripped flag (force_lockout)");
+        let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+        assert!(ab.contains("OperatorStopRequested"), "the authenticated request is chained");
+        assert!(ab.contains("GovernorMRCCommanded"), "the governor's MRC action is chained");
+        let fp = kirra_verifier::attestation::operator_key_fingerprint(&pem).unwrap();
+        assert!(ab.contains(&fp), "the request event carries the operator key fingerprint (non-repudiation)");
+    }
+
+    /// THE DOMAIN-SEPARATION SECURITY PROPERTY: a CLEARANCE (release) signature
+    /// must NOT be accepted as a STOP request (different signing domain). Without
+    /// domain separation an operator's release could be replayed as a stop.
+    #[tokio::test]
+    async fn clearance_signature_is_not_accepted_as_an_estop() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        let (sk, pem) = operator_keypair(32);
+        register_op(&svc, "alice", &pem);
+        let (_c, cb) = get(svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let nonce = parse_nonce(&cb);
+        // Sign the GRANT payload, submit to the e-stop endpoint.
+        let grant_sig = sign_grant_b64(&sk, "alice", "robot-01", &nonce);
+        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":grant_sig}).to_string();
+        let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED,
+            "a clearance signature must not satisfy the e-stop domain; body={b}");
+        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            "a rejected e-stop must NOT command the MRC");
+        let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+        assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("bad_signature"));
+    }
+
+    /// UNKNOWN operator → 403, audited, no MRC.
+    #[tokio::test]
+    async fn estop_unknown_operator_rejected_403() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        let body = json!({"node_id":"robot-01","operator_id":"ghost","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let (s, b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "unknown operator rejected; body={b}");
+        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
+        let (_s, ab) = get(svc.clone(), "/console/audit?limit=50").await;
+        assert!(ab.contains("OperatorStopRequestRejected") && ab.contains("unknown_operator"));
+    }
+
+    /// REPLAY: a stop nonce is single-use — the second identical request is rejected.
+    #[tokio::test]
+    async fn estop_nonce_replay_is_rejected() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        let (sk, pem) = operator_keypair(33);
+        register_op(&svc, "alice", &pem);
+        let (_c, cb) = get(svc.clone(),
+            "/console/clearance-challenge?operator_id=alice&node_id=robot-01").await;
+        let nonce = parse_nonce(&cb);
+        let sig = sign_stop_b64(&sk, "alice", "robot-01", &nonce);
+        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":nonce,"signature_b64":sig}).to_string();
+        let (s1, _) = post_json(svc.clone(), "/console/estop-requests", body.clone(), None).await;
+        assert_eq!(s1, StatusCode::OK, "first stop accepted");
+        let (s2, b2) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
+        assert_eq!(s2, StatusCode::UNAUTHORIZED, "replayed stop nonce rejected; body={b2}");
+    }
+
+    /// HA split-brain guard: a passive-standby instance must not command the MRC.
+    #[tokio::test]
+    async fn standby_instance_rejects_estop_request() {
+        let svc = build_state();
+        seed_node(&svc, "robot-01");
+        svc.app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+        let body = json!({"node_id":"robot-01","operator_id":"alice","nonce":"00","signature_b64":"AAAA"}).to_string();
+        let (s, _b) = post_json(svc.clone(), "/console/estop-requests", body, None).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE,
+            "a passive-standby instance must not command the MRC (split-brain guard)");
+        assert!(!svc.app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 

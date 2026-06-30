@@ -234,6 +234,32 @@ pub fn operator_grant_signing_payload(operator_id: &str, node_id: &str, nonce: &
     payload
 }
 
+/// Domain tag for an operator EMERGENCY-STOP request (#412 / ADR-0013). DISTINCT
+/// from [`OPERATOR_GRANT_DOMAIN`] so a clearance (RELEASE) signature can NEVER be
+/// replayed as a stop request, nor vice versa — the two verbs ride the same
+/// authenticated channel but are cryptographically non-interchangeable.
+pub const OPERATOR_STOP_DOMAIN: &[u8] = b"KIRRA-OPERATOR-ESTOP-v1";
+
+/// The exact byte payload an operator signs for an EMERGENCY-STOP request on
+/// `(operator_id, node_id, nonce)` (#412 / ADR-0013). Same length-prefixed,
+/// domain-separated discipline as [`operator_grant_signing_payload`], but under
+/// [`OPERATOR_STOP_DOMAIN`] — the stop is the clearance verb INVERTED, and the
+/// distinct domain is what makes a clearance signature unusable as a stop (and
+/// vice versa). The browser (WebCrypto) and the server MUST construct this
+/// identically.
+#[must_use]
+pub fn operator_stop_signing_payload(operator_id: &str, node_id: &str, nonce: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(OPERATOR_STOP_DOMAIN.len() + 24
+        + operator_id.len() + node_id.len() + nonce.len());
+    payload.extend_from_slice(OPERATOR_STOP_DOMAIN);
+    for field in [operator_id, node_id, nonce] {
+        let b = field.as_bytes();
+        payload.extend_from_slice(&(b.len() as u64).to_le_bytes());
+        payload.extend_from_slice(b);
+    }
+    payload
+}
+
 /// Verify an Ed25519 signature over `payload` against a PEM-encoded public key.
 /// Fail-closed: a malformed key, a non-64-byte signature, or a bad signature all
 /// return `false`. Uses `verify_strict` (the same path as node attestation).
@@ -357,6 +383,18 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// #412 — the e-stop and clearance payloads MUST differ for identical inputs
+    /// (distinct domain tags), so a clearance signature can never satisfy an e-stop
+    /// verification and vice versa.
+    #[test]
+    fn stop_and_grant_payloads_are_domain_separated() {
+        let g = operator_grant_signing_payload("alice", "robot-01", "deadbeef");
+        let s = operator_stop_signing_payload("alice", "robot-01", "deadbeef");
+        assert_ne!(g, s, "stop and grant payloads must not collide for the same inputs");
+        assert!(s.starts_with(OPERATOR_STOP_DOMAIN), "stop payload carries its own domain tag");
+        assert!(g.starts_with(OPERATOR_GRANT_DOMAIN), "grant payload carries its own domain tag");
+    }
 
     /// Per-call counter mixed into the seed so two keypairs created in the
     /// same nanosecond are still distinct.

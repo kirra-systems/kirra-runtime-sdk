@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed (design note — precedes code)** — for owner sign-off; ratified on merge. |
-| Date | 2026-06-21 |
+| Status | **Accepted** — verifier-side implementation landed (#412); the console action (UI) remains the one deferred step. |
+| Date | 2026-06-21 (design); implemented 2026-06-30 |
 | Deciders | Project / safety-case owner |
 | Issues | #412 (this), #314 (operator identity), #410 / #405 (MRC / decel-to-stop), ADR-0006 (the QM↔safety boundary), #411 (console safety-theater fix) |
-| Code (when built) | `src/verifier.rs` / `src/bin/kirra_verifier_service.rs` (governor-request endpoint, mirrors the clearance loop), the audit chain, the MRC vocabulary (`TRAJECTORY_MRC_FALLBACK`) |
+| Code | `POST /console/estop-requests` → `console_estop_request` (`src/bin/kirra_verifier_service/operators.rs`), the domain-separated signing payload (`attestation::operator_stop_signing_payload` / `OPERATOR_STOP_DOMAIN`), the MRC command (`supervisor_tripped` + `posture_engine::force_lockout`), and the chain events `OperatorStopRequested` → `GovernorMRCCommanded`. |
 
 ## Principle
 
@@ -79,16 +79,26 @@ clearance.
 This **design note first** (this ADR). Then implementation (laptop; end-to-end
 **hardware-gated** — needs a running governor + actuator path):
 
-1. the governor-request endpoint (mirror the clearance endpoint),
-2. the signed-request path (reuse the operator-identity verify-then-consume),
-3. the chain events (`OperatorStopRequested` → `GovernorMRCCommanded`),
-4. the console "Request Emergency Stop" action.
+1. ✅ the governor-request endpoint (`POST /console/estop-requests`, mirrors the clearance endpoint),
+2. ✅ the signed-request path (reuses the operator-identity verify-then-consume, under a
+   domain-distinct `OPERATOR_STOP_DOMAIN` so a clearance signature can't be replayed as a stop),
+3. ✅ the chain events (`OperatorStopRequested` → `GovernorMRCCommanded`), with the MRC commanded
+   under the governor's own authority (sticky `supervisor_tripped` + `force_lockout`),
+4. ⬜ the console "Request Emergency Stop" action (UI — deferred; the console correctly has no
+   E-stop button today, #411).
+
+Items 1–3 (the verifier-side core) are implemented + unit-tested (operator-signed happy path
+commands the MRC + chains both events; domain separation rejects a clearance signature; unknown
+operator / replay / passive-standby all fail closed). End-to-end validation remains
+hardware-gated.
 
 Cross-ref: #314, the clearance-loop PRs, ADR-0006 (the boundary), #411 (console
 safety-theater fix).
 
 ## Status
 
-**Proposed — for owner sign-off** (merge ratifies, as with ADR-0011 / ADR-0012). This records
-the **request-not-command** architecture *before* code so the implementation cannot drift into
-the console→actuator anti-pattern.
+**Accepted** — the request-not-command architecture was recorded *before* code (the original
+design note), and the verifier-side implementation now follows it exactly: the only inbound
+affordance is an authenticated REQUEST; the governor commands the MRC under its own authority;
+the console never touches the actuator. The console "Request Emergency Stop" action (UI) is the
+one remaining deferred step, and end-to-end validation is hardware-gated.
