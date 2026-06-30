@@ -448,11 +448,25 @@ pub(crate) async fn console_estop_request(
         }))).into_response();
     }
 
-    // 4. The target must be a registered node (mirrors the clearance grant).
+    // 4. The target must be a registered node. A store/read FAILURE is NOT an
+    //    "unregistered node" — distinguish it: a genuine not-found → 422, but a
+    //    lookup error → 500 (still fail-closed: the MRC is never commanded, and the
+    //    audit reason is accurate rather than a misleading client-error). The
+    //    closure preserves the query Result (not `unwrap_or(false)`) so the two
+    //    cases are separable (Copilot PR #718).
     let node_id_c = node_id.clone();
-    let registered = svc.app.store.call_read(move |store| {
-        Ok::<bool, ()>(store.node_exists(&node_id_c).unwrap_or(false))
-    }).await.ok().and_then(|r| r.ok()).unwrap_or(false);
+    let lookup = svc.app.store.call_read(move |store| {
+        store.node_exists(&node_id_c).map_err(|_| ())
+    }).await;
+    let registered = match lookup {
+        Ok(Ok(exists)) => exists,
+        _ => {
+            audit_estop_rejection(&svc.app, "node_lookup_failed", &node_id, &operator_id, now).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "status": "error", "reason": "node registration lookup failed"
+            }))).into_response();
+        }
+    };
     if !registered {
         audit_estop_rejection(&svc.app, "unregistered_node", &node_id, &operator_id, now).await;
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
