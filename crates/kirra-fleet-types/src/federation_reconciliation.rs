@@ -47,6 +47,18 @@
 //   because doing so would require forging an Ed25519 signature
 // - Fail-closed: on any reconciliation ambiguity, prefer the more restrictive
 //   posture (Degraded > Nominal, LockedOut > Degraded)
+//
+// CR1 / #692 DECISION
+// ===================
+// Generation-ordering is KEPT authoritative even when it lets a higher-generation
+// `Nominal` win over a lagging peer's `LockedOut`. That is intentional: a STALE
+// `LockedOut` from a dead/lagging controller must not mask a fresh `Nominal`
+// forever, and severity-wins-among-all would let exactly that happen. To avoid
+// blinding an operator to a genuine lockout, the advisory view ALSO carries a
+// dissent overlay (`dissenting_restriction`) that surfaces the most restrictive
+// posture among still-FRESH reports above the authoritative value. The overlay
+// is additive and fail-safe (only ever adds caution) and advisory-only — it does
+// NOT feed the actuator-gating posture engine.
 
 use serde::{Deserialize, Serialize};
 use kirra_core::FleetPosture;
@@ -205,6 +217,34 @@ pub fn authoritative_posture<'a>(
     }
 
     Some(current.posture)
+}
+
+/// CR1 (#692): the dissent overlay for the advisory federated view.
+///
+/// `authoritative_posture` is generation-ordered, so a controller merely AHEAD
+/// in recalc count can present `Nominal` over a lagging peer's genuine
+/// `LockedOut`. That ordering is intentional — a STALE `LockedOut` from a
+/// dead/lagging peer must not mask a fresh `Nominal` forever — but an operator
+/// must never be BLIND to a live lockout. This returns the MOST restrictive
+/// posture among reports that are still FRESH (not expired at `now_ms`) **and**
+/// strictly more restrictive than `authoritative`; `None` when nothing fresh
+/// dissents upward.
+///
+/// Purely additive and fail-safe: it only ever surfaces MORE caution, never
+/// relaxes the authoritative value, and is bounded to the advisory read path
+/// (it does not feed the actuator-gating posture engine). Freshness uses the
+/// report's own signed `expires_at_ms`, so an expired dissent self-clears.
+pub fn dissenting_restriction<'a>(
+    reports: impl IntoIterator<Item = &'a FederatedTrustReportV2>,
+    authoritative: FleetPosture,
+    now_ms: u64,
+) -> Option<FleetPosture> {
+    reports
+        .into_iter()
+        .filter(|r| now_ms < r.expires_at_ms) // fresh only — expired dissent self-clears
+        .map(|r| r.posture)
+        .filter(|p| posture_severity(p) > posture_severity(&authoritative))
+        .max_by_key(posture_severity)
 }
 
 pub fn evaluate_federated_report_v2(
@@ -497,5 +537,84 @@ mod federation_reconciliation_tests {
         assert!(posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Degraded));
         assert!(posture_severity(&FleetPosture::Degraded) > posture_severity(&FleetPosture::Nominal));
         assert!(posture_severity(&FleetPosture::LockedOut) > posture_severity(&FleetPosture::Nominal));
+    }
+
+    // -----------------------------------------------------------------------
+    // CR1 (#692): dissent overlay — surfaces a fresh, more-restrictive posture
+    // that the generation-ordered authoritative value masks.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dissent_surfaces_fresh_lockout_masked_by_higher_gen_nominal() {
+        // The exact CR1 case: gen-500 Nominal is authoritative, but a gen-100
+        // peer is LockedOut and still fresh — the overlay must surface it.
+        let reports = vec![
+            nominal("ctrl-a", 1000, Some(500)),
+            locked("ctrl-b", 1000, Some(100)),
+        ];
+        let auth = authoritative_posture(&reports).unwrap();
+        assert_eq!(auth, FleetPosture::Nominal, "gen-ordered authoritative is unchanged");
+        // Reports expire at 31_000 (issued + 30s); now=1_500 is within window.
+        assert_eq!(
+            dissenting_restriction(&reports, auth, 1_500),
+            Some(FleetPosture::LockedOut),
+        );
+    }
+
+    #[test]
+    fn test_dissent_ignores_expired_lockout() {
+        // Same shape, but evaluated AFTER the LockedOut report has expired — the
+        // overlay self-clears (a dead peer's stale lockout must not linger).
+        let reports = vec![
+            nominal("ctrl-a", 1000, Some(500)),
+            locked("ctrl-b", 1000, Some(100)),
+        ];
+        let auth = authoritative_posture(&reports).unwrap();
+        assert_eq!(dissenting_restriction(&reports, auth, 31_001), None);
+    }
+
+    #[test]
+    fn test_dissent_none_when_authoritative_already_most_restrictive() {
+        // Authoritative is LockedOut; nothing can dissent ABOVE it.
+        let reports = vec![
+            locked("ctrl-a", 1000, Some(500)),
+            nominal("ctrl-b", 1000, Some(100)),
+        ];
+        let auth = authoritative_posture(&reports).unwrap();
+        assert_eq!(auth, FleetPosture::LockedOut);
+        assert_eq!(dissenting_restriction(&reports, auth, 1_500), None);
+    }
+
+    #[test]
+    fn test_dissent_picks_most_restrictive_among_several() {
+        // Authoritative Nominal; fresh peers at Degraded and LockedOut → surface
+        // the most restrictive (LockedOut), not merely the first dissent.
+        let reports = vec![
+            nominal("ctrl-a", 1000, Some(500)),
+            degraded("ctrl-b", 1000, Some(300)),
+            locked("ctrl-c", 1000, Some(100)),
+        ];
+        let auth = authoritative_posture(&reports).unwrap();
+        assert_eq!(auth, FleetPosture::Nominal);
+        assert_eq!(
+            dissenting_restriction(&reports, auth, 1_500),
+            Some(FleetPosture::LockedOut),
+        );
+    }
+
+    #[test]
+    fn test_dissent_surfaces_degraded_when_no_fresh_lockout() {
+        // Authoritative Nominal; the only fresh dissent is Degraded (the
+        // LockedOut peer has expired) → surface Degraded.
+        let reports = vec![
+            nominal("ctrl-a", 5000, Some(500)),
+            degraded("ctrl-b", 5000, Some(300)),
+            locked("ctrl-c", 1000, Some(100)), // expires at 31_000
+        ];
+        let auth = authoritative_posture(&reports).unwrap();
+        assert_eq!(
+            dissenting_restriction(&reports, auth, 31_500),
+            Some(FleetPosture::Degraded),
+        );
     }
 }
