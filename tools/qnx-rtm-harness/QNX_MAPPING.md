@@ -227,3 +227,18 @@ emulation it is INDICATIVE, never a WCET**. The harness CSV still carries the
 NVIDIA DRIVE (Orin/Thor) + QNX OS for Safety + Ferrocene-qualified Rust under FIFO —
 that number, not a VM figure, backs the FTTI claim. The PASS gate remains **verdict
 correctness**, which is now demonstrated on a real QNX target.
+
+**`wcet_measure` CSV schema (#274).** The row is now the **canonical
+`kirra_timing::report::CSV_HEADER`** schema
+(`metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status`),
+byte-identical to the host `kirra-wcet-bench` output, so the two union into one
+table joinable on `(metric, env)`. `env`/`wcet_status` map onto
+`kirra_timing::MeasurementEnv`: the certified `qnx-target-fifo` /
+`QNX-TARGET-MEASURED` pair is emitted **only** when the binary was built for the
+QNX target *and* `SCHED_FIFO` was actually granted (the `kIsQnxTarget &&
+fifo_granted` conjunction); a host smoke build self-declares `host` /
+`INDICATIVE-NOT-WCET`, and a QNX run without FIFO privilege declares `other` /
+`INDICATIVE-NOT-WCET` — neither can mint a certified figure. The VM-vs-hardware
+(Phase-I-vs-Phase-II) distinction above is **orthogonal** to this gate and remains
+an assumption-of-use (AOU-HW-QNX-TARGET-001): a `QNX-TARGET-MEASURED` row from a
+KVM/TCG VM is feasibility-grade, not the cert-grade Phase-II number.

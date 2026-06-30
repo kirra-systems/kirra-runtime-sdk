@@ -11,6 +11,15 @@ use core::fmt;
 use crate::channel::ChannelStats;
 use crate::env::MeasurementEnv;
 
+/// The canonical CSV header — the **single source of truth** for the machine
+/// schema shared by every WCET measurement surface (this crate's
+/// [`Report::write_csv`], the host `kirra-wcet-bench`, and the QNX
+/// `tools/qnx-rtm-harness/wcet_measure` row). Downstream tooling joins on these
+/// columns, so the harness emits this byte-for-byte rather than a divergent
+/// subset. Keep [`Report::write_csv`]'s row column order identical to this.
+pub const CSV_HEADER: &str =
+    "metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status";
+
 /// One named stage's statistics within a [`Report`].
 #[derive(Debug, Clone, Copy)]
 pub struct StageReport {
@@ -53,22 +62,16 @@ impl<'a> Report<'a> {
         self.env.is_certified_wcet()
     }
 
-    /// Write the machine-readable CSV (header + one row per stage). Stable column
-    /// order. This is an **extended superset** of the
-    /// `tools/qnx-rtm-harness/wcet_measure.cpp` row
-    /// (`metric,target,sched,n,warmup,max_ns,p999_ns,wcet_status`): it shares
-    /// `metric,sched,n,max_ns,p999_ns,wcet_status` and adds
-    /// `env,min_ns,mean_ns,stddev_ns,p50_ns,p99_ns` (and uses `env` where the
-    /// harness uses `target`). It is NOT byte-identical — downstream tooling that
-    /// expects the exact harness header must map columns, not assume equality.
+    /// Write the machine-readable CSV (header + one row per stage). The header is
+    /// [`CSV_HEADER`], the canonical schema that the QNX
+    /// `tools/qnx-rtm-harness/wcet_measure` row now emits byte-for-byte too, so a
+    /// host report and an on-target report union into one table joinable on
+    /// `metric` + `env`. Row column order matches [`CSV_HEADER`] exactly.
     ///
     /// # Errors
     /// Propagates any [`fmt::Error`] from the writer.
     pub fn write_csv(&self, w: &mut impl fmt::Write) -> fmt::Result {
-        writeln!(
-            w,
-            "metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status"
-        )?;
+        writeln!(w, "{CSV_HEADER}")?;
         for s in self.stages {
             let st = &s.stats;
             writeln!(

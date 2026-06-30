@@ -36,6 +36,18 @@ namespace {
 constexpr std::size_t WARMUP_ITERS  = 10'000;
 constexpr std::size_t MEASURE_ITERS = 1'000'000;
 
+// Compile-time target gate. A certified WCET number requires BOTH the QNX target
+// AND SCHED_FIFO at runtime; FIFO-granted alone is NOT enough (a Linux host /
+// container often grants SCHED_FIFO, yet a host number is INDICATIVE by the
+// methodology). So even a host smoke build refuses to mint a certified row — the
+// `kIsQnxTarget && fifo_granted` conjunction below mirrors
+// `kirra_timing::MeasurementEnv::is_certified_wcet`.
+#if defined(__QNXNTO__) || defined(__QNX__)
+constexpr bool kIsQnxTarget = true;
+#else
+constexpr bool kIsQnxTarget = false;
+#endif
+
 // Build the OK/admissible view — the WCET path (no early short-circuit).
 KirraContractView make_admissible_view(const std::uint8_t *payload, std::uint32_t len) {
     KirraContractView v{};
@@ -63,15 +75,19 @@ std::uint64_t now_ns() {
          + static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
-// Raise to SCHED_FIFO max priority and pin to one isolated core.
+// Raise to SCHED_FIFO max priority and pin to one isolated core. Returns true iff
+// SCHED_FIFO was actually granted — the caller gates the emitted `wcet_status` on
+// this, so a run without privilege is reported INDICATIVE, never certified.
 //   * POSIX form (works on a Linux eval VM; isolate the core with isolcpus=<cpu>).
 //   * On QNX, ALSO set the runmask via
 //       ThreadCtl(_NTO_TCTL_RUNMASK_GET_AND_SET_INHERIT, &mask)
 //     and SchedSet() the FIFO priority. SCHED_FIFO requires privilege.
-void enter_rt(int cpu) {
+bool enter_rt(int cpu) {
     struct sched_param sp{};
     sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) {
+    const bool fifo_granted =
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0;
+    if (!fifo_granted) {
         std::fprintf(stderr,
             "WARN: SCHED_FIFO not granted (need privilege) — timing is INDICATIVE only\n");
     }
@@ -83,12 +99,13 @@ void enter_rt(int cpu) {
 #else
     (void)cpu;  // QNX: pin via ThreadCtl(_NTO_TCTL_RUNMASK_GET_AND_SET_INHERIT, ...)
 #endif
+    return fifo_granted;
 }
 
 } // namespace
 
 int main() {
-    enter_rt(/*cpu=*/1);
+    const bool fifo_granted = enter_rt(/*cpu=*/1);
 
     static const std::uint8_t payload[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     KirraContractView v = make_admissible_view(payload, sizeof(payload));
@@ -117,20 +134,56 @@ int main() {
 
     std::sort(samples.begin(), samples.end());
     const std::uint64_t mn   = samples.front();
-    const std::uint64_t med  = samples[samples.size() / 2];
+    const std::uint64_t p50  = samples[samples.size() / 2];
+    const std::uint64_t p99  = samples[(samples.size() * 99) / 100];
     const std::uint64_t p999 = samples[(samples.size() * 999) / 1000];
     const std::uint64_t mx   = samples.back();
 
-    std::printf("WCET kirra_judge_assess  n=%zu  min=%lluns  med=%lluns  p99.9=%lluns  MAX=%lluns\n",
-                MEASURE_ITERS,
-                (unsigned long long)mn, (unsigned long long)med,
-                (unsigned long long)p999, (unsigned long long)mx);
+    // Mean + population stddev (integer, matching kirra_timing::ChannelStats: the
+    // exact (n·Σx²−(Σx)²)/n² variance form, floor-rooted). Σx² fits in u128.
+    __uint128_t sum = 0, sum_sq = 0;
+    for (const std::uint64_t s : samples) {
+        sum += s;
+        sum_sq += static_cast<__uint128_t>(s) * s;
+    }
+    const std::uint64_t n    = MEASURE_ITERS;
+    const std::uint64_t mean = static_cast<std::uint64_t>(sum / n);
+    const __uint128_t var = (static_cast<__uint128_t>(n) * sum_sq - sum * sum)
+                          / (static_cast<__uint128_t>(n) * n);
+    std::uint64_t stddev = 0;
+    while ((static_cast<__uint128_t>(stddev) + 1) * (stddev + 1) <= var) ++stddev;
 
-    // CSV row — replaces the harness placeholder `wcet_status = TBD-QNX-TARGET`.
-    // Substitute <TARGET_TRIPLE_TBD> with the confirmed nto-qnx800 tuple.
-    std::printf("metric,target,sched,n,warmup,max_ns,p999_ns,wcet_status\n");
-    std::printf("kirra_judge_assess,<TARGET_TRIPLE_TBD>,SCHED_FIFO,%zu,%zu,%llu,%llu,QNX-TARGET-MEASURED\n",
-                MEASURE_ITERS, WARMUP_ITERS,
-                (unsigned long long)mx, (unsigned long long)p999);
+    // Certified iff on the QNX target AND FIFO actually granted (conjunction —
+    // mirrors MeasurementEnv::is_certified_wcet). Everything else is INDICATIVE.
+    const bool certified = kIsQnxTarget && fifo_granted;
+
+    std::printf("WCET kirra_judge_assess  n=%zu  min=%lluns  med=%lluns  p99.9=%lluns  MAX=%lluns%s\n",
+                MEASURE_ITERS,
+                (unsigned long long)mn, (unsigned long long)p50,
+                (unsigned long long)p999, (unsigned long long)mx,
+                certified ? "" : "  [INDICATIVE — not a WCET claim]");
+
+    // CSV row in the CANONICAL schema — byte-identical to
+    // kirra_timing::report::CSV_HEADER and kirra_timing::MeasurementEnv tokens, so
+    // a host kirra-wcet-bench report and this on-target row union into one table
+    // joinable on (metric, env). `env`/`sched`/`wcet_status` map exactly onto the
+    // MeasurementEnv variants: QNX+FIFO → qnx-target-fifo / QNX-TARGET-MEASURED;
+    // QNX without FIFO → other; a host smoke build → host. Only the certified
+    // conjunction emits QNX-TARGET-MEASURED, never a fabricated figure.
+    const char *env    = certified ? "qnx-target-fifo" : (kIsQnxTarget ? "other" : "host");
+    const char *sched  = certified ? "SCHED_FIFO" : "host-default";
+    const char *status = certified ? "QNX-TARGET-MEASURED" : "INDICATIVE-NOT-WCET";
+    std::printf("metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status\n");
+    std::printf("kirra_judge_assess,%s,%s,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s\n",
+                env, sched,
+                (unsigned long long)n,
+                (unsigned long long)mn,
+                (unsigned long long)mean,
+                (unsigned long long)mx,
+                (unsigned long long)stddev,
+                (unsigned long long)p50,
+                (unsigned long long)p99,
+                (unsigned long long)p999,
+                status);
     return 0;
 }

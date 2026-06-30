@@ -74,7 +74,7 @@ pub use clock::MonotonicClock;
 #[cfg(feature = "std")]
 pub use clock::StdMonotonicClock;
 pub use env::MeasurementEnv;
-pub use report::{Report, StageReport};
+pub use report::{Report, StageReport, CSV_HEADER};
 
 /// Canonical labels for the five safety-critical execution-loop stages (#274).
 /// Using these constants keeps stage names consistent across crates, the harness,
@@ -286,9 +286,17 @@ mod tests {
         let mut csv = String::new();
         report.write_csv(&mut csv).unwrap();
         let mut lines = csv.lines();
+        // The emitted header must be the canonical CSV_HEADER verbatim — the QNX
+        // harness's wcet_measure row joins on exactly these columns, so a drift
+        // here would silently break that union. Lock both the literal and the const.
         assert_eq!(
             lines.next().unwrap(),
             "metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status"
+        );
+        assert_eq!(
+            report::CSV_HEADER,
+            "metric,env,sched,n,min_ns,mean_ns,max_ns,stddev_ns,p50_ns,p99_ns,p999_ns,wcet_status",
+            "CSV_HEADER is the canonical schema the QNX harness mirrors — update both if it changes"
         );
         let row = lines.next().unwrap();
         assert!(row.starts_with("total_loop,ci-runner,host-default,1,"));
