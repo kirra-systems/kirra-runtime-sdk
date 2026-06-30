@@ -40,6 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Runtime quality guardrails
+        run: python3 ci/check_quality_guardrails.py
       - name: Run tests
         # --locked: build the committed Cargo.lock exactly; never re-resolve on
         # the runner (a fresh resolve pulls drifting transitives — see the
@@ -65,9 +67,8 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
       - name: Run MC/DC coverage
-        # TODO: restore `--mcdc` once cargo-llvm-cov and rustc nightly realign on
-        # the coverage-options value. Current nightly accepts only block|branch|
-        # condition; --branch is the closest substitute that compiles today.
+        # Prefer MC/DC when the installed cargo-llvm-cov + nightly support it;
+        # fall back to branch coverage only when the toolchain rejects `--mcdc`.
         #
         # `--skip wcet_gate` excludes WCET timing assertions from the
         # instrumented run. llvm-cov instrumentation adds 20–50% overhead on
@@ -75,10 +76,19 @@ jobs:
         # WCET measurement runs in the dedicated `wcet-gate` job below on a
         # clean stable toolchain.
         run: |
-          cargo llvm-cov --workspace --branch \
+          set -euo pipefail
+          if cargo llvm-cov --workspace --mcdc \
             --ignore-filename-regex='/.cargo/registry' \
             --lcov --output-path lcov.info \
-            -- --skip wcet_gate
+            -- --skip wcet_gate; then
+            echo "MC/DC coverage completed."
+          else
+            echo "MC/DC unsupported on current nightly/tooling; falling back to branch coverage."
+            cargo llvm-cov --workspace --branch \
+              --ignore-filename-regex='/.cargo/registry' \
+              --lcov --output-path lcov.info \
+              -- --skip wcet_gate
+          fi
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

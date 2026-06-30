@@ -79,6 +79,8 @@ mod fabric;
 mod console;
 #[path = "kirra_verifier_service/operators.rs"]
 mod operators;
+#[path = "kirra_verifier_service/startup.rs"]
+mod startup;
 use attestation::*;
 use fleet::*;
 use audit::*;
@@ -89,6 +91,7 @@ use actuator::*;
 use fabric::*;
 use console::*;
 use operators::*;
+use startup::*;
 
 
 // --- Auth middleware ---------------------------------------------------------
@@ -119,93 +122,6 @@ async fn require_admin_token(request: Request, next: Next) -> Result<Response, S
     }
 
     Ok(next.run(request).await)
-}
-
-// --- SG-008: process fail-closed startup sentinel ---------------------------
-//
-// Verifies: SG-008 (ASIL D) — Process Fail-Closed on Startup. The service must
-// refuse to bind its listener unless the safety-critical startup invariants
-// hold. The checks are factored into a pure predicate so they are
-// deterministically testable without `process::exit` (see sg_008_cert_tests):
-// `main` builds a `StartupContext` from the real boot facts, and aborts BEFORE
-// `TcpListener::bind` on any `Err` — so "the listener never binds before
-// invariants pass" holds by construction (bind is strictly after the check).
-
-/// The boot facts the startup sentinel evaluates. Built once in `main` from the
-/// real environment/store/wiring; consumed by `check_startup_invariants`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct StartupContext {
-    /// The hardware root of trust is healthy (`StartupSentinel::verify_hardware_root()
-    /// == Trusted`). Fail-closed: an unavailable/unresponsive TPM aborts startup.
-    /// SS-001 lists this as a startup entry invariant; this is its enforcement
-    /// point. Without the `tpm` feature the sentinel returns `Trusted` (no-op pass).
-    pub hardware_root_trusted: bool,
-    /// `KIRRA_ADMIN_TOKEN` is present and non-empty (CRITICAL INVARIANT #6).
-    pub admin_token_present: bool,
-    /// The SQLite store reports `journal_mode = wal` (CRITICAL INVARIANT #12
-    /// ordering depends on the WAL-mode durable seam).
-    pub sqlite_wal: bool,
-    /// True on the Active path. PassiveStandby is read-only and intentionally
-    /// runs neither the watchdog nor the posture engine, so those two
-    /// invariants are evaluated ONLY when this is true.
-    pub mode_active: bool,
-    /// The telemetry watchdog task was spawned (Active path; SG-003 / SG9).
-    pub watchdog_spawned: bool,
-    /// The serialized posture-engine worker is running (`posture_engine_tx` set).
-    pub posture_engine_running: bool,
-}
-
-/// The first violated startup invariant, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StartupInvariant {
-    HardwareRootUntrusted,
-    AdminTokenMissing,
-    SqliteNotWal,
-    WatchdogNotSpawned,
-    PostureEngineDown,
-}
-
-impl std::fmt::Display for StartupInvariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::HardwareRootUntrusted => "hardware root of trust unavailable/unresponsive (TPM)",
-            Self::AdminTokenMissing => "KIRRA_ADMIN_TOKEN absent or empty",
-            Self::SqliteNotWal => "SQLite store is not in WAL journal mode",
-            Self::WatchdogNotSpawned => "telemetry watchdog not spawned (Active path)",
-            Self::PostureEngineDown => "posture-engine worker not running (Active path)",
-        };
-        write!(f, "{s}")
-    }
-}
-
-/// SG-008 (ASIL D) — pure startup-invariant predicate. Returns the first
-/// violated invariant, or `Ok(())` when all hold. Fail-closed and order-stable.
-/// The watchdog / posture-engine invariants apply only to the Active path
-/// (`mode_active`); PassiveStandby is read-only and runs neither, so requiring
-/// them there would wrongly abort a valid standby.
-//
-// Verifies: SG-008
-pub(crate) fn check_startup_invariants(ctx: &StartupContext) -> Result<(), StartupInvariant> {
-    // Hardware root of trust first — it is the most fundamental precondition
-    // (SS-001 entry invariant). Fail-closed before anything else is trusted.
-    if !ctx.hardware_root_trusted {
-        return Err(StartupInvariant::HardwareRootUntrusted);
-    }
-    if !ctx.admin_token_present {
-        return Err(StartupInvariant::AdminTokenMissing);
-    }
-    if !ctx.sqlite_wal {
-        return Err(StartupInvariant::SqliteNotWal);
-    }
-    if ctx.mode_active {
-        if !ctx.watchdog_spawned {
-            return Err(StartupInvariant::WatchdogNotSpawned);
-        }
-        if !ctx.posture_engine_running {
-            return Err(StartupInvariant::PostureEngineDown);
-        }
-    }
-    Ok(())
 }
 
 async fn require_client_identity(
@@ -749,8 +665,17 @@ async fn main() {
     let listen_addr = std::env::var("KIRRA_VERIFIER_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8090".to_string());
 
-    let mut store = VerifierStore::new(&db_path)
-        .expect("failed to initialize verifier store");
+    let mut store = match VerifierStore::new(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                db_path = %db_path,
+                "startup failed: unable to initialize verifier store (fail-closed)"
+            );
+            std::process::exit(1);
+        }
+    };
 
     let mode = VerifierOperationMode::from_env();
     println!("Kirra Verifier starting in {mode:?} mode (db: {db_path})");
@@ -809,9 +734,16 @@ async fn main() {
         let pinned = std::env::var("KIRRA_LOG_SIGNING_GENESIS_PIN")
             .ok()
             .filter(|s| !s.is_empty());
-        let admission = store
-            .admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms())
-            .expect("failed to admit audit signing key against the durable trust map");
+        let admission = match store.admit_signing_key(key.clone(), adopt, pinned.as_deref(), now_ms()) {
+            Ok(admission) => admission,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "FAIL-CLOSED (#165): failed to admit audit signing key against durable trust map"
+                );
+                std::process::exit(1);
+            }
+        };
         use kirra_verifier::verifier_store::KeyAdmission;
         match admission {
             KeyAdmission::Resumed
@@ -819,29 +751,34 @@ async fn main() {
             | KeyAdmission::AdoptedReanchor => {
                 println!("Audit signing key admitted ({admission:?}).");
             }
-            KeyAdmission::RetiredKeyRejected => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a RETIRED audit key \
-                 (a later rotation is the durable active key). Refusing to sign under \
-                 a retired key. Provide the current active private key, or perform an \
-                 explicit rotation."
-            ),
-            KeyAdmission::UnadoptedNewKeyRejected => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a NEW key not in the durable \
-                 ledger and no adopt signal was given. Refusing to silently re-root audit \
-                 trust. Set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to adopting it."
-            ),
-            KeyAdmission::GenesisPinMismatch => panic!(
-                "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_GENESIS_PIN does not match the durable \
-                 trust anchor's genesis. Refusing to start."
-            ),
-            KeyAdmission::MigrationReversionRejected { chain_latest_key_id, env_key_id } => panic!(
-                "FAIL-CLOSED (#165 migration): the audit chain's latest rotation is to key \
-                 {chain_latest_key_id} but KIRRA_LOG_SIGNING_KEY supplied {env_key_id}. The env \
-                 key has reverted to a pre-rotation (or foreign) key; anchoring on it would \
-                 re-root audit trust. RESOLUTION — supply the correct active key in \
-                 KIRRA_LOG_SIGNING_KEY, OR set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to consent to \
-                 anchoring on the env key (recorded as a consented reanchor)."
-            ),
+            KeyAdmission::RetiredKeyRejected => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a retired audit key; \
+                     provide the current active key or perform explicit rotation."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::UnadoptedNewKeyRejected => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_KEY is a new key without adopt consent; \
+                     set KIRRA_LOG_SIGNING_KEY_ADOPT=1 to adopt."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::GenesisPinMismatch => {
+                tracing::error!(
+                    "FAIL-CLOSED (#165): KIRRA_LOG_SIGNING_GENESIS_PIN does not match durable genesis."
+                );
+                std::process::exit(1);
+            }
+            KeyAdmission::MigrationReversionRejected { chain_latest_key_id, env_key_id } => {
+                tracing::error!(
+                    chain_latest_key_id = %chain_latest_key_id,
+                    env_key_id = %env_key_id,
+                    "FAIL-CLOSED (#165 migration): env key disagrees with chain's latest rotation"
+                );
+                std::process::exit(1);
+            }
         }
     }
 
@@ -867,14 +804,29 @@ async fn main() {
     }
 
     {
-        let (nodes, dependencies) = app_state.store.call_read(|store| {
+        let load_initial = app_state.store.call_read(|store| {
             let nodes = store.load_nodes().map_err(|e| e.to_string())?;
             let dependencies = store.load_dependencies()
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>((nodes, dependencies))
-        }).await
-            .expect("store task failed loading initial state")
-            .expect("failed to load persisted nodes/dependencies");
+        }).await;
+        let (nodes, dependencies) = match load_initial {
+            Ok(Ok(data)) => data,
+            Ok(Err(err)) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: unable to load persisted nodes/dependencies (fail-closed)"
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: store task failed loading initial state (fail-closed)"
+                );
+                std::process::exit(1);
+            }
+        };
         for node in nodes {
             app_state.nodes.insert(node.node_id.clone(), node);
         }
@@ -1117,21 +1069,29 @@ async fn main() {
         // run it off tokio worker threads.
         let app_b = Arc::clone(&svc_state.app);
         let cache_b = Arc::clone(&svc_state.posture_cache);
-        tokio::task::spawn_blocking(move || {
+        let initial_recalc = tokio::task::spawn_blocking(move || {
             kirra_verifier::posture_engine::recalculate_and_broadcast(&app_b, &cache_b);
         })
-        .await
-        .expect("initial posture recalc task panicked");
+        .await;
+        if let Err(err) = initial_recalc {
+            tracing::error!(
+                error = %err,
+                "startup failed: initial posture recalc task panicked (fail-closed)"
+            );
+            std::process::exit(1);
+        }
         tracing::info!("posture: initial recalc complete; cache populated");
 
         let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
             Arc::clone(&svc_state.app),
             Arc::clone(&svc_state.posture_cache),
         );
-        svc_state
-            .posture_engine_tx
-            .set(posture_tx.clone())
-            .expect("posture_engine_tx must not be set before startup wiring");
+        if svc_state.posture_engine_tx.set(posture_tx.clone()).is_err() {
+            tracing::error!(
+                "startup failed: posture_engine_tx already initialized before startup wiring (fail-closed)"
+            );
+            std::process::exit(1);
+        }
         tracing::info!("posture: serialized worker started");
 
         // SAFETY: SG9 | REQ: sensor-liveness-watchdog | TEST: test_watchdog_dead_mans_switch_fires_after_telemetry_timeout
@@ -1235,8 +1195,17 @@ async fn main() {
     tracing::info!("SG-008: startup invariants satisfied; binding listener");
 
     println!("Kirra Verifier Service listening on {listen_addr} (db: {db_path})");
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await
-        .expect("failed to bind listener");
+    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                listen_addr = %listen_addr,
+                "startup failed: failed to bind listener (fail-closed)"
+            );
+            std::process::exit(1);
+        }
+    };
 
     // #46: the listener is bound and startup invariants passed (SG-008) — tell
     // systemd we are READY (Type=notify) and start the watchdog keepalive
@@ -1262,10 +1231,13 @@ async fn main() {
         }
     };
 
-    axum::serve(listener, app)
+    if let Err(err) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .expect("server error");
+    {
+        tracing::error!(error = %err, "server exited with error");
+        std::process::exit(1);
+    }
 }
 
 // ===========================================================================

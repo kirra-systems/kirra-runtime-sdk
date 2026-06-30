@@ -67,6 +67,18 @@ impl Drop for ThreadPoolGuard {
     }
 }
 
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, context: &str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!(
+                "[WARN] Recovering from poisoned mutex in {context}; continuing in fail-closed mode."
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 pub struct KirraLiveGateway {
     pub proxy_port: u16, pub plc_target_port: u16, pub admin_reset_port: u16, pub metrics_port: u16,
     pub runtime_config: ContractProfile, pub system_auth_key: Vec<u8>,
@@ -108,31 +120,14 @@ impl KirraLiveGateway {
         Ok(total_read)
     }
 
-    pub fn start_active_proxy_gateway(&self) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", self.proxy_port)).expect("FAIL_BIND");
-        let initial_gov = KirraKernelGovernor::new(
-            self.runtime_config,
-            self.runtime_config.fallback_safe_setpoint,
-            self.runtime_config.constraint_cap_min,
-            self.runtime_config.constraint_cap_max,
-        );
-
-        let shared_governor = Arc::new(Mutex::new(initial_gov));
-        // B4: the instant of the last governed frame, shared across worker threads.
-        // The rate limiter's `last_validated_scalar` anchor is governor-global, so
-        // the dt measured against it must be too (not per-connection).
-        let last_governed_eval = Arc::new(Mutex::new(None::<Instant>));
-        let flight_recorder = Arc::new(Mutex::new(CausalFlightRecorder::new()));
-        let metrics = Arc::new(LockFreeMetricsAggregator::new());
-        let active_workers = Arc::new(std::sync::atomic::AtomicU32::new(0));
-
-        let admin_listener = TcpListener::bind(format!("127.0.0.1:{}", self.admin_reset_port)).expect("FAIL_ADMIN_BIND");
-        let gov_admin_clone = Arc::clone(&shared_governor);
-        let auth_key = self.system_auth_key.clone();
-        let log_dir = self.log_directory.clone();
-        let io_lock_admin = Arc::clone(&self.io_writer_lock);
-        let metrics_admin_clone = Arc::clone(&metrics);
-
+    fn spawn_admin_listener(
+        admin_listener: TcpListener,
+        gov_admin_clone: Arc<Mutex<KirraKernelGovernor<ContractProfile>>>,
+        auth_key: Vec<u8>,
+        log_dir: String,
+        io_lock_admin: Arc<Mutex<()>>,
+        metrics_admin_clone: Arc<LockFreeMetricsAggregator>,
+    ) {
         thread::spawn(move || {
             for mut socket in admin_listener.incoming().flatten() {
                 let mut buffer = [0u8; 128];
@@ -143,28 +138,24 @@ impl KirraLiveGateway {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
                     let tracking_attempts = load_brute_force_counter(&log_dir);
-                    let mut auth_res: Result<(), &'static str> = Err("MUTEX_LOCK_FAIL");
-                    let mut captured_attempts_count = tracking_attempts;
-
-                    {
-                        if let Ok(mut gov) = gov_admin_clone.lock() {
-                            gov.trust_engine.failed_reset_attempts = tracking_attempts;
-                            auth_res = gov.trust_engine.authenticated_manual_reset(token, &auth_key, now);
-                            captured_attempts_count = gov.trust_engine.failed_reset_attempts;
-                            metrics_admin_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
-                        }
-                    }
+                    let (auth_res, captured_attempts_count) = {
+                        let mut gov = lock_or_recover(&gov_admin_clone, "admin_auth");
+                        gov.trust_engine.failed_reset_attempts = tracking_attempts;
+                        let auth = gov.trust_engine.authenticated_manual_reset(token, &auth_key, now);
+                        metrics_admin_clone.trust_score.store(gov.trust_engine.current_score as u64, Ordering::Relaxed);
+                        (auth, gov.trust_engine.failed_reset_attempts)
+                    };
 
                     match auth_res {
                         Ok(_) => {
-                            let _io_guard = io_lock_admin.lock().unwrap();
+                            let _io_guard = lock_or_recover(&io_lock_admin, "admin_counter_persist");
                             let _ = save_brute_force_counter(0, &log_dir);
                             let _ = socket.write_all(b"RESET_SUCCESS\n");
                         }
                         Err(msg) => {
                             metrics_admin_clone.authentication_failures.fetch_add(1, Ordering::Relaxed);
                             {
-                                let _io_guard = io_lock_admin.lock().unwrap();
+                                let _io_guard = lock_or_recover(&io_lock_admin, "admin_counter_persist");
                                 let _ = save_brute_force_counter(captured_attempts_count, &log_dir);
                             }
                             let _ = socket.write_all(format!("RESET_FAIL: {}\n", msg).as_bytes());
@@ -173,15 +164,26 @@ impl KirraLiveGateway {
                 }
             }
         });
+    }
 
-        let metrics_http_clone = Arc::clone(&metrics);
-        let gov_http_clone = Arc::clone(&shared_governor);
-        let workers_http_clone = Arc::clone(&active_workers);
-        let max_workers_allowed = self.max_allowed_workers;
-        let metrics_bind_port = self.metrics_port;
-
+    fn spawn_metrics_listener(
+        metrics_bind_port: u16,
+        metrics_http_clone: Arc<LockFreeMetricsAggregator>,
+        gov_http_clone: Arc<Mutex<KirraKernelGovernor<ContractProfile>>>,
+        workers_http_clone: Arc<std::sync::atomic::AtomicU32>,
+        max_workers_allowed: u32,
+    ) {
         thread::spawn(move || {
-            let http_listener = TcpListener::bind(format!("127.0.0.1:{}", metrics_bind_port)).expect("FAIL_HTTP_BIND");
+            let http_listener = match TcpListener::bind(format!("127.0.0.1:{metrics_bind_port}")) {
+                Ok(listener) => listener,
+                Err(err) => {
+                    eprintln!(
+                        "[CRITICAL] Failed to bind metrics listener on port {metrics_bind_port}: {err}. \
+                         Metrics/health endpoint disabled; fail-closed readiness applies."
+                    );
+                    return;
+                }
+            };
             let mut request_buffer = [0u8; 1024];
             for mut socket in http_listener.incoming().flatten() {
                 let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
@@ -201,12 +203,11 @@ impl KirraLiveGateway {
                         let _ = socket.write_all(response.as_bytes());
                     } else if first_line.starts_with("GET /health/ready") {
                         let mut is_ready = false;
-                        if let Ok(gov) = gov_http_clone.lock() {
-                            if gov.trust_mode() != TrustMode::LockedOut {
-                                let active_conns = workers_http_clone.load(Ordering::SeqCst);
-                                if active_conns < max_workers_allowed {
-                                    is_ready = true;
-                                }
+                        let gov = lock_or_recover(&gov_http_clone, "metrics_ready_health");
+                        if gov.trust_mode() != TrustMode::LockedOut {
+                            let active_conns = workers_http_clone.load(Ordering::SeqCst);
+                            if active_conns < max_workers_allowed {
+                                is_ready = true;
                             }
                         }
                         if is_ready {
@@ -225,6 +226,73 @@ impl KirraLiveGateway {
                 }
             }
         });
+    }
+
+    pub fn start_active_proxy_gateway(&self) {
+        let listener = match TcpListener::bind(format!("127.0.0.1:{}", self.proxy_port)) {
+            Ok(listener) => listener,
+            Err(err) => {
+                eprintln!(
+                    "[CRITICAL] Failed to bind proxy listener on port {}: {err}. Gateway startup aborted.",
+                    self.proxy_port
+                );
+                return;
+            }
+        };
+        let initial_gov = KirraKernelGovernor::new(
+            self.runtime_config,
+            self.runtime_config.fallback_safe_setpoint,
+            self.runtime_config.constraint_cap_min,
+            self.runtime_config.constraint_cap_max,
+        );
+
+        let shared_governor = Arc::new(Mutex::new(initial_gov));
+        // B4: the instant of the last governed frame, shared across worker threads.
+        // The rate limiter's `last_validated_scalar` anchor is governor-global, so
+        // the dt measured against it must be too (not per-connection).
+        let last_governed_eval = Arc::new(Mutex::new(None::<Instant>));
+        let flight_recorder = Arc::new(Mutex::new(CausalFlightRecorder::new()));
+        let metrics = Arc::new(LockFreeMetricsAggregator::new());
+        let active_workers = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let admin_listener = match TcpListener::bind(format!("127.0.0.1:{}", self.admin_reset_port)) {
+            Ok(listener) => listener,
+            Err(err) => {
+                eprintln!(
+                    "[CRITICAL] Failed to bind admin reset listener on port {}: {err}. Gateway startup aborted.",
+                    self.admin_reset_port
+                );
+                return;
+            }
+        };
+        let gov_admin_clone = Arc::clone(&shared_governor);
+        let auth_key = self.system_auth_key.clone();
+        let log_dir = self.log_directory.clone();
+        let io_lock_admin = Arc::clone(&self.io_writer_lock);
+        let metrics_admin_clone = Arc::clone(&metrics);
+
+        Self::spawn_admin_listener(
+            admin_listener,
+            gov_admin_clone,
+            auth_key,
+            log_dir,
+            io_lock_admin,
+            metrics_admin_clone,
+        );
+
+        let metrics_http_clone = Arc::clone(&metrics);
+        let gov_http_clone = Arc::clone(&shared_governor);
+        let workers_http_clone = Arc::clone(&active_workers);
+        let max_workers_allowed = self.max_allowed_workers;
+        let metrics_bind_port = self.metrics_port;
+
+        Self::spawn_metrics_listener(
+            metrics_bind_port,
+            metrics_http_clone,
+            gov_http_clone,
+            workers_http_clone,
+            max_workers_allowed,
+        );
 
         for client in listener.incoming().flatten() {
             let mut current_threads = active_workers.load(Ordering::SeqCst);
@@ -250,7 +318,13 @@ impl KirraLiveGateway {
 
             thread::spawn(move || {
                 let _guard = ThreadPoolGuard::new(workers_counter, Arc::clone(&metrics_clone));
-                let mut plc_socket = match TcpStream::connect(plc_addr) { Ok(s) => s, Err(_) => return };
+                let mut plc_socket = match TcpStream::connect(plc_addr) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        eprintln!("[WARN] Unable to connect proxy worker to PLC target: {err}");
+                        return;
+                    }
+                };
                 let mut buf = [0u8; 512];
                 let mut plc_buf = [0u8; 512];
 
@@ -264,7 +338,7 @@ impl KirraLiveGateway {
 
                     let out_bytes = match adapter_clone.decode_demand(raw_frame) {
                         Ok(demand) => {
-                            let mut gov = gov_worker_clone.lock().unwrap();
+                            let mut gov = lock_or_recover(&gov_worker_clone, "worker_governor");
                             // B4: feed the REAL elapsed dt since the previous governed
                             // frame, not a fabricated constant. Measured under the
                             // governor lock so it stays consistent with the shared
@@ -273,7 +347,7 @@ impl KirraLiveGateway {
                             // negative dt.
                             let now = Instant::now();
                             let dt = {
-                                let mut last = last_eval_clone.lock().unwrap();
+                                let mut last = lock_or_recover(&last_eval_clone, "worker_last_eval");
                                 let elapsed = last.map(|prev| now.saturating_duration_since(prev));
                                 *last = Some(now);
                                 governed_dt_secs(elapsed)
@@ -290,7 +364,7 @@ impl KirraLiveGateway {
                             }
 
                             if processed.is_multiple_of(100) {
-                                let mut rec = recorder_worker_clone.lock().unwrap();
+                                let mut rec = lock_or_recover(&recorder_worker_clone, "worker_recorder");
                                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
                                 let dynamic_resolution_text = if (intercept.sanitized_scalar - demand).abs() > 0.001 {
@@ -326,7 +400,7 @@ impl KirraLiveGateway {
                     };
 
                     if let Some(records_data) = flush_payload {
-                        let _io_guard = io_lock_worker.lock().unwrap();
+                        let _io_guard = lock_or_recover(&io_lock_worker, "worker_replay_persist");
                         let _ = save_replay_json(&records_data, &local_log_dir, "kirra_replay.json");
                     }
 
@@ -364,7 +438,7 @@ impl KirraLiveGateway {
                 };
 
                 if let Some(summary) = summary_payload {
-                    let _io_guard = io_lock_worker.lock().unwrap();
+                    let _io_guard = lock_or_recover(&io_lock_worker, "worker_summary_persist");
                     let _ = save_summary_json(&summary, &local_log_dir, "kirra_summary.json");
                 }
             });

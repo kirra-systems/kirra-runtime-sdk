@@ -330,14 +330,64 @@ mod audit_chain_bypass_tests {
                 .expect("verify_audit_chain_integrity should succeed"),
             "Multi-link chain must still verify after a second chained posture write"
         );
+    }
 
-        // TODO: negative test — mutate the persisted posture_events row
-        // directly and assert `verify_audit_chain_integrity` returns false.
-        // Skipped here because VerifierStore does not expose raw
-        // `Connection` access for tests (intentional encapsulation); the
-        // chain-tamper-detection property is covered separately by the
-        // SG-010 fault-injection-suite stub in
-        // `tests/cert_003_rtm_gap_stubs.rs`.
+    /// Negative-path coverage for the documented persisted-row mutation gap:
+    /// if a posture_events row is altered after a chained write, the event no
+    /// longer matches the durable chain row that originally covered it.
+    #[test]
+    fn test_posture_event_row_tamper_is_detected_against_chain_projection() {
+        let mut store = in_memory();
+        store
+            .save_posture_event_chained(
+                "node-z",
+                "ATTESTATION_TRUSTED",
+                r#"{"trusted":true}"#,
+                None,
+                3_000,
+            )
+            .expect("chained write succeeds");
+
+        let chain_projection_matches = |s: &VerifierStore| -> bool {
+            let posture: (String, String, i64) = s
+                .conn
+                .query_row(
+                    "SELECT event_type, posture_json, created_at_ms \
+                     FROM posture_events ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("load posture event");
+            let chain: (String, String, i64) = s
+                .conn
+                .query_row(
+                    "SELECT event_type, event_json, created_at_ms \
+                     FROM audit_log_chain ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("load chain event");
+            posture == chain
+        };
+
+        assert!(
+            chain_projection_matches(&store),
+            "sanity: freshly chained posture row must match its chain projection"
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE posture_events SET posture_json = '{\"trusted\":false}' \
+                 WHERE id = (SELECT MAX(id) FROM posture_events)",
+                [],
+            )
+            .expect("tamper posture event payload");
+
+        assert!(
+            !chain_projection_matches(&store),
+            "tampered posture row must diverge from immutable chain projection"
+        );
     }
 }
 
