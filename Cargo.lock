@@ -2104,6 +2104,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-hv-carrier"
+version = "0.1.0"
+dependencies = [
+ "kirra-contract-channel",
+ "libc",
+]
+
+[[package]]
 name = "kirra-map"
 version = "0.1.0"
 dependencies = [
