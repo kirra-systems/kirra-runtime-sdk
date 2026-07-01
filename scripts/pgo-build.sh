@@ -42,7 +42,11 @@ WORKLOAD="${WORKLOAD_DIR}/$(basename "$WORKLOAD_ARG")"
 [[ -n "$WORKLOAD_DIR" && -x "$WORKLOAD" ]] || { echo "ERROR: workload driver not found or not executable: $WORKLOAD_ARG" >&2; exit 1; }
 EXTRA_RUSTFLAGS="${EXTRA_RUSTFLAGS:-}"
 ADDR="${KIRRA_VERIFIER_ADDR:-127.0.0.1:8099}"
-PGO_DIR="${REPO_ROOT}/target/pgo-data"
+# Honor CARGO_TARGET_DIR so the profile data AND the built artifact land where
+# cargo actually emits them (defaults to the repo's target/). Covers the common
+# env-var relocation; a `.cargo/config.toml` target-dir override is out of scope.
+TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+PGO_DIR="${TARGET_DIR}/pgo-data"
 
 # The service fails closed at startup without a non-empty admin token (SG-008);
 # the phase-2 instrumented run must actually boot, so require it up front.
@@ -71,10 +75,10 @@ fi
 echo "== PGO phase 1/3: build instrumented $BIN"
 rm -rf "$PGO_DIR"
 RUSTFLAGS="-C profile-generate=${PGO_DIR} ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile dist --bin "$BIN"
+    cargo build --locked --profile dist --bin "$BIN"
 
 echo "== PGO phase 2/3: run representative workload against the instrumented binary"
-KIRRA_VERIFIER_ADDR="$ADDR" "${REPO_ROOT}/target/dist/${BIN}" &
+KIRRA_VERIFIER_ADDR="$ADDR" "${TARGET_DIR}/dist/${BIN}" &
 SVC_PID=$!
 # Arm the teardown BEFORE anything that can fail/interrupt (the sleep, the
 # workload), so the background service is never left running on an abort.
@@ -99,9 +103,9 @@ if (( ${#PROFRAWS[@]} == 0 )); then
 fi
 "$PROFDATA" merge -o "${PGO_DIR}/merged.profdata" "${PROFRAWS[@]}"
 RUSTFLAGS="-C profile-use=${PGO_DIR}/merged.profdata -C llvm-args=-pgo-warn-missing-function ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile dist --bin "$BIN"
+    cargo build --locked --profile dist --bin "$BIN"
 
 echo
-echo "PGO build complete: target/dist/${BIN}"
+echo "PGO build complete: ${TARGET_DIR}/dist/${BIN}"
 echo "  profile data: ${PGO_DIR}/merged.profdata"
 [[ -n "$EXTRA_RUSTFLAGS" ]] && echo "  stacked flags: ${EXTRA_RUSTFLAGS}"

@@ -66,12 +66,14 @@ for i in "${!TARGETS[@]}"; do
     # are opt-in overlays — see docs/PERFORMANCE_BUILD_TUNING.md. These are the
     # PORTABLE musl artifacts, so target-cpu is intentionally NOT set here.
     cross build \
+        --locked \
         --profile dist \
         --target "${TARGET}" \
         --bin "${BINARY}"
 
     # Build CARLA client
     cross build \
+        --locked \
         --profile dist \
         --target "${TARGET}" \
         --bin "${CARLA_BINARY}"
