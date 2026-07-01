@@ -4,8 +4,10 @@ Target : NVIDIA Jetson Orin NX 16GB (Tegra234; 8x Cortex-A78AE @ 1.984 GHz),
          Yahboom ROSMASTER X3 chassis. THIS is deployment-class silicon (aarch64),
          not an x86 dev box or a VM.
 OS     : L4T / JetPack, STOCK kernel. CONFIG_NO_HZ_FULL is NOT set
-         (/sys/devices/system/cpu/nohz_full = none), so nohz_full=/rcu_nocbs= in
-         the cmdline are silently ignored — only isolcpus is in force.
+         (/sys/devices/system/cpu/nohz_full = none), so the cmdline nohz_full= is
+         silently ignored. Only isolcpus is VERIFIED in force (/sys/.../isolated
+         = 6-7); rcu_nocbs= state was not checked (CONFIG_RCU_NOCB_CPU unverified),
+         so no claim is made about it either way.
 Build  : iceoryx2 0.9.2, cargo 1.96.0 (edition-2024 tree builds clean; 45.8 s cold).
          latency_bench (feat/l2-iceoryx2-frozen-contract), --release.
 Date   : 2026-07-01

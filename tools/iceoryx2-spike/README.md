@@ -109,8 +109,7 @@ measurement (#274) — the mechanism is in place; the target supplies the number
 **Isolated-core result on the deployment SoC** (Jetson Orin NX 16GB, aarch64 —
 the real robot silicon, not a VM). With `isolcpus=6,7`, MAXN + `jetson_clocks`
 (no DVFS), the requester/responder pinned to the two isolated cores, and
-`SCHED_FIFO` granted (`sudo env KIRRA_LAT_REQ_CPU=6 KIRRA_LAT_RESP_CPU=7
-KIRRA_LAT_FIFO=1 …`, 1M iters — full provenance + verbatim output in
+`SCHED_FIFO` granted (e.g. `sudo env KIRRA_LAT_REQ_CPU=6 KIRRA_LAT_RESP_CPU=7 KIRRA_LAT_FIFO=1 …`, 1M iters — full provenance + verbatim output in
 [`results/orin-nx-16gb-linux-isolated.txt`](results/orin-nx-16gb-linux-isolated.txt)):
 
 ```

@@ -137,8 +137,9 @@ what the mandatory isolation costs; iceoryx2 holds the crossing near it. The dep
 under `SCHED_FIFO`** → toward iceoryx2's published ~100 ns; the certified figure is a
 QNX-target-under-FIFO measurement (#274).
 
-**Isolated-core measurement on the DEPLOYMENT SoC** (PR #736,
-`results/orin-nx-16gb-linux-isolated.txt`). The above is an x86 shared host; the
+**Isolated-core measurement on the DEPLOYMENT SoC**
+([`tools/iceoryx2-spike/results/orin-nx-16gb-linux-isolated.txt`](../../tools/iceoryx2-spike/results/orin-nx-16gb-linux-isolated.txt)).
+The above is an x86 shared host; the
 lowest-latency mode was then measured on the **real robot silicon** — a Jetson
 Orin NX 16GB (aarch64, Tegra234) — with cores 6/7 `isolcpus`-isolated, MAXN +
 `jetson_clocks` (no DVFS), the requester/responder pinned to the isolated cores,
