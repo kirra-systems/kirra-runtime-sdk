@@ -38,7 +38,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use kirra_hv_carrier::PosixShmRegion;
+
 pub use crate::control_ingress::IngressControlCommand;
+use crate::contract_producer::{proposal_payload, ProposalSequencer};
 use crate::control_ingress::{fail_closed_control_command, parse_control_command_json};
 use crate::corridor::CorridorSource;
 use crate::state::{
@@ -160,6 +163,23 @@ fn wall_clock_ms() -> u64 {
 /// audit/correlation record timestamps ONLY. Hot path — inlined.
 #[inline]
 fn now_ms_fresh() -> u64 { crate::state::monotonic_now_ms() }
+
+/// Nominal fast-loop control cycle (100 Hz → 10 ms) as seconds — the
+/// `delta_time_s` stamped on a published cross-partition proposal's kinematic
+/// command (ADR-0030 incr. 2).
+const CONTROL_CYCLE_S: f64 = 0.01;
+
+/// Freshness budget added to a published proposal's boundary-clock publication
+/// time to form its `deadline_nanos` (2 control cycles). The governor rejects a
+/// snapshot whose deadline has passed (HVCHAN §3); a host stand-in pending the
+/// #274 FTTI budget.
+const CONTRACT_DEADLINE_BUDGET_NS: u64 = 20_000_000;
+
+/// Monotonic nanoseconds — a HOST stand-in for the boundary clock domain
+/// (AOU-TIMESYNC-001), derived from the same monotonic ms source as the freshness
+/// checks. The real boundary-clock primitive is QNX target work (#274/#278).
+#[inline]
+fn now_ns_fresh() -> u64 { now_ms_fresh().saturating_mul(1_000_000) }
 
 /// Trajectory ingress payload. The subscription callback (Phase 2B —
 /// when Lanelet2 wiring lands) deserializes
@@ -815,6 +835,26 @@ pub async fn run_adapter(
         mpsc::channel::<OutgoingControlCommand>(CONTROL_CHANNEL_CAPACITY);
     let fast_state = Arc::clone(&state);
     let staleness_timeout_ms = subscription_staleness_timeout_ms();
+    // ADR-0030 Clause C (incr. 2) — OPT-IN guest producer. When
+    // KIRRA_CONTRACT_SHM_NAME is set, additively publish each incoming proposal
+    // across the frozen cross-partition contract for the L3.3 governor consumer to
+    // bound. Unset → no contract publishing, byte-identical to prior behavior.
+    // Best-effort: a publish issue NEVER affects the gated ~/output/control_cmd
+    // path. (Host PosixShmRegion carrier; the QNX HvRegion binds the same seam.)
+    let mut contract_writer: Option<PosixShmRegion> = None;
+    let mut contract_seq: Option<ProposalSequencer> = None;
+    if let Ok(name) = std::env::var("KIRRA_CONTRACT_SHM_NAME") {
+        match PosixShmRegion::create(&name).or_else(|_| PosixShmRegion::open(&name)) {
+            Ok(w) => {
+                tracing::info!(shm = %name, "contract producer: publishing proposals to the cross-partition channel");
+                contract_writer = Some(w);
+                contract_seq = Some(ProposalSequencer::new());
+            }
+            Err(e) => {
+                tracing::error!(shm = %name, error = %e, "contract producer: shm map failed; proposals NOT published (gated output unaffected)");
+            }
+        }
+    }
     tokio::spawn(async move {
         let mut rx = control_rx;
         while let Some(in_cmd) = rx.recv().await {
@@ -888,6 +928,33 @@ pub async fn run_adapter(
                     asset_id = %in_cmd.asset_id,
                     elapsed_us = elapsed_us,
                     "fast_loop_wcet_exceeded"
+                );
+            }
+
+            // ADR-0030 Clause C — additively publish the DOER's proposal across
+            // the frozen contract for the governor to bound (L3.3). Placed AFTER
+            // the conformance WCET window above so it never perturbs that metric;
+            // best-effort — it can't affect the gated ~/output/control_cmd path.
+            if let (Some(writer), Some(sequencer)) =
+                (contract_writer.as_ref(), contract_seq.as_mut())
+            {
+                // Current velocity from ego odom. The guest has NO steering
+                // measurement (EgoOdom carries yaw rate, not steering angle), so
+                // the steering-rate baseline is the desired angle (rate 0) — the
+                // AUTHORITATIVE current state is governor-measured on the real path
+                // (HVCHAN R-HV-3); this guest field is untrusted regardless.
+                let payload = proposal_payload(
+                    &in_cmd,
+                    odom.linear_x_mps,
+                    in_cmd.steering_angle_rad.to_degrees(),
+                    CONTROL_CYCLE_S,
+                );
+                let pub_ns = now_ns_fresh();
+                let _ = sequencer.publish_to(
+                    writer,
+                    &payload,
+                    pub_ns,
+                    pub_ns.saturating_add(CONTRACT_DEADLINE_BUDGET_NS),
                 );
             }
         }
