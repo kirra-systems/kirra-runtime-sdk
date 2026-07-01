@@ -3,7 +3,7 @@
 //! crosses the guest↔host partition boundary, L3).
 //!
 //! The view's `command` field is an opaque `[u8; MAX_COMMAND_BYTES]`; THIS module
-//! defines what those bytes MEAN for [`LAYOUT_VERSION`] 1. The payload is the
+//! defines what those bytes MEAN for [`LAYOUT_VERSION`](crate::LAYOUT_VERSION) 1. The payload is the
 //! vehicle motion command the governor bounds — the on-wire form of the checker's
 //! input type `ProposedVehicleCommand` (`kirra_core::kinematics_contract`): the
 //! DOER (QM planner, guest) proposes it, the CHECKER (ASIL governor) validates it
@@ -16,7 +16,7 @@
 //!
 //! Five little-endian `f64` fields, offsets pinned by the assertions below. The
 //! encoding is the safety contract, exactly like [`GovernorContractView`]'s: any
-//! change to a field, its order, or its width is a NEW [`LAYOUT_VERSION`], never an
+//! change to a field, its order, or its width is a NEW [`LAYOUT_VERSION`](crate::LAYOUT_VERSION), never an
 //! in-place edit.
 //!
 //! ```text
@@ -142,11 +142,16 @@ impl VehicleCommandPayload {
         Ok(cmd)
     }
 
-    /// Build a committed [`GovernorContractView`] carrying this command, with a
+    /// Build a [`GovernorContractView`] body carrying this command, with a
     /// freshly computed CRC (via [`GovernorContractView::new_command`]). The
     /// payload always fits [`MAX_COMMAND_BYTES`] (freeze-asserted below), so this
-    /// never fails. `generation` is the caller's committed (even) value;
-    /// [`publish`](crate::publish) drives the odd/even transitions.
+    /// never fails.
+    ///
+    /// Note: when publishing via [`publish`](crate::publish), the shared-region
+    /// `generation` comes from the seqlock counter — `store_body` deliberately
+    /// does not write the `generation` field — so the `generation` argument here
+    /// only sets the returned body's field (useful when building a standalone
+    /// view, e.g. for `canonical_image`), not the published region's counter.
     pub fn to_view(
         &self,
         generation: u64,

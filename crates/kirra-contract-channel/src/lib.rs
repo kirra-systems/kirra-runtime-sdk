@@ -75,7 +75,7 @@
 #[cfg(test)]
 extern crate std;
 
-mod command;
+pub mod command;
 mod crc;
 pub mod reference;
 mod seqlock;
