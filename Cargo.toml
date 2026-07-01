@@ -13,7 +13,7 @@
 # That separation keeps the ML inference pipeline (parko-core / parko-onnx /
 # parko-kirra) independent of the safety-kernel build.
 [workspace]
-members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
+members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-release-token", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport"]
 resolver = "2"
 
 [package]
@@ -71,6 +71,10 @@ kirra-fleet-types = { path = "crates/kirra-fleet-types" }
 # binding (src/governor_release.rs) reuses THIS crate's canonical image plus the
 # verifier's EXISTING Ed25519/SHA-256 machinery (no new crypto).
 kirra-contract-channel = { path = "crates/kirra-contract-channel" }
+# The single canonical governor→actuator release-token format (HVCHAN §3.5-7).
+# `src/governor_release.rs` re-exports it (adding only the root-local key-id
+# helper) so there is one digest/sign/verify implementation, not two.
+kirra-release-token = { path = "crates/kirra-release-token" }
 parko-core = { path = "parko/crates/parko-core" }
 # Governor-free wire schema for capture records, shared verbatim with the offline
 # collector (docs/COLLECTOR_DESIGN.md [C1]). Re-exported by `crate::capture`.
