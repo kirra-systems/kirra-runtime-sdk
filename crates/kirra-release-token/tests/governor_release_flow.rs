@@ -99,3 +99,54 @@ fn a_denied_command_is_received_but_never_signable() {
         "…but a denied command is never signable for release"
     );
 }
+
+#[test]
+fn a_clamped_command_signs_the_enforced_bytes_not_the_proposal() {
+    // The integrity claim under a Clamp: the governor must sign the ACTUATED
+    // (clamped) bytes, not the guest's raw proposal — otherwise the bytes released
+    // differ from the bytes signed. This is the regression test for that gap.
+    let gov_key = SigningKey::from_bytes(&[9u8; 32]);
+    let gov_pub = gov_key.verifying_key();
+
+    // A command far over the speed cap → the governor CLAMPS it (Actuate with a
+    // reduced velocity), so the actuated command differs from the proposal.
+    let region = InProcessRegion::new();
+    let mut over = in_envelope();
+    over.linear_velocity_mps = 1_000.0;
+    over.current_velocity_mps = 0.0;
+    let proposal_view = over.to_view(0, 1, 0, u64::MAX / 2);
+    publish(&region, 0, &proposal_view);
+
+    let contract = VehicleKinematicsContract::nominal_reference_profile();
+    let mut wm = AcceptedWatermark::new();
+    let cycle = decide_cycle(&region, &mut wm, 0, &contract, MAX_SNAPSHOT_RETRIES);
+
+    // It actuated a CLAMPED command — velocity reduced from the 1000 proposal.
+    let actuated_velocity = match &cycle.outcome {
+        GovernorOutcome::Actuate(c) => c.linear_velocity_mps,
+        other => panic!("expected a clamp → Actuate, got {other:?}"),
+    };
+    assert!(actuated_velocity < 1_000.0, "velocity must have been clamped");
+
+    // The signable view is the ENFORCED view: it decodes to the clamped command,
+    // NOT the guest's 1000 m/s proposal.
+    let signed_view = *cycle.view_to_sign().expect("a clamp is actuatable");
+    let signed_cmd =
+        VehicleCommandPayload::from_validated_view(&signed_view).expect("enforced view decodes");
+    assert_eq!(
+        signed_cmd.linear_velocity_mps, actuated_velocity,
+        "the signed bytes must be the CLAMPED (actuated) bytes, not the proposal"
+    );
+
+    // Sign + verify closes over the enforced bytes.
+    let token = issue_release_token(&signed_view, &gov_key);
+    assert_eq!(verify_release(&token, &signed_view, &gov_pub), Ok(()));
+
+    // Critically: a token for the enforced command must NOT authorize the guest's
+    // original, un-clamped proposal — proving we bound the actuated bytes.
+    assert_eq!(
+        verify_release(&token, &proposal_view, &gov_pub),
+        Err(ReleaseDenied::DigestMismatch),
+        "a token for the clamped command must not release the raw proposal"
+    );
+}

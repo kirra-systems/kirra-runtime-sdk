@@ -205,11 +205,17 @@ pub fn decide<R: ContractReader>(
 }
 
 /// The result of one governor cycle: the actuation [`outcome`](Self::outcome) plus
-/// the exact validated snapshot [`view`](Self::view) — the release-token signing
-/// input (HVCHAN §3.5-6). `view` is `Some` iff a command was received (transport +
-/// codec passed), regardless of the kinematic outcome, and `None` on a snapshot/
-/// contract/codec fault. The governor signs `view` (with `kirra-release-token`)
-/// ONLY when `outcome` is [`GovernorOutcome::Actuate`].
+/// the signable [`view`](Self::view) — the release-token signing input (HVCHAN
+/// §3.5-6). `view` is `Some` iff a command was received (transport + codec passed)
+/// and `None` on a snapshot/contract/codec fault.
+///
+/// **The view binds the ENFORCED command, not the guest's raw proposal.** On an
+/// [`Actuate`](GovernorOutcome::Actuate) outcome the view is rebuilt over the
+/// post-enforcement command (see [`decide_cycle`]), so a `Clamp*` verdict's folded
+/// bound is reflected in the bytes that get signed — the governor signs *exactly*
+/// what the actuator will release. `Allow` leaves it byte-identical to the received
+/// snapshot. On a received-but-denied `SafeStop` the field carries the raw received
+/// view (never signable — see [`view_to_sign`](Self::view_to_sign)).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GovernorCycle {
     pub outcome: GovernorOutcome,
@@ -218,11 +224,13 @@ pub struct GovernorCycle {
 
 impl GovernorCycle {
     /// The view to sign for the release token — `Some` **only** when the outcome
-    /// is [`GovernorOutcome::Actuate`]. This is the correct gate for the release
-    /// seam: `view` is populated whenever a command was *received* (transport +
-    /// codec passed), so it is `Some` even on a kinematic `DenyBreach → SafeStop`.
-    /// Signing on `view.is_some()` would therefore sign a DENIED command; signing
-    /// on `view_to_sign()` cannot. "Sign only when actuatable" enforced at the type.
+    /// is [`GovernorOutcome::Actuate`], and then it is the ENFORCED view (the
+    /// post-clamp command). This is the correct gate for the release seam: `view`
+    /// is populated whenever a command was *received* (transport + codec passed),
+    /// so it is `Some` even on a kinematic `DenyBreach → SafeStop`. Signing on
+    /// `view.is_some()` would therefore sign a DENIED command; signing on
+    /// `view_to_sign()` cannot, and it signs the actuated (clamped) bytes rather
+    /// than the guest's proposal. "Sign only what is actuatable" at the type.
     #[must_use]
     pub fn view_to_sign(&self) -> Option<&GovernorContractView> {
         if matches!(self.outcome, GovernorOutcome::Actuate(_)) {
@@ -233,10 +241,16 @@ impl GovernorCycle {
     }
 }
 
-/// Like [`decide`], but also returns the validated [`GovernorContractView`] so the
-/// integration seam can sign it for the release token (HVCHAN §3.5-6 / ADR-0013).
-/// Same pipeline, same watermark advancement, same fail-closed reduction — this
-/// only additionally surfaces the exact bytes that were validated.
+/// Like [`decide`], but also surfaces the signable [`GovernorContractView`] for the
+/// release token (HVCHAN §3.5-6 / ADR-0013). Same pipeline, same watermark
+/// advancement, same fail-closed reduction.
+///
+/// On an actuatable verdict the returned `view` is the **enforced** view — the
+/// received snapshot's header with the *post-enforcement* command (a `Clamp*`
+/// verdict folds its bound in). This closes the integrity gap where the governor
+/// would otherwise sign the guest's raw proposal while the actuator drives the
+/// clamped command: here the signed bytes are exactly the actuated bytes. `Allow`
+/// is byte-identical to the received snapshot (enforced command == received).
 ///
 /// `#[must_use]`: the outcome gates actuation vs. MRC — dropping it is a safety bug.
 #[must_use]
@@ -248,14 +262,47 @@ pub fn decide_cycle<R: ContractReader>(
     max_retries: u32,
 ) -> GovernorCycle {
     match receive(reader, watermark, now_nanos, max_retries) {
-        Received::Command { command, view } => GovernorCycle {
-            outcome: apply(validate_vehicle_command(&command, contract), command),
-            view: Some(view),
-        },
+        Received::Command { command, view } => {
+            let outcome = apply(validate_vehicle_command(&command, contract), command);
+            // Bind the token to the bytes the actuator will ACTUALLY drive. On a
+            // Clamp verdict `apply` folded the bound into the command, so the raw
+            // received `view` no longer matches it — rebuild the enforced view. A
+            // denied command keeps the raw received view (never signable).
+            let view = match &outcome {
+                GovernorOutcome::Actuate(actuated) => enforced_view(actuated, &view),
+                GovernorOutcome::SafeStop => view,
+            };
+            GovernorCycle { outcome, view: Some(view) }
+        }
         Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => {
             GovernorCycle { outcome: GovernorOutcome::SafeStop, view: None }
         }
     }
+}
+
+/// Rebuild the contract view over the POST-ENFORCEMENT `command`, reusing the
+/// received snapshot's header (generation / sequence / timestamps / deadline) and
+/// a freshly computed CRC. The release token is signed over this view's canonical
+/// image, so on a `Clamp*` verdict the signed bytes are the clamped (actuated)
+/// bytes, not the guest's proposal. Byte-identical to `received` when the verdict
+/// was `Allow` (the command is unchanged).
+fn enforced_view(
+    command: &ProposedVehicleCommand,
+    received: &GovernorContractView,
+) -> GovernorContractView {
+    let payload = VehicleCommandPayload {
+        linear_velocity_mps: command.linear_velocity_mps,
+        current_velocity_mps: command.current_velocity_mps,
+        delta_time_s: command.delta_time_s,
+        steering_angle_deg: command.steering_angle_deg,
+        current_steering_angle_deg: command.current_steering_angle_deg,
+    };
+    payload.to_view(
+        received.generation,
+        received.sequence,
+        received.publication_nanos,
+        received.deadline_nanos,
+    )
 }
 
 #[cfg(test)]
