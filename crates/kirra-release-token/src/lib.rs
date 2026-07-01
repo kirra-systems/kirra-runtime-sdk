@@ -49,8 +49,15 @@ pub fn digest_image(canonical_image: &[u8]) -> [u8; 32] {
 /// Sign the digest of `canonical_image` with the governor's key (HVCHAN §3
 /// steps 5-6). The image is [`GovernorContractView::canonical_image`] of the
 /// exact validated snapshot; see [`sign_view`] for the typed convenience.
+///
+/// The image is a **fixed-length** `&[u8; CANONICAL_IMAGE_LEN]` so signing a
+/// wrong-length / non-canonical image is a COMPILE error, not a runtime footgun —
+/// reinforcing the "sign exactly the validated bytes" invariant at the type level.
 #[must_use]
-pub fn sign_release(canonical_image: &[u8], signing_key: &SigningKey) -> ReleaseToken {
+pub fn sign_release(
+    canonical_image: &[u8; kirra_contract_channel::CANONICAL_IMAGE_LEN],
+    signing_key: &SigningKey,
+) -> ReleaseToken {
     let digest = digest_image(canonical_image);
     ReleaseToken { signature: signing_key.sign(&digest).to_bytes() }
 }
@@ -58,9 +65,13 @@ pub fn sign_release(canonical_image: &[u8], signing_key: &SigningKey) -> Release
 /// Verify a release token against `canonical_image` and the governor's public
 /// key — the actuator's pre-release gate. **Fail-closed:** `false` on any
 /// mismatch (tampered image → different digest; wrong key; bad signature).
+///
+/// Fixed-length image (`&[u8; CANONICAL_IMAGE_LEN]`) for the same reason as
+/// [`sign_release`]: the actuator cannot accidentally verify over a non-canonical
+/// slice.
 #[must_use]
 pub fn verify_release(
-    canonical_image: &[u8],
+    canonical_image: &[u8; kirra_contract_channel::CANONICAL_IMAGE_LEN],
     token: &ReleaseToken,
     verifying_key: &VerifyingKey,
 ) -> bool {
