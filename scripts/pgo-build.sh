@@ -52,12 +52,19 @@ PGO_DIR="${REPO_ROOT}/target/pgo-data"
 cd "$REPO_ROOT"
 
 # Use the rustc-BUNDLED llvm-profdata so its LLVM version matches rustc's (a
-# system llvm-profdata will refuse a version-mismatched raw profile).
+# system llvm-profdata will refuse a version-mismatched raw profile). It lives
+# under the sysroot's per-host rustlib bin, NOT the toolchain's top-level bin, so
+# `rustup which llvm-profdata` cannot resolve it — address it by exact path first,
+# then fall back to a search for an EXECUTABLE match.
 SYSROOT="$(rustc --print sysroot)"
-PROFDATA="$(find "$SYSROOT" -name 'llvm-profdata' -type f 2>/dev/null | head -1 || true)"
-if [[ -z "$PROFDATA" ]]; then
-    echo "ERROR: rustc-bundled llvm-profdata not found."
-    echo "       Install it:  rustup component add llvm-tools-preview"
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+PROFDATA="${SYSROOT}/lib/rustlib/${HOST_TRIPLE}/bin/llvm-profdata"
+if [[ ! -x "$PROFDATA" ]]; then
+    PROFDATA="$(find "$SYSROOT" -name 'llvm-profdata' -type f -perm -u+x 2>/dev/null | head -1 || true)"
+fi
+if [[ -z "$PROFDATA" || ! -x "$PROFDATA" ]]; then
+    echo "ERROR: rustc-bundled llvm-profdata not found or not executable." >&2
+    echo "       Install it:  rustup component add llvm-tools-preview" >&2
     exit 1
 fi
 
@@ -69,9 +76,11 @@ RUSTFLAGS="-C profile-generate=${PGO_DIR} ${EXTRA_RUSTFLAGS}" \
 echo "== PGO phase 2/3: run representative workload against the instrumented binary"
 KIRRA_VERIFIER_ADDR="$ADDR" "${REPO_ROOT}/target/dist/${BIN}" &
 SVC_PID=$!
-# give it a moment to bind, then drive it; always tear the service down.
-sleep 2
+# Arm the teardown BEFORE anything that can fail/interrupt (the sleep, the
+# workload), so the background service is never left running on an abort.
 trap 'kill "$SVC_PID" 2>/dev/null || true' EXIT
+# give it a moment to bind, then drive it.
+sleep 2
 KIRRA_VERIFIER_ADDR="$ADDR" "$WORKLOAD"
 kill "$SVC_PID" 2>/dev/null || true
 wait "$SVC_PID" 2>/dev/null || true
