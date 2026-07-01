@@ -162,6 +162,8 @@ is absent, never silently passed). Reuses the existing bench scaffolding.
   precision yet; establishes the measuring stick.
 - **Q-1 — PTQ INT8 (one backend).** Calibration build step + INT8 on the
   best-supported backend (TensorRT or OpenVINO). Prove the quality gate holds.
+  Detailed scope: `QUANTIZATION_Q1_SCOPE.md` (metric producers + in-Rust PTQ on
+  CI; real TensorRT INT8 gated to the Orin lane).
 - **Q-2 — precision-aware selection.** Extend `BackendSelector` with the per-chip
   allow-list + fail-closed fallback.
 - **Q-3 — fan out** INT8 to QNN / TIDL / Vitis as those backends land
