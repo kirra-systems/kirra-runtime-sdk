@@ -21,7 +21,7 @@
 
 // Allowed unconditionally for now: the only non-test caller is the ros2-gated
 // node.rs fast loop, which lands in L3.3, so the module is dead under BOTH the
-// default AND the `--features ros2` build until then (a `cfg_attr(not(ros2), …)`
+// default AND the `--features ros2` build until then (a `cfg_attr(not(feature = "ros2"), …)`
 // would leave the ros2 build unsilenced). L3.3 tightens this to
 // `cfg_attr(not(feature = "ros2"), allow(dead_code))` once the caller exists.
 #![allow(dead_code)]
@@ -97,8 +97,10 @@ impl ProposalSequencer {
     }
 
     /// Publish one proposal into `writer` via the odd/even seqlock, stamping the
-    /// next monotonic sequence and current committed generation. Returns the new
-    /// committed (even) generation and advances both counters.
+    /// next monotonic `sequence`. The region's `generation` is owned by the
+    /// seqlock driver (`publish` / `ContractWriter::store_generation`), not the
+    /// body's `generation` field; this returns the new committed (even) generation
+    /// and advances both counters.
     ///
     /// `publication_nanos` / `deadline_nanos` are in the **boundary clock domain**
     /// (HVCHAN-001 §5): the guest must convert from its own clock before calling
