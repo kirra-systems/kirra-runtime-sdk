@@ -35,6 +35,9 @@ pub mod safety;
 pub mod scheduler;
 pub mod sensor;
 pub mod telemetry;
+// Q-0 (doer chipset tuning): the performance contract + eval harness — the
+// pass/fail measuring stick for per-silicon inference (parko/QUANTIZATION_DESIGN.md).
+pub mod perf_contract;
 
 pub use audit::{
     AuditClient, DecisionRecord, FaultRecord, HealthRecord, MockAuditClient, NoopAuditClient,
@@ -56,6 +59,10 @@ pub use backend::{
 pub use backend_selector::{
     backend_permitted, current_platform, descriptor_from_env_str, register_backend_factory,
     BackendFactory, BackendSelector, KIRRA_BACKEND_ENV, TargetPlatform,
+};
+
+pub use perf_contract::{
+    evaluate, run_latency, ContractFailure, ContractVerdict, EvalRow, LatencyStats, PerfContract,
 };
 
 pub use backends::mock::MockBackend;
