@@ -65,11 +65,18 @@ impl LatencyStats {
 /// `ceil(pct/100 * n) - 1`, clamped into range.
 fn nearest_rank(sorted: &[u64], pct: u32) -> u64 {
     debug_assert!(!sorted.is_empty());
+    debug_assert!((1..=100).contains(&pct), "pct must be 1..=100");
     let n = sorted.len() as u64;
     // ceil(pct * n / 100) without floats.
     let rank = (u64::from(pct) * n).div_ceil(100).max(1);
     let idx = (rank - 1).min(n - 1) as usize;
     sorted[idx]
+}
+
+/// A finite fraction in `[0, 1]` — the valid shape for an admissibility value.
+/// Rejects NaN/±inf and out-of-range values so the gate fails closed on garbage.
+fn is_fraction(x: f64) -> bool {
+    x.is_finite() && (0.0..=1.0).contains(&x)
 }
 
 /// The per-deployment acceptance thresholds. The `quality_floor` and the budgets
@@ -119,6 +126,10 @@ pub enum ContractFailure {
     LatencyExceeded { p99_ns: u64, budget_ns: u64 },
     QualityBelowFloor { quality: f64, floor: f64 },
     AdmissibilityRegressed { row: f64, reference: f64, budget: f64 },
+    /// A malformed contract threshold or an out-of-range row/reference metric.
+    /// The gate fails closed rather than silently passing on garbage input
+    /// (e.g. a NaN `quality_floor`, a negative budget, or `admissibility > 1`).
+    InvalidInput { reason: &'static str },
 }
 
 /// The verdict for one row against the contract + FP32 reference.
@@ -145,6 +156,35 @@ impl ContractVerdict {
 #[must_use]
 pub fn evaluate(row: &EvalRow, reference: &EvalRow, contract: &PerfContract) -> ContractVerdict {
     let mut failures = Vec::new();
+
+    // Fail-closed on a malformed contract or row BEFORE the axis checks. A NaN
+    // threshold would make the corresponding `<` / `>` compare false and silently
+    // pass; an admissibility outside [0,1] is not a valid fraction and yields a
+    // meaningless regression. Since this function gates CI, garbage input must
+    // read as a failure, never a pass. (Non-finite row.quality / regression are
+    // additionally caught inline below — this is the input-shape guard.)
+    if !contract.quality_floor.is_finite() {
+        failures.push(ContractFailure::InvalidInput {
+            reason: "contract.quality_floor is non-finite",
+        });
+    }
+    if !contract.admissibility_regression_budget.is_finite()
+        || contract.admissibility_regression_budget < 0.0
+    {
+        failures.push(ContractFailure::InvalidInput {
+            reason: "contract.admissibility_regression_budget is non-finite or negative",
+        });
+    }
+    if !is_fraction(row.admissibility) {
+        failures.push(ContractFailure::InvalidInput {
+            reason: "row.admissibility is not a finite fraction in [0,1]",
+        });
+    }
+    if !is_fraction(reference.admissibility) {
+        failures.push(ContractFailure::InvalidInput {
+            reason: "reference.admissibility is not a finite fraction in [0,1]",
+        });
+    }
 
     if row.latency.p99_ns > contract.p99_latency_budget_ns {
         failures.push(ContractFailure::LatencyExceeded {
@@ -342,6 +382,51 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, ContractFailure::AdmissibilityRegressed { .. })));
         }
+    }
+
+    #[test]
+    fn non_finite_contract_thresholds_fail_closed() {
+        let reference = row(PrecisionMode::FP32, 5_000_000, 0.99, 0.98);
+        let good = row(PrecisionMode::INT8, 2_000_000, 0.95, 0.975);
+        // A NaN quality_floor would make `quality < floor` false and silently pass.
+        let mut c = PerfContract::illustrative();
+        c.quality_floor = f64::NAN;
+        let v = evaluate(&good, &reference, &c);
+        assert!(!v.passed(), "NaN quality_floor must fail closed");
+        assert!(v.failures.contains(&ContractFailure::InvalidInput {
+            reason: "contract.quality_floor is non-finite",
+        }));
+        // A negative or non-finite regression budget is equally malformed.
+        for bad_budget in [f64::NAN, f64::INFINITY, -0.01] {
+            let mut c = PerfContract::illustrative();
+            c.admissibility_regression_budget = bad_budget;
+            let v = evaluate(&good, &reference, &c);
+            assert!(!v.passed(), "bad budget {bad_budget} must fail closed");
+            assert!(v.failures.contains(&ContractFailure::InvalidInput {
+                reason: "contract.admissibility_regression_budget is non-finite or negative",
+            }));
+        }
+    }
+
+    #[test]
+    fn out_of_range_admissibility_fails_closed() {
+        let c = PerfContract::illustrative();
+        let reference = row(PrecisionMode::FP32, 5_000_000, 0.99, 0.98);
+        // Admissibility is a fraction; 1.5 is not a valid measurement.
+        let bad_row = row(PrecisionMode::INT8, 2_000_000, 0.95, 1.5);
+        let v = evaluate(&bad_row, &reference, &c);
+        assert!(!v.passed(), "admissibility > 1 must fail closed");
+        assert!(v.failures.contains(&ContractFailure::InvalidInput {
+            reason: "row.admissibility is not a finite fraction in [0,1]",
+        }));
+        // Same for a negative reference admissibility.
+        let bad_ref = row(PrecisionMode::FP32, 5_000_000, 0.99, -0.1);
+        let good = row(PrecisionMode::INT8, 2_000_000, 0.95, 0.97);
+        let v = evaluate(&good, &bad_ref, &c);
+        assert!(!v.passed(), "reference admissibility < 0 must fail closed");
+        assert!(v.failures.contains(&ContractFailure::InvalidInput {
+            reason: "reference.admissibility is not a finite fraction in [0,1]",
+        }));
     }
 
     #[test]
