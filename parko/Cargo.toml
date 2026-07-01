@@ -9,10 +9,12 @@ codegen-units = 1
 
 # Production-artifact profile for the DOER (parko) binaries — the untrusted
 # planning/inference side. Inherits parko's already-tuned `release` (opt-level 3 +
-# fat LTO + single codegen unit) and adds a symbol strip, mirroring the SDK's
-# `--profile dist` so `cargo build --profile dist` is the shipping command in BOTH
-# workspaces. Source-identical + chipset-agnostic. Per-chipset `target-cpu` / PGO
-# and the (bigger) per-backend quantization lever are opt-in — see BUILD_TUNING.md.
+# fat LTO + single codegen unit) and adds a symbol strip, so `cargo build
+# --profile dist` is the shipping command for this workspace. Source-identical +
+# chipset-agnostic. Per-chipset `target-cpu` / PGO and the (bigger) per-backend
+# quantization lever are opt-in — see BUILD_TUNING.md. (The SDK workspace gains a
+# matching `dist` profile in a sibling PR; this one stands on its own regardless
+# of merge order.)
 #
 # Tuning the doer aggressively is SAFE: it is bounded by the KIRRA checker (a wrong
 # doer output is clamped, never actuated unbounded), so it is the sanctioned place
