@@ -2,7 +2,7 @@
 
 Status: **scoping / design** (not yet implemented). Elaborates phase **Q-1** of
 `QUANTIZATION_DESIGN.md` §9. Q-0 landed the measuring stick
-(`parko-core::perf_contract` — the contract + latency harness, with `quality`
+(`parko_core::perf_contract` — the contract + latency harness, with `quality`
 and `admissibility` as *inputs*). Q-1 turns those two inputs into **real
 producers** and adds the first sub-FP32 precision row. Owner: doer / parko.
 Reviewers: doer + safety.
@@ -90,7 +90,7 @@ Runnable on your Jetson Orin NX; skipped where the GPU/EP is absent.
 
 5. **TensorRT INT8 path.** `TrtBackend` already threads a precision posture
    (`TrtPosture { int8, fp16 }`, pinned `false`) and already implements the real
-   `warm_up` engine-build/cache hook (`parko-tensorrt/src/lib.rs`). Q-1b:
+   `warm_up` engine-build/cache hook (`parko/crates/parko-tensorrt/src/lib.rs`). Q-1b:
    - add an INT8 posture + calibration-table load into `warm_up`
      (the fail-closed build hook is the design-note §3/§6 plug-in point);
    - set `BackendCapabilities.supports_int8 = true` only where measured true;
@@ -99,7 +99,7 @@ Runnable on your Jetson Orin NX; skipped where the GPU/EP is absent.
 
 6. **Skip lane.** Reuse the existing idiom: probe tests self-skip via
    `eprintln!("SKIP: …")` + early return, and hard-fail under
-   `PARKO_TRT_REQUIRE_EP=1` (see `parko-tensorrt/tests/*_probe.rs`). A Q-1b row is
+   `PARKO_TRT_REQUIRE_EP=1` (see `parko/crates/parko-tensorrt/tests/*_probe.rs`). A Q-1b row is
    `SKIPPED` where the silicon/SDK is absent — **never silently passed**.
 
 **Q-1b exit criteria (on the Orin, strict lane):**
@@ -200,8 +200,8 @@ latency, never worse safety); the checker remains the sole fail-closed authority
 
 - `QUANTIZATION_DESIGN.md` — the Tier-D overview this elaborates (esp. §4 contract,
   §5 precision ladder, §6 IR→compile, §9 phasing).
-- `crates/parko-core/src/perf_contract.rs` — the Q-0 measuring stick Q-1 feeds.
+- `parko/crates/parko-core/src/perf_contract.rs` — the Q-0 measuring stick Q-1 feeds.
 - `crates/kirra-planner/src/learned.rs` — the MLP + vocabulary Q-1a quantizes.
 - `crates/kirra-planner/tests/learned_doer_bounded_by_kirra.rs` — the admissibility
   seam Q-1a generalizes.
-- `crates/parko-tensorrt/src/lib.rs` — the `warm_up` + `TrtPosture` Q-1b extends.
+- `parko/crates/parko-tensorrt/src/lib.rs` — the `warm_up` + `TrtPosture` Q-1b extends.
