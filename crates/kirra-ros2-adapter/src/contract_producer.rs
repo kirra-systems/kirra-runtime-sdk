@@ -19,7 +19,12 @@
 // — without a sourced ROS 2 / r2r toolchain. The ros2-gated `node.rs` fast-loop
 // call-site and the hypervisor-mapped `ContractWriter` binding land in L3.3.
 
-#![cfg_attr(not(feature = "ros2"), allow(dead_code))]
+// Allowed unconditionally for now: the only non-test caller is the ros2-gated
+// node.rs fast loop, which lands in L3.3, so the module is dead under BOTH the
+// default AND the `--features ros2` build until then (a `cfg_attr(not(ros2), …)`
+// would leave the ros2 build unsilenced). L3.3 tightens this to
+// `cfg_attr(not(feature = "ros2"), allow(dead_code))` once the caller exists.
+#![allow(dead_code)]
 
 use kirra_contract_channel::{publish, ContractWriter, VehicleCommandPayload};
 
@@ -39,10 +44,11 @@ use crate::control_ingress::IngressControlCommand;
 ///
 /// Steering is converted **rad → deg** here (the wire schema is degrees, ISO
 /// 8855, +left). No clamping or validation: the producer forwards the proposal
-/// faithfully; the governor bounds it (`validate_vehicle_command`). A finite
-/// ingress command (guaranteed by `parse_control_command_json`) plus finite
-/// context yields a finite payload; any non-finite value is still caught by the
-/// consumer's fail-closed `decode` (defense in depth).
+/// faithfully; the governor bounds it (`validate_vehicle_command`). Note that
+/// even a finite ingress command can overflow during the rad→deg conversion
+/// (e.g. the fail-closed sentinel's `f64::MAX` radians → ±Inf); the producer does
+/// not guard this, because the consumer's fail-closed `decode` rejects any
+/// non-finite field (defense in depth), so the governor never receives one.
 pub fn proposal_payload(
     cmd: &IngressControlCommand,
     current_velocity_mps: f64,
@@ -113,7 +119,11 @@ impl ProposalSequencer {
         );
         let committed = publish(writer, self.committed_generation, &body);
         self.committed_generation = committed;
-        self.next_sequence += 1;
+        // wrapping_add: matches the seqlock generation counter's convention and
+        // avoids a debug-only overflow panic. At u64 (2^64 commands) the wrap is
+        // unreachable, and were it reached the watermark's `<= last_accepted`
+        // would reject post-wrap sequences — fail-closed, not fail-open.
+        self.next_sequence = self.next_sequence.wrapping_add(1);
         committed
     }
 }
