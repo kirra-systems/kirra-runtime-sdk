@@ -10,9 +10,14 @@
 //! Steps 1-4 (the frozen layout, the seqlock coherent read, and validation) live
 //! in [`kirra_contract_channel`]. This crate closes the chain:
 //!
-//! - **Step 5 — digest.** [`contract_digest`] hashes the **exact validated
-//!   snapshot bytes** ([`GovernorContractView::canonical_image`]) — the bytes the
-//!   judge approved, not the live region which may already have moved on.
+//! - **Step 5 — digest.** [`contract_digest`] hashes the **signable view's**
+//!   [`GovernorContractView::canonical_image`] — the bytes the governor approved,
+//!   not the live region which may already have moved on. Note transport `validate`
+//!   only CRCs `command[..command_len]`, whereas `canonical_image` covers the
+//!   *full* command array; callers must therefore pass a canonicalized / **enforced**
+//!   view (e.g. `kirra_core::contract_consumer::GovernorCycle::view_to_sign`, which
+//!   zero-fills the tail) so the digest is over deterministic bytes rather than
+//!   attacker-controlled padding.
 //! - **Step 6 — release token.** [`issue_release_token`] signs that digest with
 //!   the governor's Ed25519 key.
 //! - **Step 7 — actuator verify-before-release.** [`verify_release`] re-derives

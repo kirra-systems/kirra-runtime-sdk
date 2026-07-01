@@ -213,9 +213,16 @@ pub fn decide<R: ContractReader>(
 /// [`Actuate`](GovernorOutcome::Actuate) outcome the view is rebuilt over the
 /// post-enforcement command (see [`decide_cycle`]), so a `Clamp*` verdict's folded
 /// bound is reflected in the bytes that get signed — the governor signs *exactly*
-/// what the actuator will release. `Allow` leaves it byte-identical to the received
-/// snapshot. On a received-but-denied `SafeStop` the field carries the raw received
-/// view (never signable — see [`view_to_sign`](Self::view_to_sign)).
+/// what the actuator will release. The rebuild also **canonicalizes the whole
+/// command array**: transport `validate` only CRCs `command[..command_len]`, so the
+/// bytes beyond `command_len` are unconstrained in the received snapshot, yet the
+/// digest is over `canonical_image()` (the full array). Rebuilding via
+/// [`decide_cycle`] zero-fills that tail, so the signed bytes are deterministic and
+/// free of attacker-controlled padding. For `Allow` the meaningful command is
+/// unchanged (only the unconstrained padding is canonicalized), so the view is not
+/// necessarily byte-identical to the raw received snapshot. On a received-but-denied
+/// `SafeStop` the field carries the raw received view (never signable — see
+/// [`view_to_sign`](Self::view_to_sign)).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GovernorCycle {
     pub outcome: GovernorOutcome,

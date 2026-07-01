@@ -11,7 +11,9 @@
 //!
 //! - **Step 5 — digest** ([`contract_digest`]): SHA-256 over the domain-separated,
 //!   length-prefixed [`kirra_contract_channel::GovernorContractView::canonical_image`]
-//!   — the exact validated snapshot bytes, not the live region.
+//!   of the **signable** view, not the live region. (Transport `validate` CRCs only
+//!   `command[..command_len]`; `canonical_image` covers the full command array, so
+//!   sign a canonicalized/enforced view — see the `kirra-release-token` crate docs.)
 //! - **Step 6 — release token** ([`issue_release_token`]): Ed25519 over the
 //!   domain-separated digest payload. No new crypto primitive.
 //! - **Step 7 — verify-before-release** ([`verify_release`]): re-derive the digest
