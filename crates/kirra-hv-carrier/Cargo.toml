@@ -25,3 +25,11 @@ kirra-contract-channel = { path = "../kirra-contract-channel" }
 # this crate is a host (Linux/QNX) integration shim, never built for a bare
 # no_std target.
 libc = "0.2"
+
+[dev-dependencies]
+# The two-process GOVERNOR test (tests/governor_two_process.rs) runs the L3.3
+# governor `decide` (kirra-core) over a PosixShmReader while a separate guest
+# process publishes. A DEV-dependency only — it does NOT enter the carrier's real
+# dependency tree, so the crate's cross-partition TCB stays the frozen layout +
+# this mapping shim (ADR-0006 Clause 2 / ADR-0030).
+kirra-core = { path = "../kirra-core" }
