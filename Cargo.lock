@@ -2155,6 +2155,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-release-token"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "kirra-contract-channel",
+ "kirra-core",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "kirra-ros2-adapter"
 version = "0.1.0"
 dependencies = [

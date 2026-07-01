@@ -1,0 +1,36 @@
+# crates/kirra-release-token/Cargo.toml
+#
+# The HVCHAN §3 steps 5-6 release-token bridge (ADR-0013 / ADR-0030 Clause F):
+# on an ACTUATABLE governor verdict, the governor signs the digest of the exact
+# validated GovernorContractView so the actuator can verify "the governor
+# approved EXACTLY these bytes" before it releases the command.
+#
+# "No new crypto primitives" (HVCHAN §3): this uses the SAME ed25519-dalek +
+# sha2 the verifier's attestation path already uses (`src/attestation.rs`) — it
+# only applies them at this seam. `#![forbid(unsafe_code)]`; no allocator beyond
+# the digest. Kept a small, focused crate (not folded into kirra-core, which
+# stays crypto-free, nor the heavy kirra-verifier).
+[package]
+name = "kirra-release-token"
+version = "0.1.0"
+edition = "2021"
+description = "Governor→actuator release-token bridge — sign/verify the validated contract digest (HVCHAN §3.5-6, ADR-0013)"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The frozen contract — the canonical little-endian image the digest is computed
+# over (GovernorContractView::canonical_image). Lean, no_std, zero-dep.
+kirra-contract-channel = { path = "../kirra-contract-channel" }
+# The vetted Ed25519 (verify_strict / Signer) — the SAME crate + version the
+# attestation path uses. No hand-rolled primitives.
+ed25519-dalek = "2"
+# The vetted SHA-256 — the digest primitive (matches the audit chain + the root).
+sha2 = "0.11"
+
+[dev-dependencies]
+# The governor decision step, for the end-to-end governor→actuator release-flow
+# integration test. Dev-only — kirra-core does NOT enter this crate's real tree,
+# and this crate does NOT enter kirra-core's (kirra-core stays crypto-free).
+kirra-core = { path = "../kirra-core" }

@@ -23,7 +23,7 @@
 
 use kirra_contract_channel::{
     read_coherent_snapshot, validate, AcceptedWatermark, CommandCodecError, ContractFault,
-    ContractReader, SnapshotFault, VehicleCommandPayload,
+    ContractReader, GovernorContractView, SnapshotFault, VehicleCommandPayload,
 };
 
 use crate::kinematics_contract::{
@@ -103,7 +103,9 @@ pub fn consume_and_bound<R: ContractReader>(
     max_retries: u32,
 ) -> GovernorVerdict {
     match receive(reader, watermark, now_nanos, max_retries) {
-        Received::Command(cmd) => GovernorVerdict::Bounded(validate_vehicle_command(&cmd, contract)),
+        Received::Command { command, .. } => {
+            GovernorVerdict::Bounded(validate_vehicle_command(&command, contract))
+        }
         Received::Snapshot(f) => GovernorVerdict::Snapshot(f),
         Received::Contract(f) => GovernorVerdict::Contract(f),
         Received::Codec(e) => GovernorVerdict::Codec(e),
@@ -117,7 +119,10 @@ pub fn consume_and_bound<R: ContractReader>(
 /// actuation) governs sequence advancement. A fault leaves the watermark
 /// untouched. Kept private so there is ONE transport pipeline, never two to drift.
 enum Received {
-    Command(ProposedVehicleCommand),
+    /// The decoded command AND the exact validated snapshot it came from — the
+    /// snapshot is the release-token signing input (HVCHAN §3.5-6), carried so the
+    /// governor signs the same bytes it validated.
+    Command { command: ProposedVehicleCommand, view: GovernorContractView },
     Snapshot(SnapshotFault),
     Contract(ContractFault),
     Codec(CommandCodecError),
@@ -141,7 +146,27 @@ fn receive<R: ContractReader>(
         Err(err) => return Received::Codec(err),
     };
     watermark.record(&snapshot);
-    Received::Command(payload.into())
+    Received::Command { command: payload.into(), view: snapshot }
+}
+
+/// Apply a kinematic verdict to the decoded command: `Allow`/`Clamp*` become
+/// [`GovernorOutcome::Actuate`] (the clamp folded in), a `DenyBreach` becomes
+/// [`GovernorOutcome::SafeStop`]. Shared by [`decide`] and [`decide_cycle`].
+fn apply(action: EnforceAction, command: ProposedVehicleCommand) -> GovernorOutcome {
+    match action {
+        EnforceAction::Allow => GovernorOutcome::Actuate(command),
+        EnforceAction::ClampLinear(v) => {
+            let mut c = command;
+            c.linear_velocity_mps = v;
+            GovernorOutcome::Actuate(c)
+        }
+        EnforceAction::ClampSteering(s) => {
+            let mut c = command;
+            c.steering_angle_deg = s;
+            GovernorOutcome::Actuate(c)
+        }
+        EnforceAction::DenyBreach(_) => GovernorOutcome::SafeStop,
+    }
 }
 
 /// The governor's actuation decision for one cycle — the fail-closed reduction of
@@ -172,26 +197,47 @@ pub fn decide<R: ContractReader>(
     contract: &VehicleKinematicsContract,
     max_retries: u32,
 ) -> GovernorOutcome {
-    let cmd = match receive(reader, watermark, now_nanos, max_retries) {
-        Received::Command(cmd) => cmd,
+    match receive(reader, watermark, now_nanos, max_retries) {
+        Received::Command { command, .. } => apply(validate_vehicle_command(&command, contract), command),
         // Any transport/codec fault → fail closed to the safe stop.
+        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => GovernorOutcome::SafeStop,
+    }
+}
+
+/// The result of one governor cycle: the actuation [`outcome`](Self::outcome) plus
+/// the exact validated snapshot [`view`](Self::view) — the release-token signing
+/// input (HVCHAN §3.5-6). `view` is `Some` iff a command was received (transport +
+/// codec passed), regardless of the kinematic outcome, and `None` on a snapshot/
+/// contract/codec fault. The governor signs `view` (with `kirra-release-token`)
+/// ONLY when `outcome` is [`GovernorOutcome::Actuate`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct GovernorCycle {
+    pub outcome: GovernorOutcome,
+    pub view: Option<GovernorContractView>,
+}
+
+/// Like [`decide`], but also returns the validated [`GovernorContractView`] so the
+/// integration seam can sign it for the release token (HVCHAN §3.5-6 / ADR-0013).
+/// Same pipeline, same watermark advancement, same fail-closed reduction — this
+/// only additionally surfaces the exact bytes that were validated.
+///
+/// `#[must_use]`: the outcome gates actuation vs. MRC — dropping it is a safety bug.
+#[must_use]
+pub fn decide_cycle<R: ContractReader>(
+    reader: &R,
+    watermark: &mut AcceptedWatermark,
+    now_nanos: u64,
+    contract: &VehicleKinematicsContract,
+    max_retries: u32,
+) -> GovernorCycle {
+    match receive(reader, watermark, now_nanos, max_retries) {
+        Received::Command { command, view } => GovernorCycle {
+            outcome: apply(validate_vehicle_command(&command, contract), command),
+            view: Some(view),
+        },
         Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => {
-            return GovernorOutcome::SafeStop
+            GovernorCycle { outcome: GovernorOutcome::SafeStop, view: None }
         }
-    };
-    match validate_vehicle_command(&cmd, contract) {
-        EnforceAction::Allow => GovernorOutcome::Actuate(cmd),
-        EnforceAction::ClampLinear(v) => {
-            let mut c = cmd;
-            c.linear_velocity_mps = v;
-            GovernorOutcome::Actuate(c)
-        }
-        EnforceAction::ClampSteering(s) => {
-            let mut c = cmd;
-            c.steering_angle_deg = s;
-            GovernorOutcome::Actuate(c)
-        }
-        EnforceAction::DenyBreach(_) => GovernorOutcome::SafeStop,
     }
 }
 
@@ -428,5 +474,37 @@ mod tests {
         let outcome = decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
         assert_eq!(outcome, GovernorOutcome::SafeStop); // codec fail-closed
         assert_eq!(wm.last(), None);
+    }
+
+    // ---- decide_cycle() — outcome + the validated view for the release token --
+
+    #[test]
+    fn decide_cycle_surfaces_the_validated_view_when_actuatable() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        publish_payload(&region, 0, 1, 10_000, &in_envelope());
+        let cycle = decide_cycle(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
+        assert_eq!(cycle.outcome, GovernorOutcome::Actuate(in_envelope().into()));
+        // The view is present and IS the exact validated snapshot (the sign input).
+        let view = cycle.view.expect("actuatable → view present for the release token");
+        assert_eq!(view.sequence, 1);
+        assert_eq!(
+            VehicleCommandPayload::from_validated_view(&view),
+            Ok(in_envelope())
+        );
+    }
+
+    #[test]
+    fn decide_cycle_has_no_view_on_a_fault() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        publish_payload(&region, 0, 1, 1_000, &in_envelope()); // deadline 1_000
+        let cycle = decide_cycle(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
+        assert_eq!(cycle.outcome, GovernorOutcome::SafeStop);
+        assert_eq!(cycle.view, None); // nothing to sign — a fault never releases
     }
 }
