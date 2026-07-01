@@ -57,8 +57,8 @@ rebuild the frame:
 |---|---|
 | `PrecisionMode { FP32, FP16, INT8 }` (`#[non_exhaustive]`) | The precision ladder. Extend with `FP8` / `INT4` later (non_exhaustive = additive). |
 | `BackendCapabilities { supports_int8, supports_fp16, .. }` | Per-backend capability negotiation — the input to precision policy. |
-| `ModelHandle { expected_precision, io shapes }` | A loaded model already declares its precision. |
-| `BackendDescriptor { Cpu, Cuda, TensorRT, QualcommQnn, TiTidl, IntelOpenVino, AmdVitis }` | The per-silicon dispatch key (PARK-020/027/028/029/030). |
+| `ModelHandle { expected_precision, input_shapes, output_shapes }` | A loaded model already declares its precision. |
+| `BackendDescriptor::{Cpu, Cuda, TensorRT, QualcommQnn, TiTidl, IntelOpenVino, AmdVitis}` | The per-silicon dispatch key (PARK-020/027/028/029/030). |
 | `InferenceBackend::warm_up` (fail-closed) | Where engine build / precision compile happens; a failed build ⇒ node refuses to start. TensorRT already builds its engine here. |
 | `BackendSelector` (PARK-022) | Resolves a descriptor → concrete backend; the natural home for precision-aware selection. |
 | `InferenceThreads::bitwise_reproducible` | Determinism knob — relevant to the eval harness's reproducibility. |
@@ -103,9 +103,11 @@ FP32  (reference / correctness oracle)
   a training loop, tracked as a separate spike.
 - **Selection** extends `BackendSelector`: given the resolved `BackendDescriptor`,
   its `BackendCapabilities`, and a per-chip **precision allow-list** (the rows that
-  passed the contract), choose the artifact. Fail-closed: if no artifact meets the
-  contract on a chip, fall back to the highest precision that runs (worse latency,
-  never worse safety) and log it — the checker still bounds the output.
+  passed the contract), choose the artifact. If no artifact meets the contract on a
+  chip, gracefully **degrade** to the highest precision that runs (worse latency,
+  never worse safety) and log it — the doer keeps running and the checker still
+  bounds the output. (Degradation, not "fail-closed": the checker, not the selector,
+  is the fail-closed safety authority — the doer is availability-preserving here.)
 
 ## 6. Portable IR → per-backend compile
 
