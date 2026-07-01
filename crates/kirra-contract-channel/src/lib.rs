@@ -25,6 +25,12 @@
 //! - [`AcceptedWatermark`] — the monotonic generation/sequence gate
 //!   (`<= last_accepted ⇒ reject`; HVCHAN-001 §3.1), the same rule the #273
 //!   iceoryx2 spike judge and the #79 epoch fence use.
+//! - [`VehicleCommandPayload`] — what the opaque `command` bytes MEAN for
+//!   [`LAYOUT_VERSION`] 1 (the doer↔checker actuator command, L3): the frozen
+//!   little-endian encoding of the checker's input type `ProposedVehicleCommand`,
+//!   with a fail-closed [`decode`](VehicleCommandPayload::decode) (wrong length /
+//!   non-finite ⇒ reject). The command encoding is part of the Clause 2 contract,
+//!   so it too is freeze-asserted and version-bound.
 //!
 //! ## What's deliberately NOT here
 //!
@@ -69,12 +75,14 @@
 #[cfg(test)]
 extern crate std;
 
+mod command;
 mod crc;
 pub mod reference;
 mod seqlock;
 mod validate;
 mod view;
 
+pub use command::{CommandCodecError, CommandField, VehicleCommandPayload, COMMAND_PAYLOAD_LEN};
 pub use crc::crc32_ieee;
 pub use seqlock::{publish, read_coherent_snapshot, ContractReader, ContractWriter, SnapshotFault};
 pub use validate::{validate, AcceptedWatermark, ContractFault};

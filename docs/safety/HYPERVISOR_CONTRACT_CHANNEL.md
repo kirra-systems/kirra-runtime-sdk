@@ -141,6 +141,34 @@ re-validation, **never an in-place edit**. A reader encountering an unknown
 `layout_version` rejects (§4); it never best-effort-parses a layout it was not
 built and certified against.
 
+### 2.5 Command payload schema (LAYOUT_VERSION 1)
+
+`command` above is an opaque `[u8; MAX_COMMAND_BYTES]`; this subsection fixes what
+those bytes **mean** for `layout_version = 1` (the doer↔checker actuator command,
+L3). The payload is the on-wire form of the checker's input type
+`ProposedVehicleCommand` (`kirra_core::kinematics_contract`) — the DOER (QM
+planner, guest) proposes it; the CHECKER (ASIL governor) bounds it with
+`validate_vehicle_command`. It is **five little-endian `f64`s, 40 bytes**, offsets
+pinned:
+
+```text
+off  field                        meaning
+  0  linear_velocity_mps          desired forward velocity, end of step (m/s)
+  8  current_velocity_mps         actual forward velocity, start of step (m/s)
+ 16  delta_time_s                 planning step duration (s)
+ 24  steering_angle_deg           desired steering, end of step (deg, +left ISO 8855)
+ 32  current_steering_angle_deg   actual steering, start of step (deg)
+```
+
+The codec lives in `kirra-contract-channel` (`command.rs`) — **not** in the heavy
+`kirra-core` — so the cross-partition TCB imports a struct definition, not a
+library (Clause 2). `decode` is **fail-closed** at the boundary: a wrong length
+or any **non-finite** field (NaN/±Inf) rejects, as defense-in-depth that composes
+with — never replaces — `validate_vehicle_command`'s own Priority-0 NaN/Inf guard.
+Semantic bounds (`delta_time_s > 0`, the kinematic envelope) remain the governor's
+job. The encoding is part of the Clause 2 contract: it is freeze-asserted, and a
+change is a new `layout_version`, never an in-place edit (§2.4).
+
 ---
 
 ## 3. The write/read protocol (normative trust chain)
