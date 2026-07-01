@@ -137,6 +137,31 @@ what the mandatory isolation costs; iceoryx2 holds the crossing near it. The dep
 under `SCHED_FIFO`** → toward iceoryx2's published ~100 ns; the certified figure is a
 QNX-target-under-FIFO measurement (#274).
 
+**Isolated-core measurement on the DEPLOYMENT SoC**
+([`tools/iceoryx2-spike/results/orin-nx-16gb-linux-isolated.txt`](../../tools/iceoryx2-spike/results/orin-nx-16gb-linux-isolated.txt)).
+The above is an x86 shared host; the
+lowest-latency mode was then measured on the **real robot silicon** — a Jetson
+Orin NX 16GB (aarch64, Tegra234) — with cores 6/7 `isolcpus`-isolated, MAXN +
+`jetson_clocks` (no DVFS), the requester/responder pinned to the isolated cores,
+and `SCHED_FIFO` granted (1M iters, reproduced twice):
+
+```
+mode                       p50_ns     p99_ns    p999_ns     max_ns
+iox2 ping-pong (RTT)         1408       1568       2304   ~47–51 ms
+```
+
+The true cross-core doer↔checker hop is a reproducible **~704 ns one-way** (RTT/2)
+with a **p99.9 of 2304 ns RTT (~1.15 µs one-way)** — two runs agreed to the
+nanosecond on p50/p99/p99.9, and isolation collapsed the tail *body* ~6× versus
+the shared host. **The honest caveat is the headline, not a footnote:** the max is
+a *reproducible* ~47–51 ms because the stock L4T kernel has no `CONFIG_NO_HZ_FULL`
+(so `nohz_full` was silently ignored and the timer tick + RCU/IPI housekeeping
+still land on cores 6/7). `isolcpus` tightens the distribution *body* but cannot
+*bound* the tail on non-RT Linux — which is precisely why the certified, FTTI-
+backing WCET must be a **QNX-under-FIFO** number (#274), never a Linux figure
+however clean the body. (The sub-3 µs p99.9 body still sits far under the governor
+verdict WCET target of 100 µs, so the transport is not the bottleneck.)
+
 ### 3. Where iceoryx2 applies (utilization scope)
 
 A whole-system boundary map (every IPC / serialization / FFI hop) shows the
