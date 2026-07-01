@@ -300,6 +300,19 @@ impl LearnedPlanner {
         let scores = self.scorer.forward(&featurize(&scene_of(input)));
         argmax(&scores)
     }
+
+    /// The chosen vocabulary index **and** the materialized plan from a **single**
+    /// scorer pass. `plan` + `chosen_index` each run a forward pass on the same
+    /// features; a caller that needs both (e.g. the doer-eval harness, which scores
+    /// the plan through the checker *and* compares the argmax to a reference) uses
+    /// this to score once. `&self` — the argmax does not mutate the planner. The
+    /// index rides alongside the [`PlanOutput`] rather than inside it: `PlanOutput`
+    /// is the checker-consumed shape (PHASE-0 LOCKED) and gains no audit fields.
+    pub fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
+        let scene = scene_of(input);
+        let best = argmax(&self.scorer.forward(&featurize(&scene)));
+        (best, PlanOutput { trajectory: materialize(&scene, TARGET_SPEEDS[best]), kind: ProposalKind::Motion })
+    }
 }
 
 impl Planner for LearnedPlanner {

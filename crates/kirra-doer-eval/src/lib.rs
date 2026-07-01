@@ -43,7 +43,7 @@
 use kirra_core::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
 use kirra_core::FleetPosture;
-use kirra_planner::{EgoState, Goal, LearnedPlanner, PlanInput, PlanOutput, Planner, Pose};
+use kirra_planner::{EgoState, Goal, LearnedPlanner, PlanInput, PlanOutput, Pose};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
 // ---------------------------------------------------------------------------
@@ -258,12 +258,14 @@ impl EvalScenario {
 /// Score `candidate` over `corpus`, using `reference` as the argmax-agreement
 /// oracle. For each scenario the candidate's proposal is run through the checker
 /// (admissibility) and its chosen vocabulary index is compared to the reference's
-/// (quality). `candidate` is `&mut` only because `Planner::plan` takes `&mut self`;
-/// no state is mutated across scenarios (the learned planners are pure post-training).
+/// (quality). Both planners are `&` — `plan_with_chosen_index` is `&self`, and the
+/// learned planners are pure post-training. Exactly two scorer passes per scenario
+/// (candidate + reference), no redundant argmax; the per-scenario cost is dominated
+/// by the checker pass regardless.
 #[must_use]
 pub fn evaluate_corpus(
     corpus: &[EvalScenario],
-    candidate: &mut LearnedPlanner,
+    candidate: &LearnedPlanner,
     reference: &LearnedPlanner,
 ) -> DoerEvalSummary {
     let mut admissibility = AdmissibilityTally::default();
@@ -271,9 +273,9 @@ pub fn evaluate_corpus(
 
     for sc in corpus {
         let input = sc.input();
-        let cand_choice = candidate.chosen_index(&input);
+        // One scorer pass gives BOTH the candidate's plan and its argmax.
+        let (cand_choice, plan) = candidate.plan_with_chosen_index(&input);
         let ref_choice = reference.chosen_index(&input);
-        let plan = candidate.plan(&input);
 
         let v = verdict_of(&plan, &sc.corridor, &sc.objects, &sc.config, sc.posture);
         admissibility.record(v);
@@ -392,10 +394,10 @@ mod tests {
     #[test]
     fn same_planner_agrees_and_is_admitted() {
         let corpus = demo_corpus();
-        let mut candidate = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let candidate = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
         let reference = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
 
-        let s = evaluate_corpus(&corpus, &mut candidate, &reference);
+        let s = evaluate_corpus(&corpus, &candidate, &reference);
 
         assert_eq!(
             s.quality.argmax_agreement_rate(),
@@ -418,10 +420,10 @@ mod tests {
     #[test]
     fn misalignment_is_caught_by_both_metrics() {
         let corpus = demo_corpus();
-        let mut candidate = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
+        let candidate = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
         let reference = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
 
-        let s = evaluate_corpus(&corpus, &mut candidate, &reference);
+        let s = evaluate_corpus(&corpus, &candidate, &reference);
 
         assert!(
             s.admissibility.admissibility_rate() < 1.0,
@@ -452,13 +454,13 @@ mod tests {
             40.0,
         )];
 
-        let mut safe = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
-        let mut prog = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
+        let safe = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let prog = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
         let ref_safe = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
         let ref_prog = LearnedPlanner::trained(SEED, Teacher::ProgressOnly);
 
-        let safe_progress = evaluate_corpus(&corpus, &mut safe, &ref_safe).quality.mean_progress();
-        let prog_progress = evaluate_corpus(&corpus, &mut prog, &ref_prog).quality.mean_progress();
+        let safe_progress = evaluate_corpus(&corpus, &safe, &ref_safe).quality.mean_progress();
+        let prog_progress = evaluate_corpus(&corpus, &prog, &ref_prog).quality.mean_progress();
 
         assert!((0.0..=1.0).contains(&safe_progress));
         assert!((0.0..=1.0).contains(&prog_progress));
