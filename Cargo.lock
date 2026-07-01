@@ -2153,6 +2153,7 @@ dependencies = [
  "cxx-build",
  "dashmap",
  "futures",
+ "kirra-contract-channel",
  "kirra-core",
  "kirra-trajectory",
  "parko-core",

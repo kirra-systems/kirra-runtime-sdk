@@ -94,6 +94,11 @@ smallvec = "1"
 # this severs the adapter→SDK edge and, transitively, the planner's last SDK pull.
 kirra-core        = { path = "../kirra-core" }
 parko-core        = { path = "../../parko/crates/parko-core" }
+# L3.2 — the frozen Clause-2 cross-partition contract (GovernorContractView +
+# the VehicleCommandPayload codec + the seqlock publish). Lean: no_std, zero-dep,
+# forbid-unsafe, so it adds nothing heavy to the default (non-ros2) adapter build.
+# The guest-side producer (`contract_producer.rs`) publishes proposals over it.
+kirra-contract-channel = { path = "../kirra-contract-channel" }
 # R1: the lean trajectory CHECKER (validation / prediction / perception_redundancy /
 # config / AcceptedTrajectory+EgoOdom). The adapter re-exports its modules so the
 # ros2/lanelet2 node code keeps using `crate::{validation,prediction,...}` unchanged.
