@@ -5,8 +5,8 @@ Per-chipset performance for the **doer** — the untrusted planning/inference si
 it is bounded by the KIRRA checker, so a wrong or slow output is clamped, never
 actuated unbounded. The **safety kernel** (the SDK workspace) is the opposite —
 it stays uniform and keeps its own fixed-flag QNX build; never apply any of this
-to it. See **PR #749** (the SDK-side build-tuning notes) for the control-plane
-counterpart.
+to it. See [`../docs/PERFORMANCE_BUILD_TUNING.md`](../docs/PERFORMANCE_BUILD_TUNING.md)
+for the control-plane counterpart.
 
 Tiers, cheapest first.
 
@@ -51,8 +51,9 @@ SoC's core there. (Add `--features ros2` on a sourced ROS host to include the
 Standard three-phase PGO: build instrumented (`-C profile-generate=<dir>`) → run a
 representative planning/perception workload → `llvm-profdata merge` the `*.profraw`
 → rebuild with `-C profile-use=<merged>`. Use the **rustc-bundled** `llvm-profdata`
-(match rustc's LLVM version). Composes with Tier B by combining `RUSTFLAGS`. (The
-SDK ships a ready-made helper for this shape in PR #749.)
+(match rustc's LLVM version). Composes with Tier B by combining `RUSTFLAGS`. The
+SDK ships a ready-made helper for this shape:
+[`../scripts/pgo-build.sh`](../scripts/pgo-build.sh).
 
 ## Tier D — the real per-silicon lever (backend + quantization)
 
