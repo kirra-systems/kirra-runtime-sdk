@@ -6,3 +6,18 @@ resolver = "2"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Production-artifact profile for the DOER (parko) binaries — the untrusted
+# planning/inference side. Inherits parko's already-tuned `release` (opt-level 3 +
+# fat LTO + single codegen unit) and adds a symbol strip, mirroring the SDK's
+# `--profile dist` so `cargo build --profile dist` is the shipping command in BOTH
+# workspaces. Source-identical + chipset-agnostic. Per-chipset `target-cpu` / PGO
+# and the (bigger) per-backend quantization lever are opt-in — see BUILD_TUNING.md.
+#
+# Tuning the doer aggressively is SAFE: it is bounded by the KIRRA checker (a wrong
+# doer output is clamped, never actuated unbounded), so it is the sanctioned place
+# for chipset-specific performance. This is NOT the safety kernel — that lives in
+# the SDK workspace and keeps its own fixed-flag QNX build (no LTO/PGO/target-cpu).
+[profile.dist]
+inherits = "release"
+strip = true
