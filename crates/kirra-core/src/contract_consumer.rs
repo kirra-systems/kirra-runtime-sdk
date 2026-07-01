@@ -216,6 +216,23 @@ pub struct GovernorCycle {
     pub view: Option<GovernorContractView>,
 }
 
+impl GovernorCycle {
+    /// The view to sign for the release token — `Some` **only** when the outcome
+    /// is [`GovernorOutcome::Actuate`]. This is the correct gate for the release
+    /// seam: `view` is populated whenever a command was *received* (transport +
+    /// codec passed), so it is `Some` even on a kinematic `DenyBreach → SafeStop`.
+    /// Signing on `view.is_some()` would therefore sign a DENIED command; signing
+    /// on `view_to_sign()` cannot. "Sign only when actuatable" enforced at the type.
+    #[must_use]
+    pub fn view_to_sign(&self) -> Option<&GovernorContractView> {
+        if matches!(self.outcome, GovernorOutcome::Actuate(_)) {
+            self.view.as_ref()
+        } else {
+            None
+        }
+    }
+}
+
 /// Like [`decide`], but also returns the validated [`GovernorContractView`] so the
 /// integration seam can sign it for the release token (HVCHAN §3.5-6 / ADR-0013).
 /// Same pipeline, same watermark advancement, same fail-closed reduction — this

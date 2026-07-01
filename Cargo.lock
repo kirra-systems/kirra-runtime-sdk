@@ -2226,6 +2226,7 @@ dependencies = [
  "kirra-contract-channel",
  "kirra-core",
  "kirra-fleet-types",
+ "kirra-release-token",
  "parko-core",
  "parko-kirra",
  "proptest",
