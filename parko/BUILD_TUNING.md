@@ -59,8 +59,8 @@ SDK ships a ready-made helper for this shape in PR #749.)
 Build flags (A–C) are the *cheap* win. The **large** per-silicon gains on the
 doer are not build flags — they live in the inference backend:
 
-- `parko-core/src/backend_selector.rs` + `backends/` (`openvino_stub`, `qnn_stub`,
-  `amd_stub`) — the per-chip dispatch surface.
+- `crates/parko-core/src/backend_selector.rs` + `crates/parko-core/src/backends/`
+  (`openvino_stub`, `qnn_stub`, `amd_stub`) — the per-chip dispatch surface.
 - `parko-onnx`, `parko-openvino`, `parko-tensorrt` — the vendor backends (all
   runtime-linked, so they build without the native SDK present).
 
