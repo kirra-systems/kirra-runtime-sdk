@@ -29,6 +29,11 @@ capture = ["dep:tokio", "dep:serde_json", "dep:kirra-capture-schema"]
 # The posture types are wire-serialized (federation reports, the SSE stream). serde is
 # lean — the spine dependency this crate carries.
 serde = { version = "1", features = ["derive"] }
+# L3.3 — the governor CONSUMER (`contract_consumer`) reads the frozen Clause-2
+# contract (validate + decode) before bounding with validate_vehicle_command.
+# kirra-contract-channel is lean (no_std, zero-dep, forbid-unsafe), so it adds
+# nothing heavy to the lean foundation.
+kirra-contract-channel = { path = "../kirra-contract-channel" }
 # Lightweight logging FACADE (not a runtime): the relocated kinematics_sim emits one
 # `tracing::debug!` on a held command, and the capture writer logs drops. Compiles to
 # near-nothing without a subscriber; carrying it keeps those modules verbatim. This is
