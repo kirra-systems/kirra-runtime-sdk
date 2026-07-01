@@ -22,13 +22,30 @@
 #   BIN               binary name (default: kirra_verifier_service)
 #   EXTRA_RUSTFLAGS   stacked onto both phases, e.g. "-C target-cpu=x86-64-v3"
 #   KIRRA_VERIFIER_ADDR   listen addr for the instrumented run (default 127.0.0.1:8099)
+#   KIRRA_ADMIN_TOKEN     REQUIRED — the service fails closed at startup without a
+#                         non-empty admin token (SG-008), so the instrumented run
+#                         below cannot start without it.
 set -euo pipefail
 
+# Resolve paths from the script location, not the caller's cwd, so this works from
+# anywhere. The workload arg is resolved to absolute BEFORE we cd into the repo.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 BIN="${BIN:-kirra_verifier_service}"
-WORKLOAD="${1:?usage: scripts/pgo-build.sh <workload-driver-script>}"
+WORKLOAD_ARG="${1:?usage: scripts/pgo-build.sh <workload-driver-script>}"
+WORKLOAD="$(cd "$(dirname "$WORKLOAD_ARG")" 2>/dev/null && pwd)/$(basename "$WORKLOAD_ARG")"
+[[ -x "$WORKLOAD" ]] || { echo "ERROR: workload driver not found or not executable: $WORKLOAD_ARG" >&2; exit 1; }
 EXTRA_RUSTFLAGS="${EXTRA_RUSTFLAGS:-}"
 ADDR="${KIRRA_VERIFIER_ADDR:-127.0.0.1:8099}"
-PGO_DIR="$(pwd)/target/pgo-data"
+PGO_DIR="${REPO_ROOT}/target/pgo-data"
+
+# The service fails closed at startup without a non-empty admin token (SG-008);
+# the phase-2 instrumented run must actually boot, so require it up front.
+: "${KIRRA_ADMIN_TOKEN:?ERROR: set KIRRA_ADMIN_TOKEN (non-empty) — the service fails closed at startup without it (SG-008)}"
+
+# Run everything from the repo root so target/dist paths resolve regardless of cwd.
+cd "$REPO_ROOT"
 
 # Use the rustc-BUNDLED llvm-profdata so its LLVM version matches rustc's (a
 # system llvm-profdata will refuse a version-mismatched raw profile).
@@ -46,7 +63,7 @@ RUSTFLAGS="-C profile-generate=${PGO_DIR} ${EXTRA_RUSTFLAGS}" \
     cargo build --profile dist --bin "$BIN"
 
 echo "== PGO phase 2/3: run representative workload against the instrumented binary"
-KIRRA_VERIFIER_ADDR="$ADDR" ./target/dist/"$BIN" &
+KIRRA_VERIFIER_ADDR="$ADDR" "${REPO_ROOT}/target/dist/${BIN}" &
 SVC_PID=$!
 # give it a moment to bind, then drive it; always tear the service down.
 sleep 2
@@ -57,7 +74,17 @@ wait "$SVC_PID" 2>/dev/null || true
 trap - EXIT
 
 echo "== PGO phase 3/3: merge profile + rebuild with -C profile-use"
-"$PROFDATA" merge -o "${PGO_DIR}/merged.profdata" "${PGO_DIR}"
+# `llvm-profdata merge` expects .profraw files (not a directory). Expand them and
+# fail clearly if the instrumented run produced none (e.g. the workload didn't
+# actually exercise the binary, or it never started).
+shopt -s nullglob
+PROFRAWS=("${PGO_DIR}"/*.profraw)
+shopt -u nullglob
+if (( ${#PROFRAWS[@]} == 0 )); then
+    echo "ERROR: no .profraw files in ${PGO_DIR} — did the instrumented run exercise ${BIN}?" >&2
+    exit 1
+fi
+"$PROFDATA" merge -o "${PGO_DIR}/merged.profdata" "${PROFRAWS[@]}"
 RUSTFLAGS="-C profile-use=${PGO_DIR}/merged.profdata -C llvm-args=-pgo-warn-missing-function ${EXTRA_RUSTFLAGS}" \
     cargo build --profile dist --bin "$BIN"
 
