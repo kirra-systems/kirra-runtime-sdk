@@ -70,31 +70,21 @@ pub enum ReleaseDenied {
     SignatureInvalid,
 }
 
-/// The digest payload (step 5): domain tag, then the length-prefixed canonical
-/// image. The image is fixed-size, but the length prefix keeps the encoding
-/// injective and consistent with the audit-chain discipline.
-fn digest_payload(view: &GovernorContractView) -> ([u8; 32 + 1024], usize) {
-    // Stack buffer sized to comfortably hold the domain tag + 8-byte length +
-    // the canonical image (176 bytes today). Returned with its used length.
-    let image = view.canonical_image();
-    let mut buf = [0u8; 32 + 1024];
-    let mut n = 0;
-    buf[n..n + DIGEST_DOMAIN.len()].copy_from_slice(DIGEST_DOMAIN);
-    n += DIGEST_DOMAIN.len();
-    buf[n..n + 8].copy_from_slice(&(image.len() as u64).to_le_bytes());
-    n += 8;
-    buf[n..n + image.len()].copy_from_slice(&image);
-    n += image.len();
-    (buf, n)
-}
-
 /// Step 5: the digest over the exact validated snapshot bytes. Deterministic;
 /// independent of the live shared region.
+///
+/// The digest input is the domain tag, then the length-prefixed canonical image
+/// (the audit-chain house style — the length prefix keeps the encoding injective).
+/// It is **streamed directly into the hasher** rather than assembled in a buffer,
+/// so there is no fixed-size assumption to overflow if `canonical_image()` ever
+/// grows: `SHA-256(domain || len || image)` is identical fed in one slice or three.
 #[must_use]
 pub fn contract_digest(view: &GovernorContractView) -> [u8; 32] {
-    let (buf, n) = digest_payload(view);
+    let image = view.canonical_image();
     let mut hasher = Sha256::new();
-    hasher.update(&buf[..n]);
+    hasher.update(DIGEST_DOMAIN);
+    hasher.update((image.len() as u64).to_le_bytes());
+    hasher.update(image);
     hasher.finalize().into()
 }
 
