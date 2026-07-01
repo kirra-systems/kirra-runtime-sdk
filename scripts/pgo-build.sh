@@ -34,8 +34,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 BIN="${BIN:-kirra_verifier_service}"
 WORKLOAD_ARG="${1:?usage: scripts/pgo-build.sh <workload-driver-script>}"
-WORKLOAD="$(cd "$(dirname "$WORKLOAD_ARG")" 2>/dev/null && pwd)/$(basename "$WORKLOAD_ARG")"
-[[ -x "$WORKLOAD" ]] || { echo "ERROR: workload driver not found or not executable: $WORKLOAD_ARG" >&2; exit 1; }
+# `|| true` so a non-existent workload dir doesn't trip `set -e` inside the
+# command substitution (which would exit silently, with cd's stderr suppressed,
+# before the explicit check below). A failed cd leaves WORKLOAD_DIR empty.
+WORKLOAD_DIR="$(cd "$(dirname "$WORKLOAD_ARG")" 2>/dev/null && pwd || true)"
+WORKLOAD="${WORKLOAD_DIR}/$(basename "$WORKLOAD_ARG")"
+[[ -n "$WORKLOAD_DIR" && -x "$WORKLOAD" ]] || { echo "ERROR: workload driver not found or not executable: $WORKLOAD_ARG" >&2; exit 1; }
 EXTRA_RUSTFLAGS="${EXTRA_RUSTFLAGS:-}"
 ADDR="${KIRRA_VERIFIER_ADDR:-127.0.0.1:8099}"
 PGO_DIR="${REPO_ROOT}/target/pgo-data"
