@@ -152,14 +152,18 @@ pub fn evaluate(row: &EvalRow, reference: &EvalRow, contract: &PerfContract) -> 
             budget_ns: contract.p99_latency_budget_ns,
         });
     }
-    if row.quality < contract.quality_floor {
+    // Fail-closed on a non-finite metric: NaN/±inf means a bad upstream
+    // measurement, which must never pass the gate (a plain `<` would let NaN
+    // through, since every comparison with NaN is false). `is_finite()` rejects
+    // NaN AND ±inf while staying clippy-clean (no negated partial-ord compare).
+    if !row.quality.is_finite() || row.quality < contract.quality_floor {
         failures.push(ContractFailure::QualityBelowFloor {
             quality: row.quality,
             floor: contract.quality_floor,
         });
     }
     let regression = reference.admissibility - row.admissibility;
-    if regression > contract.admissibility_regression_budget {
+    if !regression.is_finite() || regression > contract.admissibility_regression_budget {
         failures.push(ContractFailure::AdmissibilityRegressed {
             row: row.admissibility,
             reference: reference.admissibility,
@@ -173,7 +177,7 @@ pub fn evaluate(row: &EvalRow, reference: &EvalRow, contract: &PerfContract) -> 
 /// Measure the p50/p99/max latency of `backend.run(model, inputs)` over `iters`
 /// timed calls after `warmup` discarded ones. Uses a monotonic [`Instant`] (ns) —
 /// the parko `Clock` is ms-resolution (control-loop scheduling), too coarse for a
-/// per-inference tick. `iters` must be ≥ 1.
+/// per-inference tick. `iters == 0` returns a [`BackendError::ExecutionFailure`].
 ///
 /// NOTE: host timing here is INDICATIVE. A row that feeds an on-vehicle latency
 /// claim must be measured on the target silicon, pinned and warmed (design note
@@ -185,7 +189,13 @@ pub fn run_latency<B: InferenceBackend + ?Sized>(
     iters: usize,
     warmup: usize,
 ) -> Result<LatencyStats, BackendError> {
-    assert!(iters >= 1, "run_latency needs at least one measured iteration");
+    // A public harness API shouldn't crash the process on a bad parameter —
+    // return a typed error rather than panicking.
+    if iters == 0 {
+        return Err(BackendError::ExecutionFailure(
+            "run_latency needs at least one measured iteration (iters == 0)".to_string(),
+        ));
+    }
     for _ in 0..warmup {
         backend.run(model, inputs)?;
     }
@@ -193,9 +203,12 @@ pub fn run_latency<B: InferenceBackend + ?Sized>(
     for _ in 0..iters {
         let t = Instant::now();
         backend.run(model, inputs)?;
-        samples.push(t.elapsed().as_nanos() as u64);
+        // Saturate rather than truncate (`as u64`): a pathologically long sample
+        // stays huge (and fails the latency budget) instead of wrapping to a
+        // small, falsely-passing value.
+        samples.push(u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
-    // `iters >= 1` guarantees at least one sample.
+    // `iters >= 1` (guarded above) guarantees at least one sample.
     Ok(LatencyStats::from_samples(&samples).expect("iters >= 1 ⇒ non-empty samples"))
 }
 
@@ -299,6 +312,46 @@ mod tests {
         let better = row(PrecisionMode::INT8, 2_000_000, 0.95, 0.99); // higher admissibility
         let v = evaluate(&better, &reference, &c);
         assert!(v.passed());
+    }
+
+    #[test]
+    fn non_finite_quality_fails_closed() {
+        let c = PerfContract::illustrative();
+        let reference = row(PrecisionMode::FP32, 5_000_000, 0.99, 0.98);
+        for bad_q in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bad = row(PrecisionMode::INT8, 2_000_000, bad_q, 0.98);
+            let v = evaluate(&bad, &reference, &c);
+            assert!(!v.passed(), "non-finite quality {bad_q} must fail closed");
+            assert!(v
+                .failures
+                .iter()
+                .any(|f| matches!(f, ContractFailure::QualityBelowFloor { .. })));
+        }
+    }
+
+    #[test]
+    fn non_finite_admissibility_fails_closed() {
+        let c = PerfContract::illustrative();
+        let reference = row(PrecisionMode::FP32, 5_000_000, 0.99, 0.98);
+        for bad_a in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bad = row(PrecisionMode::INT8, 2_000_000, 0.95, bad_a);
+            let v = evaluate(&bad, &reference, &c);
+            assert!(!v.passed(), "non-finite admissibility {bad_a} must fail closed");
+            assert!(v
+                .failures
+                .iter()
+                .any(|f| matches!(f, ContractFailure::AdmissibilityRegressed { .. })));
+        }
+    }
+
+    #[test]
+    fn zero_iters_is_a_typed_error_not_a_panic() {
+        let backend = MockBackend::new(HashMap::new(), BackendDescriptor::Cpu);
+        let model = backend.load_model("planner").unwrap();
+        let inputs = TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() };
+        let err = run_latency(&backend, &model, &inputs, 0, 5).unwrap_err();
+        assert!(matches!(err, BackendError::ExecutionFailure(_)));
+        assert_eq!(backend.call_count(), 0, "no calls when iters == 0");
     }
 
     #[test]
