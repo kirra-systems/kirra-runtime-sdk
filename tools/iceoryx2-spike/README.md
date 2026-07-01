@@ -106,6 +106,28 @@ system scheduler on a shared core). The published ~100 ns floor needs an
 **isolated core on a low-jitter target**, which is precisely the QNX-under-FIFO
 measurement (#274) — the mechanism is in place; the target supplies the number.
 
+**Isolated-core result on the deployment SoC** (Jetson Orin NX 16GB, aarch64 —
+the real robot silicon, not a VM). With `isolcpus=6,7`, MAXN + `jetson_clocks`
+(no DVFS), the requester/responder pinned to the two isolated cores, and
+`SCHED_FIFO` granted (`sudo env KIRRA_LAT_REQ_CPU=6 KIRRA_LAT_RESP_CPU=7
+KIRRA_LAT_FIFO=1 …`, 1M iters — full provenance + verbatim output in
+[`results/orin-nx-16gb-linux-isolated.txt`](results/orin-nx-16gb-linux-isolated.txt)):
+
+```
+mode                       p50_ns     p99_ns    p999_ns     max_ns
+iox2 ping-pong (RTT)         1408       1568       2304   ~47-51 ms
+```
+
+Two honest reads. (1) **Isolation collapses the tail *body*:** p99.9 RTT is
+**2304 ns** (~1.15 µs one-way) — ~6× tighter than the shared-host ~15 µs above,
+and two runs agreed to the **nanosecond** on p50/p99/p99.9. The true cross-core
+doer↔checker hop on the deployment SoC is a reproducible **~704 ns one-way**.
+(2) **`isolcpus` tightens the body but cannot BOUND the tail:** the max is a
+*reproducible* ~47–51 ms — the stock L4T kernel has no `CONFIG_NO_HZ_FULL`
+(`nohz_full` was silently ignored), so the timer tick + RCU/IPI housekeeping
+still land on cores 6/7. That residual is the point, not a defect: it is why the
+certified WCET is a **QNX-under-FIFO** number (#274), never a non-RT-Linux figure.
+
 ## How to run
 
 ```sh

@@ -1,0 +1,71 @@
+KIRRA #275 / L2 — iceoryx2 command-handoff latency on the deployment SoC (isolated-core)
+========================================================================================
+Target : NVIDIA Jetson Orin NX 16GB (Tegra234; 8x Cortex-A78AE @ 1.984 GHz),
+         Yahboom ROSMASTER X3 chassis. THIS is deployment-class silicon (aarch64),
+         not an x86 dev box or a VM.
+OS     : L4T / JetPack, STOCK kernel. CONFIG_NO_HZ_FULL is NOT set
+         (/sys/devices/system/cpu/nohz_full = none), so nohz_full=/rcu_nocbs= in
+         the cmdline are silently ignored — only isolcpus is in force.
+Build  : iceoryx2 0.9.2, cargo 1.96.0 (edition-2024 tree builds clean; 45.8 s cold).
+         latency_bench (feat/l2-iceoryx2-frozen-contract), --release.
+Date   : 2026-07-01
+
+Config (jitter-reduction levers applied):
+  - nvpmodel -m 0 (MAXN) + jetson_clocks  -> all 8 cores pinned @ 1984000 kHz (no DVFS)
+  - isolcpus=6,7  (verified: /sys/devices/system/cpu/isolated = 6-7)
+  - requester core=6, responder core=7 (the two isolated cores)
+  - SCHED_FIFO = GRANTED (run under sudo; banner reported SCHED_FIFO=true)
+  - KIRRA_LAT_ITERS=1000000
+
+STATUS : LINUX-TARGET-ISOLATED — INDICATIVE, *not* a WCET claim.
+         isolcpus tightens the DISTRIBUTION BODY to a reproducible sub-us hop, but
+         non-RT Linux cannot BOUND the tail (see the reproducible tens-of-ms max
+         below). The certified, FTTI-backing WCET number is a QNX-under-FIFO
+         measurement on the RTOS (#274) — a Linux figure, however clean in the
+         body, never mints a WCET.
+
+payload = frozen GovernorContractView (176 B, #[repr(C)], by value) — the same
+production contract kirra_contract_channel::validate() checks.
+
+--- run 1 (verbatim) ------------------------------------------------------------
+transport                  p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+--------------------------------------------------------------------------------------
+in-process (floor)             64         64         64      47265     (floor)
+socket+serde (proxy)         3040       3200       6112      98785     47.5x
+iceoryx2 (zero-copy)          672        768        960      18945     10.5x
+mode                       p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+--------------------------------------------------------------------------------------
+iox2 ping-pong (RTT)         1408       1568       2304   50941608     22.0x
+
+--- run 2 (verbatim) ------------------------------------------------------------
+transport                  p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+--------------------------------------------------------------------------------------
+in-process (floor)             32         64         64       7008     (floor)
+socket+serde (proxy)         3040       3201       4384      80866     95.0x
+iceoryx2 (zero-copy)          672        768        992      18369     21.0x
+mode                       p50_ns     p99_ns    p999_ns     max_ns   p50 vs floor
+--------------------------------------------------------------------------------------
+iox2 ping-pong (RTT)         1408       1568       2304   46941425     44.0x
+
+Reading (the takeaways):
+- CROSS-CORE hop (the real doer<->checker shape, ping-pong RTT): p50 1408 ns,
+  p99 1568 ns, p99.9 2304 ns. Halved -> ~704 ns ONE-WAY at the median, ~1.15 us
+  one-way at p99.9. Both runs agree to the NANOSECOND on p50/p99/p99.9 — the
+  isolation makes the body deterministic and reproducible.
+- iceoryx2 vs the socket+serde DDS-proxy: ~4.5x tighter at p50 (672 vs 3040 ns)
+  and ~6.4x tighter at p99.9 (960 vs 6112 ns) on the single-thread rows. A real
+  DDS hop adds RTPS/discovery/typed-CDR on top of the proxy — the gap only widens.
+- The reproducible ~47-51 ms MAX is the stock-kernel non-RT residual (timer tick
+  on 6/7 since nohz_full is absent, plus RCU/IPI housekeeping isolcpus cannot
+  remove). It is the point, not a defect: it is why the WCET claim needs QNX.
+- FTTI budget sanity: the sub-3-us p99.9 body sits far under the governor verdict
+  WCET target (100 us) and the control-cycle budget; the transport is not the
+  bottleneck. WCET closure remains the RTOS measurement (#274).
+
+Reproduce:
+  cd tools/iceoryx2-spike
+  cargo build --release --bin latency_bench
+  sudo env KIRRA_LAT_ITERS=1000000 KIRRA_LAT_REQ_CPU=6 KIRRA_LAT_RESP_CPU=7 \
+       KIRRA_LAT_FIFO=1 ./target/release/latency_bench
+  # prerequisites: nvpmodel -m 0 && jetson_clocks; isolcpus=6,7 on the kernel
+  # cmdline (/boot/extlinux/extlinux.conf) + reboot; verify /sys/.../isolated = 6-7.
