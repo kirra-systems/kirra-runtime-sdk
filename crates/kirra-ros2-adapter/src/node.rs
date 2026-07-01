@@ -844,14 +844,21 @@ pub async fn run_adapter(
     let mut contract_writer: Option<PosixShmRegion> = None;
     let mut contract_seq: Option<ProposalSequencer> = None;
     if let Ok(name) = std::env::var("KIRRA_CONTRACT_SHM_NAME") {
-        match PosixShmRegion::create(&name).or_else(|_| PosixShmRegion::open(&name)) {
+        // OPEN an existing region — the guest never CREATES/OWNS it. The region is
+        // provided by the platform (the QNX hypervisor for HvRegion; a host setup
+        // step / the governor side for PosixShmRegion). If the guest owned it, a
+        // node restart would shm_unlink the object out from under a long-lived
+        // governor still mapped to it, silently disconnecting the reader from new
+        // publishes. Absent region → log + don't publish (fail-safe; the gated
+        // ~/output/control_cmd path is unaffected).
+        match PosixShmRegion::open(&name) {
             Ok(w) => {
                 tracing::info!(shm = %name, "contract producer: publishing proposals to the cross-partition channel");
                 contract_writer = Some(w);
                 contract_seq = Some(ProposalSequencer::new());
             }
             Err(e) => {
-                tracing::error!(shm = %name, error = %e, "contract producer: shm map failed; proposals NOT published (gated output unaffected)");
+                tracing::warn!(shm = %name, error = %e, "contract producer: region not available; proposals NOT published (gated output unaffected)");
             }
         }
     }
