@@ -19,11 +19,13 @@
 // — without a sourced ROS 2 / r2r toolchain. The ros2-gated `node.rs` fast-loop
 // call-site and the hypervisor-mapped `ContractWriter` binding land in L3.3.
 
-// Allowed unconditionally for now: the only non-test caller is the ros2-gated
-// node.rs fast loop, which lands in L3.3, so the module is dead under BOTH the
-// default AND the `--features ros2` build until then (a `cfg_attr(not(feature = "ros2"), …)`
-// would leave the ros2 build unsilenced). L3.3 tightens this to
-// `cfg_attr(not(feature = "ros2"), allow(dead_code))` once the caller exists.
+// Allowed unconditionally: under the default (non-ros2) build the ONLY consumer
+// is the ros2-gated node.rs fast loop (incr. 2 wired it), so the whole module is
+// dead there; and even under `--features ros2` the node exercises
+// `proposal_payload` + `ProposalSequencer::{new, publish_to}` but not the
+// introspection accessors (`committed_generation` / `next_sequence`, used only by
+// tests). A `cfg_attr(not(feature = "ros2"), …)` would therefore leave those two
+// accessors unsilenced under ros2, so the blanket allow stays.
 #![allow(dead_code)]
 
 use kirra_contract_channel::{publish, ContractWriter, VehicleCommandPayload};

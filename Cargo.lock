@@ -2164,6 +2164,7 @@ dependencies = [
  "futures",
  "kirra-contract-channel",
  "kirra-core",
+ "kirra-hv-carrier",
  "kirra-trajectory",
  "parko-core",
  "r2r",

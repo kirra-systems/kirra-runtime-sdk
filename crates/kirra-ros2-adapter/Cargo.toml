@@ -51,7 +51,7 @@ default = []
 # This feature pulls NO C++ / no cxx / no lanelet2 — that is the separate
 # `lanelet2` feature below (the perception governance path is independent of
 # the map/corridor layer). See README.
-ros2 = ["dep:tokio", "dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:bytes", "kirra-core/capture"]
+ros2 = ["dep:tokio", "dep:r2r", "dep:tracing-subscriber", "dep:futures", "dep:reqwest", "dep:bytes", "dep:kirra-hv-carrier", "kirra-core/capture"]
 
 # Enable the real Lanelet2CorridorSource — a cxx/C++ wrap of `lanelet2_core`'s
 # boost::serialization deserializer (`fromBinMsg`). Implies `ros2` (the only
@@ -99,6 +99,10 @@ parko-core        = { path = "../../parko/crates/parko-core" }
 # forbid-unsafe, so it adds nothing heavy to the default (non-ros2) adapter build.
 # The guest-side producer (`contract_producer.rs`) publishes proposals over it.
 kirra-contract-channel = { path = "../kirra-contract-channel" }
+# L3 incr. 2 — the POSIX-SHM cross-partition carrier (ADR-0030). Only the
+# ros2-gated node.rs guest producer uses it, so it's optional + pulled by the
+# `ros2` feature; the default (non-ros2) adapter build never links it.
+kirra-hv-carrier = { path = "../kirra-hv-carrier", optional = true }
 # R1: the lean trajectory CHECKER (validation / prediction / perception_redundancy /
 # config / AcceptedTrajectory+EgoOdom). The adapter re-exports its modules so the
 # ros2/lanelet2 node code keeps using `crate::{validation,prediction,...}` unchanged.
