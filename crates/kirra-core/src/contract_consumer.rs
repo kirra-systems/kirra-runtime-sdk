@@ -384,16 +384,23 @@ mod tests {
         let contract = VehicleKinematicsContract::nominal_reference_profile();
         let mut wm = AcceptedWatermark::new();
 
-        // 50 m/s desired, way over the 35 m/s ceiling.
-        let over = VehicleCommandPayload { linear_velocity_mps: 50.0, ..in_envelope() };
+        // 50 m/s desired over the 35 m/s ceiling, current == desired (accel 0) so
+        // ONLY the absolute speed bound trips → the nominal contract CLAMPS.
+        let over = VehicleCommandPayload {
+            linear_velocity_mps: 50.0,
+            current_velocity_mps: 50.0,
+            ..in_envelope()
+        };
         publish_payload(&region, 0, 1, 10_000, &over);
         match decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES) {
-            // If actuated, the clamp MUST have folded the speed below the proposal.
-            GovernorOutcome::Actuate(c) => {
-                assert!(c.linear_velocity_mps < 50.0, "over-speed must be clamped, got {}", c.linear_velocity_mps)
-            }
-            // A DenyBreach → SafeStop is also an acceptable fail-closed outcome.
-            GovernorOutcome::SafeStop => {}
+            // ClampLinear → Actuate the clamped command (asserting Actuate, not
+            // accepting SafeStop, so a clamping regression can't hide here).
+            GovernorOutcome::Actuate(c) => assert!(
+                c.linear_velocity_mps <= 35.0, // clamped into the 35 m/s envelope (< the 50 proposal)
+                "over-speed must be clamped into the envelope, got {}",
+                c.linear_velocity_mps
+            ),
+            GovernorOutcome::SafeStop => panic!("nominal over-speed must clamp (Actuate), not safe-stop"),
         }
     }
 
