@@ -2065,6 +2065,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-doer-eval"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-planner",
+ "kirra-trajectory",
+]
+
+[[package]]
 name = "kirra-fleet-transport"
 version = "0.1.0"
 dependencies = [

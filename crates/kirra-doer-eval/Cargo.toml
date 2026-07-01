@@ -1,0 +1,32 @@
+# crates/kirra-doer-eval/Cargo.toml
+#
+# kirra-doer-eval — the doer performance eval harness (Q-1a; see
+# parko/QUANTIZATION_Q1_SCOPE.md). It runs a planner's PlanOutput through the
+# KIRRA checker and scores the verdict, producing the two doer-eval scalars:
+# ADMISSIBILITY (fraction of proposals the checker admits without an MRC) and
+# PLAN QUALITY (argmax-agreement vs. a reference planner + mean progress).
+#
+# DEPENDENCY NOTE — this is the one place the checker is a NORMAL dependency of a
+# doer-side crate. Everywhere else (kirra-planner, kirra-mick) the checker
+# `kirra-trajectory` is a *dev*-dependency, to keep the doer's library free of the
+# checker and preserve the doer/checker separation. This crate is neither the doer
+# nor the checker: it is the MEASUREMENT harness that sits ABOVE both and joins
+# them — exactly the role `tests/learned_doer_bounded_by_kirra.rs` plays today,
+# promoted to reusable library code. Depending on both is its reason to exist.
+[package]
+name = "kirra-doer-eval"
+version = "0.1.0"
+edition = "2021"
+description = "Doer performance eval harness — runs planner proposals through the KIRRA checker to produce admissibility + plan-quality metrics (Q-1a)."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The DOER: the learned planner + the generic Planner seam + PlanInput/PlanOutput.
+kirra-planner = { path = "../kirra-planner" }
+# The CHECKER: validate_trajectory_slow + VehicleConfig + TrajectoryVerdict (lean,
+# no ROS/tokio — same crate the planner's tests already call).
+kirra-trajectory = { path = "../kirra-trajectory" }
+# Lean shared contract types: FleetPosture, corridor seam, trajectory/perception.
+kirra-core = { path = "../kirra-core" }
