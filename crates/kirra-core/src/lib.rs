@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 /// by `kirra_verifier::gateway::kinematics_contract` so every existing path holds.
 pub mod kinematics_contract;
 
+/// L3.3 — the governor CONSUMER of the frozen Clause-2 cross-partition contract
+/// (`consume_and_bound` / `GovernorVerdict`): read a coherent snapshot →
+/// `validate` the transport contract → decode the `VehicleCommandPayload` →
+/// bound with `validate_vehicle_command`. Fail-closed at every stage; the CHECKER
+/// counterpart to the ROS adapter's guest-side producer (L3.2).
+pub mod contract_consumer;
+
 /// The SG2 drivable-space containment checker — the per-trajectory corridor-containment
 /// sibling of `validate_vehicle_command` (`VehicleFootprint` / `Corridor` / `Pose` /
 /// `validate_trajectory_containment` / `MAX_TRAJECTORY_HORIZON`). Relocated here verbatim

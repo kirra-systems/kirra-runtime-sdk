@@ -2056,6 +2056,7 @@ name = "kirra-core"
 version = "0.1.0"
 dependencies = [
  "kirra-capture-schema",
+ "kirra-contract-channel",
  "proptest",
  "serde",
  "serde_json",
