@@ -170,7 +170,7 @@ impl VehicleKinematicsContract {
 
 /// A proposed actuator command from the motion planning stack, with the current
 /// kinematic state required to compute rate-of-change invariants.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ProposedVehicleCommand {
     /// Desired forward velocity at end of this time step (m/s).
     /// Negative values indicate reverse motion.

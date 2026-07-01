@@ -102,22 +102,97 @@ pub fn consume_and_bound<R: ContractReader>(
     contract: &VehicleKinematicsContract,
     max_retries: u32,
 ) -> GovernorVerdict {
+    match receive(reader, watermark, now_nanos, max_retries) {
+        Received::Command(cmd) => GovernorVerdict::Bounded(validate_vehicle_command(&cmd, contract)),
+        Received::Snapshot(f) => GovernorVerdict::Snapshot(f),
+        Received::Contract(f) => GovernorVerdict::Contract(f),
+        Received::Codec(e) => GovernorVerdict::Codec(e),
+    }
+}
+
+/// The receive stage shared by [`consume_and_bound`] and [`decide`]: the
+/// transport half of the pipeline (snapshot → validate → decode), returning the
+/// decoded command or the first fault. On success the monotonic `watermark`
+/// advances (HVCHAN-001 §3.1) — before any kinematic bound, so receipt (not
+/// actuation) governs sequence advancement. A fault leaves the watermark
+/// untouched. Kept private so there is ONE transport pipeline, never two to drift.
+enum Received {
+    Command(ProposedVehicleCommand),
+    Snapshot(SnapshotFault),
+    Contract(ContractFault),
+    Codec(CommandCodecError),
+}
+
+fn receive<R: ContractReader>(
+    reader: &R,
+    watermark: &mut AcceptedWatermark,
+    now_nanos: u64,
+    max_retries: u32,
+) -> Received {
     let snapshot = match read_coherent_snapshot(reader, max_retries) {
         Ok(view) => view,
-        Err(fault) => return GovernorVerdict::Snapshot(fault),
+        Err(fault) => return Received::Snapshot(fault),
     };
     if let Err(fault) = validate(&snapshot, now_nanos, watermark) {
-        return GovernorVerdict::Contract(fault);
+        return Received::Contract(fault);
     }
     let payload = match VehicleCommandPayload::from_validated_view(&snapshot) {
         Ok(p) => p,
-        Err(err) => return GovernorVerdict::Codec(err),
+        Err(err) => return Received::Codec(err),
     };
-    // Transport + codec passed: the command was validly received. Advance the
-    // monotonic watermark now (HVCHAN-001 §3.1), before the kinematic bound —
-    // the bound decides actuation, not receipt.
     watermark.record(&snapshot);
-    GovernorVerdict::Bounded(validate_vehicle_command(&payload.into(), contract))
+    Received::Command(payload.into())
+}
+
+/// The governor's actuation decision for one cycle — the fail-closed reduction of
+/// a [`GovernorVerdict`] to what the actuator does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GovernorOutcome {
+    /// Actuate this command, with the kinematic bound ALREADY APPLIED (a `Clamp`
+    /// verdict returns the clamped value; `Allow` returns the command as received).
+    Actuate(ProposedVehicleCommand),
+    /// Issue the MRC safe-stop: any transport/codec fault, or a kinematic
+    /// `DenyBreach`. The governor never actuates a guest command in this case.
+    SafeStop,
+}
+
+/// Consume one proposal and reduce it to an actuation decision, fail-closed:
+/// `receive` → `validate_vehicle_command` → apply the verdict. `Allow`/`Clamp*`
+/// become [`GovernorOutcome::Actuate`] (the clamp already folded into the command);
+/// a `DenyBreach` or ANY snapshot/contract/codec fault becomes
+/// [`GovernorOutcome::SafeStop`]. This is the governor loop's per-cycle step; the
+/// watermark advances exactly as in [`consume_and_bound`] (they share `receive`).
+///
+/// `#[must_use]`: the outcome gates actuation vs. MRC — dropping it is a safety bug.
+#[must_use]
+pub fn decide<R: ContractReader>(
+    reader: &R,
+    watermark: &mut AcceptedWatermark,
+    now_nanos: u64,
+    contract: &VehicleKinematicsContract,
+    max_retries: u32,
+) -> GovernorOutcome {
+    let cmd = match receive(reader, watermark, now_nanos, max_retries) {
+        Received::Command(cmd) => cmd,
+        // Any transport/codec fault → fail closed to the safe stop.
+        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => {
+            return GovernorOutcome::SafeStop
+        }
+    };
+    match validate_vehicle_command(&cmd, contract) {
+        EnforceAction::Allow => GovernorOutcome::Actuate(cmd),
+        EnforceAction::ClampLinear(v) => {
+            let mut c = cmd;
+            c.linear_velocity_mps = v;
+            GovernorOutcome::Actuate(c)
+        }
+        EnforceAction::ClampSteering(s) => {
+            let mut c = cmd;
+            c.steering_angle_deg = s;
+            GovernorOutcome::Actuate(c)
+        }
+        EnforceAction::DenyBreach(_) => GovernorOutcome::SafeStop,
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +360,66 @@ mod tests {
         let verdict = consume_and_bound(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
         assert!(matches!(verdict, GovernorVerdict::Snapshot(_)));
         assert!(!verdict.is_actuatable());
+        assert_eq!(wm.last(), None);
+    }
+
+    // ---- decide() — the actuate-vs-safe-stop reduction ---------------------
+
+    #[test]
+    fn decide_actuates_an_in_envelope_command_unchanged() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        publish_payload(&region, 0, 1, 10_000, &in_envelope());
+        let outcome = decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
+        // Allow → Actuate with the command exactly as received.
+        assert_eq!(outcome, GovernorOutcome::Actuate(in_envelope().into()));
+        assert_eq!(wm.last(), Some((2, 1))); // watermark advanced, like consume_and_bound
+    }
+
+    #[test]
+    fn decide_bounds_an_over_envelope_command_below_the_proposal() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        // 50 m/s desired, way over the 35 m/s ceiling.
+        let over = VehicleCommandPayload { linear_velocity_mps: 50.0, ..in_envelope() };
+        publish_payload(&region, 0, 1, 10_000, &over);
+        match decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES) {
+            // If actuated, the clamp MUST have folded the speed below the proposal.
+            GovernorOutcome::Actuate(c) => {
+                assert!(c.linear_velocity_mps < 50.0, "over-speed must be clamped, got {}", c.linear_velocity_mps)
+            }
+            // A DenyBreach → SafeStop is also an acceptable fail-closed outcome.
+            GovernorOutcome::SafeStop => {}
+        }
+    }
+
+    #[test]
+    fn decide_safe_stops_on_an_expired_deadline() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        publish_payload(&region, 0, 1, 1_000, &in_envelope()); // deadline 1_000
+        let outcome = decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
+        assert_eq!(outcome, GovernorOutcome::SafeStop); // now > deadline → fail closed
+        assert_eq!(wm.last(), None);
+    }
+
+    #[test]
+    fn decide_safe_stops_on_a_non_finite_payload() {
+        let region = InProcessRegion::new();
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let mut wm = AcceptedWatermark::new();
+
+        let mut bad = in_envelope();
+        bad.linear_velocity_mps = f64::INFINITY;
+        publish_payload(&region, 0, 1, 10_000, &bad);
+        let outcome = decide(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
+        assert_eq!(outcome, GovernorOutcome::SafeStop); // codec fail-closed
         assert_eq!(wm.last(), None);
     }
 }

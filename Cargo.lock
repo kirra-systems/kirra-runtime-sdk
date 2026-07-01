@@ -2108,6 +2108,7 @@ name = "kirra-hv-carrier"
 version = "0.1.0"
 dependencies = [
  "kirra-contract-channel",
+ "kirra-core",
  "libc",
 ]
 
