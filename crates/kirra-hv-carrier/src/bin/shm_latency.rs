@@ -112,8 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..(iters + warmup) {
         let t0 = Instant::now();
         let snap = read_coherent_snapshot(&governor, MAX_SNAPSHOT_RETRIES).unwrap();
-        // A fresh watermark each iter so validate always accepts (we are timing
-        // the read+validate+decode cost, not the monotonic gate).
+        // Fresh watermark (created once, never recorded) so the monotonic gate is
+        // disabled and validate always accepts — we are timing the
+        // read+validate+decode cost, not sequence-advancement behavior.
         validate(&snap, 0, &wm).unwrap();
         let cmd = VehicleCommandPayload::from_validated_view(&snap).unwrap();
         let dt = t0.elapsed();

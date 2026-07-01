@@ -142,6 +142,25 @@ fn map_region(name: &CString, prot: libc::c_int, create: bool) -> io::Result<*mu
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    if !create {
+        // Fail-closed size guard: mapping CANONICAL_IMAGE_LEN over a stale/smaller
+        // object of the same name would map fine and then SIGBUS on first access
+        // (a crash, not a reject). Verify the object is large enough BEFORE mmap.
+        // SAFETY: fd is a valid descriptor; fstat writes `st`.
+        let mut st: libc::stat = unsafe { core::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+        if (st.st_size as u64) < CANONICAL_IMAGE_LEN as u64 {
+            unsafe { libc::close(fd) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shm region smaller than the frozen contract layout",
+            ));
+        }
+    }
     if create {
         // SAFETY: fd is a valid open descriptor from shm_open above.
         if unsafe { libc::ftruncate(fd, CANONICAL_IMAGE_LEN as libc::off_t) } < 0 {
@@ -159,10 +178,15 @@ fn map_region(name: &CString, prot: libc::c_int, create: bool) -> io::Result<*mu
     let addr = unsafe {
         libc::mmap(core::ptr::null_mut(), CANONICAL_IMAGE_LEN, prot, libc::MAP_SHARED, fd, 0)
     };
+    // Capture the mmap errno BEFORE close() can overwrite it.
+    let map_err = if addr == libc::MAP_FAILED {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
     // SAFETY: fd valid; the mapping outlives the fd, so closing it now is correct.
     unsafe { libc::close(fd) };
-    if addr == libc::MAP_FAILED {
-        let e = io::Error::last_os_error();
+    if let Some(e) = map_err {
         if create {
             // SAFETY: name valid; drop the object we created but couldn't map.
             unsafe { libc::shm_unlink(name.as_ptr()) };
@@ -366,6 +390,30 @@ mod tests {
             assert_eq!(VehicleCommandPayload::from_validated_view(&snap), Ok(demo(seq)));
         }
         assert_eq!(wm.last(), Some((8, 4)));
+    }
+
+    #[test]
+    fn open_rejects_a_too_small_region_fail_closed() {
+        // A stale/malformed object one byte too small must be REFUSED before mmap
+        // (else CANONICAL_IMAGE_LEN accesses would SIGBUS). Create it raw.
+        let name = unique_name("small");
+        let cname = std::ffi::CString::new(name.clone()).unwrap();
+        // SAFETY: FFI; fd is checked and closed.
+        unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600);
+            assert!(fd >= 0, "raw shm_open");
+            assert_eq!(
+                libc::ftruncate(fd, (CANONICAL_IMAGE_LEN - 1) as libc::off_t),
+                0,
+                "ftruncate too-small"
+            );
+            libc::close(fd);
+        }
+        // Both handles fail closed rather than map a SIGBUS-prone region.
+        assert!(PosixShmRegion::open(&name).is_err(), "RW open must reject too-small");
+        assert!(PosixShmReader::open(&name).is_err(), "RO open must reject too-small");
+        // SAFETY: cleanup the raw object.
+        unsafe { libc::shm_unlink(cname.as_ptr()) };
     }
 
     #[test]
