@@ -91,6 +91,10 @@ impl GovernorVerdict {
 /// verdict, so a validly-received-but-kinematically-denied command still burns
 /// its sequence (the guest must send a strictly newer one). A snapshot/contract/
 /// codec fault leaves the watermark untouched.
+///
+/// `#[must_use]`: the returned [`GovernorVerdict`] is safety-critical — dropping
+/// it would silently skip the actuation gate. (Matches `validate_vehicle_command`.)
+#[must_use]
 pub fn consume_and_bound<R: ContractReader>(
     reader: &R,
     watermark: &mut AcceptedWatermark,
