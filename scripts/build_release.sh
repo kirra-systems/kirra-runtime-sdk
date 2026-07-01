@@ -60,15 +60,21 @@ for i in "${!TARGETS[@]}"; do
 
     echo "Building ${TARGET_NAME}..."
 
-    # Build main verifier service
+    # Build main verifier service.
+    # `--profile dist` = release + thin-LTO + single codegen unit + strip
+    # (source-identical, portable, chipset-agnostic). Per-chipset target-cpu / PGO
+    # are opt-in overlays — see docs/PERFORMANCE_BUILD_TUNING.md. These are the
+    # PORTABLE musl artifacts, so target-cpu is intentionally NOT set here.
     cross build \
-        --release \
+        --locked \
+        --profile dist \
         --target "${TARGET}" \
         --bin "${BINARY}"
 
     # Build CARLA client
     cross build \
-        --release \
+        --locked \
+        --profile dist \
         --target "${TARGET}" \
         --bin "${CARLA_BINARY}"
 
@@ -78,8 +84,8 @@ for i in "${!TARGETS[@]}"; do
     mkdir -p "${STAGING_BIN}"
 
     # Copy binaries
-    cp "target/${TARGET}/release/${BINARY}"       "${STAGING_BIN}/"
-    cp "target/${TARGET}/release/${CARLA_BINARY}" "${STAGING_BIN}/"
+    cp "target/${TARGET}/dist/${BINARY}"       "${STAGING_BIN}/"
+    cp "target/${TARGET}/dist/${CARLA_BINARY}" "${STAGING_BIN}/"
 
     # Copy supporting files
     cp install.sh                    "${STAGING}/"

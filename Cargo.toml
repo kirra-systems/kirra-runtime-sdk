@@ -44,6 +44,23 @@ crate-type = ["rlib", "cdylib"]
 [profile.release]
 panic = "abort"
 
+# Production-artifact profile for the control-plane binaries. SOURCE-IDENTICAL to
+# `release` (inherits it, so `panic = "abort"` and the fail-closed rationale above
+# still hold) — it only turns UP codegen quality: thin LTO + a single codegen unit
+# + symbol strip. These are portable, chipset-AGNOSTIC wins; they do not fragment
+# source and do not reduce portability. Per-chipset `target-cpu` and PGO are opt-in
+# at the build invocation (see docs/PERFORMANCE_BUILD_TUNING.md), never a committed
+# global default. NOTE: this profile is for the HOST/edge Linux service build only.
+# The QNX safety-checker (`tools/qnx-rtm-harness/run_qnx_fdit.sh`) builds the judge
+# with its OWN fixed flags (`-C opt-level=2 -C panic=abort`, no LTO/PGO/target-cpu)
+# so the WCET evidence stays deterministic and reproducible — do not route the cert
+# build through this profile.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [features]
 ros2 = []
 tpm = ["dep:tss-esapi"]
