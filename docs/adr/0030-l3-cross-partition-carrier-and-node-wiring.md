@@ -37,7 +37,7 @@ Introduce a single small integration crate — `kirra-hv-carrier` — that is **
 1. the **map** syscall (`mmap`/`shm_open` on host; the hypervisor-region map on QNX) producing a pointer to exactly `size_of::<GovernorContractView>()` bytes (R-HV-2);
 2. the **atomic field accesses** over the mapped bytes, reproducing `InProcessRegion`'s memory model **exactly** — the `generation` counter carries the ordering (Acquire on read, Release on write) and body fields are Relaxed; the seqlock generation fences them. This is the load-bearing correctness detail: the trust chain's torn-read freedom (HVCHAN §3) holds across the partition boundary **only** if the shim preserves those orderings on real shared memory.
 
-No other `unsafe` is admitted. The `#[repr(C)]` layout match the shim relies on is **already proven** by the freeze assertions in `kirra-contract-channel::view` (offsets, size, alignment) — the shim maps bytes and does atomic access; it does not re-derive the layout.
+No other `unsafe` is admitted. The `#[repr(C)]` layout match that the shim relies on is **already proven** by the freeze assertions in `kirra-contract-channel::view` (offsets, size, alignment) — the shim maps bytes and does atomic access; it does not re-derive the layout.
 
 ### Clause B — two real bindings: host POSIX-SHM (testable now) and QNX (target)
 
