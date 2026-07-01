@@ -1,0 +1,27 @@
+# crates/kirra-hv-carrier/Cargo.toml
+#
+# L3 last-mile carrier (ADR-0030). THE single crate in the L3 path that is NOT
+# `#![forbid(unsafe_code)]`: it binds the carrier-agnostic ContractReader /
+# ContractWriter seam to a memory-MAPPED shared region, which requires the mmap
+# `unsafe` (ADR-0006 Clause 3 integration boundary). The contract + trust chain
+# above it (kirra-contract-channel, kirra-core) stay forbid-unsafe.
+#
+# Deps are deliberately minimal — the cross-partition TCB is the frozen layout
+# plus this thin mapping shim, nothing more (Clause 2). Only:
+#   - kirra-contract-channel: the frozen GovernorContractView + seqlock + validate
+#   - libc: shm_open / mmap / ftruncate / munmap / shm_unlink (POSIX host binding)
+[package]
+name = "kirra-hv-carrier"
+version = "0.1.0"
+edition = "2021"
+description = "L3 cross-partition contract carrier — POSIX-SHM (host) binding of the ContractReader/Writer seam (ADR-0030)"
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+kirra-contract-channel = { path = "../kirra-contract-channel" }
+# POSIX shared-memory + mmap for the host `PosixShmRegion` binding. Unix-only;
+# this crate is a host (Linux/QNX) integration shim, never built for a bare
+# no_std target.
+libc = "0.2"
