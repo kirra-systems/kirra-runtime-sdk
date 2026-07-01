@@ -510,9 +510,25 @@ jobs:
     # Jazzy targets Ubuntu 24.04 (Noble), so pin the runner (the rest of the
     # workflow runs on ubuntu-latest, which is fine for the non-ROS jobs).
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # 60 (was 40): the 40-min cancellations on this job were setup-ros's apt
+    # install crawling on a degraded mirror, hitting the wall exactly. With the
+    # apt hardening below (bounded per-connection timeouts + IPv4) a slow-but-
+    # progressing install now has headroom instead of timing out.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - name: Harden apt for slow/stalling mirrors (flaky ros2 build)
+        # The timeouts on this job were setup-ros's apt install crawling on a
+        # degraded azure.archive.ubuntu.com mirror (kB/s, per-connection stalls) —
+        # NOT the ros2-apt-source rate-limit the retry below covers. Drop an apt
+        # config BEFORE setup-ros so its apt-get honors it: bounded per-connection
+        # timeouts + retries turn a wedged socket into a fast reconnect, and
+        # ForceIPv4 avoids the slow/blackholed IPv6 path that commonly causes slow
+        # apt on GitHub runners. If this still recurs, the durable fix is a
+        # prebuilt ros:jazzy container (avoids the ROS apt install entirely).
+        run: |
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::ForceIPv4 "true";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99-kirra-ci-mirror
       - id: setup_ros
         uses: ros-tooling/setup-ros@v0.7
         with:
