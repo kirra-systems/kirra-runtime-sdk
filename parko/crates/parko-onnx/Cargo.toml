@@ -30,7 +30,7 @@ parko-core = { path = "../parko-core" }
 # matches any *higher* pre-release of the same 2.0.0 (Cargo pre-release
 # semantics), so it silently resolves back to rc.12 on a fresh CI checkout
 # (parko/Cargo.lock is gitignored). `=2.0.0-rc.11` forces exactly rc.11.
-ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 # Structured logging of the execution posture (thread count + reproducibility)
 # at backend init — mirrors the parko-ros2 tracing style.
 tracing = "0.1"
