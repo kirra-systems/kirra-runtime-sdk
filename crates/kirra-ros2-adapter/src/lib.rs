@@ -23,6 +23,11 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 mod control_ingress;
+// L3.2 — the guest-side producer: map the fast-loop ingress command to the
+// frozen Clause-2 payload and publish it over a ContractWriter. Non-ros2-gated
+// so the producer contract is host-tested over InProcessRegion; the node.rs
+// call-site + hypervisor-writer binding are L3.3.
+mod contract_producer;
 pub mod corridor;
 pub mod geometry;
 pub mod state;
