@@ -165,7 +165,10 @@ is absent, never silently passed). Reuses the existing bench scaffolding.
   Detailed scope: `QUANTIZATION_Q1_SCOPE.md` (metric producers + in-Rust PTQ on
   CI; real TensorRT INT8 gated to the Orin lane).
 - **Q-2 — precision-aware selection.** Extend `BackendSelector` with the per-chip
-  allow-list + fail-closed fallback.
+  allow-list + fail-closed fallback. Implemented: `parko_core::precision`
+  (`PrecisionLadder` from `KIRRA_PRECISION_LADDER` + `select_by_ladder`, walked by
+  operational proof, degrading visibly per §5 — composes with `BackendSelector`
+  rather than replacing it) and the `parko-tensorrt` `precision_select` Orin demo.
 - **Q-3 — fan out** INT8 to QNN / TIDL / Vitis as those backends land
   (PARK-027/028/030).
 - **Q-4 — FP8/INT4** (extend `PrecisionMode`) where hardware supports it, if the
