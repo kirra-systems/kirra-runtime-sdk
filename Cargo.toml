@@ -8,10 +8,16 @@
 #                                     wiring). ROS deps gated behind `ros2`
 #                                     feature; default build does not pull them.
 #
-# `parko/` is intentionally NOT included — it is a self-contained sub-workspace
-# with its own resolver and is consumed by this crate via a `path =` dependency.
-# That separation keeps the ML inference pipeline (parko-core / parko-onnx /
-# parko-kirra) independent of the safety-kernel build.
+# `parko/` is intentionally NOT listed — it is a self-contained sub-workspace
+# with its own resolver, consumed via `path =` dependencies. CAVEAT (learned the
+# hard way): cargo FORCE-ABSORBS a path dependency living under the workspace
+# directory as an implicit member — `exclude` does not prevent it — so the
+# path-depped parko crates (parko-core, parko-kirra, and parko-onnx via
+# kirra-doer-eval's dev-deps) ARE members here and `cargo test --workspace`
+# runs their tests. Consequently any parko crate reachable by path from this
+# workspace must keep its tests sandbox-safe: self-skip when the native
+# runtime (ORT etc.) is absent, strict-fail only in the CI lane that installs
+# it (see parko-onnx's PARKO_ONNX_REQUIRE_ORT).
 [workspace]
 members = [".", "crates/kirra-core", "crates/kirra-contract-channel", "crates/kirra-hv-carrier", "crates/kirra-release-token", "crates/kirra-timing", "crates/kirra-wcet-bench", "crates/kirra-trajectory", "crates/kirra-fleet-types", "crates/kirra-ros2-adapter", "crates/kirra-capture-schema", "crates/kirra-collector", "crates/kirra-governor-service", "crates/kirra-wire-client", "crates/kirra-proposal-bench", "crates/kirra-planner", "crates/kirra-mick", "crates/kirra-map", "crates/kirra-taj", "crates/kirra-fleet-transport", "crates/kirra-doer-eval"]
 resolver = "2"

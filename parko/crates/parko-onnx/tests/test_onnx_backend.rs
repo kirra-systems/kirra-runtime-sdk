@@ -3,8 +3,43 @@ use std::collections::HashMap;
 use parko_core::backend::{BackendCapabilities, BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage};
 use parko_onnx::OrtBackend;
 
+/// `PARKO_ONNX_REQUIRE_ORT` truthy → a loadable ORT runtime is REQUIRED: a
+/// would-be skip becomes a hard failure. Set in the dedicated ORT-provisioned
+/// CI job so these tests keep gating with teeth there; unset everywhere else
+/// (self-skip). Mirrors `PARKO_TRT_REQUIRE_EP` / `KIRRA_DOER_EVAL_REQUIRE_ORT`.
+fn require_ort() -> bool {
+    std::env::var("PARKO_ONNX_REQUIRE_ORT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// `Some(())` iff a loadable ORT runtime is present (`ORT_DYLIB_PATH` names an
+/// existing file); `None` → skip (or panic in strict mode). ort PANICS on a
+/// missing dylib — and since `ort = { default-features = false }` dropped the
+/// build-time `download-binaries` provisioning, NO lane gets a dylib implicitly
+/// any more. The guard matters beyond the dedicated job because cargo absorbs
+/// path-depped parko crates as implicit ROOT-workspace members (a path dep under
+/// the workspace directory is force-absorbed; `exclude` cannot prevent it), so
+/// root `cargo test --workspace` runs THESE tests in lanes with no ORT installed.
+fn ort_available() -> Option<()> {
+    let dylib = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
+    if dylib.is_empty() || !std::path::Path::new(&dylib).exists() {
+        assert!(
+            !require_ort(),
+            "STRICT (PARKO_ONNX_REQUIRE_ORT): no loadable ORT runtime at ORT_DYLIB_PATH \
+             ({dylib:?}) — refusing to skip (the ORT-provisioned job must install it)."
+        );
+        eprintln!("SKIP: no ORT runtime ({dylib:?}) — parko-onnx tests need a real ORT lib.");
+        return None;
+    }
+    Some(())
+}
+
 #[test]
 fn mnist_end_to_end_inference() {
+    if ort_available().is_none() {
+        return;
+    }
     let model_path = "tests/data/mnist-12.onnx";
 
     let backend = OrtBackend::new(model_path)
@@ -92,6 +127,9 @@ fn mnist_end_to_end_inference() {
 
 #[test]
 fn test_ort_backend_descriptor_is_cpu() {
+    if ort_available().is_none() {
+        return;
+    }
     let model_path = "tests/data/mnist-12.onnx";
     let backend = OrtBackend::new(model_path).expect("failed to construct OrtBackend");
     assert_eq!(backend.descriptor(), BackendDescriptor::Cpu);
@@ -99,6 +137,9 @@ fn test_ort_backend_descriptor_is_cpu() {
 
 #[test]
 fn test_ort_backend_capabilities() {
+    if ort_available().is_none() {
+        return;
+    }
     let model_path = "tests/data/mnist-12.onnx";
     let backend = OrtBackend::new(model_path).expect("failed to construct OrtBackend");
     let caps = backend.capabilities();
