@@ -235,7 +235,22 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         // frame that is no longer current) and resume normal inference.
         if let Some(straggler) = self.hung_inference.take() {
             if straggler.is_finished() {
-                let _ = straggler.await;
+                // A clean straggler result is discarded (stale frame); a
+                // JoinError means the blocking task PANICKED or was aborted
+                // — a backend-health signal worth auditing, not swallowing.
+                if let Err(e) = straggler.await {
+                    if let Some(a) = &self.audit {
+                        a.record_fault(FaultRecord {
+                            tick_ms: loop_start_ms,
+                            code: "inference_worker_join_failure",
+                            detail: format!(
+                                "deadline straggler died instead of returning \
+                                 (panic/abort in the blocking inference task): {e}"
+                            ),
+                            posture,
+                        });
+                    }
+                }
             } else {
                 self.hung_inference = Some(straggler);
                 self.last_validated_command =
@@ -904,7 +919,8 @@ mod tests {
     /// normal 0.5 m/s command on every later run. Models a wedged driver /
     /// EP stall that eventually clears. The hang is a BOUNDED sleep so the
     /// runtime's shutdown (which waits for blocking-pool threads) always
-    /// completes.
+    /// completes — sized to dwarf the 50 ms test deadline (anti-flake slack)
+    /// while keeping the suite fast.
     struct HangOnceBackend {
         hang_ms: u64,
         runs: std::sync::atomic::AtomicU32,
@@ -943,7 +959,7 @@ mod tests {
     async fn hung_backend_mrcs_within_budget_then_recovers() {
         use crate::audit::MockAuditClient;
         let backend = Arc::new(HangOnceBackend {
-            hang_ms: 800,
+            hang_ms: 400,
             runs: std::sync::atomic::AtomicU32::new(0),
         });
         let model = backend.load_model("").unwrap();
@@ -954,9 +970,10 @@ mod tests {
             .with_audit_client(mock.clone());
         let mut stream = SimpleStream { next_id: 0 };
 
-        // Tick 1 — deadline breach. Must return WITHIN BUDGET (long before
-        // the 800 ms hang clears; the generous 500 ms assertion bound is
-        // slack for a loaded CI host, not the deadline itself).
+        // Tick 1 — deadline breach. Must return WITHIN BUDGET — strictly
+        // before the 400 ms hang clears, so the timing itself proves the
+        // DEADLINE cut the tick off, not the backend completing. (The 300 ms
+        // assertion bound is slack for a loaded CI host, not the deadline.)
         let started = std::time::Instant::now();
         let snap = loop_engine
             .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
@@ -964,7 +981,7 @@ mod tests {
             .unwrap();
         let elapsed = started.elapsed();
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
+            elapsed < std::time::Duration::from_millis(300),
             "the deadline must cut the hung backend off within budget; tick took {elapsed:?}"
         );
         assert_eq!(snap.active_command.linear_velocity, 0.0, "deadline breach → MRC stop");
@@ -990,7 +1007,7 @@ mod tests {
 
         // Let the straggler finish, then tick 3 — the stale result is reaped
         // and DISCARDED; fresh inference runs and the loop publishes it.
-        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let snap3 = loop_engine
             .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
             .await

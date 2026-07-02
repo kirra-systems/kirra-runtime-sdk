@@ -579,9 +579,11 @@ mod tick_pipeline_tests {
             "1000 m/s must be CLAMPED by the governor envelope, never admitted as-is; got {v}");
     }
 
-    /// A backend that hangs (bounded 800 ms real sleep — the runtime's
+    /// A backend that hangs (bounded 400 ms real sleep — the runtime's
     /// shutdown waits for blocking threads, so an unbounded hang would wedge
-    /// the test itself) and would emit a moving command if ever awaited.
+    /// the test itself; 400 ms dwarfs the 50 ms deadline for anti-flake
+    /// slack without slowing the suite) and would emit a moving command if
+    /// ever awaited.
     #[derive(Debug)]
     struct HangingBackend;
     impl parko_core::backend::InferenceBackend for HangingBackend {
@@ -601,7 +603,7 @@ mod tick_pipeline_tests {
             _model: &parko_core::backend::ModelHandle,
             _inputs: &TensorBatch,
         ) -> Result<TensorBatch<'static>, parko_core::backend::BackendError> {
-            std::thread::sleep(std::time::Duration::from_millis(800));
+            std::thread::sleep(std::time::Duration::from_millis(400));
             let mut map = HashMap::new();
             map.insert(
                 "cmd_vel_linear".to_string(),
@@ -645,8 +647,10 @@ mod tick_pipeline_tests {
                 .await;
         let elapsed = started.elapsed();
 
+        // Strictly below the 400 ms hang: the timing proves the DEADLINE cut
+        // the tick off, not the backend completing.
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
+            elapsed < std::time::Duration::from_millis(300),
             "a hung backend must not stall the tick; took {elapsed:?}"
         );
         assert_eq!(outcome.twist.linear_x_mps, 0.0,
