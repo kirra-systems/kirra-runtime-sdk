@@ -34,3 +34,12 @@ kirra-core = { path = "../kirra-core" }
 # JSON the parko-side Q-1b runner reads and joins with the on-target latency row.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Round-trip verification of the ONNX export (tests/onnx_roundtrip.rs): load the
+# emitted bytes through the REAL ONNX Runtime and assert the outputs match the
+# Rust scorer. Cross-workspace path dep — same pattern as the root crate's
+# parko-core dep. ort is `load-dynamic`, so this compiles with no ORT runtime
+# present; the test self-skips unless ORT_DYLIB_PATH points at a real lib.
+parko-onnx = { path = "../../parko/crates/parko-onnx" }
+parko-core = { path = "../../parko/crates/parko-core" }

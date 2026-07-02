@@ -79,6 +79,30 @@ pub struct TrtPosture {
     pub engine_sha: Option<String>,
 }
 
+/// Requested execution precision for a [`TrtBackend`] (Q-1b; doer-eval only).
+///
+/// `Full` is the safety default and the ONLY precision the safety path uses —
+/// [`TrtBackend::new`] / [`TrtBackend::with_config`] construct it and are
+/// byte-identical to before this enum existed. `Fp16` / `Int8Qdq` are the
+/// EXPLICIT OPT-IN rows of the doer performance contract
+/// (`parko/QUANTIZATION_Q1_SCOPE.md`): they tune the UNTRUSTED doer's inference
+/// only, and the KIRRA checker bounds the resulting proposals exactly as it
+/// bounds FP32 ones — quantization is a quality knob, never a safety knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrtPrecision {
+    /// Full precision (fp16/int8 off) — the fixed safety default.
+    #[default]
+    Full,
+    /// FP16 inference (doer-eval row; near-lossless on the ranking scorer).
+    Fp16,
+    /// INT8 via an **explicit-quantization (QDQ) model**: the loaded ONNX must
+    /// carry `QuantizeLinear`/`DequantizeLinear` nodes with embedded scales (the
+    /// in-Rust PTQ calibration exported by `kirra-doer-eval`). No implicit
+    /// TensorRT calibration is configured — a non-QDQ model under this posture
+    /// gets no silent calibration, matching "no silent quantization".
+    Int8Qdq,
+}
+
 impl TrtPosture {
     /// The fixed safety defaults for a given engine-cache path: full precision
     /// (no fp16/int8), TF32 unenforced-pending, no engine SHA yet.
@@ -91,6 +115,19 @@ impl TrtPosture {
             engine_cache_path: engine_cache_path.into(),
             engine_sha: None,
         }
+    }
+
+    /// A posture at an explicitly requested [`TrtPrecision`] (Q-1b doer-eval rows).
+    /// `TrtPrecision::Full` is identical to [`Self::full_precision`].
+    #[must_use]
+    pub fn at_precision(engine_cache_path: impl Into<String>, precision: TrtPrecision) -> Self {
+        let mut p = Self::full_precision(engine_cache_path);
+        match precision {
+            TrtPrecision::Full => {}
+            TrtPrecision::Fp16 => p.fp16 = true,
+            TrtPrecision::Int8Qdq => p.int8 = true,
+        }
+        p
     }
 
     /// True only if precision is *fully* guaranteed end to end. It is NOT, while
@@ -164,9 +201,28 @@ impl TrtBackend {
     /// — fail-closed is the posture), with full precision (fp16/int8 off) and
     /// engine caching enabled. Returns `Err` if the TRT EP cannot register
     /// against the dlopened ORT runtime (`error_on_failure`) — never a silent
-    /// CPU run.
+    /// CPU run. Byte-identical to before [`TrtPrecision`] existed — the safety
+    /// path always constructs full precision.
     pub fn with_config(model_path: &str, cfg: &TrtConfig) -> Result<Self, BackendError> {
-        let posture = TrtPosture::full_precision(cfg.engine_cache_path.clone());
+        Self::with_precision(model_path, cfg, TrtPrecision::Full)
+    }
+
+    /// [`Self::with_config`] at an EXPLICITLY requested precision — the Q-1b
+    /// doer-eval constructor (`Fp16` / `Int8Qdq` rows of the performance
+    /// contract). The precision is an opt-in audit-logged posture, never a
+    /// default: the safety path stays on [`Self::with_config`] (Full). For
+    /// `Int8Qdq` the model must be an explicit-quantization (QDQ) ONNX carrying
+    /// its own scales; no implicit calibration is configured here.
+    ///
+    /// NOTE for callers running multiple precisions of the SAME model (the eval
+    /// matrix): use a DISTINCT `engine_cache_path` per precision — the serialized
+    /// engine is precision-specific and the cache must not cross-contaminate.
+    pub fn with_precision(
+        model_path: &str,
+        cfg: &TrtConfig,
+        precision: TrtPrecision,
+    ) -> Result<Self, BackendError> {
+        let posture = TrtPosture::at_precision(cfg.engine_cache_path.clone(), precision);
 
         // TRT EP only. fp16=false, int8=false (full precision); engine cache on.
         // `.error_on_failure()` makes a failed registration fatal (fail-closed).
@@ -457,6 +513,28 @@ mod tests {
         assert!(s.contains("UNENFORCED"), "status must surface that TF32 is unenforced");
         assert!(!s.to_lowercase().contains("off"),
             "status must NOT read as 'TF32 off'");
+    }
+
+    #[test]
+    fn precision_default_is_full() {
+        // The safety default: an unconfigured precision is Full, and Full maps to
+        // the exact same posture full_precision() builds.
+        assert_eq!(TrtPrecision::default(), TrtPrecision::Full);
+        assert_eq!(
+            TrtPosture::at_precision("/tmp/c", TrtPrecision::Full),
+            TrtPosture::full_precision("/tmp/c"),
+        );
+    }
+
+    #[test]
+    fn opt_in_precisions_set_exactly_one_flag() {
+        let fp16 = TrtPosture::at_precision("/tmp/c", TrtPrecision::Fp16);
+        assert!(fp16.fp16 && !fp16.int8);
+        let int8 = TrtPosture::at_precision("/tmp/c", TrtPrecision::Int8Qdq);
+        assert!(int8.int8 && !int8.fp16);
+        // Neither may claim guaranteed full precision (honesty guard).
+        assert!(!fp16.full_precision_guaranteed());
+        assert!(!int8.full_precision_guaranteed());
     }
 
     #[test]

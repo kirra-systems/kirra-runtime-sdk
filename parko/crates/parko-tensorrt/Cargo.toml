@@ -18,9 +18,15 @@ parko-onnx = { path = "../parko-onnx" }
 # execution provider is registered at runtime against the dlopened libonnxruntime.so;
 # on a CPU-only ORT lib that registration FAILS (fail-closed), and on the Jetson's
 # TensorRT-enabled ORT it succeeds.
-ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic", "std"] }
 tracing = "0.1"
 # Engine fingerprinting for warm_up() → TrtPosture.engine_sha (PARK-021 #2). SHA-256
 # of the serialized TRT engine cached on disk; same versions as the workspace root.
 sha2 = "0.11"
 hex = "0.4"
+
+[dev-dependencies]
+# The Q-1b orin_eval example parses the kirra-doer-eval scorecard JSON (the
+# cross-workspace file seam — this side owns its own deserializer).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
