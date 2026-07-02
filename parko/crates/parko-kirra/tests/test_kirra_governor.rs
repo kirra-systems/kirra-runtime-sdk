@@ -4,7 +4,9 @@ use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 
 #[test]
 fn nominal_governor_allows_low_velocity_command() {
-    let governor = KirraGovernor::nominal();
+    // Envelope-tier test; RSS is out of scope → declare external gating
+    // (the fail-closed unfed default would HOLD at zero — see RssFeed).
+    let governor = KirraGovernor::nominal().with_external_rss_gate();
     let cmd = ControlCommand {
         linear_velocity: 0.1,
         angular_velocity: 0.0,

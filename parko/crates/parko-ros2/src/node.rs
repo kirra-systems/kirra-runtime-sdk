@@ -37,10 +37,16 @@ use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CON
 use crate::imu_shim::imu_msg_to_sample;
 use crate::sensor_mapping::{ImuSample, SensorInputMapping};
 use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
+use crate::scene_vetoes::{
+    apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
+};
 use crate::taj_objects::{
     apply_object_rss_gate, courier_rss_params, object_snapshot_to_vanished_scene, ObjectSnapshot,
 };
 use crate::tick_pipeline::{current_time_ms, TickError};
+use parko_core::commit_zone::{CommitZoneCfg, CommitZoneScene};
+use parko_core::rss::OcclusionScene;
+use parko_core::water::{WaterScene, WaterVetoConfig};
 use parko_kirra::clearance_delivery::DeliveryOutcome;
 
 /// Run the Parko ROS 2 node. Owns the r2r context for the lifetime of
@@ -262,6 +268,45 @@ where
         ),
     }
 
+    // WS-0.1 scene-veto channels (occlusion / water / commit-zone). Each slot
+    // is where a future producer subscription publishes its latest stamped
+    // scene (the `latest_objects` pattern). The gates are ARMED by config;
+    // while armed, an empty/stale slot fails CLOSED inside the gate (stop) —
+    // the enabled-but-silent rule. Not armed → the gate is never called.
+    let latest_occlusion: Arc<StdMutex<Option<StampedScene<OcclusionScene>>>> =
+        Arc::new(StdMutex::new(None));
+    let latest_water: Arc<StdMutex<Option<StampedScene<WaterScene>>>> =
+        Arc::new(StdMutex::new(None));
+    let latest_commit_zone: Arc<StdMutex<Option<StampedScene<CommitZoneScene>>>> =
+        Arc::new(StdMutex::new(None));
+    // Occlusion needs the RSS params → armed only with a platform_profile
+    // (same precedent as the object gate). Enabled without a profile → warn.
+    let drain_occlusion_params = config
+        .platform_profile
+        .as_ref()
+        .filter(|_| config.occlusion_gate_enabled)
+        .map(courier_rss_params);
+    if config.occlusion_gate_enabled {
+        match &drain_occlusion_params {
+            Some(_) => tracing::warn!(
+                "parko-ros2: WS-0.1 occlusion gate ARMED — a missing/stale sightline scene                  fails closed to a STOP; ensure a producer feeds the occlusion slot"
+            ),
+            None => tracing::warn!(
+                "parko-ros2: occlusion_gate_enabled but no platform_profile (no RSS params) —                  occlusion gate NOT armed"
+            ),
+        }
+    }
+    if config.water_gate_enabled {
+        tracing::warn!(
+            "parko-ros2: WS-0.1 SG4 water gate ARMED — a missing/stale water scene fails              closed to a STOP; ensure a producer feeds the water slot"
+        );
+    }
+    if config.commit_zone_gate_enabled {
+        tracing::warn!(
+            "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED — a missing/stale zone scene fails              closed to a STOP; ensure a producer feeds the commit-zone slot"
+        );
+    }
+
     // --- Drain task: consume the sensor stream, tick, publish ---------
     let drain_config  = Arc::clone(&config);
     let drain_infer   = Arc::clone(&infer);
@@ -286,6 +331,11 @@ where
     let drain_vanished_armed = config.vanished_detection_enabled
         && config.platform_profile.is_some()
         && config.lidar_topic.is_some();
+    let drain_occlusion = Arc::clone(&latest_occlusion);
+    let drain_water = Arc::clone(&latest_water);
+    let drain_commit_zone = Arc::clone(&latest_commit_zone);
+    let drain_water_armed = config.water_gate_enabled;
+    let drain_commit_zone_armed = config.commit_zone_gate_enabled;
 
     let drain_task = tokio::spawn(async move {
         use futures::StreamExt;
@@ -393,6 +443,44 @@ where
                 None => outcome,
             };
 
+            // WS-0.1 scene-veto gates (occlusion / water / commit-zone),
+            // composed after the object gate on the same publication seam.
+            // Armed-when-configured; inside an armed gate a missing/stale
+            // scene fails closed (stop). The brief std-mutex locks release
+            // before any `.await`.
+            let outcome = match &drain_occlusion_params {
+                Some(params) => apply_occlusion_gate(
+                    outcome,
+                    drain_occlusion.lock().ok().and_then(|g| g.clone()).as_ref(),
+                    params,
+                    drain_config.corridor_max_age_ms,
+                    current_time_ms(),
+                ),
+                None => outcome,
+            };
+            let outcome = if drain_water_armed {
+                apply_water_gate(
+                    outcome,
+                    drain_water.lock().ok().and_then(|g| g.clone()).as_ref(),
+                    &WaterVetoConfig::default(),
+                    drain_config.corridor_max_age_ms,
+                    current_time_ms(),
+                )
+            } else {
+                outcome
+            };
+            let outcome = if drain_commit_zone_armed {
+                apply_commit_zone_gate(
+                    outcome,
+                    drain_commit_zone.lock().ok().and_then(|g| g.clone()).as_ref(),
+                    &CommitZoneCfg::default(),
+                    drain_config.corridor_max_age_ms,
+                    current_time_ms(),
+                )
+            } else {
+                outcome
+            };
+
             // Surface the per-tick clearance delivery (a console-recorded grant
             // arriving on this node's own tick). A `NoGrant` no-op is silent.
             match &cleared.delivery {
@@ -429,6 +517,19 @@ where
                         tracing::warn!(frame_id,
                             "parko-ros2: SG1 object-RSS breach (a perceived object made the command \
                              unsafe, or object perception was absent/stale); publishing MRC"),
+                    TickError::OcclusionBreach =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: RSS rule-iv occlusion breach (command speed above the \
+                             assured-clear-distance cap, or the sightline scene was absent/stale); \
+                             publishing MRC"),
+                    TickError::WaterVeto =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: SG4 water veto (untraversable signature, or the water \
+                             scene was absent/stale); publishing MRC (stop short of water)"),
+                    TickError::CommitZoneVeto =>
+                        tracing::warn!(frame_id,
+                            "parko-ros2: SG5 commit-zone veto (entry blocked, or the zone scene / \
+                             map was absent/stale); publishing MRC (stop short of the zone)"),
                 }
             }
 

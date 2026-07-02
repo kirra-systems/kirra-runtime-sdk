@@ -731,7 +731,12 @@ mod tests {
         let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
         let model = backend.load_model("test.onnx").expect("mock model loads");
         let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
-        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        // See tick_pipeline tests: enforcement lives at the publication seam;
+        // the in-loop governors declare external gating (unfed = HOLD).
+        let comparator = GovernorComparator::new(
+            KirraGovernor::new().with_external_rss_gate(),
+            KirraGovernor::new().with_external_rss_gate(),
+        );
         let infer = InferenceLoop::new(backend, model, tx)
             .with_governor(ComparatorAsGovernor(comparator))
             .with_tick_period(0.05);

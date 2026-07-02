@@ -364,6 +364,56 @@ pub fn compute_occlusion_cap(occlusion: &OcclusionScene, params: &RssParams) -> 
     }
 }
 
+/// Where the pushed-state RSS verdict for `evaluate()` comes from — and,
+/// critically, what "nothing was ever pushed" means.
+///
+/// **Fail-closed default (#G2 / WS-0.1):** a governor that has NEVER been fed
+/// an RSS verdict must not assert one. The prior implementation seeded
+/// `rss_state` with `safe: true`, so a call site that forgot (or didn't know)
+/// to feed the governor got a silently fail-open RSS tier — the exact
+/// "accept by default" class the doer-checker invariants forbid. `NeverFed`
+/// gates as UNSAFE (→ the MRC decel-to-stop-and-HOLD profile: no motion from
+/// standstill), so an unfed governor is immobile, not permissive.
+///
+/// The two ways OUT of `NeverFed` are both explicit and greppable:
+///   - [`KirraGovernor::update_rss_state`] → `Fed(state)`: a control loop
+///     pushes a per-cycle verdict (the comparator/shadow + test path).
+///   - [`KirraGovernor::with_external_rss_gate`] → `ExternallyGated`: the
+///     integrator DECLARES that the scene-RSS verdict is enforced OUTSIDE this
+///     governor instance — e.g. parko-ros2's publication-seam
+///     `apply_object_rss_gate` (ADR-0029 Phase 3b), which bounds the exact
+///     twist about to be published — or that the operator has explicitly
+///     accepted motion without a scene-RSS producer (logged loudly by the
+///     node). The RSS tier inside `evaluate()` is then intentionally
+///     quiescent; every OTHER tier (non-finite reject, LockedOut, Degraded
+///     MRC, kinematic envelope, angular bound) still enforces.
+///
+/// The authoritative `evaluate_scene*` family bypasses this state entirely —
+/// it computes the verdict from the scene per call and never trusts a pushed
+/// value.
+#[derive(Debug, Clone)]
+pub enum RssFeed {
+    /// No RSS verdict has ever been supplied. Gates as UNSAFE (fail-closed).
+    NeverFed,
+    /// The most recent verdict pushed via `update_rss_state`.
+    Fed(RssState),
+    /// The integrator explicitly declared that scene-RSS enforcement happens
+    /// outside this governor (publication-seam gate) or was explicitly
+    /// waived. The pushed-state RSS tier does not gate.
+    ExternallyGated,
+}
+
+impl RssFeed {
+    /// The RSS-safe verdict this feed contributes to the three-tier gate.
+    fn rss_safe(&self) -> bool {
+        match self {
+            RssFeed::NeverFed => false,
+            RssFeed::Fed(state) => state.safe,
+            RssFeed::ExternallyGated => true,
+        }
+    }
+}
+
 /// A safety governor backed by the Kirra runtime SDK's vehicle kinematics
 /// contract.
 ///
@@ -373,7 +423,7 @@ pub struct KirraGovernor {
     nominal_contract: VehicleKinematicsContract,
     #[allow(dead_code)]
     fallback_contract: VehicleKinematicsContract,
-    rss_state: RssState,
+    rss_feed: RssFeed,
     /// SOTIF-derived angular-velocity bound for the Nominal posture.
     /// Default = `AngularVelocityBound::nominal(PlatformParams::conservative_default())`.
     /// Override per platform via `with_platform_params` or
@@ -405,11 +455,16 @@ impl KirraGovernor {
     /// See `crate::angular_bound` for the derivation;
     /// `docs/safety/ANGULAR_VELOCITY_SOTIF.md` is the safety case
     /// (DRAFT — pending formal safety-engineer review).
+    /// **Fail-closed RSS default:** the constructed governor starts
+    /// [`RssFeed::NeverFed`] — its pushed-state RSS tier gates as UNSAFE (MRC
+    /// decel-to-stop-and-HOLD; no motion from standstill) until either a
+    /// verdict is fed (`update_rss_state`) or external gating is explicitly
+    /// declared (`with_external_rss_gate`). See [`RssFeed`].
     pub fn new() -> Self {
         Self {
             nominal_contract: VehicleKinematicsContract::nominal_reference_profile(),
             fallback_contract: VehicleKinematicsContract::mrc_fallback_profile(),
-            rss_state: RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX },
+            rss_feed: RssFeed::NeverFed,
             nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
             mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
         }
@@ -479,18 +534,36 @@ impl KirraGovernor {
     /// Updates the RSS safe-distance state.
     /// Called by the control loop after each RSS evaluation cycle.
     pub fn update_rss_state(&mut self, state: RssState) {
-        self.rss_state = state;
+        self.rss_feed = RssFeed::Fed(state);
+    }
+
+    /// EXPLICITLY declare that the scene-RSS verdict is enforced OUTSIDE this
+    /// governor instance — at the publication seam (parko-ros2's
+    /// `apply_object_rss_gate` bounds the exact twist about to publish,
+    /// ADR-0029 Phase 3b) — or that the operator has explicitly accepted
+    /// motion without a scene-RSS producer. The pushed-state RSS tier inside
+    /// `evaluate()` is then intentionally quiescent; all other tiers
+    /// (non-finite reject, LockedOut, Degraded MRC, kinematic envelope,
+    /// angular bound) still enforce.
+    ///
+    /// This is the ONLY way to get pre-#G2 pass-through behaviour from a
+    /// governor that is never fed — and it is intent-visible at the call
+    /// site, unlike the removed `safe: true` construction default.
+    pub fn with_external_rss_gate(mut self) -> Self {
+        self.rss_feed = RssFeed::ExternallyGated;
+        self
     }
 
     /// Construct a governor that uses the nominal profile regardless of
     /// the posture passed to evaluate(). Kept for convenience and
     /// backward compatibility.
+    /// Starts [`RssFeed::NeverFed`] like `new()` — feed or explicitly gate.
     pub fn nominal() -> Self {
         let profile = VehicleKinematicsContract::nominal_reference_profile();
         Self {
             nominal_contract: profile,
             fallback_contract: profile,
-            rss_state: RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX },
+            rss_feed: RssFeed::NeverFed,
             nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
             mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
         }
@@ -499,12 +572,13 @@ impl KirraGovernor {
     /// Construct a governor that uses the MRC fallback profile regardless
     /// of the posture passed to evaluate(). Kept for convenience and
     /// backward compatibility.
+    /// Starts [`RssFeed::NeverFed`] like `new()` — feed or explicitly gate.
     pub fn mrc_fallback() -> Self {
         let profile = VehicleKinematicsContract::mrc_fallback_profile();
         Self {
             nominal_contract: profile,
             fallback_contract: profile,
-            rss_state: RssState { safe: true, longitudinal_margin: f64::MAX, lateral_margin: f64::MAX },
+            rss_feed: RssFeed::NeverFed,
             nominal_angular_bound: AngularVelocityBound::nominal(PlatformParams::conservative_default()),
             mrc_angular_bound:     AngularVelocityBound::mrc    (PlatformParams::conservative_default()),
         }
@@ -1016,8 +1090,11 @@ impl SafetyGovernor for KirraGovernor {
     ) -> EnforcementAction {
         // Pushed-state path (comparator/shadow + tests): the gate runs on the
         // RSS verdict last set via `update_rss_state`. The production verdict
-        // comes from `evaluate_scene`, which computes RSS pairwise.
-        self.gate(proposed, previous, delta_time_s, posture, self.rss_state.safe)
+        // comes from `evaluate_scene`, which computes RSS pairwise — or from
+        // the publication-seam gate when `with_external_rss_gate` was
+        // declared. A governor that was NEVER fed gates as UNSAFE
+        // (RssFeed::NeverFed → MRC/HOLD): "no RSS input" is never "safe".
+        self.gate(proposed, previous, delta_time_s, posture, self.rss_feed.rss_safe())
     }
 }
 
@@ -1270,6 +1347,98 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // #G2 / WS-0.1 — the fail-closed RssFeed default. These pin the semantic
+    // change: an UNFED governor never asserts RSS-safe; the pre-fix
+    // `safe: true` construction default (silent fail-open) is gone.
+    // -------------------------------------------------------------------------
+
+    /// THE DoD TEST — "default posture without RSS input is not-safe": a
+    /// freshly constructed governor (never fed an RSS verdict) must not admit
+    /// motion from standstill in Nominal. The RSS tier gates UNSAFE →
+    /// MRC/HOLD → re-initiation from stop is denied.
+    #[test]
+    fn unfed_governor_is_immobile_from_standstill_fail_closed() {
+        let gov = KirraGovernor::new();
+        let action = gov.evaluate(&cmd(2.0), None, 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(action, EnforcementAction::Deny { .. }),
+            "an unfed governor must HOLD at zero (deny re-initiation), got {action:?}"
+        );
+    }
+
+    /// An unfed governor bounds an already-moving platform by the MRC
+    /// decel-to-stop profile: a speed INCREASE is denied (never authored),
+    /// while a converging (non-increasing) command within the MRC envelope
+    /// is admitted — a controlled stop, not a slammed one.
+    #[test]
+    fn unfed_governor_applies_mrc_decel_profile_when_moving() {
+        let gov = KirraGovernor::new();
+        let prev = cmd(4.0);
+        let increase = gov.evaluate(&cmd(6.0), Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(increase, EnforcementAction::Deny { .. }),
+            "an unfed governor must deny a speed increase, got {increase:?}"
+        );
+        let converge = gov.evaluate(&cmd(3.9), Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert!(
+            !matches!(converge, EnforcementAction::Deny { .. }),
+            "a converging command within the MRC envelope decelerates under control, got {converge:?}"
+        );
+    }
+
+    /// The explicit opt-out restores envelope pass-through — and is the ONLY
+    /// way to get it without feeding a verdict.
+    #[test]
+    fn externally_gated_governor_restores_envelope_passthrough() {
+        let gov = KirraGovernor::new().with_external_rss_gate();
+        let prev = cmd(3.0);
+        let action = gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(action, EnforcementAction::Allow),
+            "externally-gated governor passes an in-envelope command, got {action:?}"
+        );
+    }
+
+    /// Feeding a safe verdict exits NeverFed; feeding an unsafe one after a
+    /// safe one re-gates — the feed is live state, not a one-shot unlock.
+    #[test]
+    fn feeding_transitions_never_fed_to_live_verdicts() {
+        let mut gov = KirraGovernor::new();
+        gov.update_rss_state(safe_rss());
+        let prev = cmd(3.0);
+        assert!(matches!(
+            gov.evaluate(&cmd(3.0), Some(&prev), 0.05, SafetyPosture::Nominal),
+            EnforcementAction::Allow
+        ));
+        gov.update_rss_state(unsafe_rss());
+        let after_unsafe = gov.evaluate(&cmd(6.0), Some(&cmd(4.0)), 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(after_unsafe, EnforcementAction::Deny { .. }),
+            "an unsafe feed after a safe one must re-gate, got {after_unsafe:?}"
+        );
+    }
+
+    /// Lockstep: an unfed primary and an unfed diverse shadow reach the SAME
+    /// physical verdict (both MRC/HOLD) — the fail-closed default cannot be a
+    /// source of false divergence.
+    #[test]
+    fn unfed_primary_and_diverse_agree_fail_closed() {
+        let primary = KirraGovernor::new();
+        let diverse = crate::DiverseKirraGovernor::new();
+        let proposed = cmd(2.0);
+        let pa = primary.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
+        let da = diverse.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
+        assert!(
+            matches!(pa, EnforcementAction::Deny { .. }),
+            "unfed primary holds, got {pa:?}"
+        );
+        assert!(
+            matches!(da, EnforcementAction::Deny { .. }),
+            "unfed diverse holds, got {da:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Tests for H1 — angular-velocity enforcement (Approach A)
     // -------------------------------------------------------------------------
     //
@@ -1309,7 +1478,12 @@ mod tests {
     /// of the SOTIF derivation itself construct their own governors
     /// via `with_platform_params`.
     fn legacy_scalar_gov() -> KirraGovernor {
-        KirraGovernor::new().with_angular_bounds(H1_NOMINAL_RAD_S, H1_MRC_RAD_S)
+        // These tests exercise the ANGULAR/kinematic tier; the RSS tier is out
+        // of scope, so declare it externally gated (the unfed default would
+        // route every command to the MRC/HOLD profile — see `RssFeed`).
+        KirraGovernor::new()
+            .with_angular_bounds(H1_NOMINAL_RAD_S, H1_MRC_RAD_S)
+            .with_external_rss_gate()
     }
 
     fn cmd_twist(linear: f64, angular: f64) -> ControlCommand {
@@ -1490,7 +1664,7 @@ mod tests {
     fn with_angular_bounds_override_changes_verdict() {
         // Tighter platform: 0.3 rad/s nominal cap. A command at 0.5 rad/s
         // that would be Allow under the placeholder default now clamps.
-        let gov = KirraGovernor::new().with_angular_bounds(0.3, 0.1);
+        let gov = KirraGovernor::new().with_angular_bounds(0.3, 0.1).with_external_rss_gate();
         let prev = cmd_twist(2.0, 0.0);
         let proposed = cmd_twist(2.0, 0.5);
         let action = gov.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
@@ -1529,12 +1703,13 @@ mod tests {
     fn derived_bound_changes_verdict_between_platforms() {
         let proposed = cmd_twist(1.0, 0.5);
         let urban = KirraGovernor::new()
-            .with_platform_params(PlatformParams::urban_service_robot_reference());
+            .with_platform_params(PlatformParams::urban_service_robot_reference())
+            .with_external_rss_gate();
         let action_urban = urban.evaluate(
             &proposed, Some(&cmd_twist(1.0, 0.0)), 0.05, SafetyPosture::Nominal);
         assert!(matches!(action_urban, EnforcementAction::Allow),
             "urban-reference: 0.5 rad/s at v=1 m/s must Allow; got {action_urban:?}");
-        let cons = KirraGovernor::new();
+        let cons = KirraGovernor::new().with_external_rss_gate();
         let action_cons = cons.evaluate(
             &proposed, Some(&cmd_twist(1.0, 0.0)), 0.05, SafetyPosture::Nominal);
         match action_cons {
@@ -1551,7 +1726,8 @@ mod tests {
     #[test]
     fn derived_in_place_rotation_clamps_to_sweep_bound() {
         let gov = KirraGovernor::new()
-            .with_platform_params(PlatformParams::urban_service_robot_reference());
+            .with_platform_params(PlatformParams::urban_service_robot_reference())
+            .with_external_rss_gate();
         let proposed = cmd_twist(0.0, 1.0);
         let action = gov.evaluate(&proposed, None, 0.05, SafetyPosture::Nominal);
         match action {
@@ -1589,7 +1765,7 @@ mod tests {
     /// confirmation for the H1 enforcement-logic tests.
     #[test]
     fn with_angular_bounds_scalar_back_compat_is_v_independent() {
-        let gov = KirraGovernor::new().with_angular_bounds(0.7, 0.3);
+        let gov = KirraGovernor::new().with_angular_bounds(0.7, 0.3).with_external_rss_gate();
         for v in [0.0_f64, 1.0, 5.0] {
             let proposed = cmd_twist(v, 0.8);
             let action = gov.evaluate(
@@ -2189,7 +2365,7 @@ mod scene_rss_tests {
     /// immobilize (Deny) — regardless of the planner's Nominal verdict.
     #[test]
     fn impact_latch_overrides_pushed_safe_to_immobilize() {
-        let gov = KirraGovernor::new();
+        let gov = KirraGovernor::new().with_external_rss_gate();
         let action = gov.evaluate_with_impact_latch(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &latched());
         assert!(matches!(action, EnforcementAction::Deny { .. }),
@@ -2199,7 +2375,7 @@ mod scene_rss_tests {
     /// Not latched → motion passes through (normal evaluation).
     #[test]
     fn impact_not_latched_passes_through() {
-        let gov = KirraGovernor::new();
+        let gov = KirraGovernor::new().with_external_rss_gate();
         let action = gov.evaluate_with_impact_latch(
             &cmd(8.0), Some(&cmd(8.0)), 0.05, SafetyPosture::Nominal, &ImpactLatch::new());
         assert!(matches!(action, EnforcementAction::Allow),
@@ -2211,7 +2387,7 @@ mod scene_rss_tests {
     /// only an explicit clearance releases it.
     #[test]
     fn impact_no_resume_without_clearance() {
-        let gov = KirraGovernor::new();
+        let gov = KirraGovernor::new().with_external_rss_gate();
         let mut l = latched();
         // More clean ticks must NOT release the latch (sticky-toward-safe).
         l.observe(
@@ -2238,7 +2414,7 @@ mod scene_rss_tests {
     /// the SS-003 structural no-resume at the governor boundary.
     #[test]
     fn clearance_loop_vetoes_in_both_states_and_releases_only_on_grant() {
-        let gov = KirraGovernor::new();
+        let gov = KirraGovernor::new().with_external_rss_gate();
         let mut l = ClearanceLoop::new();
         let contact = ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: true, vanished_object: false };
         let clean = ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: false, vanished_object: false };
