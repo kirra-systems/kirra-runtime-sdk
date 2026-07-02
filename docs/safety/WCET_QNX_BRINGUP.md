@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | **RUN on a QNX SDP 8.0 x86_64 target — FDIT verdict-correctness gate PASSES.** The judge cross-compiled to `x86_64-pc-nto-qnx800` (core-only, no QNX std) and the FDIT/RTM matrix passed byte-identically on a `mkqnximage`/QEMU QNX 8.0 VM (`GATE: PASS`, all 9 rows). Acceptance #1 + #2 met. **WCET is INDICATIVE only** — the VM ran under QEMU TCG (VT-x disabled on the dev laptop), so a representative `max < 100 µs` (#4) is deferred to a KVM/hardware run; cert-grade WCET remains Phase-II (DRIVE + QNX OS for Safety). |
-| Date | 2026-06-27 |
+| Status | **RUN on a QNX SDP 8.0 x86_64 target — FDIT verdict-correctness gate PASSES; acceptance #1, #2 AND #4 met.** The judge cross-compiled to `x86_64-pc-nto-qnx800` (core-only, no QNX std) and the FDIT/RTM matrix passed byte-identically on a `mkqnximage`/QEMU QNX 8.0 VM (`GATE: PASS`, all 9 rows — both the TCG and KVM runs). The KVM re-run (VT-x enabled) met the `max < 100 µs` acceptance-#4 target **as a KVM-INDICATIVE result**: `max = 19.96 µs`, p99.9 = 79 ns, median 40 ns under `SCHED_FIFO`, n=1M (`tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt`; the post-#734 cert gate correctly self-declares `INDICATIVE-NOT-WCET` — a VM cannot mint `QNX-TARGET-MEASURED`). Cert-grade WCET remains Phase-II (DRIVE + QNX OS for Safety). |
+| Date | 2026-06-27 (TCG run) / 2026-06-30 (KVM re-run — acceptance #4) |
 | Owner | Project / safety-case owner |
 | Issue | #274 (EPIC #270, QNX governor lane). RTM tracing #272 (done). |
 | Scope | Cross-compile the no_std verdict **judge** (`tools/qnx-rtm-harness/kirra_judge.rs`) for a QNX target and measure its per-verdict WCET under `SCHED_FIFO`, replacing the harness placeholder `wcet_status = TBD-QNX-TARGET`. |
@@ -152,7 +152,7 @@ What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verd
 
 **Phase-I status (KVM, 2026-06-30).** Criteria 1, 2, and 4 are met on a QNX SDP 8.0
 x86_64 `mkqnximage`/QEMU VM under **KVM**: the judge cross-compiles, the FDIT matrix
-passes byte-identically (`GATE: PASS`, all 9 rows), and **`max = 20.0 µs < 100 µs`**
+passes byte-identically (`GATE: PASS`, all 9 rows), and **`max = 19.96 µs < 100 µs`**
 (median 40 ns, p99.9 79 ns) — see `QNX_MAPPING.md` §6.2 and
 `tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt`. **Criterion 3 is
 deliberately NOT met by this run:** the `QNX-TARGET-MEASURED` token is gated behind
@@ -172,4 +172,4 @@ VM is feasibility-grade; the certified token is reserved for the Phase-II hardwa
 | gated CMake QNX path + `qnx.toolchain.cmake` + `run_qnx_fdit.sh` driver | done (host build byte-identical, ctest 2/2) |
 | judge cross-compiles to `x86_64-pc-nto-qnx800` (core-only, no QNX std) | **done — built via `cargo -Zbuild-std=core`, links `core` + `compiler_builtins` only** |
 | FDIT/RTM matrix runs byte-identically on a QNX 8.0 x86_64 VM (acceptance #2) | **done — `GATE: PASS`, all 9 verdicts correct on `mkqnximage`/QEMU QNX 8.0** |
-| representative `SCHED_FIFO` WCET (`max < 100 µs`, acceptance #4) | **deferred — VM ran under TCG (no VT-x); needs KVM or hardware. Cert-grade is Phase-II (DRIVE + QNX OS for Safety)** |
+| representative `SCHED_FIFO` WCET (`max < 100 µs`, acceptance #4) | **met (KVM-INDICATIVE, 2026-06-30)** — `max = 19.96 µs` under `SCHED_FIFO` on the KVM VM (`tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt`; ~100× cleaner than TCG's 2.20 ms). A VM figure is never cert-grade: the row self-declares `INDICATIVE-NOT-WCET`. Cert-grade is Phase-II (DRIVE + QNX OS for Safety) |
