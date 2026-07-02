@@ -271,6 +271,11 @@ impl EvalScenario {
 /// int8 [`QuantizedLearnedPlanner`] compare through one interface — the FP32-vs-int8
 /// row Q-1a step 3 produces. Exactly two scorer passes per scenario (candidate +
 /// reference); the per-scenario cost is dominated by the checker pass regardless.
+///
+/// VOCABULARY CAVEAT: argmax agreement compares vocabulary INDICES, so candidate
+/// and reference must share a vocabulary (fp32-vs-quantized of the SAME model,
+/// v2-vs-v2, …). Comparing planners with different vocabularies (v1's 4 entries
+/// vs v2's grid) makes the quality axis meaningless; admissibility is still valid.
 #[must_use]
 pub fn evaluate_corpus(
     corpus: &[EvalScenario],

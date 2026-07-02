@@ -191,9 +191,9 @@ impl<const M: usize> Mlp<M> {
 }
 
 /// Seeded xorshift64* PRNG — keeps training deterministic with no `rand` dependency.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
     fn next_u64(&mut self) -> u64 {
@@ -204,16 +204,16 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
-    fn unit(&mut self) -> f64 {
+    pub(crate) fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
-    fn gaussian(&mut self) -> f64 {
+    pub(crate) fn gaussian(&mut self) -> f64 {
         // Box-Muller.
         let u1 = self.unit().max(1e-12);
         let u2 = self.unit();
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
-    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+    pub(crate) fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.unit()
     }
 }

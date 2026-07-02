@@ -89,6 +89,14 @@ pub use learned::{
     ScoredPlanner, ScorerWeights, Teacher,
 };
 
+// M-1 (parko/DOER_MODEL_SCALEUP.md): the real-sized doer scorer — offset×speed
+// vocabulary grid, ~32-dim scene encoding, N-layer MLP trained by seeded
+// in-Rust SGD backprop (gradient-checked). Same ScoredPlanner seam as v1.
+pub mod learned_v2;
+pub use learned_v2::{
+    train_planner_v2, LearnedPlannerV2, ScorerConfigV2, TrainConfigV2, FEATURE_DIM_V2,
+};
+
 /// Fast-loop trajectory tracker — the System-1 conformance side of the dual-rate loop, which
 /// follows one admitted trajectory by elapsed time across many fast ticks.
 pub mod fast_loop;
