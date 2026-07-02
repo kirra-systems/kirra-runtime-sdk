@@ -303,7 +303,8 @@ pub fn quantize_over_corpus(
     planner: &LearnedPlanner,
     corpus: &[EvalScenario],
 ) -> QuantizedLearnedPlanner {
-    let inputs: Vec<PlanInput> = corpus.iter().map(EvalScenario::plan_input).collect();
+    // `<'_>` makes the borrow-from-corpus explicit (the elided form compiles too).
+    let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
     planner.quantize_int8(&inputs)
 }
 
@@ -414,8 +415,12 @@ impl Scorecard {
     /// Serialize to pretty JSON — the file the cross-workspace seam carries.
     #[must_use]
     pub fn to_json(&self) -> String {
-        // A fixed, finite struct of numbers/strings — serialization cannot fail.
-        serde_json::to_string_pretty(self).expect("scorecard serializes")
+        // Infallible for this type: `to_string_pretty` writes into an in-memory
+        // buffer (no I/O to fail), and the derived `Serialize` over `String` /
+        // number / `Vec` fields is total — serde_json renders a non-finite `f64`
+        // as JSON `null` rather than erroring (and the scorecard's rates are finite
+        // by construction anyway). `expect` documents that invariant.
+        serde_json::to_string_pretty(self).expect("scorecard serialization is infallible")
     }
 
     /// Parse a scorecard from JSON.
