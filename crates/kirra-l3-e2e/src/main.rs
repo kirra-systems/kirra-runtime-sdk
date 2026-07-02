@@ -195,7 +195,9 @@ fn governor_main() -> ExitCode {
             GovernorOutcome::Actuate(c) => Some(c.linear_velocity_mps),
             GovernorOutcome::SafeStop => None,
         };
-        let clamped = clamped_vel.is_some_and(|v| v <= 35.0);
+        // Assert against the contract's own effective ceiling (not a hardcoded
+        // copy of it), so this row tracks the profile / any future ODD cap.
+        let clamped = clamped_vel.is_some_and(|v| v <= contract.effective_max_speed_mps());
         let enforced_bound = match cycle.view_to_sign() {
             Some(view) => {
                 let token = issue_release_token(view, &gov_key);
@@ -209,7 +211,7 @@ fn governor_main() -> ExitCode {
         };
         rows.push(row(
             "L3-02",
-            "over-envelope 50: clamped <=35; token binds enforced bytes",
+            "over-envelope 50: clamped to envelope; token binds enforced bytes",
             published && clamped && enforced_bound,
             format!("published={published} clamped_vel={clamped_vel:?} enforced_bound={enforced_bound}"),
         ));
