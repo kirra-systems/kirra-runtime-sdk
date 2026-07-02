@@ -2126,6 +2126,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-l3-e2e"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "kirra-contract-channel",
+ "kirra-core",
+ "kirra-hv-carrier",
+ "kirra-release-token",
+ "libc",
+]
+
+[[package]]
 name = "kirra-map"
 version = "0.1.0"
 dependencies = [

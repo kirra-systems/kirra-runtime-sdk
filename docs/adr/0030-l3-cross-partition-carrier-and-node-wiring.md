@@ -103,10 +103,37 @@ These are **not** discharged by this ADR; they are the hypervisor-config checkli
 
 ## Implementation order (recommended, each a bounded increment)
 
-1. **`kirra-hv-carrier` + `PosixShmRegion` + a two-process host integration test** (host-testable; proves the cross-process seqlock).
-2. **Guest call-site** — wire `contract_producer` into `node.rs` (ros2-gated; tighten the `dead_code` allow).
-3. **Governor call-site** — the poll loop + `is_actuatable` actuation gate + the Clause-F digest/release bridge.
-4. **`HvRegion` (QNX binding)** + the R-HV config checklist + #279 hypervisor-layer fault injection (target).
+1. **`kirra-hv-carrier` + `PosixShmRegion` + a two-process host integration test** (host-testable; proves the cross-process seqlock). *DONE — PR #744.*
+2. **Guest call-site** — wire `contract_producer` into `node.rs` (ros2-gated; tighten the `dead_code` allow). *DONE — PR #746.*
+3. **Governor call-site** — the poll loop + `is_actuatable` actuation gate + the Clause-F digest/release bridge. *DONE — PRs #747/#748 (`decide`/`decide_cycle`/`view_to_sign` + `kirra-release-token`).*
+4. **`HvRegion` (QNX binding)** + the R-HV config checklist + #279 hypervisor-layer fault injection (target). *Phase-I DONE (see the update below); the hypervisor half remains.*
+
+## Update 2026-07-02 — incr. 4 Phase-I evidence (QNX 8.0 target OS, KVM VM)
+
+The `kirra-l3-e2e` harness ran the **entire L3 chain on QNX 8.0** (`x86_64-pc-nto-qnx800`,
+mkqnximage/QEMU under KVM) — two real QNX processes over QNX POSIX shared memory, the
+governor on a read-only mapping: **GATE PASS on all five verdict rows** (in-envelope
+actuate + token; over-envelope clamped with the token binding the ENFORCED bytes and
+refusing the raw proposal; expired deadline, replay, and cold start all SafeStop).
+Verbatim runs + provenance: `crates/kirra-l3-e2e/results/qnx800-x86_64-vm-kvm.txt`.
+
+Two findings feed forward (timing INDICATIVE-KVM, never WCET):
+
+- **Under SCHED_FIFO the whole transport+validate+decode+bound step is ~1.1 µs at
+  p99.9** (`decide_cycle`; FIFO collapsed the tail 5322 → 1115 ns) — ~1% of the 100 µs
+  governor-verdict budget. The carrier is not the cost.
+- **The Clause-F crypto DOMINATES:** Ed25519 sign (~32 µs) + verify (~60 µs) ≈ 91 µs
+  p50 — nearly the whole verdict budget, p99 over it. **The release token must be
+  budgeted APART from the verdict path** (pipelined/overlapped with actuation latency,
+  issued below cycle rate, or hardware-assisted); it cannot ride inline per-cycle
+  within the verdict WCET target on this CPU class. This is a follow-up design
+  decision for the ADR-0013 integration, recorded here so it is not lost.
+
+**What Phase-I is NOT:** the VM runs QNX **OS**, not QNX **Hypervisor** — no guest
+partitions, so the true `HvRegion` mapping, R-HV-1 read-only enforcement at hypervisor
+config, R-HV-4 partition scheduling, the boundary-clock primitive, and #279's
+hypervisor-layer fault rows remain **Phase-II hardware** (unchanged reopening
+conditions above).
 
 ## Cross-references
 

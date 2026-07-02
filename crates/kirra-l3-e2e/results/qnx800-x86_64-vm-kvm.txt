@@ -1,0 +1,78 @@
+KIRRA L3 incr. 4 Phase-I — on-target E2E + timing, QNX 8.0 (ADR-0030 / #279 subset)
+====================================================================================
+Target : QNX SDP 8.0, x86_64, mkqnximage/QEMU VM (KVM: --enable-kvm --cpu host,
+         2 vCPU, 1G). QNX OS — NOT QNX Hypervisor: no guest partitions, so the
+         hypervisor HvRegion + R-HV-1/R-HV-4 enforcement remain Phase-II.
+Build  : cargo +nightly -Zbuild-std=std,panic_abort --target x86_64-pc-nto-qnx800
+         --release -p kirra-l3-e2e (first QNX std binary in this repo; the only
+         fix needed vs host was naming panic_abort — the workspace release
+         profile is panic="abort"). Linker qcc 12.2.0 via the committed
+         .cargo/config.toml stanza. Dynamically linked (ldqnx-64.so.2); ran on
+         the stock image without extra libraries.
+Run    : scp to root's home, executed over ssh as root. Two runs verbatim below.
+Date   : 2026-07-02
+
+STATUS : INDICATIVE-KVM — a KVM VM on an x86_64 laptop is near-native but NOT the
+         deployment ISA; the row gate is VERDICT CORRECTNESS (the #274 harness
+         discipline), which virtualization does not affect. Timing is never a
+         WCET claim; the certified figure is Phase-II hardware under FIFO.
+
+WHAT RAN (each row = two real QNX processes over QNX POSIX shared memory; the
+guest OPENS the governor-owned region and publishes; the governor reads via a
+READ-ONLY mapping, then decide_cycle -> view_to_sign -> issue/verify token):
+  L3-01 in-envelope         -> Actuate(10.0), release token verifies
+  L3-02 over-envelope 50    -> clamped to 35.0; token binds the ENFORCED bytes
+                               and REFUSES the raw proposal (DigestMismatch)
+  L3-03 expired deadline    -> SafeStop, nothing signable
+  L3-04 replay (same seq)   -> SafeStop (fresh guest process re-published)
+  L3-05 unwritten region    -> SafeStop (cold start fail-closed)
+
+--- run 1 (default sched, 100k iters) — verbatim -------------------------------
+platform: os=nto arch=x86_64  (row gate = verdict correctness; timing INDICATIVE)
+L3-01   in-envelope: Actuate(10.0) + token verifies          PASS
+L3-02   over-envelope 50: clamped <=35; token binds enforced bytes PASS
+L3-03   expired deadline: SafeStop, nothing signable         PASS
+L3-04   replay (same seq re-published): SafeStop             PASS
+L3-05   unwritten region (cold start): SafeStop              PASS
+GATE (verdict correctness): PASS
+path                                  p50_ns    p99_ns   p999_ns      max_ns
+shm read_coherent_snapshot                97       112       114       19606
+decide_cycle (read+val+bound)            688       782      5322       27093
+issue_release_token (sign)             31794     49456     61961       82563
+verify_release (actuator)              59617     80830    109222      138624
+
+--- run 2 (SCHED_FIFO granted, 1M iters) — verbatim ----------------------------
+GATE (verdict correctness): PASS  (all five rows, as run 1)
+path                                  p50_ns    p99_ns   p999_ns      max_ns
+shm read_coherent_snapshot                97       112       162       71635
+decide_cycle (read+val+bound)            688       772      1115      342815
+issue_release_token (sign)             31629     42482     63455      465424
+verify_release (actuator)              59626     73822     88333      361312
+
+READING (the takeaways):
+1. GATE PASS on the target OS. The ENTIRE L3 chain — frozen contract, seqlock
+   carrier, governor validate/decode/bound, enforced-bytes release token —
+   executed across two real QNX processes. This is the incr. 4 Phase-I claim.
+2. FIFO collapses the pipeline tail: decide_cycle p99.9 went 5322 -> 1115 ns.
+   On QNX under FIFO the WHOLE transport+validate+decode+bound step is ~1.1 us
+   at p99.9 — roughly 1% of the 100 us governor-verdict budget. The QNX seqlock
+   read tail is also tighter than host Linux (p99.9 114-162 ns vs 244 ns).
+3. THE CRYPTO DOMINATES — the load-bearing finding. Ed25519 sign (~32 us p50)
+   + verify (~60 us p50) ~= 91 us combined, ~99% of the release path and nearly
+   the whole 100 us verdict budget; p99 exceeds it. Conclusion for ADR-0030
+   Clause F / ADR-0013 integration: the release token must be BUDGETED APART
+   from the verdict path (pipelined/overlapped with actuation latency, issued at
+   a lower rate, or hardware-assisted) — it cannot ride inline per-cycle inside
+   the verdict WCET target on this class of CPU. Follow-up design decision.
+4. The few-hundred-us maxes (runs 2) are KVM/vCPU jitter (host preemption, VM
+   exits) — the residual the INDICATIVE-KVM label exists for. Bounding the max
+   is Phase-II bare hardware (QNX Hypervisor, isolated cores, boundary clock).
+
+Reproduce:
+  source /opt/qnx800/sdp2/qnxsdp-env.sh
+  cargo +nightly build -Zbuild-std=std,panic_abort \
+    --target x86_64-pc-nto-qnx800 --release -p kirra-l3-e2e
+  scp target/x86_64-pc-nto-qnx800/release/kirra-l3-e2e root@172.31.1.10:
+  ssh root@172.31.1.10 './kirra-l3-e2e'                                # run 1
+  ssh root@172.31.1.10 'KIRRA_E2E_FIFO=1 KIRRA_LAT_ITERS=1000000 ./kirra-l3-e2e'  # run 2
+  # VM bring-up: tools/qnx-rtm-harness/QNX_VM_RELAUNCH.md
