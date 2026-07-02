@@ -24,7 +24,7 @@ Stage 0  "Make the code tell the truth"        ──► GATE A
 Stage 1  P1 productization                     ──► GATE B  (P1 GA)
 Stage 2  P2 fleet plane GA                     ──► GATE C  (P2 GA)
 Stage 3  Certification leg   (parallel from Stage 1) ──► GATE D  (certified artifact + audit-ready evidence)
-Stage 4  World model build-out (parallel from Stage 2) ──► GATE E' (AoUs demonstrated in-tree)
+Stage 4  World model build-out (parallel from Stage 2) ──► GATE E′ (AoUs demonstrated in-tree)
 Stage 5  P3 pilot + assessor sign-off          ──► GATE E  (P3 sellable)
 ```
 
@@ -111,13 +111,13 @@ Design-partner AV program: certified partition on partner vehicle, contract chan
 |---|---|---|---|
 | G1 perception AoU | WS-6 · S4 (interim: partner+divergence, WS-7) | G11 supply chain | WS-0.6 · S0 |
 | G2 parko wiring | WS-0.1 · S0 | G12 pedestrian RSS | WS-2 · S1 |
-| G3 fleet lifecycle | WS-4 · S2 | G13 map lifecycle | WS-6.5 · S4 |
-| G4 certified artifact | WS-5.1–3 · S1→S3 | G14 transport security | WS-4 · S2 |
+| G3 fleet lifecycle | WS-4 · S2 | G13 map lifecycle | WS-6 item 5 · S4 |
+| G4 certified artifact | WS-5 items 1–3 · S1→S3 | G14 transport security | WS-4 · S2 |
 | G5 evidence execution | WS-5.4–5 · S3 | G15 learning loop | WS-2 · S1 (capture) → WS-6 (train/sim) |
 | G6 secure boot | WS-4 · S2 | G16 model integrity | WS-2 · S1 |
 | G7 key lifecycle | WS-1 · S1 | G17 observability | WS-0.5 · S0 → WS-2/4 |
 | G8 RT scheduling | WS-0.4 · S0 (deadline) → WS-5 (partition) | G18 config governance | WS-2 · S1 |
-| G9 scenario scale | WS-3 · S1→S3 | G19 SOTIF catalog | WS-3.3 · S3 |
+| G9 scenario scale | WS-3 · S1→S3 | G19 SOTIF catalog | WS-3 phase 3 · S3 |
 | G10 persistence integrity | WS-0.2/0.3 · S0 → WS-4 (WORM/HA) | G20 SDK/DX | WS-0.7 · S0 → WS-2 · S1 |
 
 ---
