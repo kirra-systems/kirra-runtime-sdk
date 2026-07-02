@@ -47,8 +47,8 @@ use kirra_core::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
 use kirra_core::FleetPosture;
 use kirra_planner::{
-    EgoState, Goal, LearnedPlanner, PlanInput, PlanOutput, Pose, QuantizedLearnedPlanner,
-    ScoredPlanner,
+    EgoState, Goal, LearnedPlanner, LearnedPlannerV2, PlanInput, PlanOutput, Pose,
+    QuantizedLearnedPlanner, QuantizedLearnedPlannerV2, ScoredPlanner,
 };
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 use serde::{Deserialize, Serialize};
@@ -312,6 +312,18 @@ pub fn quantize_over_corpus(
     corpus: &[EvalScenario],
 ) -> QuantizedLearnedPlanner {
     // `<'_>` makes the borrow-from-corpus explicit (the elided form compiles too).
+    let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
+    planner.quantize_int8(&inputs)
+}
+
+/// The v2 sibling of [`quantize_over_corpus`] (M-2): int8-quantize the N-layer
+/// v2 planner, calibrating over the scenarios' worlds. Same corpus-doubles-as-
+/// calibration-set caveat as v1 (Q1 scope §5).
+#[must_use]
+pub fn quantize_v2_over_corpus(
+    planner: &LearnedPlannerV2,
+    corpus: &[EvalScenario],
+) -> QuantizedLearnedPlannerV2 {
     let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
     planner.quantize_int8(&inputs)
 }

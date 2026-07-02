@@ -25,7 +25,9 @@
 //! Safety framing: offline artifact generation for the UNTRUSTED doer. Nothing
 //! here touches the checker.
 
-use kirra_planner::{QuantizedScorerWeights, ScorerWeights};
+use kirra_planner::{
+    QuantizedScorerWeights, QuantizedScorerWeightsV2, ScorerWeights, ScorerWeightsV2,
+};
 
 // --- ONNX constants -----------------------------------------------------------
 
@@ -237,6 +239,133 @@ pub fn int8_qdq_model(q: &QuantizedScorerWeights) -> Vec<u8> {
         f32_tensor(g, 5, "B2", &[o as u64], &to_f32(&q.b2));
         f32_value_info(g, 11, INPUT_NAME, &[1, i as u64]);
         f32_value_info(g, 12, OUTPUT_NAME, &[1, o as u64]);
+    })
+}
+
+// --- The N-layer chain exporters (M-2; `parko/DOER_MODEL_SCALEUP.md` §2) --------
+//
+// The v2 scorer is an N-layer chain, so these generalize the two fixed-topology
+// exporters above to any depth: per hidden layer `MatMul → Add → Tanh`, then a
+// final linear `MatMul → Add`; the QDQ variant wraps every matmul input in a
+// per-tensor `QuantizeLinear`/`DequantizeLinear` pair carrying the in-Rust PTQ
+// calibration, exactly as v1's. The 2-layer `fp32_model` / `int8_qdq_model`
+// above are kept VERBATIM (not rewritten as chain calls): the checked-in v1
+// artifacts are the exact bytes measured on the Orin (`Q1B_ORIN.md`), and a
+// chain-generic naming scheme ("h1" for v1's "hidden", "a0_scale" for
+// "x_scale") would churn those pinned bytes for no numerical difference.
+
+/// The FP32 chain model: `features[1,in] → (MatMul(Wi) → Add(Bi) → Tanh)* →
+/// MatMul(Wn) → Add(Bn) → scores[1,out]`. Layer names are 1-based (`mm1`…);
+/// hidden activations are `h1`…`h{n-1}`.
+#[must_use]
+pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
+    assert!(!w.layers.is_empty(), "a scorer chain has at least one layer");
+    // Fail fast on an inconsistent chain — an ONNX graph with mismatched
+    // matmul shapes would only error later, inside the backend.
+    for win in w.layers.windows(2) {
+        assert_eq!(
+            win[0].out_dim, win[1].in_dim,
+            "scorer chain dim mismatch: layer out_dim {} != next in_dim {}",
+            win[0].out_dim, win[1].in_dim
+        );
+    }
+    for l in &w.layers {
+        assert_eq!(l.w.len(), l.in_dim * l.out_dim, "weight tensor size mismatch");
+        assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
+    }
+    let in_dim = w.layers[0].in_dim as u64;
+    let out_dim = w.layers.last().expect("non-empty").out_dim as u64;
+    let n = w.layers.len();
+    model("kirra_planner_scorer_v2_fp32", |g| {
+        let mut act = INPUT_NAME.to_string();
+        for idx in 0..n {
+            let i = idx + 1;
+            let last = i == n;
+            node(g, "MatMul", &format!("mm{i}"), &[&act, &format!("W{i}")], &[&format!("mm{i}_out")]);
+            let add_out = if last { OUTPUT_NAME.to_string() } else { format!("pre{i}") };
+            node(g, "Add", &format!("add{i}"), &[&format!("mm{i}_out"), &format!("B{i}")], &[&add_out]);
+            if !last {
+                act = format!("h{i}");
+                node(g, "Tanh", &format!("tanh{i}"), &[&add_out], &[&act]);
+            }
+        }
+        for (idx, l) in w.layers.iter().enumerate() {
+            let i = idx + 1;
+            let w_t = to_f32(&transpose(&l.w, l.out_dim, l.in_dim)); // [in, out]
+            f32_tensor(g, 5, &format!("W{i}"), &[l.in_dim as u64, l.out_dim as u64], &w_t);
+            f32_tensor(g, 5, &format!("B{i}"), &[l.out_dim as u64], &to_f32(&l.b));
+        }
+        f32_value_info(g, 11, INPUT_NAME, &[1, in_dim]);
+        f32_value_info(g, 12, OUTPUT_NAME, &[1, out_dim]);
+    })
+}
+
+/// The explicit-quantization (QDQ) chain model: the same topology with every
+/// matmul input passed through `QuantizeLinear`/`DequantizeLinear` at its
+/// calibrated scale (`a0_scale` = the input features, `a{j}_scale` = hidden
+/// activation `j`), and every weight tensor stored as int8 codes dequantized at
+/// its per-tensor scale. Zero-points all 0 (symmetric), shared initializer.
+#[must_use]
+pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
+    assert_eq!(
+        q.layers.len(),
+        q.act_scales.len(),
+        "one activation scale per matmul input"
+    );
+    assert!(!q.layers.is_empty(), "a scorer chain has at least one layer");
+    // Fail fast on an inconsistent chain, as in `fp32_model_chain`.
+    for win in q.layers.windows(2) {
+        assert_eq!(
+            win[0].out_dim, win[1].in_dim,
+            "scorer chain dim mismatch: layer out_dim {} != next in_dim {}",
+            win[0].out_dim, win[1].in_dim
+        );
+    }
+    for l in &q.layers {
+        assert_eq!(l.codes.len(), l.in_dim * l.out_dim, "code tensor size mismatch");
+        assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
+    }
+    let in_dim = q.layers[0].in_dim as u64;
+    let out_dim = q.layers.last().expect("non-empty").out_dim as u64;
+    let n = q.layers.len();
+    model("kirra_planner_scorer_v2_int8_qdq", |g| {
+        let mut act = INPUT_NAME.to_string();
+        for idx in 0..n {
+            let i = idx + 1;
+            let j = idx; // activation index entering this layer
+            let last = i == n;
+            let (a_q, a_dq, a_scale) =
+                (format!("a{j}_q"), format!("a{j}_dq"), format!("a{j}_scale"));
+            node(g, "QuantizeLinear", &format!("q_a{j}"), &[&act, &a_scale, "zp"], &[&a_q]);
+            node(g, "DequantizeLinear", &format!("dq_a{j}"), &[&a_q, &a_scale, "zp"], &[&a_dq]);
+            node(
+                g,
+                "DequantizeLinear",
+                &format!("dq_w{i}"),
+                &[&format!("W{i}_q"), &format!("w{i}_scale"), "zp"],
+                &[&format!("w{i}_dq")],
+            );
+            node(g, "MatMul", &format!("mm{i}"), &[&a_dq, &format!("w{i}_dq")], &[&format!("mm{i}_out")]);
+            let add_out = if last { OUTPUT_NAME.to_string() } else { format!("pre{i}") };
+            node(g, "Add", &format!("add{i}"), &[&format!("mm{i}_out"), &format!("B{i}")], &[&add_out]);
+            if !last {
+                act = format!("h{i}");
+                node(g, "Tanh", &format!("tanh{i}"), &[&add_out], &[&act]);
+            }
+        }
+        for (idx, l) in q.layers.iter().enumerate() {
+            let i = idx + 1;
+            let codes_t = transpose(&l.codes, l.out_dim, l.in_dim); // [in, out]
+            i8_tensor(g, 5, &format!("W{i}_q"), &[l.in_dim as u64, l.out_dim as u64], &codes_t);
+            f32_tensor(g, 5, &format!("w{i}_scale"), &[], &[l.w_scale as f32]);
+            f32_tensor(g, 5, &format!("B{i}"), &[l.out_dim as u64], &to_f32(&l.b));
+        }
+        for (j, &s) in q.act_scales.iter().enumerate() {
+            f32_tensor(g, 5, &format!("a{j}_scale"), &[], &[s as f32]);
+        }
+        i8_tensor(g, 5, "zp", &[], &[0]);
+        f32_value_info(g, 11, INPUT_NAME, &[1, in_dim]);
+        f32_value_info(g, 12, OUTPUT_NAME, &[1, out_dim]);
     })
 }
 

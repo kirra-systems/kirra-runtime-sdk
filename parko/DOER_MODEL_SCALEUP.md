@@ -1,6 +1,13 @@
 # Doer model scale-up (the M-lane) — detailed scope
 
-Status: **scoping / design** (M-0). Owner: doer / parko. Reviewers: doer + safety.
+Status: **M-1 + M-2 COMPLETE; M-3 (Orin re-measure) open.** Owner: doer / parko.
+Reviewers: doer + safety. M-1 shipped the trained v2 weights artifact +
+behavior gates; M-2 shipped the N-layer PTQ + chain ONNX exporters and the
+regenerated artifacts (`planner_v2_fp32.onnx` / `planner_v2_int8_qdq.onnx` +
+v2 scorecard rows, round-tripped through real ORT). First quality datum: on
+the demo corpus the v2 int8 PTQ flips the argmax on 1 of 4 scenes
+(agreement 0.75, admissibility still 1.0, 0 MRC) — the quantization
+sensitivity the toy v1 could not exhibit.
 
 The Q-lane (Q-0…Q-2, complete and measured — `QUANTIZATION_Q1_SCOPE.md`,
 `crates/parko-tensorrt/Q1B_ORIN.md`) built the full per-silicon pipeline:

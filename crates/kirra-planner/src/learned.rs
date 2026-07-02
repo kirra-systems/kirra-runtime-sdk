@@ -489,7 +489,7 @@ impl QuantizedLearnedPlanner {
 
 /// Symmetric per-tensor int8 scale: `absmax / 127`. A zero/degenerate tensor gets a
 /// unit scale (all codes then 0) rather than a divide-by-zero.
-fn int8_scale(absmax: f64) -> f64 {
+pub(crate) fn int8_scale(absmax: f64) -> f64 {
     if absmax > 0.0 && absmax.is_finite() {
         absmax / 127.0
     } else {
@@ -499,12 +499,12 @@ fn int8_scale(absmax: f64) -> f64 {
 
 /// Quantize one value to the symmetric int8 grid at `scale` (round-to-nearest,
 /// clamped to `[-127, 127]`).
-fn quantize_i8(v: f64, scale: f64) -> i8 {
+pub(crate) fn quantize_i8(v: f64, scale: f64) -> i8 {
     (v / scale).round().clamp(-127.0, 127.0) as i8
 }
 
 /// Fake-quantize one activation: quantize to int8 then dequantize back to `f64`.
-fn fake_quant(v: f64, scale: f64) -> f64 {
+pub(crate) fn fake_quant(v: f64, scale: f64) -> f64 {
     f64::from(quantize_i8(v, scale)) * scale
 }
 

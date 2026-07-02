@@ -18,6 +18,24 @@
       "mean_progress": 0.2878571428571431,
       "scenarios": 4,
       "mrc": 0
+    },
+    {
+      "label": "v2-fp32",
+      "admissibility_rate": 1.0,
+      "strict_accept_rate": 0.0,
+      "argmax_agreement_rate": 1.0,
+      "mean_progress": 0.4502000000000001,
+      "scenarios": 4,
+      "mrc": 0
+    },
+    {
+      "label": "v2-int8-ptq",
+      "admissibility_rate": 1.0,
+      "strict_accept_rate": 0.0,
+      "argmax_agreement_rate": 0.75,
+      "mean_progress": 0.44531428571428566,
+      "scenarios": 4,
+      "mrc": 0
     }
   ]
 }
