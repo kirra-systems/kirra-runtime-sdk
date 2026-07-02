@@ -6,7 +6,7 @@
 | Date | 2026-07-02 |
 | Deciders | Project / safety-case owner |
 | Safety goals | **SG3** (per-command kinematic envelope — the release token is the authenticated *proof* of the bounded command, ADR-0013); FTTI budget integrity (the verdict gate stays crypto-free and bounded) |
-| Cross-refs | ADR-0030 (Clause F + the *Update 2026-07-02* Phase-I evidence); ADR-0013 (authenticated actuation gate); `docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md` §3 steps 5–7; `crates/kirra-release-token` (the canonical token); `kirra_core::contract_consumer::{decide_cycle, GovernorCycle::view_to_sign}`; `src/wcet_gate.rs` (`GOVERNOR_VERDICT_WCET_TARGET_MICROS = 100`, p99.9 gate); the measurements: **PR #766** (`crates/kirra-l3-e2e`, results `qnx800-x86_64-vm-kvm.txt`, INDICATIVE-KVM) |
+| Cross-refs | ADR-0030 (Clause F; its *Update 2026-07-02* Phase-I evidence section **lands in PR #766**); ADR-0013 (authenticated actuation gate); `docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md` §3 steps 5–7; `crates/kirra-release-token` (the canonical token); `kirra_core::contract_consumer::decide_cycle`; `kirra_core::contract_consumer::GovernorCycle::view_to_sign()`; `src/wcet_gate.rs` (`GOVERNOR_VERDICT_WCET_TARGET_MICROS = 100`, p99.9 gate); the measurements: **PR #766** (`crates/kirra-l3-e2e`, results `qnx800-x86_64-vm-kvm.txt`, INDICATIVE-KVM) |
 
 ## Context — the measured problem
 
@@ -51,9 +51,10 @@ The FTTI decomposition is `verdict_WCET + actuation_latency < control_cycle (≪
 
 ### Clause B — per-command tokens are retained (and are affordable)
 
-At the 100 Hz control cycle (10 ms), the measured pair costs ~91 µs p50 / ~150 µs at
-p99-sum — **~1–2 % of the cycle**; even the VM's worst-case outliers (340–465 µs, KVM
-jitter) are <5 %. Per-command, per-cycle tokens therefore fit with an order-of-magnitude
+At the 100 Hz control cycle (10 ms), the measured pair costs ~91 µs p50 / ~116 µs at
+p99-sum (42+74) / ~151 µs at p99.9-sum (63+88) — **~1–2 % of the cycle**; even the VM's
+worst-case outliers (340–465 µs, KVM jitter) are <5 %. Per-command, per-cycle tokens
+therefore fit with an order-of-magnitude
 margin on this CPU class. **No weakening of the per-command binding is needed or taken**:
 every actuated command carries a token over its exact enforced bytes
 (`view_to_sign` → `issue_release_token` → `verify_release`).
