@@ -2071,6 +2071,8 @@ dependencies = [
  "kirra-core",
  "kirra-planner",
  "kirra-trajectory",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
