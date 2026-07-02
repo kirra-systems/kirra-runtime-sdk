@@ -30,3 +30,7 @@ kirra-planner = { path = "../kirra-planner" }
 kirra-trajectory = { path = "../kirra-trajectory" }
 # Lean shared contract types: FleetPosture, corridor seam, trajectory/perception.
 kirra-core = { path = "../kirra-core" }
+# The cross-workspace scorecard seam (Q1 scope §4, option A): a small versioned
+# JSON the parko-side Q-1b runner reads and joins with the on-target latency row.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

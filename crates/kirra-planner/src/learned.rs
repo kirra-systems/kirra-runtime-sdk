@@ -144,14 +144,7 @@ struct Mlp<const M: usize> {
 
 impl<const M: usize> Mlp<M> {
     fn forward(&self, x: &[f64; IN]) -> [f64; M] {
-        let mut h = [0.0; H];
-        for (hj, (w1row, b1j)) in h.iter_mut().zip(self.w1.iter().zip(self.b1.iter())) {
-            let mut a = *b1j;
-            for (w, xi) in w1row.iter().zip(x.iter()) {
-                a += w * xi;
-            }
-            *hj = a.tanh();
-        }
+        let h = self.hidden(x);
         let mut y = [0.0; M];
         for (yk, (w2row, b2k)) in y.iter_mut().zip(self.w2.iter().zip(self.b2.iter())) {
             let mut a = *b2k;
@@ -161,6 +154,20 @@ impl<const M: usize> Mlp<M> {
             *yk = a;
         }
         y
+    }
+
+    /// The post-tanh hidden activations — layer 1 of [`Self::forward`], factored out
+    /// so PTQ calibration can observe the hidden-activation distribution.
+    fn hidden(&self, x: &[f64; IN]) -> [f64; H] {
+        let mut h = [0.0; H];
+        for (hj, (w1row, b1j)) in h.iter_mut().zip(self.w1.iter().zip(self.b1.iter())) {
+            let mut a = *b1j;
+            for (w, xi) in w1row.iter().zip(x.iter()) {
+                a += w * xi;
+            }
+            *hj = a.tanh();
+        }
+        h
     }
 
     fn perturb(&mut self, rng: &mut Rng, sigma: f64) {
@@ -349,6 +356,205 @@ fn argmax<const M: usize>(v: &[f64; M]) -> usize {
 }
 
 // ============================================================================
+// Post-training quantization (PTQ) — Q-1a step 3
+// ============================================================================
+//
+// A real per-tensor int8 quantization of the speed-only scorer, calibrated over a
+// scenario corpus. Weights AND activations are quantized (symmetric per-tensor,
+// int8). This is a QUALITY artifact: it snaps the scorer onto the int8 grid so the
+// doer-eval harness can measure the argmax / admissibility delta vs. FP32
+// (parko/QUANTIZATION_Q1_SCOPE.md §2). It is NOT a latency artifact — real int8
+// kernel timing is Q-1b on the target silicon; here the dequantized matmul runs in
+// f64 (a faithful *quality* model of int8, not a bit-exact kernel).
+//
+// PTQ is monotone-in-safety-relaxation = 0: the int8 scorer can only pick a
+// different (still checker-admissible) vocabulary entry, or a more-conservative one.
+// The checker bounds it exactly as it bounds the FP32 planner.
+
+/// A scorer-backed planner exposing its chosen vocabulary index + materialized plan
+/// in a single pass — the seam the doer-eval harness scores. Implemented by both the
+/// FP32 [`LearnedPlanner`] and its int8 [`QuantizedLearnedPlanner`], so the harness
+/// can compare them through one interface.
+pub trait ScoredPlanner {
+    /// The vocabulary index the scorer ranks highest for `input`.
+    fn chosen_index(&self, input: &PlanInput) -> usize;
+    /// The chosen index + materialized plan from one scorer pass.
+    fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput);
+}
+
+impl ScoredPlanner for LearnedPlanner {
+    fn chosen_index(&self, input: &PlanInput) -> usize {
+        // Fully-qualified → the inherent method (no trait recursion).
+        LearnedPlanner::chosen_index(self, input)
+    }
+    fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
+        LearnedPlanner::plan_with_chosen_index(self, input)
+    }
+}
+
+/// Symmetric per-tensor int8 scale: `absmax / 127`. A zero/degenerate tensor gets a
+/// unit scale (all codes then 0) rather than a divide-by-zero.
+fn int8_scale(absmax: f64) -> f64 {
+    if absmax > 0.0 && absmax.is_finite() {
+        absmax / 127.0
+    } else {
+        1.0
+    }
+}
+
+/// Quantize one value to the symmetric int8 grid at `scale` (round-to-nearest,
+/// clamped to `[-127, 127]`).
+fn quantize_i8(v: f64, scale: f64) -> i8 {
+    (v / scale).round().clamp(-127.0, 127.0) as i8
+}
+
+/// Fake-quantize one activation: quantize to int8 then dequantize back to `f64`.
+fn fake_quant(v: f64, scale: f64) -> f64 {
+    f64::from(quantize_i8(v, scale)) * scale
+}
+
+/// Per-tensor absmax over a 2-D weight matrix.
+fn absmax2<const R: usize, const C: usize>(m: &[[f64; C]; R]) -> f64 {
+    let mut a = 0.0_f64;
+    for row in m {
+        for &v in row {
+            a = a.max(v.abs());
+        }
+    }
+    a
+}
+
+/// Quantize a 2-D weight matrix to int8 codes at `scale`.
+fn quantize_tensor2<const R: usize, const C: usize>(m: &[[f64; C]; R], scale: f64) -> [[i8; C]; R] {
+    let mut out = [[0i8; C]; R];
+    for (orow, mrow) in out.iter_mut().zip(m.iter()) {
+        for (o, &v) in orow.iter_mut().zip(mrow.iter()) {
+            *o = quantize_i8(v, scale);
+        }
+    }
+    out
+}
+
+/// An int8-quantized copy of an [`Mlp`]: i8 weight codes + per-tensor weight scales,
+/// plus per-tensor *activation* scales (`s_x` on the inputs, `s_h` on the hidden
+/// layer) from calibration. Biases stay `f64`.
+#[derive(Clone, Copy)]
+struct QuantMlp<const M: usize> {
+    w1: [[i8; IN]; H],
+    b1: [f64; H],
+    s_w1: f64,
+    w2: [[i8; H]; M],
+    b2: [f64; M],
+    s_w2: f64,
+    s_x: f64,
+    s_h: f64,
+}
+
+impl<const M: usize> QuantMlp<M> {
+    /// The int8 forward: activations are fake-quantized entering each matmul, weights
+    /// are dequantized from their i8 codes; accumulation is `f64` (a *quality* model
+    /// of int8, not a bit-exact kernel — that is the backend's job in Q-1b).
+    fn forward(&self, x: &[f64; IN]) -> [f64; M] {
+        let mut h = [0.0; H];
+        for (hj, (w1row, b1j)) in h.iter_mut().zip(self.w1.iter().zip(self.b1.iter())) {
+            let mut a = *b1j;
+            for (w, xi) in w1row.iter().zip(x.iter()) {
+                a += (f64::from(*w) * self.s_w1) * fake_quant(*xi, self.s_x);
+            }
+            *hj = a.tanh();
+        }
+        let mut y = [0.0; M];
+        for (yk, (w2row, b2k)) in y.iter_mut().zip(self.w2.iter().zip(self.b2.iter())) {
+            let mut a = *b2k;
+            for (w, hj) in w2row.iter().zip(h.iter()) {
+                a += (f64::from(*w) * self.s_w2) * fake_quant(*hj, self.s_h);
+            }
+            *yk = a;
+        }
+        y
+    }
+}
+
+/// A [`LearnedPlanner`] whose scorer has been int8-quantized (PTQ). Same trajectory
+/// vocabulary + teacher; the only difference is the scorer runs on the int8 grid.
+#[derive(Clone, Copy)]
+pub struct QuantizedLearnedPlanner {
+    scorer: QuantMlp<K>,
+    teacher: Teacher,
+}
+
+impl QuantizedLearnedPlanner {
+    /// The teacher the underlying FP32 planner was distilled from.
+    pub fn teacher(&self) -> Teacher {
+        self.teacher
+    }
+
+    /// The calibrated scales `(w1, w2, input, hidden)` — all finite and `> 0` for a
+    /// non-degenerate calibration. A hook for tests and the eval scorecard.
+    pub fn scales(&self) -> (f64, f64, f64, f64) {
+        (self.scorer.s_w1, self.scorer.s_w2, self.scorer.s_x, self.scorer.s_h)
+    }
+}
+
+impl ScoredPlanner for QuantizedLearnedPlanner {
+    fn chosen_index(&self, input: &PlanInput) -> usize {
+        argmax(&self.scorer.forward(&featurize(&scene_of(input))))
+    }
+    fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
+        let scene = scene_of(input);
+        let best = argmax(&self.scorer.forward(&featurize(&scene)));
+        (best, PlanOutput { trajectory: materialize(&scene, TARGET_SPEEDS[best]), kind: ProposalKind::Motion })
+    }
+}
+
+impl LearnedPlanner {
+    /// **Post-training int8 quantization** (PTQ) of this planner's scorer, calibrated
+    /// over `calibration` inputs. Weights are quantized per-tensor (symmetric int8);
+    /// the activation scales — `s_x` on the input features, `s_h` on the hidden layer
+    /// — are the absmax observed across the calibration corpus (a real PTQ
+    /// calibration pass). Returns an int8 [`QuantizedLearnedPlanner`] with the same
+    /// vocabulary + teacher.
+    ///
+    /// PTQ is a QUALITY operation, not a safety one (see the section header): the int8
+    /// scorer's proposal is still bounded by the unchanged checker.
+    pub fn quantize_int8(&self, calibration: &[PlanInput]) -> QuantizedLearnedPlanner {
+        // Weight scales: per-tensor absmax over the (static) trained weights.
+        let s_w1 = int8_scale(absmax2(&self.scorer.w1));
+        let s_w2 = int8_scale(absmax2(&self.scorer.w2));
+
+        // Activation scales: absmax of the input features and the hidden activations
+        // observed over the calibration corpus.
+        let mut ax = 0.0_f64;
+        let mut ah = 0.0_f64;
+        for input in calibration {
+            let x = featurize(&scene_of(input));
+            for &xi in &x {
+                ax = ax.max(xi.abs());
+            }
+            for hj in self.scorer.hidden(&x) {
+                ah = ah.max(hj.abs());
+            }
+        }
+        let s_x = int8_scale(ax);
+        let s_h = int8_scale(ah);
+
+        QuantizedLearnedPlanner {
+            scorer: QuantMlp {
+                w1: quantize_tensor2(&self.scorer.w1, s_w1),
+                b1: self.scorer.b1,
+                s_w1,
+                w2: quantize_tensor2(&self.scorer.w2, s_w2),
+                b2: self.scorer.b2,
+                s_w2,
+                s_x,
+                s_h,
+            },
+            teacher: self.teacher,
+        }
+    }
+}
+
+// ============================================================================
 // The 2-D maneuvering planner: a real Hydra-MDP trajectory vocabulary
 // ============================================================================
 //
@@ -481,5 +687,72 @@ impl Planner for LearnedManeuverPlanner {
         let scene = scene_of(input);
         let (offset, speed) = maneuver_candidate(argmax(&self.scorer.forward(&featurize(&scene))));
         PlanOutput { trajectory: materialize_maneuver(&scene, offset, speed), kind: ProposalKind::Motion }
+    }
+}
+
+// ============================================================================
+// PTQ unit tests — the quantization is a real, bounded perturbation
+// ============================================================================
+
+#[cfg(test)]
+mod ptq_tests {
+    use super::*;
+
+    #[test]
+    fn int8_scale_guards_degenerate_tensor() {
+        assert_eq!(int8_scale(0.0), 1.0); // all-zero ⇒ unit scale, no div-by-zero
+        assert_eq!(int8_scale(f64::NAN), 1.0);
+        assert!((int8_scale(1.27) - 0.01).abs() < 1e-12); // 1.27 / 127
+    }
+
+    #[test]
+    fn quantize_i8_clamps_to_range() {
+        assert_eq!(quantize_i8(1000.0, 0.01), 127);
+        assert_eq!(quantize_i8(-1000.0, 0.01), -127);
+        assert_eq!(quantize_i8(0.0, 0.01), 0);
+    }
+
+    /// The load-bearing honesty test: the int8 forward genuinely DIFFERS from the
+    /// FP32 forward on the same input (so a passing admissibility/argmax test upstream
+    /// reflects real quantization robustness, not a silent passthrough) — yet the
+    /// perturbation is small (a ranking MLP is quantization-tolerant).
+    #[test]
+    fn int8_forward_is_lossy_but_close() {
+        // A hand-built scorer with clearly off-grid weights.
+        let mut m = Mlp::<K> { w1: [[0.0; IN]; H], b1: [0.0; H], w2: [[0.0; H]; K], b2: [0.0; K] };
+        for (j, row) in m.w1.iter_mut().enumerate() {
+            for (i, w) in row.iter_mut().enumerate() {
+                *w = 0.1234 * (j as f64 + 1.0) - 0.037 * (i as f64);
+            }
+        }
+        for (k, row) in m.w2.iter_mut().enumerate() {
+            for (j, w) in row.iter_mut().enumerate() {
+                *w = 0.211 - 0.019 * (k as f64) + 0.007 * (j as f64);
+            }
+        }
+        let x: [f64; IN] = [0.371, 0.62, 0.44, 1.0];
+
+        let s_w1 = int8_scale(absmax2(&m.w1));
+        let s_w2 = int8_scale(absmax2(&m.w2));
+        let s_x = int8_scale(x.iter().fold(0.0_f64, |a, &v| a.max(v.abs())));
+        let h = m.hidden(&x);
+        let s_h = int8_scale(h.iter().fold(0.0_f64, |a, &v| a.max(v.abs())));
+        let q = QuantMlp::<K> {
+            w1: quantize_tensor2(&m.w1, s_w1),
+            b1: m.b1,
+            s_w1,
+            w2: quantize_tensor2(&m.w2, s_w2),
+            b2: m.b2,
+            s_w2,
+            s_x,
+            s_h,
+        };
+
+        let yf = m.forward(&x);
+        let yq = q.forward(&x);
+        let moved = yf.iter().zip(yq.iter()).any(|(a, b)| (a - b).abs() > 1e-9);
+        assert!(moved, "int8 forward must differ from fp32 — quantization is non-trivial");
+        let maxdiff = yf.iter().zip(yq.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(maxdiff < 0.5, "int8 perturbation should be small, got {maxdiff}");
     }
 }

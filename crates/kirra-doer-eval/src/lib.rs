@@ -43,8 +43,12 @@
 use kirra_core::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
 use kirra_core::FleetPosture;
-use kirra_planner::{EgoState, Goal, LearnedPlanner, PlanInput, PlanOutput, Pose};
+use kirra_planner::{
+    EgoState, Goal, LearnedPlanner, PlanInput, PlanOutput, Pose, QuantizedLearnedPlanner,
+    ScoredPlanner,
+};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Verdict reductions — the admissibility boolean(s)
@@ -230,8 +234,10 @@ impl EvalScenario {
 
     /// Build the borrowed [`PlanInput`] the planner sees. Every optional/behavioral
     /// field is empty/`None` (a bare motion-planning world) — the harness measures
-    /// the base doer↔checker loop, not the behavioral layer.
-    fn input(&self) -> PlanInput<'_> {
+    /// the base doer↔checker loop, not the behavioral layer. Public so a caller can
+    /// build a calibration corpus (`&[PlanInput]`) for [`quantize_over_corpus`].
+    #[must_use]
+    pub fn plan_input(&self) -> PlanInput<'_> {
         PlanInput {
             ego: self.ego,
             goal: self.goal,
@@ -258,21 +264,21 @@ impl EvalScenario {
 /// Score `candidate` over `corpus`, using `reference` as the argmax-agreement
 /// oracle. For each scenario the candidate's proposal is run through the checker
 /// (admissibility) and its chosen vocabulary index is compared to the reference's
-/// (quality). Both planners are `&` — `plan_with_chosen_index` is `&self`, and the
-/// learned planners are pure post-training. Exactly two scorer passes per scenario
-/// (candidate + reference), no redundant argmax; the per-scenario cost is dominated
-/// by the checker pass regardless.
+/// (quality). Both are `&dyn ScoredPlanner` so an FP32 [`LearnedPlanner`] and its
+/// int8 [`QuantizedLearnedPlanner`] compare through one interface — the FP32-vs-int8
+/// row Q-1a step 3 produces. Exactly two scorer passes per scenario (candidate +
+/// reference); the per-scenario cost is dominated by the checker pass regardless.
 #[must_use]
 pub fn evaluate_corpus(
     corpus: &[EvalScenario],
-    candidate: &LearnedPlanner,
-    reference: &LearnedPlanner,
+    candidate: &dyn ScoredPlanner,
+    reference: &dyn ScoredPlanner,
 ) -> DoerEvalSummary {
     let mut admissibility = AdmissibilityTally::default();
     let mut quality = QualityTally::default();
 
     for sc in corpus {
-        let input = sc.input();
+        let input = sc.plan_input();
         // One scorer pass gives BOTH the candidate's plan and its argmax.
         let (cand_choice, plan) = candidate.plan_with_chosen_index(&input);
         let ref_choice = reference.chosen_index(&input);
@@ -285,6 +291,21 @@ pub fn evaluate_corpus(
     }
 
     DoerEvalSummary { admissibility, quality }
+}
+
+/// Int8-quantize `planner` (PTQ), calibrating over `corpus` — a convenience wrapper
+/// that builds the `&[PlanInput]` calibration set from the scenarios' worlds and
+/// calls [`kirra_planner::LearnedPlanner::quantize_int8`]. The corpus doubles as the
+/// calibration set here; splitting a held-out calibration set from the eval set is a
+/// tracked follow-up (Q1 scope §5).
+#[must_use]
+pub fn quantize_over_corpus(
+    planner: &LearnedPlanner,
+    corpus: &[EvalScenario],
+) -> QuantizedLearnedPlanner {
+    // `<'_>` makes the borrow-from-corpus explicit (the elided form compiles too).
+    let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
+    planner.quantize_int8(&inputs)
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +357,76 @@ pub fn demo_corpus() -> Vec<EvalScenario> {
         EvalScenario::new("hazard_mid", road(), vec![stopped_car(1, 25.0)], 5.0, 2.0, 40.0),
         EvalScenario::new("hazard_near", road(), vec![stopped_car(1, 18.0)], 5.0, 2.0, 40.0),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Cross-workspace scorecard (Q1 scope §4, seam A)
+// ---------------------------------------------------------------------------
+
+/// One precision's row: the doer-eval scalars for a labelled `(model, precision)`
+/// run, ready for the parko-side Q-1b runner to join with the on-target latency row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScorecardRow {
+    /// e.g. `"fp32"` (reference) or `"int8-ptq"`.
+    pub label: String,
+    pub admissibility_rate: f64,
+    pub strict_accept_rate: f64,
+    pub argmax_agreement_rate: f64,
+    pub mean_progress: f64,
+    pub scenarios: usize,
+    pub mrc: usize,
+}
+
+impl ScorecardRow {
+    /// Build a row from a summary.
+    #[must_use]
+    pub fn from_summary(label: impl Into<String>, s: &DoerEvalSummary) -> Self {
+        Self {
+            label: label.into(),
+            admissibility_rate: s.admissibility.admissibility_rate(),
+            strict_accept_rate: s.admissibility.strict_accept_rate(),
+            argmax_agreement_rate: s.quality.argmax_agreement_rate(),
+            mean_progress: s.quality.mean_progress(),
+            scenarios: s.quality.scenarios,
+            mrc: s.admissibility.mrc,
+        }
+    }
+}
+
+/// The offline scorecard the root workspace emits and the parko-side Q-1b runner
+/// reads (Q1 scope §4, option A: a file seam keeps the two workspaces decoupled).
+/// Versioned so the wire format can evolve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Scorecard {
+    pub schema_version: u32,
+    pub rows: Vec<ScorecardRow>,
+}
+
+impl Scorecard {
+    /// Current scorecard wire-format version.
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// A scorecard stamped with the current [`Self::SCHEMA_VERSION`].
+    #[must_use]
+    pub fn new(rows: Vec<ScorecardRow>) -> Self {
+        Self { schema_version: Self::SCHEMA_VERSION, rows }
+    }
+
+    /// Serialize to pretty JSON — the file the cross-workspace seam carries.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        // Infallible for this type: `to_string_pretty` writes into an in-memory
+        // buffer (no I/O to fail), and the derived `Serialize` over `String` /
+        // number / `Vec` fields is total — serde_json renders a non-finite `f64`
+        // as JSON `null` rather than erroring (and the scorecard's rates are finite
+        // by construction anyway). `expect` documents that invariant.
+        serde_json::to_string_pretty(self).expect("scorecard serialization is infallible")
+    }
+
+    /// Parse a scorecard from JSON.
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
 }
 
 #[cfg(test)]
@@ -468,5 +559,83 @@ mod tests {
             prog_progress > safe_progress,
             "the progress-only net reaches further (prog {prog_progress} > safe {safe_progress})"
         );
+    }
+
+    // --- Q-1a step 3: the in-Rust PTQ -------------------------------------
+
+    /// The core step-3 claim: an int8-PTQ'd planner stays checker-admissible within
+    /// a small budget of FP32 AND its argmax barely moves — quantization on a
+    /// ranking MLP is a quality perturbation the checker already tolerates.
+    #[test]
+    fn int8_ptq_stays_admissible_and_agrees_with_fp32() {
+        let corpus = demo_corpus();
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let int8 = quantize_over_corpus(&fp32, &corpus);
+
+        let fp32_summary = evaluate_corpus(&corpus, &fp32, &fp32);
+        let int8_summary = evaluate_corpus(&corpus, &int8, &fp32);
+
+        // Admissibility must not regress beyond a small budget vs. FP32.
+        const BUDGET: f64 = 0.05;
+        let fp32_adm = fp32_summary.admissibility.admissibility_rate();
+        let int8_adm = int8_summary.admissibility.admissibility_rate();
+        assert!(
+            int8_adm + BUDGET >= fp32_adm,
+            "int8 admissibility {int8_adm} regressed >{BUDGET} below fp32 {fp32_adm}"
+        );
+
+        // A ranking MLP is quantization-robust: the int8 argmax matches FP32 on
+        // (almost) every scenario.
+        assert!(
+            int8_summary.quality.argmax_agreement_rate() >= 0.75,
+            "int8 argmax agreement too low: {}",
+            int8_summary.quality.argmax_agreement_rate()
+        );
+
+        // Calibration produced real, finite, positive per-tensor scales.
+        let (s_w1, s_w2, s_x, s_h) = int8.scales();
+        for s in [s_w1, s_w2, s_x, s_h] {
+            assert!(s.is_finite() && s > 0.0, "degenerate calibration scale {s}");
+        }
+    }
+
+    /// Quantization is a pure function of `(planner, calibration set)` — same inputs,
+    /// byte-identical artifact and eval. (Reproducibility is a scorecard-provenance
+    /// requirement; see Q1 scope §5.)
+    #[test]
+    fn quantization_is_deterministic() {
+        let corpus = demo_corpus();
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let a = quantize_over_corpus(&fp32, &corpus);
+        let b = quantize_over_corpus(&fp32, &corpus);
+        assert_eq!(a.scales(), b.scales());
+        assert_eq!(
+            evaluate_corpus(&corpus, &a, &fp32),
+            evaluate_corpus(&corpus, &b, &fp32),
+            "same planner + same calibration ⇒ identical eval"
+        );
+    }
+
+    /// The cross-workspace seam: a scorecard serializes to versioned JSON and parses
+    /// back byte-for-byte — the file the parko-side Q-1b runner consumes.
+    #[test]
+    fn scorecard_round_trips() {
+        let corpus = demo_corpus();
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let int8 = quantize_over_corpus(&fp32, &corpus);
+
+        let fp32_s = evaluate_corpus(&corpus, &fp32, &fp32);
+        let int8_s = evaluate_corpus(&corpus, &int8, &fp32);
+
+        let card = Scorecard::new(vec![
+            ScorecardRow::from_summary("fp32", &fp32_s),
+            ScorecardRow::from_summary("int8-ptq", &int8_s),
+        ]);
+        let json = card.to_json();
+        assert!(json.contains("\"schema_version\""), "scorecard carries a version");
+        let parsed = Scorecard::from_json(&json).expect("valid scorecard JSON");
+        assert_eq!(card, parsed);
+        assert_eq!(parsed.schema_version, Scorecard::SCHEMA_VERSION);
+        assert_eq!(parsed.rows.len(), 2);
     }
 }
