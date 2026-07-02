@@ -816,7 +816,17 @@ impl LearnedPlannerV2 {
             Teacher::SafetyAware => 0u8,
             Teacher::ProgressOnly => 1u8,
         });
-        let put_u32 = |out: &mut Vec<u8>, v: usize| out.extend_from_slice(&(v as u32).to_le_bytes());
+        // Fail-closed mirror of `Cursor::counted`: a count the parser would
+        // reject (0, > MAX_DECLARED, or a usize that would truncate to u32)
+        // must panic here, never be silently written into the artifact.
+        let put_u32 = |out: &mut Vec<u8>, v: usize| {
+            let v = u32::try_from(v).expect("weights artifact count must fit in u32");
+            assert!(
+                (1..=MAX_DECLARED).contains(&v),
+                "weights artifact count {v} outside the parser's accepted 1..=MAX_DECLARED"
+            );
+            out.extend_from_slice(&v.to_le_bytes());
+        };
         put_u32(&mut out, self.cfg.hidden.len());
         for &h in &self.cfg.hidden {
             put_u32(&mut out, h);
