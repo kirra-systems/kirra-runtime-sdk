@@ -1,6 +1,8 @@
 # Q-1 — PTQ INT8 on one backend + the metric producers (detailed scope)
 
-Status: **scoping / design** (not yet implemented). Elaborates phase **Q-1** of
+Status: **COMPLETE — measured on target** (Q-1a: #755/#756; Q-1b: #757; Orin
+exit criteria met 2026-07-02, results in
+`crates/parko-tensorrt/Q1B_ORIN.md` §"Measured results"). Elaborates phase **Q-1** of
 `QUANTIZATION_DESIGN.md` §9. Q-0 landed the measuring stick
 (`parko_core::perf_contract` — the contract + latency harness, with `quality`
 and `admissibility` as *inputs*). Q-1 turns those two inputs into **real
@@ -102,7 +104,11 @@ Runnable on your Jetson Orin NX; skipped where the GPU/EP is absent.
    `PARKO_TRT_REQUIRE_EP=1` (see `parko/crates/parko-tensorrt/tests/*_probe.rs`). A Q-1b row is
    `SKIPPED` where the silicon/SDK is absent — **never silently passed**.
 
-**Q-1b exit criteria (on the Orin, strict lane):**
+**Q-1b exit criteria (on the Orin, strict lane):** ✅ **MET 2026-07-02** — see
+`crates/parko-tensorrt/Q1B_ORIN.md` §"Measured results" (fp32 + int8-qdq PASS,
+fp16 latency-only; INT8 zero admissibility regression; notable finding: INT8 is
+*slower* than FP32 at this model size — the contract measured it, selection
+verdict for this model on Orin is FP32).
 - FP32, FP16, and INT8 rows for the exported planner, each meeting or explicitly
   failing the §4 contract; INT8 within the admissibility-regression budget of FP32.
 - Cross-precision comparison is **quality-based, not bit-based** (design-note §7.4:
