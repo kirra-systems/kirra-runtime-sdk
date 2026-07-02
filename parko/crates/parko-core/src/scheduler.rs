@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::backend::{BackendCapabilities, BackendDescriptor, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch};
+use crate::backend::{BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch};
 use crate::commands::ControlCommand;
 use crate::sensor::SensorFrame;
 use crate::telemetry::{CumulativeJitterEvaluator, PostureSnapshot, RuntimeTelemetry, ThermalState};
@@ -23,6 +23,26 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
         EnforcementAction::Deny { .. } => Some("deny"),
     }
 }
+
+/// WS-0.4 — default per-tick inference deadline, ms. The HARD bound on how
+/// long `tick` waits for the backend before failing closed to a stopped
+/// command; distinct from `DegradationThresholds::max_inference_latency_ms`
+/// (150 ms), which only FLAGS a slow-but-completed inference as degraded.
+/// A backend that never returns (wedged driver, deadlocked EP) previously
+/// stalled `tick` — and therefore the node's whole drain loop — forever;
+/// the deadline turns that hang into an MRC within a bounded time.
+/// Deliberately generous (20× the tick period @ 20 Hz) so it only fires on
+/// a genuine hang, never on ordinary latency jitter; deployments tighten it
+/// via `with_inference_deadline_ms` / `PARKO_INFERENCE_DEADLINE_MS`.
+pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 = 1_000;
+
+/// The join handle of an in-flight (possibly hung) inference task. The
+/// blocking task cannot be cancelled — `spawn_blocking` work holds an OS
+/// thread until it returns — so on deadline breach the handle is parked
+/// here and polled for completion on later ticks instead of being dropped
+/// (a dropped handle would leave the straggler untracked and let every
+/// subsequent tick stack a fresh blocking task onto a wedged backend).
+type InFlightInference = task::JoinHandle<(Result<TensorBatch<'static>, BackendError>, u64)>;
 
 /// Thresholds for degraded-mode detection.
 ///
@@ -68,6 +88,16 @@ pub struct InferenceLoop<B: InferenceBackend> {
     /// overrides and non-finite faults through the `AuditClient` trait, keeping
     /// it independent of any concrete (e.g. SDK-backed) audit implementation.
     audit: Option<Arc<dyn AuditClient>>,
+    /// WS-0.4 — per-tick inference deadline, ms (always on; default
+    /// `DEFAULT_INFERENCE_DEADLINE_MS`). Exceeding it fails the tick closed
+    /// to a stopped command instead of stalling the loop.
+    inference_deadline_ms: u64,
+    /// WS-0.4 — the watchdog state for a backend that blew its deadline:
+    /// the still-running straggler task. While `Some` and unfinished, ticks
+    /// fail fast to MRC without spawning more inference; once it finishes,
+    /// its (stale) result is reaped and discarded and normal operation
+    /// resumes.
+    hung_inference: Option<InFlightInference>,
 }
 
 fn capabilities_precision(caps: &BackendCapabilities) -> PrecisionMode {
@@ -114,7 +144,19 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             governor: None,
             tick_period_s: 0.05,
             audit: None,
+            inference_deadline_ms: DEFAULT_INFERENCE_DEADLINE_MS,
+            hung_inference: None,
         }
+    }
+
+    /// WS-0.4 — set the per-tick inference deadline (ms). Must be positive;
+    /// zero is coerced to 1 ms (a zero deadline would MRC every tick, which
+    /// is fail-closed but certainly a misconfiguration). The deadline cannot
+    /// be disabled: a backend hang must never stall the loop indefinitely.
+    #[must_use]
+    pub fn with_inference_deadline_ms(mut self, deadline_ms: u64) -> Self {
+        self.inference_deadline_ms = deadline_ms.max(1);
+        self
     }
 
     /// Attach an [`AuditClient`] so the decision path records governor overrides
@@ -184,19 +226,83 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             .map(|s| std::mem::size_of_val(s.as_slice()))
             .sum();
 
+        // WS-0.4 watchdog — a previous inference that blew its deadline may
+        // still be running (a blocking task cannot be cancelled). While it
+        // is, fail fast to MRC WITHOUT spawning more inference: each extra
+        // spawn onto a wedged backend would leak another blocking-pool
+        // thread, and its answer would be for a stale frame anyway. Once the
+        // straggler finishes, reap and DISCARD its output (it answers a
+        // frame that is no longer current) and resume normal inference.
+        if let Some(straggler) = self.hung_inference.take() {
+            if straggler.is_finished() {
+                let _ = straggler.await;
+            } else {
+                self.hung_inference = Some(straggler);
+                self.last_validated_command =
+                    Some(ControlCommand::stopped(loop_start_ms));
+                // The onset was audited on the deadline tick; while-hung
+                // ticks stay quiet (a 20 Hz loop would flood the ledger) —
+                // the degraded MRC snapshots are the ongoing record.
+                return Ok(self.deadline_mrc_snapshot(
+                    current_frame.frame_id,
+                    loop_start_ms,
+                    frame_age_ms,
+                    tensor_payload_bytes,
+                ));
+            }
+        }
+
         let backend_ref = Arc::clone(&self.backend);
         let model_handle = Arc::clone(&self.model);
         let payload = current_frame.payload;
 
-        // Inference on blocking thread.
-        let (output_tensors, inference_latency_ms) = task::spawn_blocking(move || {
+        // Inference on blocking thread, bounded by the WS-0.4 per-tick
+        // deadline. On breach the handle is parked in `hung_inference` (see
+        // the watchdog above) and the tick fails closed to a stopped command
+        // — the loop keeps ticking and publishing MRC instead of stalling.
+        let mut in_flight: InFlightInference = task::spawn_blocking(move || {
             let start = std::time::Instant::now();
             let out = backend_ref.run(&model_handle, &payload);
             let elapsed = start.elapsed().as_millis() as u64;
             (out, elapsed)
-        })
+        });
+        let joined = match tokio::time::timeout(
+            std::time::Duration::from_millis(self.inference_deadline_ms),
+            &mut in_flight,
+        )
         .await
-        .map_err(|e| format!("inference worker join failure: {}", e))?;
+        {
+            Ok(join_result) => join_result,
+            Err(_elapsed) => {
+                if let Some(a) = &self.audit {
+                    a.record_fault(FaultRecord {
+                        tick_ms: loop_start_ms,
+                        code: "inference_deadline_exceeded",
+                        detail: format!(
+                            "backend did not return within the {} ms per-tick \
+                             inference deadline; failing closed to MRC and \
+                             watchdogging the straggler",
+                            self.inference_deadline_ms
+                        ),
+                        posture,
+                    });
+                }
+                self.hung_inference = Some(in_flight);
+                // The next flush must carry a STOP, not the pre-hang command
+                // (fail-closed: after a hang the governor's `previous` is a
+                // stop, so Degraded's no-re-initiation gate holds at zero).
+                self.last_validated_command =
+                    Some(ControlCommand::stopped(loop_start_ms));
+                return Ok(self.deadline_mrc_snapshot(
+                    current_frame.frame_id,
+                    loop_start_ms,
+                    frame_age_ms,
+                    tensor_payload_bytes,
+                ));
+            }
+        };
+        let (output_tensors, inference_latency_ms) =
+            joined.map_err(|e| format!("inference worker join failure: {}", e))?;
 
         let processed_outputs =
             output_tensors.map_err(|e| format!("backend inference error: {}", e))?;
@@ -372,6 +478,38 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             telemetry,
             active_state_degraded: degraded,
         })
+    }
+
+    /// WS-0.4 — the fail-closed snapshot for a tick whose inference blew the
+    /// deadline (or was skipped because a straggler is still hung): a stopped
+    /// command, degraded. `inference_latency_ms` reports the DEADLINE — no
+    /// true measurement exists (the work never finished), and the exhausted
+    /// budget is the honest lower bound; it also keeps the value above
+    /// `max_inference_latency_ms` so downstream latency triage agrees with
+    /// the degraded flag. The jitter tracker is NOT updated (no measurement).
+    fn deadline_mrc_snapshot(
+        &self,
+        frame_id: u64,
+        loop_start_ms: u64,
+        frame_age_ms: u64,
+        tensor_payload_bytes: usize,
+    ) -> PostureSnapshot {
+        let telemetry = RuntimeTelemetry {
+            inference_latency_ms: self.inference_deadline_ms,
+            rolling_jitter_ms: self.jitter_tracker.std_dev_ms(),
+            dropped_frames: self.dropped_frame_counter,
+            thermal_state: self.probe_platform_thermals().unwrap_or(ThermalState::Normal),
+            frame_age_ms,
+            tensor_payload_bytes,
+            backend_precision: capabilities_precision(&self.cached_capabilities),
+            backend_vendor: std::borrow::Cow::Borrowed(descriptor_vendor(&self.cached_descriptor)),
+        };
+        PostureSnapshot {
+            frame_id,
+            active_command: ControlCommand::stopped(loop_start_ms),
+            telemetry,
+            active_state_degraded: true,
+        }
     }
 
     fn parse_inference_to_command(
@@ -760,6 +898,138 @@ mod tests {
         assert!(flushed.linear_velocity <= 1.5);
     }
 
+    // ── WS-0.4: per-tick inference deadline + hung-backend watchdog ──────────
+
+    /// Backend whose FIRST run hangs for `hang_ms` (real time) and returns a
+    /// normal 0.5 m/s command on every later run. Models a wedged driver /
+    /// EP stall that eventually clears. The hang is a BOUNDED sleep so the
+    /// runtime's shutdown (which waits for blocking-pool threads) always
+    /// completes.
+    struct HangOnceBackend {
+        hang_ms: u64,
+        runs: std::sync::atomic::AtomicU32,
+    }
+
+    impl InferenceBackend for HangOnceBackend {
+        fn load_model(&self, _: &str) -> Result<ModelHandle, BackendError> {
+            Ok(ModelHandle {
+                model_id: "hang-once".to_string(),
+                input_shapes: HashMap::new(),
+                output_shapes: HashMap::new(),
+                expected_precision: PrecisionMode::FP32,
+            })
+        }
+        fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
+            let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(self.hang_ms));
+            }
+            let mut map = HashMap::new();
+            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![0.5_f32]));
+            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
+            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+        }
+    }
+
+    /// THE WS-0.4 DoD TEST — "hung-backend test MRCs within budget":
+    ///   tick 1: the backend hangs → the deadline MRCs the tick well before
+    ///           the backend would have returned, audited as a fault;
+    ///   tick 2: the straggler is still running → the watchdog fails fast to
+    ///           MRC WITHOUT spawning another blocking task onto the wedged
+    ///           backend (run count stays 1);
+    ///   tick 3 (after the straggler clears): its stale result is discarded,
+    ///           inference resumes, the loop is healthy again.
+    #[tokio::test]
+    async fn hung_backend_mrcs_within_budget_then_recovers() {
+        use crate::audit::MockAuditClient;
+        let backend = Arc::new(HangOnceBackend {
+            hang_ms: 800,
+            runs: std::sync::atomic::AtomicU32::new(0),
+        });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mock = Arc::new(MockAuditClient::new());
+        let mut loop_engine = InferenceLoop::new(Arc::clone(&backend), model, tx)
+            .with_inference_deadline_ms(50)
+            .with_audit_client(mock.clone());
+        let mut stream = SimpleStream { next_id: 0 };
+
+        // Tick 1 — deadline breach. Must return WITHIN BUDGET (long before
+        // the 800 ms hang clears; the generous 500 ms assertion bound is
+        // slack for a loaded CI host, not the deadline itself).
+        let started = std::time::Instant::now();
+        let snap = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the deadline must cut the hung backend off within budget; tick took {elapsed:?}"
+        );
+        assert_eq!(snap.active_command.linear_velocity, 0.0, "deadline breach → MRC stop");
+        assert!(snap.active_state_degraded, "deadline breach → degraded snapshot");
+        let faults = mock.faults();
+        assert_eq!(faults.len(), 1, "the breach must be audited exactly once");
+        assert_eq!(faults[0].code, "inference_deadline_exceeded");
+
+        // Tick 2 — straggler still hung: MRC again, and NO new inference is
+        // spawned (the watchdog half of WS-0.4: no blocking-thread pile-up).
+        let snap2 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert_eq!(snap2.active_command.linear_velocity, 0.0);
+        assert!(snap2.active_state_degraded);
+        assert_eq!(
+            backend.runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "while hung, ticks must NOT stack more blocking tasks onto the wedged backend"
+        );
+        assert_eq!(mock.faults().len(), 1, "while-hung ticks do not re-audit the onset");
+
+        // Let the straggler finish, then tick 3 — the stale result is reaped
+        // and DISCARDED; fresh inference runs and the loop publishes it.
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        let snap3 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.runs.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "after the straggler clears, inference must resume"
+        );
+        assert_eq!(
+            snap3.active_command.linear_velocity, 0.5,
+            "recovery tick publishes the fresh backend output, not the stale straggler result"
+        );
+        assert!(!snap3.active_state_degraded, "recovered loop is healthy again");
+    }
+
+    /// The deadline must not fire on a slow-but-completing backend: the
+    /// existing `TestBackend` (200 ms) under the DEFAULT deadline (1000 ms)
+    /// completes normally — degraded by the latency THRESHOLD, but with the
+    /// real command, not an MRC stop. Pins the threshold/deadline separation.
+    #[tokio::test]
+    async fn slow_but_completing_backend_is_degraded_not_deadlined() {
+        let backend = Arc::new(TestBackend);
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx); // default deadline
+        let mut stream = SimpleStream { next_id: 0 };
+        let snap = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert!(snap.active_state_degraded, "200 ms latency trips the degraded THRESHOLD");
+        assert_eq!(
+            snap.active_command.linear_velocity, 1.5,
+            "a completed inference is clamped (1.5), not deadline-MRC'd to 0.0 — \
+             the 1000 ms deadline must not fire at 200 ms"
+        );
+    }
+
     // ── PARK-004 test helpers ────────────────────────────────────────────────
 
     /// Backend that returns a configurable linear velocity; no sleep.
@@ -817,7 +1087,7 @@ mod tests {
                 Just(f32::NEG_INFINITY),
             ]
         ) {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
             let (linear_vel, degraded) = rt.block_on(async {
                 let backend = Arc::new(ConfigurableBackend { linear: val });
                 let model = backend.load_model("").unwrap();
@@ -846,7 +1116,7 @@ mod tests {
         fn subnormal_model_output_does_not_panic(
             val in prop::num::f32::SUBNORMAL
         ) {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
             rt.block_on(async {
                 let backend = Arc::new(ConfigurableBackend { linear: val });
                 let model = backend.load_model("").unwrap();

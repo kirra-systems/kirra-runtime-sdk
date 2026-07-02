@@ -218,6 +218,7 @@ fn build_loop<B>(
     backend: Arc<B>,
     model_path: &str,
     tick_period_s: f64,
+    inference_deadline_ms: u64,
     platform_profile: Option<&CourierPlatformProfile>,
     external_rss_gate: bool,
 ) -> Arc<Mutex<InferenceLoop<B>>>
@@ -295,7 +296,10 @@ where
     };
     let infer = InferenceLoop::new(backend, model, actuator_tx)
         .with_governor(ComparatorAsGovernor(comparator))
-        .with_tick_period(tick_period_s);
+        .with_tick_period(tick_period_s)
+        // WS-0.4: a backend that never returns MRCs the tick within this
+        // bound instead of stalling the drain loop forever.
+        .with_inference_deadline_ms(inference_deadline_ms);
     Arc::new(Mutex::new(infer))
 }
 
@@ -381,6 +385,19 @@ fn build_config() -> ParkoNodeConfig {
             ),
         }
     }
+    // WS-0.4: per-tick inference deadline override. Always on (the default is
+    // hang-scale, 1000 ms); a non-positive / unparsable value keeps the default.
+    if let Ok(raw) = std::env::var("PARKO_INFERENCE_DEADLINE_MS") {
+        match raw.trim().parse::<u64>() {
+            Ok(v) if v > 0 => config.inference_deadline_ms = v,
+            _ => tracing::warn!(
+                value = %raw,
+                "parko-ros2: PARKO_INFERENCE_DEADLINE_MS is not a positive integer — keeping the \
+                 default {} ms",
+                config.inference_deadline_ms
+            ),
+        }
+    }
     // WS-0.1 (#G2) opt-in flags. `1`/`true` (case-insensitive) enable; anything
     // else keeps the fail-closed default.
     config.allow_motion_without_object_perception =
@@ -460,6 +477,7 @@ async fn main() {
         backend,
         &model_path,
         config.tick_period_s,
+        config.inference_deadline_ms,
         config.platform_profile.as_ref(),
         external_rss_gate,
     );

@@ -235,7 +235,8 @@ impl Default for DivState {
 /// On divergence beyond `COMPARATOR_TOLERANCE` on **either** axis (linear
 /// or angular — CERT-006 v3), the comparator commands a most-restrictive
 /// reconciliation of the two outputs as an `EnforcementAction::ClampMotion`
-/// (MRC-capped on linear, pure most-restrictive on angular). It escalates
+/// (MRC-capped on BOTH axes — WS-0.4: `MRC_VELOCITY_CEILING_MPS` on linear,
+/// the SOTIF-derived MRC `ω_max(v)` on angular). It escalates
 /// to LockedOut **only** when the divergence is persistent **AND** the
 /// vehicle is already at a safe speed — never as a hard stop at speed.
 ///
@@ -427,13 +428,19 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
         // ---------------- Divergence path ----------------
 
         let reconciled_lin = reconcile(primary_lin, shadow_lin, MRC_VELOCITY_CEILING_MPS);
-        // Angular cap: no `MRC_ANGULAR_CEILING_RAD_S` exists in the
-        // codebase today, so use `f64::INFINITY` — pure most-restrictive
-        // min-of-magnitudes (sign and direction-disagreement handling are
-        // identical to the linear case via `reconcile`). FOLLOW-UP:
-        // introduce a proper MRC_ANGULAR_CEILING_RAD_S in parko-kirra and
-        // pass it here instead of INFINITY.
-        let angular_cap = f64::INFINITY;
+        // WS-0.4 — the angular reconciliation is capped by the SOTIF-derived
+        // MRC angular ceiling `ω_max(v)` (#136), evaluated at the RECONCILED
+        // linear velocity (matching `apply_mrc_profile`, which evaluates the
+        // bound at the post-clamp linear command). Divergence is a lost-trust
+        // condition, so the MRC (posture-derated) bound — not the Nominal one
+        // — is the envelope. The bound is read from the PRIMARY arm: the
+        // production wiring configures both arms with identical platform
+        // params by construction (a mismatched shadow would spuriously
+        // diverge on every tick anyway). Replaces the interim
+        // `f64::INFINITY` pure min-of-magnitudes, which left the reconciled
+        // yaw rate unbounded whenever both governors admitted a
+        // large-but-differing angular command.
+        let angular_cap = self.primary.mrc_omega_max(reconciled_lin);
         let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         // Best-available current-speed proxy. There is no measured-speed
@@ -666,6 +673,106 @@ mod tests {
         assert!(
             v.abs() <= MRC_VELOCITY_CEILING_MPS + COMPARATOR_TOLERANCE,
             "Reconciled linear magnitude must be at or below MRC ceiling. Got {v}"
+        );
+    }
+
+    /// WS-0.4 DoD — "angular divergence bounded": when both arms admit a
+    /// large but DIFFERING yaw rate, the reconciled angular command is
+    /// capped at the primary's MRC angular ceiling `ω_max(v)`, not merely
+    /// the smaller of the two outputs. (Pre-WS-0.4 the cap was
+    /// `f64::INFINITY` — pure min-of-magnitudes — so a 3-vs-2 rad/s
+    /// divergence commanded a 2 rad/s yaw under lost trust.)
+    #[test]
+    fn angular_divergence_is_capped_at_the_mrc_angular_ceiling() {
+        /// Shadow that agrees on the linear axis (passes the proposal
+        /// through) but clamps yaw to a fixed large value — forcing an
+        /// angular-only divergence with BOTH effective yaw rates far above
+        /// the MRC angular ceiling.
+        struct FixedAngularClamp(f64);
+        impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                EnforcementAction::ClampAngularVelocity(self.0)
+            }
+        }
+
+        // Scalar bounds make the numbers exact: Nominal ω ≤ 5.0 (admits the
+        // 3.0 rad/s proposal), MRC ω ceiling 0.4.
+        let mut primary = KirraGovernor::new().with_angular_bounds(5.0, 0.4);
+        primary.update_rss_state(safe_rss());
+        let comparator = GovernorComparator::new(primary, FixedAngularClamp(2.0));
+
+        let proposed = ControlCommand {
+            linear_velocity: 1.0,
+            angular_velocity: 3.0,
+            timestamp_ms: 0,
+        };
+        let prev = proposed.clone();
+        let out = comparator.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
+
+        assert!(
+            matches!(out, EnforcementAction::ClampMotion { .. }),
+            "an angular-only divergence must reconcile to ClampMotion, got {out:?}"
+        );
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity);
+        assert!(
+            ang.abs() <= 0.4 + COMPARATOR_TOLERANCE,
+            "reconciled yaw must be capped at the MRC angular ceiling (0.4 rad/s); \
+             got {ang} — min-of-magnitudes alone would have commanded 2.0"
+        );
+        assert!(ang > 0.0, "the cap must preserve the agreed yaw direction");
+        // The agreed linear axis passes through the reconciliation unharmed.
+        let lin = effective_linear_velocity(&out, proposed.linear_velocity);
+        assert!(
+            (lin - 1.0).abs() <= COMPARATOR_TOLERANCE,
+            "the agreed linear axis must survive an angular-only divergence; got {lin}"
+        );
+    }
+
+    /// WS-0.4 — with the default (derived) bounds, the reconciled yaw under
+    /// divergence never exceeds `AngularVelocityBound::mrc(...)`'s ω_max at
+    /// the reconciled linear velocity — pinning that the comparator uses the
+    /// POSTURE-DERATED bound, not the looser Nominal one.
+    #[test]
+    fn angular_divergence_cap_uses_the_derated_mrc_bound() {
+        struct FixedAngularClamp(f64);
+        impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                EnforcementAction::ClampAngularVelocity(self.0)
+            }
+        }
+        use crate::angular_bound::{AngularVelocityBound, PlatformParams};
+
+        let mut primary = KirraGovernor::new(); // conservative-default derived bounds
+        primary.update_rss_state(safe_rss());
+        let comparator = GovernorComparator::new(primary, FixedAngularClamp(10.0));
+
+        // In-place rotation request far above every bound.
+        let proposed = ControlCommand {
+            linear_velocity: 0.0,
+            angular_velocity: 12.0,
+            timestamp_ms: 0,
+        };
+        let prev = proposed.clone();
+        let out = comparator.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
+
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity);
+        let mrc_ceiling =
+            AngularVelocityBound::mrc(PlatformParams::conservative_default()).omega_max(0.0);
+        assert!(
+            ang.abs() <= mrc_ceiling + COMPARATOR_TOLERANCE,
+            "reconciled yaw {ang} must be ≤ the derated MRC ω_max(0) = {mrc_ceiling}"
         );
     }
 
