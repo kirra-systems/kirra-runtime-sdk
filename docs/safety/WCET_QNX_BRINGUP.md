@@ -152,7 +152,7 @@ What the Phase-I run must show to substantiate the Objective-1 "sub-100 µs verd
 
 **Phase-I status (KVM, 2026-06-30).** Criteria 1, 2, and 4 are met on a QNX SDP 8.0
 x86_64 `mkqnximage`/QEMU VM under **KVM**: the judge cross-compiles, the FDIT matrix
-passes byte-identically (`GATE: PASS`, all 9 rows), and **`max = 20.0 µs < 100 µs`**
+passes byte-identically (`GATE: PASS`, all 9 rows), and **`max = 19.96 µs < 100 µs`**
 (median 40 ns, p99.9 79 ns) — see `QNX_MAPPING.md` §6.2 and
 `tools/qnx-rtm-harness/results/qnx800-x86_64-vm-kvm.txt`. **Criterion 3 is
 deliberately NOT met by this run:** the `QNX-TARGET-MEASURED` token is gated behind
