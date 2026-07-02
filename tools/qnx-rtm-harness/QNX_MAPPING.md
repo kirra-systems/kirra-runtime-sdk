@@ -239,8 +239,9 @@ correctly emits `INDICATIVE-NOT-WCET` (the operator did not assert
 
 ## 7. WCET — Phase-I indicative, cert-grade TBD
 
-The on-target run (§6.1) produced a real QNX-`SCHED_FIFO` row, but **under TCG
-emulation it is INDICATIVE, never a WCET**. The harness CSV still carries the
+The on-target runs (§6.1 TCG, §6.2 KVM) produced real QNX-`SCHED_FIFO` rows — the
+KVM re-run met the `max < 100 µs` acceptance-#4 target (max 19.96 µs) — but **a VM
+figure is INDICATIVE, never a WCET**. The harness CSV still carries the
 `TBD-QNX-TARGET` discipline for the certified figure. Cert-grade WCET is **Phase-II**:
 NVIDIA DRIVE (Orin/Thor) + QNX OS for Safety + Ferrocene-qualified Rust under FIFO —
 that number, not a VM figure, backs the FTTI claim. The PASS gate remains **verdict
