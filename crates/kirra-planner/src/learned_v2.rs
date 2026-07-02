@@ -57,6 +57,13 @@ const MARGIN: f64 = 10.0;
 /// Per-metre teacher cost of a candidate's terminal lateral offset (both
 /// teachers — progress alone is blind to lateral wandering).
 const OFFSET_COST_PER_M: f64 = 0.03;
+/// Teacher progress gain. Label shaping: the normalized progress term spans
+/// ~0.4 between the best and worst clear-road candidates while hazard labels
+/// span 5.0, so an MSE distillation underweights clear-road SPEED ORDERING —
+/// the net learns to brake for hazards but dawdles on open road. ×2 makes the
+/// ordering salient without letting progress outbid a collision (−5) or a
+/// containment breach (−5).
+const PROGRESS_GAIN: f64 = 2.0;
 /// Half-vehicle lateral margin the teacher's containment term reserves: a pass
 /// offset must fit inside the corridor clearance minus this.
 const VEHICLE_HALF_WIDTH_M: f64 = 1.2;
@@ -325,7 +332,7 @@ fn teacher_score_v2(s: &SceneV2, cfg: &ScorerConfigV2, c: usize, teacher: Teache
         0.0
     };
 
-    progress + hazard + containment - OFFSET_COST_PER_M * offset.abs()
+    PROGRESS_GAIN * progress + hazard + containment - OFFSET_COST_PER_M * offset.abs()
 }
 
 // ---------------------------------------------------------------------------
@@ -469,10 +476,12 @@ pub struct TrainConfigV2 {
 
 impl TrainConfigV2 {
     /// A CI-bounded schedule for [`ScorerConfigV2::reduced`] — trains in seconds
-    /// (debug build included) and is enough for the behavioral tests.
+    /// (debug build included) and is enough for the behavioral tests. Sized for
+    /// the ego-relative velocity features (larger magnitudes, no label signal
+    /// yet → more variance to fit than the naive first cut).
     #[must_use]
     pub fn reduced(seed: u64) -> Self {
-        Self { seed, scenes: 240, epochs: 220, batch: 16, lr: 0.02, momentum: 0.9 }
+        Self { seed, scenes: 320, epochs: 420, batch: 16, lr: 0.02, momentum: 0.9 }
     }
 }
 
