@@ -273,6 +273,11 @@ jobs:
           # to reference HOME in an Actions expression (${{ env.HOME }}) yields
           # an empty string → a "/.local/..." dlopen failure.
           RUST_BACKTRACE: "1"
+          # STRICT: this is THE ORT-provisioned lane, so a would-be self-skip
+          # (dylib missing/unloadable) is a hard failure here — the tests
+          # self-skip everywhere else (the root --workspace lanes absorb
+          # parko-onnx as an implicit member and install no ORT runtime).
+          PARKO_ONNX_REQUIRE_ORT: "1"
         run: cargo test -p parko-onnx -- --nocapture
 
       - name: parko-tensorrt fail-closed test (PARK-021, GATING)

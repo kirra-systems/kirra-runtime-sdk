@@ -71,3 +71,48 @@ KIRRA_DOER_EVAL_REQUIRE_ORT=1 cargo test -p kirra-doer-eval --test onnx_roundtri
   numbers land (design note §11).
 - All of this tunes the **untrusted doer**; the checker is unchanged and bounds
   the INT8 planner's proposals exactly as it bounds FP32 ones.
+
+---
+
+## Measured results — Jetson Orin NX 16GB (2026-07-02)
+
+Q-1b exit criteria: **MET**. Bench: Orin NX 16GB, JetPack 6 (`jp6/cu126`),
+onnxruntime-gpu **1.23.0** (venv, `load-dynamic`), `ort` rc.11, strict lane
+(`PARKO_TRT_REQUIRE_EP=1`), artifacts as checked in at `artifacts/doer-eval/`.
+
+### Probe (step 2)
+
+`INT8-QDQ PROBE PASSED` — cold INT8 engine build **48 ms**, engine SHA
+`2fbc1a6f…9052e5f1`, scores `[0.0448861, -0.4265421, -1.3937072, -3.0795364]`,
+argmax `0`, stable across runs.
+
+### Contract matrix (step 3; iters=1000, warmup=100)
+
+| row | engine build | p50 | p99 | max | contract |
+|---|---|---|---|---|---|
+| fp32 | 19 ms | 97 µs | 115 µs | 157 µs | **PASS** (quality 1.000, admissibility 1.000) |
+| fp16 | 1 ms | 97 µs | 134 µs | 175 µs | informational (latency-only by design) |
+| int8-qdq | 1 ms | 146 µs | 163 µs | 185 µs | **PASS** (quality 1.000, admissibility 1.000) |
+
+All rows are ~60–90× under the placeholder 10 ms p99 budget
+(`PerfContract::illustrative()` — real per-class budgets are design-note §11).
+
+### Findings
+
+1. **The calibration is consistent across silicon (design note §6, measured).**
+   The TensorRT INT8 engine's scores agree with the same QDQ artifact run
+   through CPU ONNX Runtime to ~1e-7, identical argmax — one calibration
+   artifact, two very different backends, the same decision. Engine SHA matched
+   between the probe and the eval run (deterministic build).
+2. **FP16 is a no-op at this model size.** The fp16 row produced a
+   byte-identical engine to fp32 (same SHA): TensorRT judged reduced precision
+   pointless for a 4→8→4 MLP. Expected; recorded so nobody reads the fp16 row
+   as a win.
+3. **INT8 is SLOWER than FP32 on this model (146 µs vs 97 µs p50)** — the Q/DQ
+   overhead dominates a net with almost no compute. This is the contract
+   framework doing its job: "closed the gap" is measured, not assumed, and for
+   THIS model on THIS chip the selection verdict is **FP32**. INT8 earns its row
+   when a real-sized net goes through the same pipeline (Q-2+ / larger doer).
+
+Honesty: all latency figures are on-target-indicative (pinning/isolation not
+controlled), NOT a WCET/FTTI claim.
