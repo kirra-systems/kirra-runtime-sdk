@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {
+      "label": "fp32",
+      "admissibility_rate": 1.0,
+      "strict_accept_rate": 1.0,
+      "argmax_agreement_rate": 1.0,
+      "mean_progress": 0.2878571428571431,
+      "scenarios": 4,
+      "mrc": 0
+    },
+    {
+      "label": "int8-ptq",
+      "admissibility_rate": 1.0,
+      "strict_accept_rate": 1.0,
+      "argmax_agreement_rate": 1.0,
+      "mean_progress": 0.2878571428571431,
+      "scenarios": 4,
+      "mrc": 0
+    }
+  ]
+}

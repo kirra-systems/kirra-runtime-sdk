@@ -40,6 +40,9 @@
 //! [`evaluate_corpus`] to produce the FP32-vs-int8 deltas, and emits the
 //! cross-workspace scorecard.
 
+// Q-1b: minimal ONNX export of the learned scorer (FP32 + int8-QDQ artifacts).
+pub mod onnx;
+
 use kirra_core::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_core::trajectory::{PerceivedObject, TrajectoryVerdict};
 use kirra_core::FleetPosture;

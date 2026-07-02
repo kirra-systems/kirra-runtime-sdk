@@ -85,7 +85,8 @@ pub use mick_llm::{
 
 pub mod learned;
 pub use learned::{
-    LearnedManeuverPlanner, LearnedPlanner, QuantizedLearnedPlanner, ScoredPlanner, Teacher,
+    LearnedManeuverPlanner, LearnedPlanner, QuantizedLearnedPlanner, QuantizedScorerWeights,
+    ScoredPlanner, ScorerWeights, Teacher,
 };
 
 /// Fast-loop trajectory tracker — the System-1 conformance side of the dual-rate loop, which

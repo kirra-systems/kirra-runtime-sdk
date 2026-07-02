@@ -392,6 +392,101 @@ impl ScoredPlanner for LearnedPlanner {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Offline export views (Q-1b) — the weights leave the crate, read-only
+// ----------------------------------------------------------------------------
+
+/// The FP32 scorer's trained weights, exported for OFFLINE artifact generation
+/// (the ONNX export in `kirra-doer-eval`; Q-1b). Row-major, dims explicit so the
+/// consumer does not depend on this crate's private layout constants. Read-only
+/// snapshot — nothing here can write back into the planner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScorerWeights {
+    pub input_dim: usize,
+    pub hidden_dim: usize,
+    pub output_dim: usize,
+    /// `hidden_dim × input_dim`, row-major (`w1[h * input_dim + i]`).
+    pub w1: Vec<f64>,
+    pub b1: Vec<f64>,
+    /// `output_dim × hidden_dim`, row-major.
+    pub w2: Vec<f64>,
+    pub b2: Vec<f64>,
+}
+
+/// The int8-PTQ scorer's codes + scales, exported for OFFLINE artifact generation
+/// (the QDQ ONNX export; Q-1b). The codes/scales are EXACTLY the ones the in-Rust
+/// [`QuantizedLearnedPlanner`] runs on — one quantization, reused by every backend
+/// (design note §6: the calibration artifact is produced once).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantizedScorerWeights {
+    pub input_dim: usize,
+    pub hidden_dim: usize,
+    pub output_dim: usize,
+    /// `hidden_dim × input_dim` int8 codes, row-major.
+    pub w1_codes: Vec<i8>,
+    pub w1_scale: f64,
+    pub b1: Vec<f64>,
+    /// `output_dim × hidden_dim` int8 codes, row-major.
+    pub w2_codes: Vec<i8>,
+    pub w2_scale: f64,
+    pub b2: Vec<f64>,
+    /// Calibrated activation scales (input features / hidden activations).
+    pub input_scale: f64,
+    pub hidden_scale: f64,
+}
+
+impl LearnedPlanner {
+    /// Export the trained FP32 scorer weights (offline artifact generation).
+    #[must_use]
+    pub fn scorer_weights(&self) -> ScorerWeights {
+        ScorerWeights {
+            input_dim: IN,
+            hidden_dim: H,
+            output_dim: K,
+            w1: self.scorer.w1.iter().flat_map(|r| r.iter().copied()).collect(),
+            b1: self.scorer.b1.to_vec(),
+            w2: self.scorer.w2.iter().flat_map(|r| r.iter().copied()).collect(),
+            b2: self.scorer.b2.to_vec(),
+        }
+    }
+
+    /// The featurized input and the FP32 vocabulary scores for `input` — export /
+    /// round-trip verification introspection (an exported ONNX model fed the same
+    /// features must reproduce these scores within float tolerance).
+    #[must_use]
+    pub fn features_and_scores(&self, input: &PlanInput) -> (Vec<f64>, Vec<f64>) {
+        let x = featurize(&scene_of(input));
+        (x.to_vec(), self.scorer.forward(&x).to_vec())
+    }
+}
+
+impl QuantizedLearnedPlanner {
+    /// Export the int8 codes + calibrated scales (offline QDQ artifact generation).
+    #[must_use]
+    pub fn scorer_weights(&self) -> QuantizedScorerWeights {
+        QuantizedScorerWeights {
+            input_dim: IN,
+            hidden_dim: H,
+            output_dim: K,
+            w1_codes: self.scorer.w1.iter().flat_map(|r| r.iter().copied()).collect(),
+            w1_scale: self.scorer.s_w1,
+            b1: self.scorer.b1.to_vec(),
+            w2_codes: self.scorer.w2.iter().flat_map(|r| r.iter().copied()).collect(),
+            w2_scale: self.scorer.s_w2,
+            b2: self.scorer.b2.to_vec(),
+            input_scale: self.scorer.s_x,
+            hidden_scale: self.scorer.s_h,
+        }
+    }
+
+    /// The int8 scorer's vocabulary scores for `input` — round-trip verification
+    /// introspection (the exported QDQ ONNX model must reproduce these).
+    #[must_use]
+    pub fn scores(&self, input: &PlanInput) -> Vec<f64> {
+        self.scorer.forward(&featurize(&scene_of(input))).to_vec()
+    }
+}
+
 /// Symmetric per-tensor int8 scale: `absmax / 127`. A zero/degenerate tensor gets a
 /// unit scale (all codes then 0) rather than a divide-by-zero.
 fn int8_scale(absmax: f64) -> f64 {
