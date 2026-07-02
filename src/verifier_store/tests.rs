@@ -139,6 +139,22 @@ mod attestation_registry_tests {
         assert!(!store.save_last_generation(11).unwrap(), "an equal generation is rejected (strict >)");
         assert_eq!(store.load_last_generation().unwrap(), 11);
     }
+
+    /// #771 review — a present-but-non-numeric `last_generation` value is
+    /// CORRUPTION and must surface as `Err`, never read as 0/"fresh store"
+    /// (which would silently reintroduce the restart time-reversal the boot
+    /// init exists to prevent; the binary exits fail-closed on the Err).
+    #[test]
+    fn test_corrupted_last_generation_fails_closed_not_zero() {
+        let store = in_memory();
+        store
+            .save_engine_state("last_generation", "not-a-number")
+            .unwrap();
+        assert!(
+            store.load_last_generation().is_err(),
+            "a non-numeric persisted generation must be a load ERROR, not 0"
+        );
+    }
 }
 
 #[cfg(test)]
