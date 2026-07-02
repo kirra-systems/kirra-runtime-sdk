@@ -50,7 +50,16 @@ fn main() {
         format!("{}/../../../artifacts/doer-eval", env!("CARGO_MANIFEST_DIR"))
     });
 
-    let ladder = PrecisionLadder::from_env().expect("valid KIRRA_PRECISION_LADDER");
+    // A malformed ladder is a MISCONFIGURATION → a controlled nonzero-exit
+    // refusal, unconditionally (this is not the hardware skip lane — a config
+    // error must never read as "skipped").
+    let ladder = match PrecisionLadder::from_env() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("REFUSED: invalid KIRRA_PRECISION_LADDER: {e}");
+            std::process::exit(1);
+        }
+    };
     if ladder.fp32_anchored() {
         println!(
             "note: fp32 was absent from the configured ladder — appended as the \
