@@ -37,3 +37,6 @@ occy_standards.sh
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# cargo-cyclonedx trial outputs (release SBOMs are generated in CI)
+*.cdx.json
