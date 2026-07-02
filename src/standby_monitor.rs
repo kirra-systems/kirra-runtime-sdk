@@ -938,6 +938,9 @@ async fn perform_promotion(
     }
 
     // Promotion succeeded (durable epoch claimed, audit anchored, mode flipped).
+    // WS-0.5 — count the completed failover for /metrics (aborted promotions
+    // above returned false and are not counted). Observability only.
+    app.fleet_metrics.record_ha_promotion();
     true
 }
 
@@ -1478,6 +1481,40 @@ mod sg_009_promotion_act_tests {
     // #78 — hash-v2 audit anchor is ENSURED before any Active write, and its
     // failure FAILS CLOSED (promotion aborts, no Active state written).
     // -----------------------------------------------------------------------
+
+    /// WS-0.5 — a COMPLETED promotion increments the /metrics failover
+    /// counter; an ABORTED one (here: the hash-v2 anchor cannot be ensured,
+    /// the same deterministic abort `test_promotion_aborts_when_anchor_
+    /// cannot_be_ensured` pins) does not — the counter reports failovers
+    /// that actually transferred authority, not attempts.
+    #[test]
+    fn test_promotion_counts_for_metrics_only_when_completed() {
+        // Completed promotion → counted once.
+        let store = VerifierStore::new(":memory:").expect("store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        run_promotion(&app, &cache, "standby-metrics", "HEARTBEAT_TIMEOUT");
+        assert!(app.is_active(), "healthy promotion completes");
+        assert_eq!(
+            app.fleet_metrics.ha_promotion_count(),
+            1,
+            "a completed failover must be counted"
+        );
+
+        // Aborted promotion (broken audit-chain table → anchor failure,
+        // fail-closed early return) → NOT counted.
+        let store2 = VerifierStore::new(":memory:").expect("store");
+        store2.break_audit_chain_table_for_test();
+        let app2 = Arc::new(AppState::new(store2, VerifierOperationMode::PassiveStandby));
+        let cache2: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        run_promotion(&app2, &cache2, "standby-abort", "HEARTBEAT_TIMEOUT");
+        assert!(!app2.is_active(), "precondition: the promotion aborted");
+        assert_eq!(
+            app2.fleet_metrics.ha_promotion_count(),
+            0,
+            "an aborted promotion is not a failover and must not be counted"
+        );
+    }
 
     /// Happy path: a store carrying legacy v1 audit rows has its
     /// `HASH_V2_MIGRATION` anchor ensured DURING promotion (proof the anchor

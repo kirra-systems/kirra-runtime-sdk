@@ -40,6 +40,50 @@ pub(crate) async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResp
     }
 }
 
+/// WS-0.5 — `GET /metrics`: Prometheus text exposition (0.0.4) of the
+/// fleet-safety series (posture gauge, committed transitions, gate denials
+/// by reason, HA promotions, audit/capture drop counters). Public read-only
+/// and posture-exempt (pre-allowlisted in `is_posture_exempt`): the scrape
+/// must survive LockedOut — that is exactly when an operator needs it. No
+/// secrets: counters and posture state only.
+pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+
+    // Effective fail-closed posture via the single TTL authority — the gauge
+    // reports what the ROUTING GATE would enforce (cold/stale/poisoned →
+    // LockedOut), not a possibly-stale cached optimism.
+    let (effective_posture, stale_reason) =
+        resolve_posture_with_reason(&svc.posture_cache, POSTURE_CACHE_TTL_MS);
+    let posture_generation = svc
+        .posture_cache
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| c.generation))
+        .unwrap_or(0);
+
+    let snap = kirra_verifier::metrics::FleetMetricsSnapshot {
+        effective_posture,
+        posture_cache_stale: stale_reason.is_some(),
+        posture_generation,
+        mode_active: svc.app.is_active(),
+        audit_write_drops: svc.app.audit_write_drops.load(Ordering::SeqCst),
+        capture_drops: svc.app.capture_drops.load(Ordering::SeqCst),
+        post_incident_write_failures: svc.app.post_incident_write_failures.load(Ordering::SeqCst),
+        command_source_write_failures: svc
+            .app
+            .command_source_write_failures
+            .load(Ordering::SeqCst),
+    };
+    let body = svc
+        .app
+        .fleet_metrics
+        .format_prometheus(&kirra_verifier::standby_monitor::instance_id(), &snap);
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
+}
+
 pub(crate) async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     let exported_at_ms = now_ms();
     // Three full-table loads (nodes + dependencies + all posture events) — the

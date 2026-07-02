@@ -249,6 +249,7 @@ pass that fits the corridor, rejects one that doesn't or a misaligned straight-t
 
 ### Public read-only
 - `GET /health`, `GET /ready`
+- `GET /metrics` — Prometheus fleet-safety series (WS-0.5); posture-exempt so the scrape survives LockedOut
 - `GET /attestation/status/:node_id`
 - `GET /fleet/posture`, `GET /fleet/posture/:node_id`
 - `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id`

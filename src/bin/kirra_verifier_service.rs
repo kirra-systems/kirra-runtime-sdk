@@ -1565,7 +1565,11 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
 
     let probe_routes = Router::new()
         .route("/health", get(health))
-        .route("/ready", get(ready));
+        .route("/ready", get(ready))
+        // WS-0.5 — Prometheus fleet-safety series. Public read-only;
+        // posture-exempt (pre-allowlisted in `is_posture_exempt`) so the
+        // scrape survives LockedOut.
+        .route("/metrics", get(metrics_endpoint));
 
     let read_routes = Router::new()
         .route("/attestation/status/{node_id}", get(get_node_status))
@@ -1879,6 +1883,92 @@ mod posture_gate_real_router_tests {
             locked,
             StatusCode::SERVICE_UNAVAILABLE,
             "LockedOut must still 503 at the posture gate even authenticated; got {locked}"
+        );
+    }
+
+    /// WS-0.5 DoD — "Prometheus scrape returns fleet-safety series", proven
+    /// on the REAL assembled router UNDER LockedOut (the scrape must survive
+    /// exactly the posture it exists to observe). Asserts reachability, the
+    /// exposition content type, every fleet-safety family, the fail-closed
+    /// posture gauge value, and that a denial that just happened is visible
+    /// on the labeled counter — the series are live, not just present.
+    #[tokio::test]
+    async fn metrics_scrape_returns_fleet_safety_series_under_lockedout() {
+        let svc = state_with(FleetPosture::LockedOut);
+
+        // A functional read denied by the gate first, so the scrape can show
+        // a non-zero locked_out denial.
+        let denied =
+            status_through_real_app(Arc::clone(&svc), "GET", "/fleet/posture").await;
+        assert_eq!(
+            denied,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "precondition: LockedOut denies the functional read"
+        );
+
+        let resp = build_app(Arc::clone(&svc))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router service should not panic");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/metrics must remain reachable under LockedOut (posture-exempt)"
+        );
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "Prometheus text exposition content type expected; got {content_type:?}"
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("read body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8 exposition");
+
+        for family in [
+            "kirra_fleet_posture{",
+            "kirra_posture_cache_stale{",
+            "kirra_posture_generation{",
+            "kirra_mode_active{",
+            "kirra_posture_transitions_total{",
+            "kirra_gate_denials_total{",
+            "kirra_ha_promotions_total{",
+            "kirra_audit_write_drops_total{",
+            "kirra_capture_drops_total{",
+            "kirra_post_incident_write_failures_total{",
+            "kirra_command_source_write_failures_total{",
+        ] {
+            assert!(
+                text.contains(family),
+                "the scrape must contain the {family} series; got:\n{text}"
+            );
+        }
+
+        // The live LockedOut posture reads 2 on the gauge (fresh cache → not
+        // the stale-synthetic flavor).
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("kirra_fleet_posture{") && l.ends_with(" 2")),
+            "the posture gauge must read 2 (LockedOut); got:\n{text}"
+        );
+        // The denied read above is visible on the labeled denial counter.
+        assert!(
+            text.lines().any(|l| l.starts_with("kirra_gate_denials_total{")
+                && l.contains("reason=\"locked_out\"")
+                && l.ends_with(" 1")),
+            "the LockedOut denial must be counted on the labeled series; got:\n{text}"
         );
     }
 

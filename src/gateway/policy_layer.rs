@@ -605,7 +605,14 @@ pub async fn enforce_posture_routing(
         // and any audit work, so an epoch change during the actuator write is
         // caught at the final authority boundary too.
         OperationalCommand::ActuatorMotion => {
-            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await?;
+            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command")
+                .await
+                .inspect_err(|_| {
+                    // WS-0.5: count the authority-fence denial for /metrics.
+                    svc.app
+                        .fleet_metrics
+                        .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
+                })?;
         }
         // Other mutations keep the fast CACHED epoch check (Pass B1): they ARE
         // backstopped by the in-transaction `assert_epoch_held` on their durable
@@ -628,6 +635,10 @@ pub async fn enforce_posture_routing(
                     db     = db,
                     "FENCED — held epoch stale; self-demoting and rejecting mutation (HA split-brain prevention)"
                 );
+                // WS-0.5: count the fence denial for /metrics.
+                svc.app
+                    .fleet_metrics
+                    .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
@@ -644,16 +655,123 @@ pub async fn enforce_posture_routing(
         Err(_) => None,
     };
 
-    if !should_route_command(&snapshot, posture_now_ms(), cmd) {
+    let gate_now_ms = posture_now_ms();
+    if !should_route_command(&snapshot, gate_now_ms, cmd) {
+        let reason = classify_gate_denial(&snapshot, gate_now_ms, cmd);
+        // WS-0.5: count the dropped command for /metrics, labeled by reason.
+        svc.app.fleet_metrics.record_gate_denial(reason);
         tracing::warn!(
             method = %method,
             path = %path,
             command = ?cmd,
+            deny_reason = reason.as_label(),
             "posture-routing gate denied command (fail-closed)"
         );
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     Ok(next.run(req).await)
+}
+
+/// WS-0.5 — derive the metrics label for a `should_route_command` denial.
+/// OBSERVABILITY ONLY: this mirrors `should_route_command`'s decision order
+/// (Unknown first, then cache presence, then staleness, then posture) but
+/// never influences it — the gate's verdict is already made when this runs.
+fn classify_gate_denial(
+    snapshot: &Option<CachedFleetPosture>,
+    now_ms: u64,
+    cmd: OperationalCommand,
+) -> crate::metrics::GateDenialReason {
+    use crate::metrics::GateDenialReason as R;
+    if cmd == OperationalCommand::Unknown {
+        return R::UnknownCommand;
+    }
+    match snapshot {
+        None => R::PostureCacheEmpty,
+        Some(c) if c.is_stale(now_ms) => R::PostureCacheStale,
+        Some(c) => match c.posture {
+            crate::verifier::FleetPosture::LockedOut => R::LockedOut,
+            // A denial with a fresh cache and a non-Unknown command can only
+            // be a Degraded write (`should_route_command` admits everything
+            // else under Nominal, and ReadTelemetry / the ActuatorMotion
+            // deferral under Degraded).
+            _ => R::DegradedWriteDenied,
+        },
+    }
+}
+
+#[cfg(test)]
+mod gate_denial_metrics_tests {
+    use super::*;
+    use crate::metrics::GateDenialReason as R;
+    use crate::posture_cache::POSTURE_CACHE_TTL_MS;
+    use crate::verifier::FleetPosture;
+
+    fn fresh(posture: FleetPosture, now: u64) -> Option<CachedFleetPosture> {
+        Some(CachedFleetPosture {
+            posture,
+            generated_at_ms: now,
+            ttl_ms: POSTURE_CACHE_TTL_MS,
+            generation: 1,
+        })
+    }
+
+    /// WS-0.5 — the denial classifier mirrors `should_route_command`'s
+    /// decision order: Unknown before the cache is consulted, then cache
+    /// presence, then staleness, then posture.
+    #[test]
+    fn classifier_mirrors_the_gate_decision_order() {
+        let now = 1_000_000u64;
+        // Unknown wins even with a fresh Nominal cache.
+        assert_eq!(
+            classify_gate_denial(&fresh(FleetPosture::Nominal, now), now, OperationalCommand::Unknown),
+            R::UnknownCommand
+        );
+        // Cold cache.
+        assert_eq!(
+            classify_gate_denial(&None, now, OperationalCommand::ReadTelemetry),
+            R::PostureCacheEmpty
+        );
+        // Stale cache (aged past TTL) beats its recorded posture.
+        let stale = fresh(FleetPosture::Nominal, now);
+        assert_eq!(
+            classify_gate_denial(&stale, now + POSTURE_CACHE_TTL_MS + 1, OperationalCommand::ReadTelemetry),
+            R::PostureCacheStale
+        );
+        // Fresh LockedOut.
+        assert_eq!(
+            classify_gate_denial(&fresh(FleetPosture::LockedOut, now), now, OperationalCommand::ReadTelemetry),
+            R::LockedOut
+        );
+        // Fresh Degraded + a denied write.
+        assert_eq!(
+            classify_gate_denial(&fresh(FleetPosture::Degraded, now), now, OperationalCommand::SystemMutation),
+            R::DegradedWriteDenied
+        );
+    }
+
+    /// The classifier agrees with `should_route_command` on every denied
+    /// combination it labels: whenever the gate denies, the classifier's
+    /// reason is consistent with the input that caused the denial (and the
+    /// classifier is never consulted on admitted commands).
+    #[test]
+    fn classifier_is_only_meaningful_where_the_gate_denies() {
+        let now = 1_000_000u64;
+        let cases = [
+            (fresh(FleetPosture::Nominal, now), OperationalCommand::Unknown),
+            (None, OperationalCommand::WriteState),
+            (fresh(FleetPosture::LockedOut, now), OperationalCommand::ReadTelemetry),
+            (fresh(FleetPosture::Degraded, now), OperationalCommand::WriteState),
+        ];
+        for (snapshot, cmd) in cases {
+            assert!(
+                !should_route_command(&snapshot, now, cmd),
+                "test premise: the gate denies ({snapshot:?}, {cmd:?})"
+            );
+            // Classification must not panic and must produce a stable label.
+            let label = classify_gate_denial(&snapshot, now, cmd).as_label();
+            assert!(!label.is_empty());
+        }
+    }
 }
 
 #[cfg(test)]
