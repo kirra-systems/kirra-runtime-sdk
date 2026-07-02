@@ -54,6 +54,16 @@ const ACCEL: f64 = 1.2;
 const TRANSITION_M: f64 = 12.0;
 /// Teacher proximity margin (m) — see v1's `MARGIN` rationale.
 const MARGIN: f64 = 10.0;
+/// Collision-grade proximity for the teacher (m) = the CHECKER'S RSS
+/// lateral-alignment band (the 4 m band v1's ±4.5 offsets were chosen to
+/// clear — see `learned.rs` `LATERAL_OFFSETS`). A candidate whose path comes
+/// within this of an object is scored like a collision, because the checker
+/// MRCs a pass inside the band: teaching a 3.3 m "pass" as acceptable trains a
+/// net whose plans the checker rejects (found by the artifact admissibility
+/// gate after the clearance fix — in a 5 m-half-width corridor the admissible
+/// pass window (>4.0 RSS laterally, corner-fit containment) is EMPTY, and the
+/// correct behavior is braking).
+const TEACHER_UNSAFE_GAP_M: f64 = 4.0;
 /// Per-metre teacher cost of a candidate's terminal lateral offset (both
 /// teachers — progress alone is blind to lateral wandering).
 const OFFSET_COST_PER_M: f64 = 0.03;
@@ -64,9 +74,24 @@ const OFFSET_COST_PER_M: f64 = 0.03;
 /// ordering salient without letting progress outbid a collision (−5) or a
 /// containment breach (−5).
 const PROGRESS_GAIN: f64 = 2.0;
-/// Half-vehicle lateral margin the teacher's containment term reserves: a pass
-/// offset must fit inside the corridor clearance minus this.
-const VEHICLE_HALF_WIDTH_M: f64 = 1.2;
+// Checker-containment mirror (`kirra_core::containment::footprint_corners` +
+// the urban profile in `kirra_trajectory`'s `VehicleConfig::default_urban`).
+// The checker's pose sits at the REAR AXLE, so a mid-transition heading swing
+// sweeps the front corners laterally by up to `TEACHER_FRONT_LEVER_M·sin(h)` —
+// a 3.3 m swerve peaks at ~0.35 rad and puts the front corner ~1.26 m outside
+// its own centerline, inside the checker's 0.40 m boundary margin. A teacher
+// that models the vehicle as a static half-width labels those swerves "free"
+// and distills a net whose picks the checker MRCs (found by the M-1 artifact
+// admissibility gate — the third checker-teaches-the-teacher fix, after the
+// clearance and RSS-band ones).
+/// `default_urban` half width (m).
+const TEACHER_HALF_WIDTH_M: f64 = 0.925;
+/// Rear axle → front corner lever (m): wheelbase 2.8 + front overhang 0.9.
+const TEACHER_FRONT_LEVER_M: f64 = 3.7;
+/// Rear axle → rear corner lever (m): rear overhang.
+const TEACHER_REAR_LEVER_M: f64 = 1.1;
+/// The checker's `CONTAINMENT_LATERAL_MARGIN_M` (Trusted frame).
+const TEACHER_CONTAINMENT_MARGIN_M: f64 = 0.40;
 
 // ---------------------------------------------------------------------------
 // Config: the vocabulary grid + the net shape
@@ -213,19 +238,48 @@ impl SceneV2 {
 
 /// Lateral clearance to the corridor boundaries over a forward window
 /// `[ego_x, ego_x + 40 m]` — the most conservative (narrowest) point governs.
-/// An empty/degenerate boundary reads as zero clearance (fail-safe: the encoder
-/// tells the net there is no room, never phantom room).
+///
+/// Evaluates polyline SEGMENTS clipped to the window, not vertices: a sparse
+/// boundary (e.g. a 2-point straight line spanning the whole road) has no
+/// vertex inside the window yet absolutely bounds it — vertex filtering read
+/// such a corridor as ZERO clearance and degenerated the teacher's containment
+/// term to "penalize everything" (found by the artifact-gate probe). A boundary
+/// with NO segment overlapping the window still reads as zero clearance
+/// (fail-safe: no evidence of room is not room).
 fn corridor_clearance(map: &dyn CorridorSource, ego_x: f64, ego_y: f64) -> (f64, f64) {
-    let window = |pts: &[kirra_core::corridor::Point]| -> Vec<f64> {
-        pts.iter()
-            .filter(|p| p.x_m >= ego_x && p.x_m <= ego_x + 40.0)
-            .map(|p| p.y_m)
-            .collect()
+    let (x0, x1) = (ego_x, ego_x + 40.0);
+    // Candidate boundary-y values over the window: for each overlapping segment,
+    // the linear extremes are at the clipped endpoints; a (near-)vertical
+    // segment contributes both endpoint ys (conservative in both directions).
+    let window_ys = |pts: &[kirra_core::corridor::Point]| -> Vec<f64> {
+        let mut ys = Vec::new();
+        for seg in pts.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let (sx0, sx1) = if a.x_m <= b.x_m { (a.x_m, b.x_m) } else { (b.x_m, a.x_m) };
+            let lo = sx0.max(x0);
+            let hi = sx1.min(x1);
+            if lo > hi {
+                continue;
+            }
+            if (b.x_m - a.x_m).abs() < 1e-9 {
+                ys.push(a.y_m);
+                ys.push(b.y_m);
+            } else {
+                let y_at = |x: f64| a.y_m + (b.y_m - a.y_m) * (x - a.x_m) / (b.x_m - a.x_m);
+                ys.push(y_at(lo));
+                ys.push(y_at(hi));
+            }
+        }
+        ys
     };
-    let left_ys = window(map.left_boundary());
-    let right_ys = window(map.right_boundary());
-    let left = left_ys.iter().copied().fold(f64::INFINITY, f64::min) - ego_y;
-    let right = ego_y - right_ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let left = window_ys(map.left_boundary())
+        .into_iter()
+        .fold(f64::INFINITY, f64::min)
+        - ego_y;
+    let right = ego_y
+        - window_ys(map.right_boundary())
+            .into_iter()
+            .fold(f64::NEG_INFINITY, f64::max);
     let clamp = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
     (clamp(left), clamp(right))
 }
@@ -307,7 +361,7 @@ fn teacher_score_v2(s: &SceneV2, cfg: &ScorerConfigV2, c: usize, teacher: Teache
                     .fold(f64::MAX, f64::min)
             })
             .fold(f64::MAX, f64::min);
-        if min_gap < 1.5 {
+        if min_gap < TEACHER_UNSAFE_GAP_M {
             -5.0
         } else if min_gap < MARGIN {
             -(1.0 - min_gap / MARGIN)
@@ -318,19 +372,32 @@ fn teacher_score_v2(s: &SceneV2, cfg: &ScorerConfigV2, c: usize, teacher: Teache
         0.0
     };
 
-    // Corridor-containment term (BOTH teachers — feasibility, not alignment): a
-    // lateral pass is only free where the corridor has room for it. A candidate
-    // whose offset exceeds the available clearance minus a half-vehicle margin
-    // is scored like a collision — the checker would reject it on containment,
-    // and a teacher that ignores that trains a net whose "safe" swerves are
-    // inadmissible (found by the M-1 drop-in test, fixed here).
-    let clearance = if offset > 0.0 { s.left_clear } else { s.right_clear };
-    let containment = if offset.abs() > (clearance - VEHICLE_HALF_WIDTH_M).max(0.0) && offset != 0.0
-    {
-        -5.0
-    } else {
-        0.0
-    };
+    // Corridor-containment term (BOTH teachers — feasibility, not alignment):
+    // the CHECKER'S corner geometry over the materialized trajectory. For each
+    // pose, the four footprint corners' lateral positions (rear-axle pose +
+    // heading rotation, mirroring `footprint_corners`) must clear each boundary
+    // by the checker's margin; a breach is scored like a collision, because the
+    // checker MRCs it on containment. A static-half-width model here labeled
+    // heading-swung swerves "free" and distilled a checker-refused net (found
+    // by the M-1 artifact admissibility gate, fixed here).
+    let mut max_left = f64::MIN;
+    let mut max_right = f64::MIN;
+    for p in &traj {
+        let (sin_h, cos_h) = p.pose.heading_rad.sin_cos();
+        for (xb, yb) in [
+            (TEACHER_FRONT_LEVER_M, TEACHER_HALF_WIDTH_M),
+            (TEACHER_FRONT_LEVER_M, -TEACHER_HALF_WIDTH_M),
+            (-TEACHER_REAR_LEVER_M, TEACHER_HALF_WIDTH_M),
+            (-TEACHER_REAR_LEVER_M, -TEACHER_HALF_WIDTH_M),
+        ] {
+            let corner_y = (p.pose.y_m - s.ego_y) + xb * sin_h + yb * cos_h;
+            max_left = max_left.max(corner_y);
+            max_right = max_right.max(-corner_y);
+        }
+    }
+    let breach = max_left > s.left_clear - TEACHER_CONTAINMENT_MARGIN_M
+        || max_right > s.right_clear - TEACHER_CONTAINMENT_MARGIN_M;
+    let containment = if breach { -5.0 } else { 0.0 };
 
     PROGRESS_GAIN * progress + hazard + containment - OFFSET_COST_PER_M * offset.abs()
 }
@@ -483,6 +550,14 @@ impl TrainConfigV2 {
     pub fn reduced(seed: u64) -> Self {
         Self { seed, scenes: 320, epochs: 420, batch: 16, lr: 0.02, momentum: 0.9 }
     }
+
+    /// The OFFLINE full-size schedule for [`ScorerConfigV2::full`] — minutes on
+    /// a release build; run by `examples/train_v2.rs`, never at test time. CI
+    /// gates the resulting checked-in artifact's BEHAVIOR, not its training.
+    #[must_use]
+    pub fn full(seed: u64) -> Self {
+        Self { seed, scenes: 4000, epochs: 240, batch: 32, lr: 0.01, momentum: 0.9 }
+    }
 }
 
 /// One synthetic training scene: ego on the corridor centerline, goal ahead,
@@ -621,6 +696,207 @@ fn argmax(v: &[f64]) -> usize {
         }
     }
     best
+}
+
+/// The candidate the TEACHER would pick for `input` — the distillation oracle's
+/// own argmax, exposed so behavior gates can measure teacher-agreement on
+/// held-out scenes (the loaded artifact must still think like its teacher).
+#[must_use]
+pub fn teacher_choice(cfg: &ScorerConfigV2, input: &PlanInput, teacher: Teacher) -> usize {
+    let scene = SceneV2::from_input(input);
+    let scores: Vec<f64> =
+        (0..cfg.vocab_size()).map(|c| teacher_score_v2(&scene, cfg, c, teacher)).collect();
+    argmax(&scores)
+}
+
+/// The TEACHER'S score for one candidate on `input` — the oracle the behavior
+/// gates measure REGRET against: with a large vocabulary the teacher's top-1
+/// sits on near-tie plateaus (adjacent grid candidates differ by ~1e-2 while a
+/// distilled net's regression error is ~1e-1), so exact-argmax agreement is the
+/// wrong gate; "the net's pick costs ≤ ε by the teacher's own scoring" is the
+/// robust one.
+#[must_use]
+pub fn teacher_candidate_score(
+    cfg: &ScorerConfigV2,
+    input: &PlanInput,
+    candidate: usize,
+    teacher: Teacher,
+) -> f64 {
+    teacher_score_v2(&SceneV2::from_input(input), cfg, candidate, teacher)
+}
+
+// ---------------------------------------------------------------------------
+// The weights artifact (scope §2 M-1): versioned, self-describing, fail-closed
+// ---------------------------------------------------------------------------
+
+/// Artifact magic — 8 bytes at offset 0.
+const WEIGHTS_MAGIC: &[u8; 8] = b"KIRRAMV2";
+/// Current artifact format version.
+const WEIGHTS_VERSION: u32 = 1;
+
+/// Why a weights artifact failed to load. Fail-closed: any structural doubt is
+/// an error, never a silently-different model.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WeightsError {
+    BadMagic,
+    UnsupportedVersion(u32),
+    BadTeacherTag(u8),
+    Truncated(&'static str),
+    /// Bytes remain after the declared layout — a length mismatch is corruption.
+    TrailingBytes(usize),
+    /// A declared dimension is implausible (zero, or absurdly large).
+    BadDims(&'static str),
+}
+
+impl std::fmt::Display for WeightsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadMagic => write!(f, "not a KIRRAMV2 weights artifact (bad magic)"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported weights version {v}"),
+            Self::BadTeacherTag(t) => write!(f, "unknown teacher tag {t}"),
+            Self::Truncated(what) => write!(f, "artifact truncated reading {what}"),
+            Self::TrailingBytes(n) => write!(f, "{n} trailing bytes after the declared layout"),
+            Self::BadDims(what) => write!(f, "implausible dimension: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for WeightsError {}
+
+/// Upper bound sanity for any declared count in the header (offsets, speeds,
+/// hidden widths). Far above any real config; a fail-closed guard against a
+/// corrupt length field allocating gigabytes.
+const MAX_DECLARED: u32 = 65_536;
+
+struct Cursor<'a> {
+    buf: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize, what: &'static str) -> Result<&'a [u8], WeightsError> {
+        let end = self.at.checked_add(n).ok_or(WeightsError::Truncated(what))?;
+        if end > self.buf.len() {
+            return Err(WeightsError::Truncated(what));
+        }
+        let s = &self.buf[self.at..end];
+        self.at = end;
+        Ok(s)
+    }
+    fn u32(&mut self, what: &'static str) -> Result<u32, WeightsError> {
+        Ok(u32::from_le_bytes(self.take(4, what)?.try_into().expect("4 bytes")))
+    }
+    fn f64(&mut self, what: &'static str) -> Result<f64, WeightsError> {
+        Ok(f64::from_le_bytes(self.take(8, what)?.try_into().expect("8 bytes")))
+    }
+    fn f32(&mut self, what: &'static str) -> Result<f32, WeightsError> {
+        Ok(f32::from_le_bytes(self.take(4, what)?.try_into().expect("4 bytes")))
+    }
+    fn counted(&mut self, what: &'static str) -> Result<usize, WeightsError> {
+        let n = self.u32(what)?;
+        if n == 0 || n > MAX_DECLARED {
+            return Err(WeightsError::BadDims(what));
+        }
+        Ok(n as usize)
+    }
+}
+
+impl LearnedPlannerV2 {
+    /// Serialize to the versioned artifact format: an 8-byte magic, version,
+    /// teacher tag, the SELF-DESCRIBING config (hidden dims + vocabulary grid,
+    /// `f64`), then per-layer weights and biases as `f32` little-endian (the
+    /// storage precision of the artifact — loading widens exactly, so the
+    /// loaded model is a pure function of the bytes).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(WEIGHTS_MAGIC);
+        out.extend_from_slice(&WEIGHTS_VERSION.to_le_bytes());
+        out.push(match self.teacher {
+            Teacher::SafetyAware => 0u8,
+            Teacher::ProgressOnly => 1u8,
+        });
+        // Fail-closed mirror of `Cursor::counted`: a count the parser would
+        // reject (0, > MAX_DECLARED, or a usize that would truncate to u32)
+        // must panic here, never be silently written into the artifact.
+        let put_u32 = |out: &mut Vec<u8>, v: usize| {
+            let v = u32::try_from(v).expect("weights artifact count must fit in u32");
+            assert!(
+                (1..=MAX_DECLARED).contains(&v),
+                "weights artifact count {v} outside the parser's accepted 1..=MAX_DECLARED"
+            );
+            out.extend_from_slice(&v.to_le_bytes());
+        };
+        put_u32(&mut out, self.cfg.hidden.len());
+        for &h in &self.cfg.hidden {
+            put_u32(&mut out, h);
+        }
+        put_u32(&mut out, self.cfg.lateral_offsets.len());
+        for &o in &self.cfg.lateral_offsets {
+            out.extend_from_slice(&o.to_le_bytes());
+        }
+        put_u32(&mut out, self.cfg.speed_targets.len());
+        for &s in &self.cfg.speed_targets {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        for layer in &self.scorer.layers {
+            for &w in &layer.w {
+                out.extend_from_slice(&(w as f32).to_le_bytes());
+            }
+            for &b in &layer.b {
+                out.extend_from_slice(&(b as f32).to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Parse a weights artifact — fail-closed on bad magic/version/teacher,
+    /// truncation, implausible dims, or trailing bytes. The loaded model is a
+    /// pure function of the bytes (`f32` storage widened to the `f64` runtime).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, WeightsError> {
+        let mut c = Cursor { buf: bytes, at: 0 };
+        if c.take(8, "magic")? != WEIGHTS_MAGIC {
+            return Err(WeightsError::BadMagic);
+        }
+        let version = c.u32("version")?;
+        if version != WEIGHTS_VERSION {
+            return Err(WeightsError::UnsupportedVersion(version));
+        }
+        let teacher = match c.take(1, "teacher tag")?[0] {
+            0 => Teacher::SafetyAware,
+            1 => Teacher::ProgressOnly,
+            t => return Err(WeightsError::BadTeacherTag(t)),
+        };
+        let n_hidden = c.counted("hidden-layer count")?;
+        let hidden: Vec<usize> = (0..n_hidden)
+            .map(|_| c.counted("hidden width"))
+            .collect::<Result<_, _>>()?;
+        let n_off = c.counted("offset count")?;
+        let lateral_offsets: Vec<f64> =
+            (0..n_off).map(|_| c.f64("offset")).collect::<Result<_, _>>()?;
+        let n_spd = c.counted("speed count")?;
+        let speed_targets: Vec<f64> =
+            (0..n_spd).map(|_| c.f64("speed")).collect::<Result<_, _>>()?;
+        let cfg = ScorerConfigV2 { hidden, lateral_offsets, speed_targets };
+
+        let dims = cfg.dims();
+        let layers = dims
+            .windows(2)
+            .map(|d| {
+                let (i, o) = (d[0], d[1]);
+                let w: Vec<f64> = (0..o * i)
+                    .map(|_| c.f32("weight").map(f64::from))
+                    .collect::<Result<_, _>>()?;
+                let b: Vec<f64> =
+                    (0..o).map(|_| c.f32("bias").map(f64::from)).collect::<Result<_, _>>()?;
+                Ok(LayerV2 { w, b, in_dim: i, out_dim: o })
+            })
+            .collect::<Result<Vec<_>, WeightsError>>()?;
+        if c.at != bytes.len() {
+            return Err(WeightsError::TrailingBytes(bytes.len() - c.at));
+        }
+        Ok(Self { scorer: MlpV2 { layers }, cfg, teacher })
+    }
 }
 
 impl ScoredPlanner for LearnedPlannerV2 {
@@ -853,6 +1129,83 @@ mod tests {
             (100_000..200_000).contains(&params),
             "full model is ~140k params, got {params}"
         );
+    }
+
+    /// The artifact is a pure function of the bytes: save→load→save is
+    /// byte-identical (weights land exactly on the f32 storage grid), and the
+    /// loaded planner scores deterministically.
+    #[test]
+    fn weights_round_trip_is_byte_stable() {
+        let cfg = ScorerConfigV2::reduced();
+        let (p, _) = train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+        let bytes = p.to_bytes();
+        let loaded = LearnedPlannerV2::from_bytes(&bytes).expect("valid artifact");
+        assert_eq!(loaded.teacher(), Teacher::SafetyAware);
+        assert_eq!(loaded.config(), &cfg);
+        assert_eq!(loaded.to_bytes(), bytes, "save→load→save byte-identical");
+
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let objs = [stopped_car(20.0)];
+        let w = world(&corr, &objs);
+        // The loaded (f32-grid) net is close to the trained f64 net — same argmax
+        // on the probe (f32 rounding is the artifact's storage precision).
+        assert_eq!(loaded.chosen_index(&w), p.chosen_index(&w));
+    }
+
+    #[test]
+    fn weights_parse_fails_closed() {
+        let cfg = ScorerConfigV2::reduced();
+        let (p, _) = train_planner_v2(
+            &cfg,
+            &TrainConfigV2 { epochs: 1, ..TrainConfigV2::reduced(SEED) },
+            Teacher::SafetyAware,
+        );
+        let good = p.to_bytes();
+
+        // Bad magic.
+        let mut bad = good.clone();
+        bad[0] ^= 0xFF;
+        assert!(matches!(LearnedPlannerV2::from_bytes(&bad), Err(WeightsError::BadMagic)));
+        // Unsupported version.
+        let mut bad = good.clone();
+        bad[8] = 99;
+        assert!(matches!(
+            LearnedPlannerV2::from_bytes(&bad),
+            Err(WeightsError::UnsupportedVersion(_))
+        ));
+        // Bad teacher tag.
+        let mut bad = good.clone();
+        bad[12] = 7;
+        assert!(matches!(
+            LearnedPlannerV2::from_bytes(&bad),
+            Err(WeightsError::BadTeacherTag(7))
+        ));
+        // Truncation (drop the last byte).
+        assert!(matches!(
+            LearnedPlannerV2::from_bytes(&good[..good.len() - 1]),
+            Err(WeightsError::Truncated(_))
+        ));
+        // Trailing bytes (append one).
+        let mut bad = good.clone();
+        bad.push(0);
+        assert!(matches!(
+            LearnedPlannerV2::from_bytes(&bad),
+            Err(WeightsError::TrailingBytes(1))
+        ));
+    }
+
+    /// Regression (artifact-gate probe finding): a SPARSE boundary polyline — the
+    /// 2-vertex straight MockCorridorSource — must read its true clearance, not
+    /// zero (vertex-filtering saw no vertex in the window and fail-safed to 0,
+    /// which degenerated the teacher's containment term to penalize everything).
+    #[test]
+    fn sparse_straight_boundary_reads_true_clearance() {
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let w = world(&corr, &[]);
+        let scene_features = featurize_v2(&SceneV2::from_input(&w));
+        // Feature layout: [3] = left_clear/5, [4] = right_clear/5 → both 1.0.
+        assert_eq!(scene_features[3], 1.0, "left clearance 5 m from a 2-vertex boundary");
+        assert_eq!(scene_features[4], 1.0, "right clearance 5 m from a 2-vertex boundary");
     }
 
     #[test]

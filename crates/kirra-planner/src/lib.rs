@@ -94,7 +94,8 @@ pub use learned::{
 // in-Rust SGD backprop (gradient-checked). Same ScoredPlanner seam as v1.
 pub mod learned_v2;
 pub use learned_v2::{
-    train_planner_v2, LearnedPlannerV2, ScorerConfigV2, TrainConfigV2, FEATURE_DIM_V2,
+    teacher_candidate_score, teacher_choice, train_planner_v2, LearnedPlannerV2, ScorerConfigV2, TrainConfigV2,
+    WeightsError, FEATURE_DIM_V2,
 };
 
 /// Fast-loop trajectory tracker — the System-1 conformance side of the dual-rate loop, which
