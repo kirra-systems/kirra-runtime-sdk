@@ -191,6 +191,9 @@ is absent, never silently passed). Reuses the existing bench scaffolding.
   / robotaxi)?
 - Is `LearnedManeuverPlanner` (2-D vocabulary) more quantization-sensitive than the
   speed-only planner? (Likely yes — argmax over a bigger space; may need QAT first.)
+  → Being answered at real scale by the **M-lane** doer scale-up
+  (`DOER_MODEL_SCALEUP.md`: ~256-way vocabulary, ~140k-param scorer, same
+  pipeline re-measured).
 - Do we want a fast-loop/slow-loop *split* precision (INT8 fast-loop, FP16
   slow-loop), or one precision per model?
 - Calibration-artifact provenance: where stored, how versioned/signed alongside the
