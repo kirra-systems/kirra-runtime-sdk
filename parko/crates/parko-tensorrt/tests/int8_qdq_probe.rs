@@ -28,13 +28,19 @@ fn require_ep() -> bool {
         .unwrap_or(false)
 }
 
-/// The checked-in QDQ artifact, relative to this crate (tests run with CWD =
-/// the crate dir); env-overridable for out-of-tree artifacts.
+/// The checked-in QDQ artifact, resolved from this crate's manifest dir (robust
+/// to the invoker's CWD — workspace root, IDE runner, …); env-overridable for
+/// out-of-tree artifacts.
 fn qdq_model_path() -> String {
     std::env::var("KIRRA_PLANNER_QDQ_ONNX")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "../../../artifacts/doer-eval/planner_int8_qdq.onnx".to_string())
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../artifacts/doer-eval/planner_int8_qdq.onnx")
+                .to_string_lossy()
+                .into_owned()
+        })
 }
 
 /// Under the Int8Qdq posture on a TensorRT-enabled ORT, the exported QDQ planner
