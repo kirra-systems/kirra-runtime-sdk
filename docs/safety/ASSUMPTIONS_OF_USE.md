@@ -55,6 +55,9 @@ the verification passes for the target deployment.
 | AOU-HW-QNX-TARGET-001 | The QNX-resident safety partition and its **certified-WCET** evidence run on an NVIDIA **DRIVE** platform (DRIVE AGX Orin / DRIVE AGX Thor) running DRIVE OS + QNX OS for Safety — **NOT** a Jetson module (Orin NX / AGX Orin / Jetson Thor), which runs L4T/Linux and which NVIDIA does **not** support QNX on | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate; vendor-fixed (informational) | the QNX-target WCET / FTTI claim (`TBD-QNX-TARGET`, #274); the EPIC #270 QNX safety-partition lane; ADR `KIRRA_QNX_CROSSCOMPILE` aarch64 path |
 | AOU-PLATFORM-GEOMETRY-001 | A non-Ackermann platform deployed behind the `PlatformKinematics` abstraction supplies a footprint and kinematic limits (via its impl) that MATCH the physical platform; for a platform using the center-convention `VehicleFootprint` (`wheelbase_m = 0`, symmetric overhangs), the supplied pose is the **geometric center** | Integrator (platform) | **AoU** (by design) — abstraction + SG2 seam IMPLEMENTED and dual-platform-PROVEN (S-PK1a/b/c, ADR-0027); a live non-Ackermann **deployment** is **DEPLOYMENT-PENDING** (integrator wires a node consuming `validate_platform_containment` + supplies verified geometry/limits). The Ackermann path is unchanged/ENFORCED | SG2 drivable-space containment for any platform via `validate_platform_containment` (`crates/kirra-core/src/platform_kinematics.rs`); the per-platform envelope (`evaluate`) + RSS stay platform-specific |
 | AOU-TRANSPORT-TLS-001 | The verifier HTTP API (admin token + mutation routes) is reached only over a TLS-terminated / encrypted transport; plaintext exposure beyond a trusted cluster-internal path is prohibited | Integrator (deployment / platform) | **AoU** (by design) — chart fail-closed guard + TLS Ingress live (H-1); cert/issuer integrator-supplied | the confidentiality of `KIRRA_ADMIN_TOKEN` (Tier-2 Bearer auth) and the integrity of all mutation routes — `constant_time_compare` defends the comparison, not the wire |
+| AOU-HV-CLOCK-001 | The hypervisor provides the **boundary clock domain** (HVCHAN §5, R-HV-3): one shared, monotonic time source readable identically from the guest and governor partitions, with a **bounded max cross-partition skew** (bound: **VALIDATION-PENDING**, set with the FTTI budget on hypervisor hardware) | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the concrete QNX primitive + skew figure are #274/#278 target work | every governor deadline/staleness verdict (`validate` `now > deadline`, HVCHAN §3); the §4 `clock skew beyond bound` fail-closed backstop. Distinct from AOU-TIMESYNC-001 (that binds the integrator's *timestamps*; this binds the *clock source*) |
+| AOU-HV-ROMAP-001 | The hypervisor maps the contract region **read-only into the governor partition** (HVCHAN R-HV-1): the governor cannot write it, and no guest action can induce a governor-side write; verified at hypervisor-configuration level | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; the software mirrors (`PosixShmReader` `PROT_READ` + no-`ContractWriter`-impl) are defense-in-depth, **not** the discharge | the one-way trust direction of the whole Clause-2 channel; `HV_FAULT_CAMPAIGN.md` row HV-R1 |
+| AOU-HV-SCHED-001 | The hypervisor grants the governor partition a **CPU scheduling guarantee independent of guest behavior** (HVCHAN R-HV-4): a guest CPU flood or starve-then-burst cannot delay the governor's bounded snapshot→validate→decide path beyond its FTTI allocation | Integrator (hypervisor / platform) | **AoU-GAP** — Phase-II hypervisor gate; tested by the `HV_FAULT_CAMPAIGN.md` HV-S* rows (a flood absorbed only by judge speed is a FINDING, per the #279 attribution rule) | the `publisher silent` liveness row (§4) and the verdict-latency half of FTTI — without it, guest misbehavior converts into governor latency, the interference FFI forbids |
 
 ---
 
@@ -1130,3 +1133,138 @@ control plane, not a single route.
 - `docs/ros2_interlock.md` (interceptor token-over-TLS note).
 - Route auth matrix: `CLAUDE.md` / `docs/v1_route_authorization_matrix.md`
   (Tier-1 / Tier-2 routes that carry the token).
+
+---
+
+## AOU-HV-CLOCK-001 — Hypervisor boundary-clock provision (shared monotonic source, bounded skew)
+
+### Assumption
+> *The hypervisor shall provide the boundary clock domain (HVCHAN §5, R-HV-3): a
+> single shared, monotonic time source readable identically from the guest and
+> governor partitions, with a bounded maximum cross-partition skew (bound:
+> **VALIDATION-PENDING** — fixed with the FTTI budget on hypervisor hardware,
+> #274/#278).*
+
+### Why it is load-bearing
+Every deadline/staleness verdict the governor issues is `now > deadline ⇒ reject`
+(HVCHAN §3 step 4; `kirra_contract_channel::validate`). `deadline_nanos` is
+written by the guest, `now` is read by the governor — the comparison is only
+meaningful if **both partitions read the same monotonic clock** within a known
+skew. A skew beyond bound silently converts into deadline error: stale commands
+admitted as fresh (skew one way) or fresh commands spuriously rejected into MRC
+(the other way). This is the **provision half** of the two-clock-domain model;
+the **conversion half** (integrator timestamps) is AOU-TIMESYNC-001, filed
+separately — the two discharge different obligations by different owners.
+
+### Evidence / consuming mechanisms
+- `HYPERVISOR_CONTRACT_CHANNEL.md` §5 **R-HV-3** — the domain model (decided) and
+  the primitive (target work); §4 `clock skew beyond bound` — the fail-closed
+  backstop for gross violations.
+- `kirra_contract_channel::validate` — the deadline check that consumes it.
+- ADR-0031 Clause A — the verdict/actuation budget split this clock underpins.
+
+### Scope
+- **In scope:** the shared monotonic source itself — its existence, guest
+  visibility mechanism, monotonicity, and bounded cross-partition skew; the
+  measured **read cost** (it sits on the governor validation path's WCET, #274).
+- **Owner:** Integrator (hypervisor / platform). KIRRA consumes the clock; it
+  cannot create it.
+- **Out of scope:** integrator sensor-timestamp synchronization/conversion
+  (AOU-TIMESYNC-001); system-timing (PTP/wall) uses off the validation path.
+
+### Verification status — **AoU-GAP** (Phase-II hypervisor gate)
+Not dischargeable on the Phase-I evidence platform (QNX OS VM — no partitions,
+one kernel clock). Discharged on hypervisor hardware by (a) identifying the
+concrete QNX Hypervisor clock primitive, (b) demonstrating identical guest/
+governor readability, (c) measuring the skew bound and the read cost, and (d)
+folding both into the FTTI budget (#274/#278). Until then the §4 skew/deadline
+rows are the runtime backstops (gross, not subtle — same honesty note as
+AOU-TIMESYNC-001).
+
+---
+
+## AOU-HV-ROMAP-001 — Read-only governor mapping of the contract region (R-HV-1)
+
+### Assumption
+> *The hypervisor configuration shall map the contract region **read-only** into
+> the governor partition: the governor cannot write the region, and no guest
+> action can induce a governor-side write. Verified at the hypervisor-
+> configuration level, not assumed from software behavior.*
+
+### Why it is load-bearing
+The Clause-2 channel's trust argument is **one-directional**: the guest writes,
+the governor validates a local snapshot and never trusts — or touches — the
+shared bytes. A writable governor mapping breaks that direction: a fault (or
+compromise) on the governor side could fabricate "guest" input, corrupt the
+region mid-read for its own snapshot loop, or mask a guest fault — undermining
+both the validation claim and the #279 attribution taxonomy (which layer owns
+which fault).
+
+### Evidence / consuming mechanisms
+- `HYPERVISOR_CONTRACT_CHANNEL.md` §5 **R-HV-1**; §2.3 (writer/checker roles).
+- **Software mirrors (defense-in-depth, NOT the discharge):** the host carrier
+  already enforces the shape twice — `kirra_hv_carrier::PosixShmReader` maps
+  `PROT_READ` (OS level) and implements no `ContractWriter` (type level); the
+  Phase-I harness ran the governor exclusively on that read-only mapping. These
+  demonstrate the *software* never needs a writable mapping; only the hypervisor
+  config makes it *impossible*.
+- `HV_FAULT_CAMPAIGN.md` row **HV-R1** — the config-violation probe.
+
+### Scope
+- **In scope:** the hypervisor memory-map configuration for the contract region
+  (guest RW, governor RO), and its verification as a checkable precondition.
+- **Owner:** Integrator (hypervisor / platform).
+- **Out of scope:** in-partition memory protection (the guest's own hygiene) and
+  the region's size/alignment (R-HV-2, enforced by the carrier's fstat guard +
+  freeze assertions).
+
+### Verification status — **AoU-GAP** (Phase-II hypervisor gate)
+Not dischargeable on Phase-I (POSIX SHM offers `PROT_READ`, but a same-kernel
+process with credentials could remap; only a hypervisor makes the RO mapping a
+partition-level invariant). Discharged by hypervisor-config review + the
+HV-R1 campaign row (an attempted governor-side write must fault at the
+hypervisor, not merely be absent from the software).
+
+---
+
+## AOU-HV-SCHED-001 — Governor-partition scheduling guarantee independent of guest behavior (R-HV-4)
+
+### Assumption
+> *The hypervisor shall grant the governor partition a CPU scheduling guarantee
+> sufficient to complete its bounded snapshot → validate → decide (and, when
+> actuatable, token-issue) path within its FTTI allocation **regardless of guest
+> CPU behavior** — a guest flood or starve-then-burst shall not delay it.*
+
+### Why it is load-bearing
+The FTTI decomposition (`verdict_WCET + actuation_latency < control_cycle`,
+ADR-0031 Clause A) presumes the governor actually gets scheduled. Without a
+partition-level guarantee, a compromised or merely busy guest converts its CPU
+consumption into governor latency — the precise interference that
+freedom-from-interference (ADR-0004/0020) forbids, arriving through the
+scheduler rather than through memory. The §4 `publisher silent` row catches a
+guest that stops *publishing*; only R-HV-4 catches a guest that keeps publishing
+while starving the *governor*.
+
+### Evidence / consuming mechanisms
+- `HYPERVISOR_CONTRACT_CHANNEL.md` §5 **R-HV-4**; §4 `publisher silent` row
+  (SG-003 liveness posture) — the complementary barrier.
+- The Phase-I timing baseline (PR #766 results): the governor path is ~1.1 µs
+  p99.9 under FIFO **when scheduled** — R-HV-4 is what makes "when scheduled" a
+  guarantee rather than a hope.
+- `HV_FAULT_CAMPAIGN.md` rows **HV-S1/HV-S2** — flood and starve-then-burst.
+- **Attribution rule (#279, normative here):** a flood absorbed only because the
+  judge is fast is a **finding against the hypervisor config**, not a pass.
+
+### Scope
+- **In scope:** the hypervisor's CPU budget/priority configuration for the
+  governor partition and its independence from guest load.
+- **Owner:** Integrator (hypervisor / platform).
+- **Out of scope:** in-partition thread scheduling (the governor's own FIFO
+  discipline — measured in Phase-I) and the guest's internal QoS.
+
+### Verification status — **AoU-GAP** (Phase-II hypervisor gate)
+Not dischargeable on Phase-I (one kernel, no partitions — SCHED_FIFO inside one
+OS is not a partition guarantee). Discharged by hypervisor scheduling
+configuration + the HV-S1/HV-S2 campaign rows measuring governor-path latency
+percentiles UNDER guest flood/starve-burst, against the same budgets the
+Phase-I baseline established unloaded.

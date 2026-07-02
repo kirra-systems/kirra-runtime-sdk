@@ -344,14 +344,16 @@ safety argument leans on. They become the **hypervisor-config checklist** that
     drift-bounded against the boundary domain, and **converted to it before
     publication** (the §5 R-HV-3 non-mixing rule). This is the integrator half of
     the resolved two-domain model.
-  - **Integrator / hypervisor clock provision — *NOT filed yet*.** The boundary
-    domain *itself*: a hypervisor-provided shared monotonic source with a bounded
-    max skew across partitions (R-HV-3). The domain model is decided (§5); the
-    concrete clock **primitive** + its bounded-skew figure are **target work
-    (#274/#278)**, to be filed as its own register entry when resolved on target.
-    Distinct from `AOU-TIMESYNC-001`: that one binds the integrator's *timestamps*;
-    this one binds the hypervisor's *clock source*.
-  - **Hypervisor partition-scheduling guarantee** — the governor-partition CPU
-    guarantee independent of guest behavior (R-HV-4). *(NOT filed yet.)*
-  - **Read-only-mapping enforcement** — the hypervisor config that makes R-HV-1
-    a checkable precondition. *(NOT filed yet.)*
+  - **Integrator / hypervisor clock provision — FILED as `AOU-HV-CLOCK-001`**
+    (`ASSUMPTIONS_OF_USE.md`). The boundary domain *itself*: a hypervisor-provided
+    shared monotonic source with a bounded max skew across partitions (R-HV-3).
+    The domain model is decided (§5); the concrete clock **primitive** + its
+    bounded-skew figure remain **target work (#274/#278)** — the entry carries the
+    bound as VALIDATION-PENDING. Distinct from `AOU-TIMESYNC-001`: that one binds
+    the integrator's *timestamps*; this one binds the hypervisor's *clock source*.
+  - **Hypervisor partition-scheduling guarantee — FILED as `AOU-HV-SCHED-001`** —
+    the governor-partition CPU guarantee independent of guest behavior (R-HV-4);
+    tested by the `HV_FAULT_CAMPAIGN.md` HV-S1/HV-S2 rows.
+  - **Read-only-mapping enforcement — FILED as `AOU-HV-ROMAP-001`** — the
+    hypervisor config that makes R-HV-1 a checkable precondition; probed by the
+    `HV_FAULT_CAMPAIGN.md` HV-R1 row.
