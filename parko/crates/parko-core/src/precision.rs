@@ -123,10 +123,25 @@ impl PrecisionLadder {
         }
     }
 
-    /// Build the ladder from [`KIRRA_PRECISION_LADDER_ENV`].
+    /// Build the ladder from [`KIRRA_PRECISION_LADDER_ENV`]. Fail-closed on a
+    /// present-but-non-UTF-8 value: `.ok()` would silently collapse it to the
+    /// fp32 default, which is exactly the "malformed config selects something
+    /// else" hazard the parse refuses everywhere else.
     pub fn from_env() -> Result<Self, BackendError> {
-        let raw = std::env::var(KIRRA_PRECISION_LADDER_ENV).ok();
-        Self::from_env_value(raw.as_deref())
+        Self::from_env_lookup(std::env::var(KIRRA_PRECISION_LADDER_ENV))
+    }
+
+    /// The env-lookup routing, separated from the env read for testability
+    /// (a non-UTF-8 value cannot be injected without `set_var`, which the
+    /// workspace forbids in tests).
+    fn from_env_lookup(raw: Result<String, std::env::VarError>) -> Result<Self, BackendError> {
+        match raw {
+            Ok(s) => Self::from_env_value(Some(s.as_str())),
+            Err(std::env::VarError::NotPresent) => Self::from_env_value(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(BackendError::InitializationError(
+                format!("{KIRRA_PRECISION_LADDER_ENV} contains non-UTF-8 data (fail-closed)"),
+            )),
+        }
     }
 
     /// The rungs, in walk order (including the appended FP32 anchor, if any).
@@ -244,6 +259,21 @@ mod tests {
             assert_eq!(l.rungs(), &[PrecisionMode::FP32]);
             assert!(!l.fp32_anchored());
         }
+    }
+
+    #[test]
+    fn non_utf8_env_value_fails_closed_not_default() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+        let err = PrecisionLadder::from_env_lookup(Err(std::env::VarError::NotUnicode(bad)))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("non-UTF-8"),
+            "a present-but-non-UTF-8 ladder must be a typed error, never the fp32 default"
+        );
+        // NotPresent still routes to the default (unset ≠ malformed).
+        let l = PrecisionLadder::from_env_lookup(Err(std::env::VarError::NotPresent)).unwrap();
+        assert_eq!(l.rungs(), &[PrecisionMode::FP32]);
     }
 
     #[test]

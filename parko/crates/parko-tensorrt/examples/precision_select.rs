@@ -42,7 +42,9 @@ fn skip_or_refuse(reason: &str) -> ! {
 
 fn main() {
     let dylib = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
-    if dylib.is_empty() || !std::path::Path::new(&dylib).exists() {
+    // `is_file()` (not `exists()`): a directory here is a misconfiguration that
+    // would sail past the guard into ort's panicking dlopen.
+    if dylib.is_empty() || !std::path::Path::new(&dylib).is_file() {
         skip_or_refuse(&format!("no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?})"));
     }
 
@@ -87,6 +89,15 @@ fn main() {
                 ))
             }
         };
+        // A missing artifact is a MISCONFIGURATION, not absent hardware — give it
+        // a distinguishable error so the exhausted-ladder path refuses instead of
+        // skipping (the run-the-export remedy is in the message).
+        if !std::path::Path::new(&model_path).is_file() {
+            return Err(parko_core::backend::BackendError::InitializationError(format!(
+                "artifact missing: {model_path} — run \
+                 `cargo run -p kirra-doer-eval --example export_artifacts` (root workspace)"
+            )));
+        }
         // Distinct engine cache per precision — engines are precision-specific.
         let cache = std::env::temp_dir().join(format!("kirra_precision_select_{rung:?}"));
         let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
@@ -110,6 +121,18 @@ fn main() {
                 backend.engine_sha().unwrap_or("-"),
             );
         }
-        Err(e) => skip_or_refuse(&format!("ladder exhausted: {e}")),
+        Err(e) => {
+            // Only ABSENT HARDWARE is skippable: every rung failing with the TRT
+            // EP's fail-closed registration error (our own marker string from
+            // `TrtBackend::with_config`) means a CPU-only ORT / no GPU — the
+            // documented skip case. Any other exhaustion (missing artifacts, bad
+            // paths) is a misconfiguration and must refuse, never read as skipped.
+            let msg = e.to_string();
+            if msg.contains("TensorRT EP registration failed") {
+                skip_or_refuse(&format!("ladder exhausted — TensorRT EP unavailable: {msg}"));
+            }
+            eprintln!("REFUSED: ladder exhausted for non-EP reasons (misconfiguration): {msg}");
+            std::process::exit(1);
+        }
     }
 }
