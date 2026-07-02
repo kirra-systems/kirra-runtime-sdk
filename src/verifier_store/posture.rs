@@ -161,7 +161,17 @@ impl VerifierStore {
             [],
             |row| row.get::<_, String>(0),
         ) {
-            Ok(s)  => Ok(s.parse::<u64>().unwrap_or(0)),
+            // FAIL-CLOSED parse (#771 review): a present-but-non-numeric value is
+            // CORRUPTION, not a fresh store. The prior `unwrap_or(0)` read it as
+            // "no history", silently reintroducing the restart time-reversal the
+            // boot init exists to prevent. Only a genuinely absent row is 0.
+            Ok(s) => s.parse::<u64>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
             Err(e) => Err(e),
         }
