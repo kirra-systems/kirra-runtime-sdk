@@ -134,13 +134,25 @@ fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
 // The scene the scorer sees + the feature encoding
 // ---------------------------------------------------------------------------
 
-/// One object as the encoder sees it (relative to the ego, demo frame).
+/// One object as the encoder sees it — position AND velocity relative to the
+/// ego (demo frame: ego velocity = `(linear_x_mps, 0)`), so `vx` is the closing
+/// speed (a stopped world-frame car reads `vx = -ego_speed`).
 #[derive(Debug, Clone, Copy)]
 struct SceneObject {
     dx: f64,
     dy: f64,
     vx: f64,
     vy: f64,
+}
+
+/// Slot normalization shared by BOTH the inference extraction and the synthetic
+/// training generator — nearest-ahead first, truncated to [`OBJECT_SLOTS`] — so
+/// slot 0 always means "nearest ahead" in training AND at inference (a silent
+/// train/inference order mismatch materially degrades the learned behavior).
+fn normalize_objects(mut objects: Vec<SceneObject>) -> Vec<SceneObject> {
+    objects.sort_by(|a, b| a.dx.total_cmp(&b.dx));
+    objects.truncate(OBJECT_SLOTS);
+    objects
 }
 
 /// The v2 scene: richer than v1's single-obstacle `Scene` — up to
@@ -164,19 +176,21 @@ impl SceneV2 {
     fn from_input(input: &PlanInput) -> Self {
         let ego = input.ego.pose;
         let (left_clear, right_clear) = corridor_clearance(input.map, ego.x_m, ego.y_m);
-        let mut objects: Vec<SceneObject> = input
-            .objects
-            .iter()
-            .filter(|o| o.pos.x_m > ego.x_m)
-            .map(|o| SceneObject {
-                dx: o.pos.x_m - ego.x_m,
-                dy: o.pos.y_m - ego.y_m,
-                vx: o.vel.x_m,
-                vy: o.vel.y_m,
-            })
-            .collect();
-        objects.sort_by(|a, b| a.dx.total_cmp(&b.dx));
-        objects.truncate(OBJECT_SLOTS);
+        let objects = normalize_objects(
+            input
+                .objects
+                .iter()
+                .filter(|o| o.pos.x_m > ego.x_m)
+                .map(|o| SceneObject {
+                    dx: o.pos.x_m - ego.x_m,
+                    dy: o.pos.y_m - ego.y_m,
+                    // Ego-RELATIVE velocity (closing speed); `PerceivedObject.vel`
+                    // is world-frame, the ego moves at (linear_x_mps, 0) here.
+                    vx: o.vel.x_m - input.ego.linear_x_mps,
+                    vy: o.vel.y_m,
+                })
+                .collect(),
+        );
         Self {
             ego_x: ego.x_m,
             ego_y: ego.y_m,
@@ -468,14 +482,20 @@ impl TrainConfigV2 {
 fn training_scene_v2(rng: &mut Rng) -> SceneV2 {
     let ego_speed = rng.range(0.0, 4.0);
     let n_objects = (rng.unit() * 4.0) as usize; // 0..=3
-    let objects = (0..n_objects)
-        .map(|_| SceneObject {
-            dx: rng.range(8.0, 35.0),
-            dy: rng.range(-4.0, 4.0),
-            vx: rng.range(-1.0, 1.0),
-            vy: rng.range(-0.5, 0.5),
-        })
-        .collect();
+    // Same normalization as the inference path (nearest-ahead first) and the
+    // same EGO-RELATIVE velocity semantics: world-frame object speeds in
+    // [-1, +1] m/s become relative vx in [-ego_speed-1, -ego_speed+1] — so the
+    // canonical stopped-car case (relative vx = -ego_speed) is IN distribution.
+    let objects = normalize_objects(
+        (0..n_objects)
+            .map(|_| SceneObject {
+                dx: rng.range(8.0, 35.0),
+                dy: rng.range(-4.0, 4.0),
+                vx: rng.range(-1.0, 1.0) - ego_speed,
+                vy: rng.range(-0.5, 0.5),
+            })
+            .collect(),
+    );
     SceneV2 {
         ego_x: 5.0,
         ego_y: 0.0,
