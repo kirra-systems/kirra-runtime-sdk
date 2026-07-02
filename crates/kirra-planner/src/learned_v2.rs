@@ -33,7 +33,7 @@
 
 use kirra_core::corridor::CorridorSource;
 
-use crate::learned::Rng;
+use crate::learned::{fake_quant, int8_scale, quantize_i8, Rng};
 use crate::{PlanInput, PlanOutput, Pose, ProposalKind, ScoredPlanner, Teacher, TrajectoryPoint};
 
 /// Fixed feature-vector width (reserved slots zero-padded — additive headroom
@@ -919,6 +919,229 @@ impl ScoredPlanner for LearnedPlannerV2 {
 }
 
 // ---------------------------------------------------------------------------
+// M-2: N-layer PTQ + the export seams (`parko/DOER_MODEL_SCALEUP.md` §2)
+// ---------------------------------------------------------------------------
+//
+// The v1 pipeline's PTQ and ONNX export assumed the fixed 2-layer `Mlp`; the
+// v2 scorer is an N-layer chain, so both generalize here on the same design:
+// per-tensor symmetric int8 weights, calibrated per-activation absmax scales,
+// `f64` accumulation (a QUALITY model of int8, not a bit-exact kernel — that
+// is the backend's job). PTQ is a quality operation, never a safety one: the
+// int8 doer's proposal is still bounded by the unchanged checker.
+
+/// One layer of the FP32 export seam: `w` is `out_dim × in_dim` row-major
+/// (the scorer's native layout; the ONNX writer transposes for MatMul).
+pub struct LayerWeightsV2 {
+    pub w: Vec<f64>,
+    pub b: Vec<f64>,
+    pub in_dim: usize,
+    pub out_dim: usize,
+}
+
+/// The N-layer FP32 export seam — what the chain ONNX writer consumes. Hidden
+/// layers are tanh; the last layer is linear (the writer knows this by index).
+pub struct ScorerWeightsV2 {
+    pub layers: Vec<LayerWeightsV2>,
+}
+
+/// One layer of the int8 export seam: per-tensor symmetric codes + scale.
+pub struct QuantLayerWeightsV2 {
+    /// `out_dim × in_dim` int8 codes, row-major.
+    pub codes: Vec<i8>,
+    pub w_scale: f64,
+    /// Biases stay f64/f32 (standard int8 practice — they add post-matmul).
+    pub b: Vec<f64>,
+    pub in_dim: usize,
+    pub out_dim: usize,
+}
+
+/// The N-layer int8 export seam. `act_scales[l]` is the calibrated scale of the
+/// activation ENTERING layer `l` (`[0]` = the input features, `[l>0]` = the
+/// post-tanh output of hidden layer `l-1`) — one Q/DQ pair per matmul input.
+pub struct QuantizedScorerWeightsV2 {
+    pub layers: Vec<QuantLayerWeightsV2>,
+    pub act_scales: Vec<f64>,
+}
+
+/// A [`LearnedPlannerV2`] whose scorer runs on the int8 grid (PTQ). Same
+/// vocabulary, teacher, and materialization; only the scorer arithmetic
+/// changes — the checker seam is identical.
+pub struct QuantizedLearnedPlannerV2 {
+    layers: Vec<QuantLayerV2>,
+    act_scales: Vec<f64>,
+    cfg: ScorerConfigV2,
+    teacher: Teacher,
+}
+
+struct QuantLayerV2 {
+    codes: Vec<i8>,
+    b: Vec<f64>,
+    s_w: f64,
+    in_dim: usize,
+    out_dim: usize,
+}
+
+impl QuantizedLearnedPlannerV2 {
+    /// The teacher the underlying FP32 planner was distilled from.
+    pub fn teacher(&self) -> Teacher {
+        self.teacher
+    }
+
+    /// The vocabulary/shape config (identical to the FP32 planner's).
+    pub fn config(&self) -> &ScorerConfigV2 {
+        &self.cfg
+    }
+
+    /// The calibrated activation scales — all finite and `> 0` for a
+    /// non-degenerate calibration. A hook for tests and the scorecard.
+    pub fn act_scales(&self) -> &[f64] {
+        &self.act_scales
+    }
+
+    /// The int8 scores for `input` (the quality model the QDQ ONNX mirrors).
+    pub fn scores(&self, input: &PlanInput) -> Vec<f64> {
+        self.qforward(&featurize_v2(&SceneV2::from_input(input)))
+    }
+
+    /// The int8 export seam for the chain ONNX writer.
+    #[must_use]
+    pub fn scorer_weights(&self) -> QuantizedScorerWeightsV2 {
+        QuantizedScorerWeightsV2 {
+            layers: self
+                .layers
+                .iter()
+                .map(|l| QuantLayerWeightsV2 {
+                    codes: l.codes.clone(),
+                    w_scale: l.s_w,
+                    b: l.b.clone(),
+                    in_dim: l.in_dim,
+                    out_dim: l.out_dim,
+                })
+                .collect(),
+            act_scales: self.act_scales.clone(),
+        }
+    }
+
+    /// The int8 forward: each matmul input is fake-quantized at its calibrated
+    /// scale, weights are dequantized from their i8 codes, accumulation is f64
+    /// — v1's `QuantMlp::forward` semantics generalized to the chain.
+    fn qforward(&self, x: &[f64]) -> Vec<f64> {
+        let n = self.layers.len();
+        let mut act = x.to_vec();
+        for (l, layer) in self.layers.iter().enumerate() {
+            let s_a = self.act_scales[l];
+            let mut out = vec![0.0; layer.out_dim];
+            for (o, out_o) in out.iter_mut().enumerate() {
+                let mut a = layer.b[o];
+                let row = &layer.codes[o * layer.in_dim..(o + 1) * layer.in_dim];
+                for (w, xi) in row.iter().zip(act.iter()) {
+                    a += (f64::from(*w) * layer.s_w) * fake_quant(*xi, s_a);
+                }
+                *out_o = if l + 1 == n { a } else { a.tanh() };
+            }
+            act = out;
+        }
+        act
+    }
+}
+
+impl ScoredPlanner for QuantizedLearnedPlannerV2 {
+    fn chosen_index(&self, input: &PlanInput) -> usize {
+        argmax(&self.qforward(&featurize_v2(&SceneV2::from_input(input))))
+    }
+
+    fn plan_with_chosen_index(&self, input: &PlanInput) -> (usize, PlanOutput) {
+        let scene = SceneV2::from_input(input);
+        let best = argmax(&self.qforward(&featurize_v2(&scene)));
+        let (offset, target) = self.cfg.candidate(best);
+        (
+            best,
+            PlanOutput {
+                trajectory: materialize_v2(&scene, offset, target),
+                kind: ProposalKind::Motion,
+            },
+        )
+    }
+}
+
+impl LearnedPlannerV2 {
+    /// The FP32 export seam for the chain ONNX writer.
+    #[must_use]
+    pub fn scorer_weights(&self) -> ScorerWeightsV2 {
+        ScorerWeightsV2 {
+            layers: self
+                .scorer
+                .layers
+                .iter()
+                .map(|l| LayerWeightsV2 {
+                    w: l.w.clone(),
+                    b: l.b.clone(),
+                    in_dim: l.in_dim,
+                    out_dim: l.out_dim,
+                })
+                .collect(),
+        }
+    }
+
+    /// The feature vector AND the FP32 scores for `input` — the ONNX round-trip
+    /// tests feed the features to the exported model and compare the scores.
+    #[must_use]
+    pub fn features_and_scores(&self, input: &PlanInput) -> (Vec<f64>, Vec<f64>) {
+        let x = featurize_v2(&SceneV2::from_input(input));
+        let scores = self.scorer.forward(&x);
+        (x.to_vec(), scores)
+    }
+
+    /// **Post-training int8 quantization** (PTQ) of the N-layer scorer,
+    /// calibrated over `calibration` inputs: per-tensor symmetric int8 weight
+    /// scales (absmax of each trained weight tensor) + per-activation scales
+    /// (absmax of each matmul input observed across the corpus) — v1's
+    /// `quantize_int8` generalized to the chain (M-2).
+    #[must_use]
+    pub fn quantize_int8(&self, calibration: &[PlanInput]) -> QuantizedLearnedPlannerV2 {
+        let n = self.scorer.layers.len();
+
+        // Activation absmax per matmul input over the calibration corpus.
+        // `forward_acts` returns [input, h1, …, output]; entries 0..n are the
+        // matmul inputs (the final output is never re-quantized).
+        let mut amax = vec![0.0_f64; n];
+        for input in calibration {
+            let x = featurize_v2(&SceneV2::from_input(input));
+            let acts = self.scorer.forward_acts(&x);
+            for (m, act) in amax.iter_mut().zip(acts.iter()) {
+                for &v in act {
+                    *m = m.max(v.abs());
+                }
+            }
+        }
+        let act_scales: Vec<f64> = amax.into_iter().map(int8_scale).collect();
+
+        let layers = self
+            .scorer
+            .layers
+            .iter()
+            .map(|l| {
+                let s_w = int8_scale(l.w.iter().fold(0.0_f64, |a, &v| a.max(v.abs())));
+                QuantLayerV2 {
+                    codes: l.w.iter().map(|&v| quantize_i8(v, s_w)).collect(),
+                    b: l.b.clone(),
+                    s_w,
+                    in_dim: l.in_dim,
+                    out_dim: l.out_dim,
+                }
+            })
+            .collect();
+
+        QuantizedLearnedPlannerV2 {
+            layers,
+            act_scales,
+            cfg: self.cfg.clone(),
+            teacher: self.teacher,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests: gradient check (the math), training behavior (the loop), determinism
 // ---------------------------------------------------------------------------
 
@@ -1217,5 +1440,68 @@ mod tests {
         assert!(f[5..5 + OBJECT_SLOTS * OBJECT_FEATS].iter().all(|&v| v == 0.0));
         // And the padding tail is zero.
         assert!(f[5 + OBJECT_SLOTS * OBJECT_FEATS..].iter().all(|&v| v == 0.0));
+    }
+
+    /// M-2 PTQ: the int8-quantized reduced planner keeps its FP32 source's
+    /// DECISION (argmax) on the calibration-domain scenes — int8 is a mild
+    /// perturbation of a trained net, and the decision is what the harness
+    /// scores. Also pins the calibration invariants: one activation scale per
+    /// matmul input, all finite and positive.
+    #[test]
+    fn quantized_v2_keeps_the_fp32_decision_on_calibration_scenes() {
+        let cfg = ScorerConfigV2::reduced();
+        let (p, _) =
+            train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let hazards = [vec![], vec![stopped_car(15.0)], vec![stopped_car(25.0)]];
+        let worlds: Vec<PlanInput> = hazards.iter().map(|o| world(&corr, o)).collect();
+        let int8 = p.quantize_int8(&worlds);
+
+        assert_eq!(int8.act_scales().len(), cfg.hidden.len() + 1, "one scale per matmul input");
+        assert!(int8.act_scales().iter().all(|&s| s.is_finite() && s > 0.0));
+        assert_eq!(int8.teacher(), p.teacher());
+        assert_eq!(int8.config(), p.config());
+
+        for (w, objs) in worlds.iter().zip(hazards.iter()) {
+            assert_eq!(
+                int8.chosen_index(w),
+                LearnedPlannerV2::chosen_index(&p, w),
+                "int8 argmax diverged from fp32 on the {}-object scene",
+                objs.len()
+            );
+        }
+    }
+
+    /// M-2 export seams: the FP32 seam mirrors the net's dims exactly, and the
+    /// int8 seam carries per-layer codes of the same shapes plus the activation
+    /// scales — what the chain ONNX writer consumes.
+    #[test]
+    fn v2_export_seams_carry_the_chain_shapes() {
+        let cfg = ScorerConfigV2::reduced();
+        let (p, _) = train_planner_v2(
+            &cfg,
+            &TrainConfigV2 { epochs: 1, ..TrainConfigV2::reduced(SEED) },
+            Teacher::SafetyAware,
+        );
+        let dims = cfg.dims();
+
+        let w = p.scorer_weights();
+        assert_eq!(w.layers.len(), dims.len() - 1);
+        for (l, d) in w.layers.iter().zip(dims.windows(2)) {
+            assert_eq!((l.in_dim, l.out_dim), (d[0], d[1]));
+            assert_eq!(l.w.len(), d[0] * d[1]);
+            assert_eq!(l.b.len(), d[1]);
+        }
+
+        let corr = MockCorridorSource::straight_5m_half_width(100.0);
+        let q = p.quantize_int8(&[world(&corr, &[])]).scorer_weights();
+        assert_eq!(q.layers.len(), dims.len() - 1);
+        assert_eq!(q.act_scales.len(), dims.len() - 1);
+        for (l, d) in q.layers.iter().zip(dims.windows(2)) {
+            assert_eq!(l.codes.len(), d[0] * d[1]);
+            assert_eq!(l.b.len(), d[1]);
+            assert!(l.w_scale.is_finite() && l.w_scale > 0.0);
+        }
     }
 }
