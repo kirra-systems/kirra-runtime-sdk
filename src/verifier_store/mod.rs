@@ -887,13 +887,46 @@ impl VerifierStore {
     /// safe-stop/shutdown + SQLite auto-checkpoint). So the final audit rows
     /// before an UNGRACEFUL power cut may be lost — a forensic gap, never a
     /// safety-state gap (the verdict path is store-free). Do NOT assume the audit
-    /// tail is hard-power-loss-durable. Tighter durability (a periodic fsync'd
-    /// checkpoint) is an available future knob, off by default. See
+    /// tail is hard-power-loss-durable — EXCEPT incident-class rows: since
+    /// WS-0.3, a posture TRANSITION and every post-incident sequence event are
+    /// followed by `fsync_wal_durable`, so the record of the incident preceding
+    /// a power cut is fsync-durable at write time. The periodic refresh tail
+    /// keeps the checkpoint-bounded window. See
     /// docs/safety/CODING_GUIDELINES.md INV-12.
     pub fn durable_checkpoint(&self) -> Result<()> {
         if let Some(dc) = &self.durable_conn {
             dc.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         }
+        Ok(())
+    }
+
+    /// WS-0.3 (#G10 audit axis) — make everything committed so far on the
+    /// shared WAL **hard-power-loss durable**, by committing one tiny marker
+    /// row on the `synchronous=FULL` connection. A FULL commit fsyncs the WAL
+    /// file, and fsync flushes the file's dirty pages wholesale — including
+    /// every frame previously committed by the NORMAL connection. So the
+    /// incident row committed immediately before this call survives an
+    /// ungraceful power cut, without per-row fsync on the 20 Hz+ audit path
+    /// and without a checkpoint's reader/writer coordination.
+    ///
+    /// Call AFTER committing an INCIDENT-CLASS audit row (a posture
+    /// TRANSITION, a post-incident sequence event) — never on the periodic
+    /// `POSTURE_CACHE_REFRESHED` traffic, which keeps the INV-12 throughput
+    /// rationale intact (transitions are rare state changes, not steady-state
+    /// load). The marker itself (`last_incident_durable_ms`) doubles as a
+    /// forensic breadcrumb: the last instant the audit tail was known
+    /// fsync-durable.
+    ///
+    /// In-memory stores have no durable connection (and nothing to make
+    /// durable); the marker then rides the main connection — semantics
+    /// preserved for tests.
+    pub fn fsync_wal_durable(&self, now_ms: u64) -> Result<()> {
+        self.durable_ref().execute(
+            "INSERT INTO posture_engine_state (key, value)
+             VALUES ('last_incident_durable_ms', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![now_ms.to_string()],
+        )?;
         Ok(())
     }
 

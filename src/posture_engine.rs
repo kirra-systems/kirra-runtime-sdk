@@ -288,6 +288,23 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                     ),
                     Err(e) => tracing::error!(error = %e, generation, "Failed to persist last generation (high-water self-heals on next recalc; live transition not suppressed) — #695"),
                 }
+                // WS-0.3: a posture TRANSITION is incident-class — make its
+                // just-committed audit row hard-power-loss durable NOW (one
+                // FULL-sync marker commit fsyncs the shared WAL). The periodic
+                // POSTURE_CACHE_REFRESHED traffic is NOT fsync'd (INV-12
+                // throughput rationale). Best-effort by the same reasoning as
+                // the generation persist above: the row IS committed and the
+                // live (possibly escalating) transition must not be suppressed
+                // over a degraded durability guarantee — log loudly instead.
+                if is_transition {
+                    if let Err(e) = store.fsync_wal_durable(ts) {
+                        tracing::error!(
+                            error = %e,
+                            generation,
+                            "INCIDENT-DURABILITY DEGRADED: WAL fsync after posture transition failed — the transition row is committed but not yet power-loss durable (WS-0.3)"
+                        );
+                    }
+                }
                 true
             }
             // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
@@ -1110,6 +1127,52 @@ mod posture_engine_tests {
             next > high_water,
             "the first generation after init must exceed the persisted high-water \
              (got {next}, high-water {high_water}) — otherwise restarts time-reverse"
+        );
+    }
+
+    /// WS-0.3 — the incident-durability fsync is gated on TRANSITIONS: a
+    /// posture change fsyncs the WAL (marker advances); the periodic
+    /// POSTURE_CACHE_REFRESHED traffic does not (INV-12 throughput rationale
+    /// — no 20 Hz per-row fsync re-introduced through the back door).
+    #[test]
+    fn test_incident_fsync_fires_on_transition_not_on_refresh() {
+        let app = active_app();
+        let cache = empty_cache();
+
+        // First recalc: None → Nominal is a transition → marker committed.
+        recalculate_and_broadcast(&app, &cache);
+        let after_transition = app
+            .store
+            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
+        assert!(
+            after_transition.is_some(),
+            "a posture transition must fsync the WAL (marker present)"
+        );
+
+        // Poison the marker, then recalc with NO posture change: the refresh
+        // path must NOT re-fsync (marker stays poisoned).
+        app.store
+            .with(|s| s.save_engine_state("last_incident_durable_ms", "sentinel").unwrap());
+        recalculate_and_broadcast(&app, &cache);
+        let after_refresh = app
+            .store
+            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
+        assert_eq!(
+            after_refresh.as_deref(),
+            Some("sentinel"),
+            "a no-change refresh must not fsync (INV-12: transitions only)"
+        );
+
+        // Force a real transition (trust the DAG down): marker advances again.
+        insert_node(&app, "faulty", NodeTrustState::Untrusted("test".into()));
+        recalculate_and_broadcast(&app, &cache);
+        let after_second_transition = app
+            .store
+            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
+        assert_ne!(
+            after_second_transition.as_deref(),
+            Some("sentinel"),
+            "a real transition must fsync again (marker overwritten)"
         );
     }
 

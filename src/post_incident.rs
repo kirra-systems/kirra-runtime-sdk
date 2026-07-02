@@ -109,7 +109,13 @@ fn emit(app: &AppState, event_type: &str, body: &serde_json::Value, ts: u64) {
             &body.to_string(),
             Some("post-incident forensic sequence (#104)"),
             ts,
-        )
+        )?;
+        // WS-0.3: every post-incident sequence event is incident-class by
+        // definition — fsync the WAL so the forensic row survives a hard
+        // power loss (the incident record must not be the least durable
+        // write in the system). Same best-effort contract as the rest of
+        // this module: a failure is counted, never propagated.
+        store.fsync_wal_durable(ts)
     });
     if let Err(e) = outcome {
         note_failure(app, event_type, &e.to_string());
