@@ -899,8 +899,7 @@ async fn main() {
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "startup failed: generation-init task failed to join (panic or \
-                     cancellation) (fail-closed)"
+                    "startup failed: generation-init task failed to join (panic or cancellation) (fail-closed)"
                 );
                 std::process::exit(1);
             }
