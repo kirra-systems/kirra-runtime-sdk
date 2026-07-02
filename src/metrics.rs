@@ -31,6 +31,21 @@ pub enum GateDenialReason {
     HaFenced,
 }
 
+/// Escape a string for use inside a quoted Prometheus label value
+/// (text exposition format 0.0.4): `\` → `\\`, `"` → `\"`, newline → `\n`.
+fn escape_label_value(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 impl GateDenialReason {
     /// The stable Prometheus label value.
     pub fn as_label(self) -> &'static str {
@@ -155,6 +170,11 @@ impl FleetSafetyMetrics {
     /// `LockFreeMetricsAggregator::format_prometheus_metrics`.
     pub fn format_prometheus(&self, node_id: &str, snap: &FleetMetricsSnapshot) -> String {
         use std::fmt::Write as _;
+        // node_id comes from env/hostname — escape it per the Prometheus
+        // text-format rules for quoted label values (`\` → `\\`, `"` → `\"`,
+        // newline → `\n`), or a hostile/odd instance id breaks every scrape.
+        let node_id = escape_label_value(node_id);
+        let node_id = node_id.as_str();
         let mut out = String::with_capacity(4096);
 
         // One HELP/TYPE block, then one sample line per label value.
@@ -437,6 +457,28 @@ mod fleet_metrics_tests {
         ] {
             assert!(text.contains(expected), "missing exact sample {expected:?} in:\n{text}");
         }
+    }
+
+    /// A node_id carrying label-breaking characters (`"`, `\`, newline) is
+    /// escaped per the text-format rules, so an odd/hostile instance id can
+    /// neither corrupt the exposition nor inject extra samples.
+    #[test]
+    fn node_id_is_escaped_in_label_values() {
+        let m = FleetSafetyMetrics::new();
+        let text = m.format_prometheus(
+            "bad\"id\\with\nnewline",
+            &snap(FleetPosture::Nominal, false),
+        );
+        assert!(
+            text.contains("kirra_fleet_posture{node_id=\"bad\\\"id\\\\with\\nnewline\"} 0\n"),
+            "node_id must be escaped for the quoted label value; got:\n{text}"
+        );
+        // No raw newline may survive inside a sample line (it would split
+        // the sample and inject a bogus line).
+        assert!(
+            !text.lines().any(|l| l.starts_with("newline")),
+            "a raw newline in node_id must not split a sample line:\n{text}"
+        );
     }
 
     /// Label values are the stable snake_case codes (renaming one breaks

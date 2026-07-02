@@ -66,13 +66,16 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         posture_cache_stale: stale_reason.is_some(),
         posture_generation,
         mode_active: svc.app.is_active(),
-        audit_write_drops: svc.app.audit_write_drops.load(Ordering::SeqCst),
-        capture_drops: svc.app.capture_drops.load(Ordering::SeqCst),
-        post_incident_write_failures: svc.app.post_incident_write_failures.load(Ordering::SeqCst),
+        // Relaxed: monotonic observability counters — a best-effort snapshot
+        // needs no ordering with other memory, and the scrape path should not
+        // pay SeqCst fences.
+        audit_write_drops: svc.app.audit_write_drops.load(Ordering::Relaxed),
+        capture_drops: svc.app.capture_drops.load(Ordering::Relaxed),
+        post_incident_write_failures: svc.app.post_incident_write_failures.load(Ordering::Relaxed),
         command_source_write_failures: svc
             .app
             .command_source_write_failures
-            .load(Ordering::SeqCst),
+            .load(Ordering::Relaxed),
     };
     let body = svc
         .app
