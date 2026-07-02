@@ -219,6 +219,7 @@ fn build_loop<B>(
     model_path: &str,
     tick_period_s: f64,
     platform_profile: Option<&CourierPlatformProfile>,
+    external_rss_gate: bool,
 ) -> Arc<Mutex<InferenceLoop<B>>>
 where
     B: InferenceBackend + 'static,
@@ -269,15 +270,26 @@ where
     // rotation between the two bounds and escalate the posture). With no
     // profile, both keep KirraGovernor/DiverseKirraGovernor `::new()` — the
     // conservative default, byte-identical to pre-Phase-2.
+    // WS-0.1 (#G2): the governors start RssFeed::NeverFed (fail-closed — an
+    // unfed governor HOLDs at zero). `external_rss_gate` is set by main()
+    // ONLY when the publication-seam object-RSS gate is armed, or the
+    // operator explicitly accepted motion without object perception; it is
+    // applied to BOTH comparator arms (a one-sided declaration would be a
+    // permanent false divergence).
+    let gate_arm = |g: KirraGovernor| if external_rss_gate { g.with_external_rss_gate() } else { g };
+    let gate_arm_diverse =
+        |g: DiverseKirraGovernor| if external_rss_gate { g.with_external_rss_gate() } else { g };
     let comparator = match platform_profile {
         Some(profile) => GovernorComparator::with_sink(
-            profile.angular_governor(),
-            DiverseKirraGovernor::new().with_platform_params(profile.angular_params.clone()),
+            gate_arm(profile.angular_governor()),
+            gate_arm_diverse(
+                DiverseKirraGovernor::new().with_platform_params(profile.angular_params.clone()),
+            ),
             build_divergence_sink(),
         ),
         None => GovernorComparator::with_sink(
-            KirraGovernor::new(),
-            DiverseKirraGovernor::new(),
+            gate_arm(KirraGovernor::new()),
+            gate_arm_diverse(DiverseKirraGovernor::new()),
             build_divergence_sink(),
         ),
     };
@@ -369,7 +381,24 @@ fn build_config() -> ParkoNodeConfig {
             ),
         }
     }
+    // WS-0.1 (#G2) opt-in flags. `1`/`true` (case-insensitive) enable; anything
+    // else keeps the fail-closed default.
+    config.allow_motion_without_object_perception =
+        env_flag("PARKO_ALLOW_MOTION_WITHOUT_OBJECT_PERCEPTION");
+    config.occlusion_gate_enabled = env_flag("PARKO_OCCLUSION_GATE_ENABLED");
+    config.water_gate_enabled = env_flag("PARKO_WATER_GATE_ENABLED");
+    config.commit_zone_gate_enabled = env_flag("PARKO_COMMIT_ZONE_GATE_ENABLED");
     config
+}
+
+/// `1` / `true` (case-insensitive, trimmed) → `true`; everything else → `false`.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::main]
@@ -400,11 +429,39 @@ async fn main() {
             );
             std::process::exit(2);
         });
+    // WS-0.1 (#G2): decide the governors' RSS mode. Fail-closed default: with
+    // no armed object gate and no explicit waiver, the governors stay UNFED
+    // and the node HOLDs at zero.
+    let object_gate_armed = config.object_rss_enabled
+        && config.lidar_topic.is_some()
+        && config.platform_profile.is_some();
+    let external_rss_gate = object_gate_armed || config.allow_motion_without_object_perception;
+    if object_gate_armed {
+        tracing::info!(
+            "parko-ros2: scene-RSS enforced at the publication seam (object gate ARMED); \
+             in-loop governors declare external gating"
+        );
+    } else if config.allow_motion_without_object_perception {
+        tracing::warn!(
+            "parko-ros2: MOTION WITHOUT OBJECT PERCEPTION explicitly enabled \
+             (PARKO_ALLOW_MOTION_WITHOUT_OBJECT_PERCEPTION) — the governors' scene-RSS tier is \
+             WAIVED by operator acknowledgment; kinematic/angular/posture tiers still enforce"
+        );
+    } else {
+        tracing::error!(
+            "parko-ros2: NO scene-RSS source — the object gate is not armed (needs \
+             `lidar_topic` + `platform_profile` + `object_rss_enabled` in ParkoNodeConfig) and \
+             no explicit waiver. FAIL-CLOSED: the governors are UNFED and every tick will \
+             publish a STOP. Arm the object gate or set \
+             PARKO_ALLOW_MOTION_WITHOUT_OBJECT_PERCEPTION=1 to accept driving blind."
+        );
+    }
     let infer = build_loop(
         backend,
         &model_path,
         config.tick_period_s,
         config.platform_profile.as_ref(),
+        external_rss_gate,
     );
 
     // M2 posture: static, defaults to Nominal. M1b's `PostureTracker`

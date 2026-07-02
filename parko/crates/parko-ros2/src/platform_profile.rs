@@ -105,8 +105,18 @@ impl CourierPlatformProfile {
     /// `evaluate` both bind the courier.
     #[must_use]
     pub fn platform(&self) -> DiffDrivePlatform<KirraGovernor> {
+        self.platform_with(self.angular_governor())
+    }
+
+    /// [`Self::platform`] with a caller-supplied governor — the seam for
+    /// choosing the governor's [`parko_kirra::RssFeed`] mode. `platform()`
+    /// keeps the fail-closed unfed default (no motion until the integrator
+    /// feeds an RSS verdict or explicitly declares external gating on the
+    /// governor it passes here).
+    #[must_use]
+    pub fn platform_with(&self, governor: KirraGovernor) -> DiffDrivePlatform<KirraGovernor> {
         DiffDrivePlatform::new(
-            self.angular_governor(),
+            governor,
             self.footprint(),
             self.max_speed_mps,
             self.max_brake_mps2,
@@ -176,7 +186,9 @@ mod tests {
     /// a sane rate through.
     #[test]
     fn courier_admits_in_place_rotation_within_the_bound() {
-        let platform = CourierPlatformProfile::courier_reference().platform();
+        // Angular-envelope test; RSS is out of scope → externally-gated governor.
+        let profile = CourierPlatformProfile::courier_reference();
+        let platform = profile.platform_with(profile.angular_governor().with_external_rss_gate());
         let cmd = ControlCommand { linear_velocity: 0.0, angular_velocity: 0.5, timestamp_ms: 0 };
         let verdict = platform.evaluate(&cmd, &nominal_state());
         assert!(verdict.is_admitted(), "in-place yaw within the bound must be admitted");
@@ -192,7 +204,8 @@ mod tests {
     /// bounds it.
     #[test]
     fn courier_clamps_excessive_in_place_rotation() {
-        let platform = CourierPlatformProfile::courier_reference().platform();
+        let profile = CourierPlatformProfile::courier_reference();
+        let platform = profile.platform_with(profile.angular_governor().with_external_rss_gate());
         let cmd = ControlCommand { linear_velocity: 0.0, angular_velocity: 1.5, timestamp_ms: 0 };
         let verdict = platform.evaluate(&cmd, &nominal_state());
         match verdict.0 {

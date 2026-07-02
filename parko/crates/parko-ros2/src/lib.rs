@@ -37,6 +37,7 @@ pub mod odometry_shim;
 pub mod platform_profile;
 pub mod posture_state;
 pub mod radar_shim;
+pub mod scene_vetoes;
 pub mod sensor_mapping;
 pub mod taj_corridor;
 pub mod taj_objects;
@@ -66,6 +67,9 @@ pub use crate::sensor_mapping::{
     CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
     CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping,
     OdomMappingError, OdomOrientation, OdomSample, OwnedCameraSample, SensorInputMapping,
+};
+pub use crate::scene_vetoes::{
+    apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
 };
 pub use crate::tick_pipeline::{run_pipeline_tick, TickError, TickOutcome};
 pub use crate::clearance_gate::{

@@ -212,10 +212,20 @@ banner; do not treat the numbers as a validated safety claim.
 
 ### 3.3 RSS safe-distance
 
-`parko_kirra::KirraGovernor` carries an `RssState { safe: bool, … }`
-updated via `update_rss_state`. An unsafe RSS state applies the MRC
-profile (same path as `SafetyPosture::Degraded`) — a sensor gap is
-recoverable, not a hard stop. Per ADL-001.
+`parko_kirra::KirraGovernor` carries an RSS feed (`RssFeed`) updated via
+`update_rss_state`. An unsafe RSS state applies the MRC profile (same
+path as `SafetyPosture::Degraded`) — a sensor gap is recoverable, not a
+hard stop. Per ADL-001.
+
+**Fail-closed default (WS-0.1 / #G2):** a freshly constructed governor is
+`RssFeed::NeverFed` and gates as UNSAFE — an integrator that never feeds
+an RSS verdict gets a HOLD-at-zero governor, not a silently permissive
+one. The two explicit exits: call `update_rss_state` per control cycle,
+or declare `with_external_rss_gate()` when scene-RSS enforcement happens
+at the publication seam (the parko-ros2 node does this automatically when
+its object-RSS gate is armed) or has been explicitly waived by the
+operator (`PARKO_ALLOW_MOTION_WITHOUT_OBJECT_PERCEPTION=1`, logged
+loudly). A comparator pairing must set the same mode on BOTH arms.
 
 ### 3.4 Posture-driven profile
 

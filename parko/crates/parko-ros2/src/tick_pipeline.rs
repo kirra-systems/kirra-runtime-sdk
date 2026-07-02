@@ -62,6 +62,21 @@ pub enum TickError {
     /// absent/stale. The tick MRCs (stopped twist). Set by
     /// `taj_objects::apply_object_rss_gate`.
     ObjectRssBreach,
+    /// WS-0.1 (RSS rule iv) — the command's speed exceeded the occlusion /
+    /// assured-clear-distance cap for the sightline scene, or the armed
+    /// occlusion channel was missing/stale (fail-closed `Absent` → cap 0.0).
+    /// Set by `scene_vetoes::apply_occlusion_gate`.
+    OcclusionBreach,
+    /// WS-0.1 (SG4) — the water scene carried the untraversable / fail-closed
+    /// signature (or the armed channel was missing/stale → `Unknown` → veto).
+    /// The tick MRCs (stop short of water). Set by
+    /// `scene_vetoes::apply_water_gate`.
+    WaterVeto,
+    /// WS-0.1 (SG5) — commit-zone entry is blocked (or the armed channel /
+    /// map was missing/stale → `Unknown` → veto; reject fires from map
+    /// alone). The tick MRCs (stop short of the zone). Set by
+    /// `scene_vetoes::apply_commit_zone_gate`.
+    CommitZoneVeto,
 }
 
 /// What a single `run_pipeline_tick` produced. Always carries a safe
@@ -235,7 +250,14 @@ mod tick_pipeline_tests {
         let model = backend.load_model("test.onnx").expect("mock model loads");
 
         let (tx, rx) = mpsc::channel::<ControlCommand>(8);
-        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        // Pipeline-mechanics tests: scene-RSS enforcement lives at the node's
+        // publication seam (`apply_object_rss_gate`, ADR-0029 Phase 3b), so the
+        // in-loop governors declare external gating. The unfed fail-closed
+        // default is pinned separately by `unfed_governor_tick_holds_at_zero`.
+        let comparator = GovernorComparator::new(
+            KirraGovernor::new().with_external_rss_gate(),
+            KirraGovernor::new().with_external_rss_gate(),
+        );
 
         let infer = InferenceLoop::new(backend, model, tx)
             .with_governor(ComparatorAsGovernor(comparator))
@@ -502,7 +524,10 @@ mod tick_pipeline_tests {
     ) -> Arc<Mutex<InferenceLoop<B>>> {
         let model = backend.load_model("test.onnx").expect("mock model loads");
         let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
-        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        let comparator = GovernorComparator::new(
+            KirraGovernor::new().with_external_rss_gate(),
+            KirraGovernor::new().with_external_rss_gate(),
+        );
         let infer = InferenceLoop::new(backend, model, tx)
             .with_governor(ComparatorAsGovernor(comparator))
             .with_tick_period(0.05);
@@ -657,5 +682,87 @@ mod tick_pipeline_tests {
         assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
             "Nominal observation must release the Degraded seed; got {}",
             outcome.twist.linear_x_mps);
+    }
+
+    // =======================================================================
+    // WS-0.1 / #G2 — the fail-closed RSS default and the live scene→RSS→gate
+    // edge, proven at the TICK level (the same composition the node runs).
+    // =======================================================================
+
+    /// THE DoD TEST (default axis) — "default posture without RSS input is
+    /// not-safe", proven THROUGH `run_pipeline_tick`: a loop whose governors
+    /// were never fed an RSS verdict and never declared external gating
+    /// publishes a STOPPED twist for a command the envelope would admit.
+    /// (Before #G2, the `safe: true` construction default let this through.)
+    #[tokio::test(start_paused = true)]
+    async fn unfed_governor_tick_holds_at_zero() {
+        let mut outputs: HashMap<String, Vec<f32>> = HashMap::new();
+        outputs.insert("cmd_vel_linear".to_string(),  vec![0.1]);
+        outputs.insert("cmd_vel_angular".to_string(), vec![0.0]);
+        let backend = Arc::new(MockBackend::new(outputs, BackendDescriptor::Cpu));
+        let model = backend.load_model("test.onnx").expect("mock model loads");
+        let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
+        // UNFED governors — no update_rss_state, no with_external_rss_gate.
+        let comparator = GovernorComparator::new(KirraGovernor::new(), KirraGovernor::new());
+        let infer = Arc::new(Mutex::new(
+            InferenceLoop::new(backend, model, tx)
+                .with_governor(ComparatorAsGovernor(comparator))
+                .with_tick_period(0.05),
+        ));
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, make_frame(201, 0), SafetyPosture::Nominal)
+                .await;
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "an unfed governor must HOLD at zero through the live tick (fail-closed default)");
+        assert_eq!(outcome.twist.angular_z_rads, 0.0);
+    }
+
+    /// THE DoD TEST (scene axis) — "injected unsafe scene MRCs the live
+    /// tick": the node's exact live composition (`run_pipeline_tick` →
+    /// `apply_object_rss_gate`) with an object dead ahead stops the tick and
+    /// tags `ObjectRssBreach`; the same composition with a verified-clear
+    /// scene publishes the governed command.
+    #[tokio::test(start_paused = true)]
+    async fn injected_unsafe_scene_mrcs_the_live_tick() {
+        use crate::taj_objects::{apply_object_rss_gate, courier_rss_params, ObjectSnapshot};
+        use kirra_core::corridor::Point;
+        use kirra_core::trajectory::PerceivedObject;
+
+        let params = courier_rss_params(&crate::CourierPlatformProfile::courier_reference());
+        let now = current_time_ms();
+
+        // Unsafe scene: an ONCOMING object 0.5 m dead ahead closing at 2 m/s —
+        // far inside the head-on RSS bound for any moving ego (the first-tick
+        // accel clamp bounds the ego to ~0.125 m/s; a stationary far object
+        // would be longitudinally SAFE at that speed, which is correct RSS,
+        // not a gate miss).
+        let blocker = PerceivedObject {
+            id: 1,
+            pos: Point { x_m: 0.5, y_m: 0.0 },
+            velocity_mps: 2.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: -2.0, y_m: 0.0 },
+        };
+        let unsafe_snapshot = ObjectSnapshot::from_objects(&[blocker], now);
+
+        let (infer, _rx) = build_loop(1.0, 0.0);
+        let tick =
+            run_pipeline_tick(&default_config(), infer, make_frame(202, 0), SafetyPosture::Nominal)
+                .await;
+        assert!(tick.twist.linear_x_mps > 0.0, "precondition: the tick admits motion");
+        let gated = apply_object_rss_gate(tick, Some(&unsafe_snapshot), &params, 500, now);
+        assert_eq!(gated.twist.linear_x_mps, 0.0,
+            "an injected unsafe scene must MRC the live tick");
+        assert_eq!(gated.error, Some(TickError::ObjectRssBreach));
+
+        // Control: a fresh verified-clear scene admits the governed command.
+        let clear_snapshot = ObjectSnapshot::from_objects(&[], now);
+        let (infer2, _rx2) = build_loop(0.1, 0.0);
+        let tick2 =
+            run_pipeline_tick(&default_config(), infer2, make_frame(203, 0), SafetyPosture::Nominal)
+                .await;
+        let gated2 = apply_object_rss_gate(tick2, Some(&clear_snapshot), &params, 500, now);
+        assert!(gated2.error.is_none(), "a verified-clear scene passes; got {:?}", gated2.error);
+        assert!(gated2.twist.linear_x_mps > 0.0);
     }
 }

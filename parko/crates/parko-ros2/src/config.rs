@@ -128,6 +128,39 @@ pub struct ParkoNodeConfig {
     /// silently enabled by `object_rss_enabled`. Missing/stale object perception →
     /// `AgentScene::Absent` (a gap — never a fabricated latch). **Default `false`.**
     pub vanished_detection_enabled: bool,
+
+    /// WS-0.1 (#G2) — EXPLICIT operator acknowledgment that this deployment
+    /// may MOVE without a scene-RSS producer. **Default `false` — fail-closed:**
+    /// when the object-RSS gate is NOT armed (no lidar/profile or
+    /// `object_rss_enabled = false`) and this is `false`, the node builds
+    /// UNFED governors ([`parko_kirra::RssFeed::NeverFed`]) and the tick HOLDs
+    /// at zero. Setting `true` builds externally-gated governors and is logged
+    /// loudly at startup: the operator — not a silent construction default —
+    /// owns the decision to drive blind.
+    pub allow_motion_without_object_perception: bool,
+
+    /// WS-0.1 — arm the RSS rule-iv occlusion gate
+    /// (`scene_vetoes::apply_occlusion_gate`) at the publication seam. Armed
+    /// only when a `platform_profile` is also configured (the RSS params).
+    /// While armed, a missing/stale sightline scene (staleness budget:
+    /// `corridor_max_age_ms`) fails CLOSED
+    /// (`OcclusionScene::Absent` → cap 0.0 → stop): arm this only when a
+    /// sightline producer feeds the node's occlusion slot. **Default `false`.**
+    pub occlusion_gate_enabled: bool,
+
+    /// WS-0.1 — arm the SG4 water-veto gate (`scene_vetoes::apply_water_gate`).
+    /// While armed, a missing/stale water scene (staleness budget:
+    /// `corridor_max_age_ms`) fails CLOSED
+    /// (`WaterScene::Unknown` → veto): arm only with a water-detector producer.
+    /// **Default `false`.**
+    pub water_gate_enabled: bool,
+
+    /// WS-0.1 — arm the SG5 commit-zone gate
+    /// (`scene_vetoes::apply_commit_zone_gate`). While armed, a missing/stale
+    /// zone scene (staleness budget: `corridor_max_age_ms`) fails CLOSED
+    /// (`CommitZoneScene::Unknown` → veto): arm only
+    /// with a map-anchored zone producer. **Default `false`.**
+    pub commit_zone_gate_enabled: bool,
 }
 
 /// Placeholder for an MRC fallback override. Today's MRC is always
@@ -168,6 +201,14 @@ impl Default for ParkoNodeConfig {
             // #309: SG6 vanished-object detection off by default — a latching
             // auto-immobilizer is opt-in, never silently enabled.
             vanished_detection_enabled: false,
+            // WS-0.1 (#G2): fail-closed — motion without a scene-RSS producer
+            // requires the operator's explicit acknowledgment.
+            allow_motion_without_object_perception: false,
+            // WS-0.1 scene-veto gates: armed-when-configured, off by default
+            // (an armed gate with no producer fails closed to a stop).
+            occlusion_gate_enabled: false,
+            water_gate_enabled: false,
+            commit_zone_gate_enabled: false,
         }
     }
 }

@@ -74,6 +74,8 @@ use parko_core::commands::ControlCommand;
 use parko_core::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use parko_core::RssState;
 
+use crate::RssFeed;
+
 use crate::angular_bound::{AngularVelocityBound, PlatformParams};
 use crate::comparator::RssAwareGovernor;
 use crate::{degraded_channel_violation, MRC_VELOCITY_CEILING_MPS, STOP_EPSILON_RAD_S};
@@ -110,7 +112,7 @@ pub struct DiverseKirraGovernor {
     /// `odd_speed_cap_mps`) — the diverse path does NOT call
     /// `validate_vehicle_command`.
     nominal_contract: VehicleKinematicsContract,
-    rss_state: RssState,
+    rss_feed: RssFeed,
     /// SOTIF-derived angular bound for the Nominal posture — same config
     /// object the primary uses. The ω_max(v) derivation is shared SPEC
     /// (see the honest-limit note); the ENFORCEMENT decision around it is
@@ -130,15 +132,14 @@ impl DiverseKirraGovernor {
     /// Construct a diverse governor with defaults identical to
     /// [`crate::KirraGovernor::new`] so the two agree by construction on a
     /// shared config. Mirroring the primary's defaults is what makes the
-    /// comparator's agreement property meaningful.
+    /// comparator's agreement property meaningful — including the
+    /// **fail-closed [`RssFeed::NeverFed`] default** (an unfed shadow gates
+    /// as UNSAFE exactly as the unfed primary does; a mismatched default
+    /// would be a permanent false divergence).
     pub fn new() -> Self {
         Self {
             nominal_contract: VehicleKinematicsContract::nominal_reference_profile(),
-            rss_state: RssState {
-                safe: true,
-                longitudinal_margin: f64::MAX,
-                lateral_margin: f64::MAX,
-            },
+            rss_feed: RssFeed::NeverFed,
             nominal_angular_bound: AngularVelocityBound::nominal(
                 PlatformParams::conservative_default(),
             ),
@@ -201,7 +202,16 @@ impl DiverseKirraGovernor {
     /// `update_rss_state`; the comparator keeps both governors in lockstep
     /// by calling this through its own `update_rss_state`.
     pub fn update_rss_state(&mut self, state: RssState) {
-        self.rss_state = state;
+        self.rss_feed = RssFeed::Fed(state);
+    }
+
+    /// Mirror of [`crate::KirraGovernor::with_external_rss_gate`] — the
+    /// explicit declaration that scene-RSS enforcement happens outside this
+    /// governor. A comparator pairing MUST set this on BOTH arms (or
+    /// neither); a one-sided declaration is a permanent false divergence.
+    pub fn with_external_rss_gate(mut self) -> Self {
+        self.rss_feed = RssFeed::ExternallyGated;
+        self
     }
 
     /// DIFFERENCE #1 — single regime classifier. Folds the primary's
@@ -211,9 +221,17 @@ impl DiverseKirraGovernor {
     /// to the minimum-risk envelope (the primary reaches the same MRC code
     /// from two different branches).
     fn classify(&self, posture: SafetyPosture) -> Regime {
+        // The RSS-safe verdict re-derives the SAME RssFeed semantics as the
+        // primary (NeverFed → unsafe; ExternallyGated → quiescent) through
+        // this governor's own match — the shared item is the SPEC, not code.
+        let rss_safe = match &self.rss_feed {
+            RssFeed::NeverFed => false,
+            RssFeed::Fed(state) => state.safe,
+            RssFeed::ExternallyGated => true,
+        };
         if posture == SafetyPosture::LockedOut {
             Regime::HardStop
-        } else if posture == SafetyPosture::Degraded || !self.rss_state.safe {
+        } else if posture == SafetyPosture::Degraded || !rss_safe {
             Regime::MinimumRisk
         } else {
             Regime::Nominal
@@ -602,7 +620,9 @@ mod tests {
     /// with `&&` a single NaN would slip through to an unbounded command.
     #[test]
     fn diverse_denies_each_nonfinite_input_in_nominal() {
-        let gov = DiverseKirraGovernor::new();
+        // Nominal-tier test: the unfed fail-closed default would route to the
+        // MinimumRisk regime; declare external RSS gating to reach Nominal.
+        let gov = DiverseKirraGovernor::new().with_external_rss_gate();
         let fin = twist(1.0, 0.0);
         // Non-finite linear (current + dt finite).
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -626,7 +646,7 @@ mod tests {
     /// arithmetic to the kinematics contract.
     #[test]
     fn diverse_accel_clamp_equals_spec_value() {
-        let gov = DiverseKirraGovernor::new();
+        let gov = DiverseKirraGovernor::new().with_external_rss_gate();
         let out = gov.evaluate(&twist(20.0, 0.0), Some(&twist(0.0, 0.0)), 0.05, SafetyPosture::Nominal);
         let v = effective_lin(&out, 20.0);
         assert!((v - 0.125).abs() < 1e-6,
