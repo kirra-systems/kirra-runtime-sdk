@@ -323,6 +323,13 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         return;
     }
 
+    // WS-0.5 — count the COMMITTED transition for /metrics (a suppressed
+    // transition above is not counted, matching what subscribers observe;
+    // refresh traffic is not a transition). Observability only.
+    if is_transition {
+        app.fleet_metrics.record_transition(&new_posture);
+    }
+
     // #104: post-incident forensic sequence — OBSERVABILITY ONLY. Runs only
     // after the posture transition is committed to the chain (above); it never
     // perturbs or blocks the cache/broadcast path below. A failed forensic write
@@ -1127,6 +1134,51 @@ mod posture_engine_tests {
             next > high_water,
             "the first generation after init must exceed the persisted high-water \
              (got {next}, high-water {high_water}) — otherwise restarts time-reverse"
+        );
+    }
+
+    /// WS-0.5 — a COMMITTED posture transition increments the /metrics
+    /// transition counter for its TARGET posture; the periodic no-change
+    /// refresh does not count (it is not a transition).
+    #[test]
+    fn test_transition_counts_for_metrics_but_refresh_does_not() {
+        let app = active_app();
+        let cache = empty_cache();
+
+        // First recalc: None → Nominal is a transition.
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(
+            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            1,
+            "the None→Nominal transition must be counted"
+        );
+
+        // No-change refresh: nothing moves.
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(
+            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            1,
+            "a no-change refresh is not a transition and must not count"
+        );
+
+        // Trust the DAG down: the new posture's counter increments once.
+        insert_node(&app, "faulty", NodeTrustState::Untrusted("test".into()));
+        recalculate_and_broadcast(&app, &cache);
+        let new_posture = cache
+            .read()
+            .unwrap()
+            .expect("cache populated")
+            .posture;
+        assert_ne!(new_posture, FleetPosture::Nominal, "precondition: the fault degrades the fleet");
+        assert_eq!(
+            app.fleet_metrics.transition_count(&new_posture),
+            1,
+            "the degradation transition must be counted under its target posture"
+        );
+        assert_eq!(
+            app.fleet_metrics.transition_count(&FleetPosture::Nominal),
+            1,
+            "the earlier Nominal count is untouched"
         );
     }
 

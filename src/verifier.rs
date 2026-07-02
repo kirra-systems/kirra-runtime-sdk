@@ -324,6 +324,12 @@ pub struct AppState {
     /// SG-003 detection-latency bound (TIMEOUT + one sweep). The watchdog swaps it
     /// back to false when it refreshes. Defaults false.
     pub av_registry_dirty: Arc<AtomicBool>,
+    /// WS-0.5 — fleet-safety Prometheus counters (posture transitions, gate
+    /// denials, HA promotions), exported by `GET /metrics` on the verifier
+    /// binary. Lock-free; incremented on the observed paths, never gating
+    /// them. Lives here (not on `ServiceState`) so the posture engine, the
+    /// routing gate, and the HA promotion path can all reach it.
+    pub fleet_metrics: crate::metrics::FleetSafetyMetrics,
 }
 
 impl AppState {
@@ -361,6 +367,7 @@ impl AppState {
             audit_write_drops: Arc::new(AtomicU64::new(0)),
             capture_drops: Arc::new(AtomicU64::new(0)),
             av_registry_dirty: Arc::new(AtomicBool::new(false)),
+            fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
         }
     }
 
