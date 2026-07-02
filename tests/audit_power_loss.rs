@@ -73,8 +73,10 @@ fn incident_row_survives_ungraceful_process_death() {
 
     assert!(
         !output.status.success(),
-        "the child must die by abort, not exit cleanly (stdout: {})",
-        String::from_utf8_lossy(&output.stdout)
+        "the child must die by abort, not exit cleanly (status: {:?}, stdout: {}, stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 
     // Reopen the store the way a restarted service would.

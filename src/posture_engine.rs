@@ -1130,10 +1130,12 @@ mod posture_engine_tests {
         );
     }
 
-    /// WS-0.3 — the incident-durability fsync is gated on TRANSITIONS: a
-    /// posture change fsyncs the WAL (marker advances); the periodic
-    /// POSTURE_CACHE_REFRESHED traffic does not (INV-12 throughput rationale
-    /// — no 20 Hz per-row fsync re-introduced through the back door).
+    /// WS-0.3 — the incident-durability marker write is gated on TRANSITIONS:
+    /// a posture change commits the marker (and on a file-backed store, that
+    /// commit fsyncs the shared WAL — this test's in-memory store exercises
+    /// only the gating); the periodic POSTURE_CACHE_REFRESHED traffic does
+    /// not (INV-12 throughput rationale — no 20 Hz per-row fsync
+    /// re-introduced through the back door).
     #[test]
     fn test_incident_fsync_fires_on_transition_not_on_refresh() {
         let app = active_app();
