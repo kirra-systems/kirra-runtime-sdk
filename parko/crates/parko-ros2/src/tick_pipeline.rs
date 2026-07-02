@@ -105,7 +105,7 @@ pub struct TickOutcome {
 /// uncontended in practice (one drain task drives the loop) but the
 /// `&mut`-receiver shape requires interior mutability.
 ///
-// SAFETY: SG8 SG9 | REQ: parko-ros2-tick-fail-closed | TEST: tick_with_finite_inference_publishes_governed_command,tick_with_stale_sensor_input_publishes_stopped_twist,tick_with_zero_inference_publishes_stopped_twist,tick_with_locked_out_posture_publishes_stopped_twist
+// SAFETY: SG8 SG9 | REQ: parko-ros2-tick-fail-closed | TEST: tick_with_finite_inference_publishes_governed_command,tick_with_stale_sensor_input_publishes_stopped_twist,tick_with_zero_inference_publishes_stopped_twist,tick_with_locked_out_posture_publishes_stopped_twist,fault_hung_backend_mrcs_the_tick_within_budget
 pub async fn run_pipeline_tick<B>(
     config:      &ParkoNodeConfig,
     loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
@@ -577,6 +577,88 @@ mod tick_pipeline_tests {
         assert!(v >= 0.0, "must not flip sign, got {v}");
         assert!(v < 1000.0,
             "1000 m/s must be CLAMPED by the governor envelope, never admitted as-is; got {v}");
+    }
+
+    /// A backend that hangs (bounded 400 ms real sleep — the runtime's
+    /// shutdown waits for blocking threads, so an unbounded hang would wedge
+    /// the test itself; 400 ms dwarfs the 50 ms deadline for anti-flake
+    /// slack without slowing the suite) and would emit a moving command if
+    /// ever awaited.
+    #[derive(Debug)]
+    struct HangingBackend;
+    impl parko_core::backend::InferenceBackend for HangingBackend {
+        fn load_model(
+            &self,
+            path: &str,
+        ) -> Result<parko_core::backend::ModelHandle, parko_core::backend::BackendError> {
+            Ok(parko_core::backend::ModelHandle {
+                model_id: format!("hanging::{path}"),
+                input_shapes: HashMap::new(),
+                output_shapes: HashMap::new(),
+                expected_precision: parko_core::backend::PrecisionMode::FP32,
+            })
+        }
+        fn run(
+            &self,
+            _model: &parko_core::backend::ModelHandle,
+            _inputs: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, parko_core::backend::BackendError> {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let mut map = HashMap::new();
+            map.insert(
+                "cmd_vel_linear".to_string(),
+                parko_core::backend::TensorStorage::Owned(vec![2.0_f32]),
+            );
+            map.insert(
+                "cmd_vel_angular".to_string(),
+                parko_core::backend::TensorStorage::Owned(vec![0.0_f32]),
+            );
+            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+        }
+        fn descriptor(&self) -> BackendDescriptor {
+            BackendDescriptor::Cpu
+        }
+    }
+
+    /// WS-0.4 DoD at the TICK level — "hung-backend test MRCs within budget":
+    /// a wedged backend must not stall `run_pipeline_tick`; the deadline MRCs
+    /// the tick (stopped twist, degraded) well before the backend would have
+    /// answered. REAL time (not `start_paused`) — the deadline race against a
+    /// blocking thread is exactly what is under test.
+    #[tokio::test]
+    async fn fault_hung_backend_mrcs_the_tick_within_budget() {
+        let backend = Arc::new(HangingBackend);
+        let model = backend.load_model("test.onnx").expect("model loads");
+        let (tx, _rx) = mpsc::channel::<ControlCommand>(8);
+        let comparator = GovernorComparator::new(
+            KirraGovernor::new().with_external_rss_gate(),
+            KirraGovernor::new().with_external_rss_gate(),
+        );
+        let infer = Arc::new(Mutex::new(
+            InferenceLoop::new(backend, model, tx)
+                .with_governor(ComparatorAsGovernor(comparator))
+                .with_tick_period(0.05)
+                .with_inference_deadline_ms(50),
+        ));
+
+        let started = std::time::Instant::now();
+        let outcome =
+            run_pipeline_tick(&default_config(), infer, make_frame(105, 0), SafetyPosture::Nominal)
+                .await;
+        let elapsed = started.elapsed();
+
+        // Strictly below the 400 ms hang: the timing proves the DEADLINE cut
+        // the tick off, not the backend completing.
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "a hung backend must not stall the tick; took {elapsed:?}"
+        );
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "deadline breach must publish a stopped twist (linear=0)");
+        assert_eq!(outcome.twist.angular_z_rads, 0.0,
+            "deadline breach must publish a stopped twist (angular=0)");
+        assert!(outcome.degraded,
+            "the deadline-MRC snapshot must be flagged degraded for the audit ledger");
     }
 
     /// FAULT: the inference backend itself errors. ASSERT fail-closed — the

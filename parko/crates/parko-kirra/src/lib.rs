@@ -675,6 +675,16 @@ impl KirraGovernor {
         }
     }
 
+    /// WS-0.4 — the MRC angular-velocity ceiling `ω_max(v)` (rad/s) at a
+    /// given linear velocity: the SAME SOTIF-derived bound
+    /// `apply_mrc_profile` enforces (#136), exposed for the comparator's
+    /// divergence reconciliation, which caps the reconciled yaw rate with
+    /// the primary arm's MRC envelope. Always non-negative and finite
+    /// (`AngularVelocityBound::omega_max` masks the v→0 singularity).
+    pub(crate) fn mrc_omega_max(&self, linear_velocity_mps: f64) -> f64 {
+        self.mrc_angular_bound.omega_max(linear_velocity_mps.abs())
+    }
+
     /// Applies the Nominal angular-velocity ceiling to a proposed command,
     /// returning the clamped magnitude (sign-preserved) when the bound is
     /// exceeded, else `None`.

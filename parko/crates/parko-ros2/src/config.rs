@@ -38,6 +38,17 @@ pub struct ParkoNodeConfig {
     /// `POSTURE_STALENESS_TIMEOUT_MS` in M1b.
     pub sensor_staleness_budget_ms: u64,
 
+    /// WS-0.4 — per-tick inference deadline, ms (threaded into
+    /// `InferenceLoop::with_inference_deadline_ms`). The HARD bound on how
+    /// long a tick waits for the backend before failing closed to a stopped
+    /// command; a backend that never returns (wedged driver / EP stall)
+    /// previously stalled the drain loop forever. Always on; default
+    /// `parko_core::scheduler::DEFAULT_INFERENCE_DEADLINE_MS` (1000 ms —
+    /// generous, so it fires only on a genuine hang, never on latency
+    /// jitter; the 150 ms latency THRESHOLD handles slow-but-completing
+    /// ticks). Env: `PARKO_INFERENCE_DEADLINE_MS` (positive integer).
+    pub inference_deadline_ms: u64,
+
     /// MRC fallback published when a sensor input is stale or
     /// inference fails. Always a stopped twist (linear = angular = 0)
     /// per the M1 / parko-kirra discipline. Stored as a field so the
@@ -177,6 +188,8 @@ impl Default for ParkoNodeConfig {
             command_topic: "~/output/cmd_vel".to_string(),
             tick_period_s: 0.05,
             sensor_staleness_budget_ms: 200,
+            // WS-0.4: hung-backend deadline — always on, hang-scale default.
+            inference_deadline_ms: parko_core::scheduler::DEFAULT_INFERENCE_DEADLINE_MS,
             mrc_command: OutgoingTwistDefaults,
             num_threads: 1,
             // SG6 detection sources default OFF — a missing sensor is reduced
