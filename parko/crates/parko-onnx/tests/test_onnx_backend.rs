@@ -14,7 +14,8 @@ fn require_ort() -> bool {
 }
 
 /// `Some(())` iff a loadable ORT runtime is present (`ORT_DYLIB_PATH` names an
-/// existing file); `None` → skip (or panic in strict mode). ort PANICS on a
+/// existing regular file — symlinks resolve); `None` → skip (or panic in strict
+/// mode). ort PANICS on a
 /// missing dylib — and since `ort = { default-features = false }` dropped the
 /// build-time `download-binaries` provisioning, NO lane gets a dylib implicitly
 /// any more. The guard matters beyond the dedicated job because cargo absorbs
@@ -23,7 +24,9 @@ fn require_ort() -> bool {
 /// root `cargo test --workspace` runs THESE tests in lanes with no ORT installed.
 fn ort_available() -> Option<()> {
     let dylib = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
-    if dylib.is_empty() || !std::path::Path::new(&dylib).exists() {
+    // `is_file()` (not `exists()`): a directory here is a misconfiguration that
+    // would sail past the guard straight into ort's panicking dlopen.
+    if dylib.is_empty() || !std::path::Path::new(&dylib).is_file() {
         assert!(
             !require_ort(),
             "STRICT (PARKO_ONNX_REQUIRE_ORT): no loadable ORT runtime at ORT_DYLIB_PATH \
