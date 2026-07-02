@@ -142,20 +142,23 @@ pub struct ParkoNodeConfig {
     /// WS-0.1 — arm the RSS rule-iv occlusion gate
     /// (`scene_vetoes::apply_occlusion_gate`) at the publication seam. Armed
     /// only when a `platform_profile` is also configured (the RSS params).
-    /// While armed, a missing/stale sightline scene fails CLOSED
+    /// While armed, a missing/stale sightline scene (staleness budget:
+    /// `corridor_max_age_ms`) fails CLOSED
     /// (`OcclusionScene::Absent` → cap 0.0 → stop): arm this only when a
     /// sightline producer feeds the node's occlusion slot. **Default `false`.**
     pub occlusion_gate_enabled: bool,
 
     /// WS-0.1 — arm the SG4 water-veto gate (`scene_vetoes::apply_water_gate`).
-    /// While armed, a missing/stale water scene fails CLOSED
+    /// While armed, a missing/stale water scene (staleness budget:
+    /// `corridor_max_age_ms`) fails CLOSED
     /// (`WaterScene::Unknown` → veto): arm only with a water-detector producer.
     /// **Default `false`.**
     pub water_gate_enabled: bool,
 
     /// WS-0.1 — arm the SG5 commit-zone gate
     /// (`scene_vetoes::apply_commit_zone_gate`). While armed, a missing/stale
-    /// zone scene fails CLOSED (`CommitZoneScene::Unknown` → veto): arm only
+    /// zone scene (staleness budget: `corridor_max_age_ms`) fails CLOSED
+    /// (`CommitZoneScene::Unknown` → veto): arm only
     /// with a map-anchored zone producer. **Default `false`.**
     pub commit_zone_gate_enabled: bool,
 }

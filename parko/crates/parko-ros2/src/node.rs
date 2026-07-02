@@ -289,21 +289,25 @@ where
     if config.occlusion_gate_enabled {
         match &drain_occlusion_params {
             Some(_) => tracing::warn!(
-                "parko-ros2: WS-0.1 occlusion gate ARMED — a missing/stale sightline scene                  fails closed to a STOP; ensure a producer feeds the occlusion slot"
+                "parko-ros2: WS-0.1 occlusion gate ARMED — a missing/stale sightline scene \
+                 fails closed to a STOP; ensure a producer feeds the occlusion slot"
             ),
             None => tracing::warn!(
-                "parko-ros2: occlusion_gate_enabled but no platform_profile (no RSS params) —                  occlusion gate NOT armed"
+                "parko-ros2: occlusion_gate_enabled but no platform_profile (no RSS params) — \
+                 occlusion gate NOT armed"
             ),
         }
     }
     if config.water_gate_enabled {
         tracing::warn!(
-            "parko-ros2: WS-0.1 SG4 water gate ARMED — a missing/stale water scene fails              closed to a STOP; ensure a producer feeds the water slot"
+            "parko-ros2: WS-0.1 SG4 water gate ARMED — a missing/stale water scene fails \
+                 closed to a STOP; ensure a producer feeds the water slot"
         );
     }
     if config.commit_zone_gate_enabled {
         tracing::warn!(
-            "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED — a missing/stale zone scene fails              closed to a STOP; ensure a producer feeds the commit-zone slot"
+            "parko-ros2: WS-0.1 SG5 commit-zone gate ARMED — a missing/stale zone scene fails \
+                 closed to a STOP; ensure a producer feeds the commit-zone slot"
         );
     }
 
