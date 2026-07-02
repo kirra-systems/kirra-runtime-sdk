@@ -260,6 +260,19 @@ pub fn int8_qdq_model(q: &QuantizedScorerWeights) -> Vec<u8> {
 #[must_use]
 pub fn fp32_model_chain(w: &ScorerWeightsV2) -> Vec<u8> {
     assert!(!w.layers.is_empty(), "a scorer chain has at least one layer");
+    // Fail fast on an inconsistent chain — an ONNX graph with mismatched
+    // matmul shapes would only error later, inside the backend.
+    for win in w.layers.windows(2) {
+        assert_eq!(
+            win[0].out_dim, win[1].in_dim,
+            "scorer chain dim mismatch: layer out_dim {} != next in_dim {}",
+            win[0].out_dim, win[1].in_dim
+        );
+    }
+    for l in &w.layers {
+        assert_eq!(l.w.len(), l.in_dim * l.out_dim, "weight tensor size mismatch");
+        assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
+    }
     let in_dim = w.layers[0].in_dim as u64;
     let out_dim = w.layers.last().expect("non-empty").out_dim as u64;
     let n = w.layers.len();
@@ -300,6 +313,18 @@ pub fn int8_qdq_model_chain(q: &QuantizedScorerWeightsV2) -> Vec<u8> {
         "one activation scale per matmul input"
     );
     assert!(!q.layers.is_empty(), "a scorer chain has at least one layer");
+    // Fail fast on an inconsistent chain, as in `fp32_model_chain`.
+    for win in q.layers.windows(2) {
+        assert_eq!(
+            win[0].out_dim, win[1].in_dim,
+            "scorer chain dim mismatch: layer out_dim {} != next in_dim {}",
+            win[0].out_dim, win[1].in_dim
+        );
+    }
+    for l in &q.layers {
+        assert_eq!(l.codes.len(), l.in_dim * l.out_dim, "code tensor size mismatch");
+        assert_eq!(l.b.len(), l.out_dim, "bias size mismatch");
+    }
     let in_dim = q.layers[0].in_dim as u64;
     let out_dim = q.layers.last().expect("non-empty").out_dim as u64;
     let n = q.layers.len();

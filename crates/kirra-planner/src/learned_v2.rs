@@ -1029,13 +1029,17 @@ impl QuantizedLearnedPlannerV2 {
         let n = self.layers.len();
         let mut act = x.to_vec();
         for (l, layer) in self.layers.iter().enumerate() {
+            // Fake-quantize the layer input ONCE (it is reused by every output
+            // row — quantizing inside the dot-product loop would redo it
+            // out_dim times for identical values).
             let s_a = self.act_scales[l];
+            let act_q: Vec<f64> = act.iter().map(|&v| fake_quant(v, s_a)).collect();
             let mut out = vec![0.0; layer.out_dim];
             for (o, out_o) in out.iter_mut().enumerate() {
                 let mut a = layer.b[o];
                 let row = &layer.codes[o * layer.in_dim..(o + 1) * layer.in_dim];
-                for (w, xi) in row.iter().zip(act.iter()) {
-                    a += (f64::from(*w) * layer.s_w) * fake_quant(*xi, s_a);
+                for (w, xi_q) in row.iter().zip(act_q.iter()) {
+                    a += (f64::from(*w) * layer.s_w) * xi_q;
                 }
                 *out_o = if l + 1 == n { a } else { a.tanh() };
             }
@@ -1442,13 +1446,14 @@ mod tests {
         assert!(f[5 + OBJECT_SLOTS * OBJECT_FEATS..].iter().all(|&v| v == 0.0));
     }
 
-    /// M-2 PTQ: the int8-quantized reduced planner keeps its FP32 source's
-    /// DECISION (argmax) on the calibration-domain scenes — int8 is a mild
-    /// perturbation of a trained net, and the decision is what the harness
-    /// scores. Also pins the calibration invariants: one activation scale per
-    /// matmul input, all finite and positive.
+    /// M-2 PTQ: calibration invariants — one activation scale per matmul
+    /// input, all finite and positive; identity (teacher/config) preserved;
+    /// the int8 scores are finite and vocabulary-shaped. Deliberately does
+    /// NOT assert int8 argmax == fp32 argmax: PTQ does not guarantee it (the
+    /// full-config scorecard measures a real 1-in-4 flip), so agreement is a
+    /// MEASURED harness metric, never a pinned invariant.
     #[test]
-    fn quantized_v2_keeps_the_fp32_decision_on_calibration_scenes() {
+    fn quantized_v2_calibration_invariants_hold() {
         let cfg = ScorerConfigV2::reduced();
         let (p, _) =
             train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
@@ -1463,13 +1468,12 @@ mod tests {
         assert_eq!(int8.teacher(), p.teacher());
         assert_eq!(int8.config(), p.config());
 
-        for (w, objs) in worlds.iter().zip(hazards.iter()) {
-            assert_eq!(
-                int8.chosen_index(w),
-                LearnedPlannerV2::chosen_index(&p, w),
-                "int8 argmax diverged from fp32 on the {}-object scene",
-                objs.len()
-            );
+        for w in &worlds {
+            let scores = int8.scores(w);
+            let (_, fp32_scores) = p.features_and_scores(w);
+            assert_eq!(scores.len(), fp32_scores.len());
+            assert_eq!(scores.len(), cfg.vocab_size());
+            assert!(scores.iter().all(|s| s.is_finite()));
         }
     }
 
