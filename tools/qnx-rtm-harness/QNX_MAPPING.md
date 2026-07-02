@@ -231,7 +231,7 @@ WCET kirra_judge_assess  n=1000000  min=31ns  med=40ns  p99.9=79ns  MAX=19962ns 
 kirra_judge_assess,other,SCHED_FIFO,1000000,31,41,19962,81,40,47,79,INDICATIVE-NOT-WCET
 ```
 
-median 40 ns, p99.9 **79 ns**, **max 20.0 µs** (vs TCG max 2.20 ms). Full evidence:
+median 40 ns, p99.9 **79 ns**, **max 19.96 µs** (vs TCG max 2.20 ms). Full evidence:
 `results/qnx800-x86_64-vm-kvm.txt`. This is **Phase-I feasibility, not cert-grade** —
 a VM on an x86_64 laptop is not the deployment ISA, and the post-#274 cert gate
 correctly emits `INDICATIVE-NOT-WCET` (the operator did not assert
