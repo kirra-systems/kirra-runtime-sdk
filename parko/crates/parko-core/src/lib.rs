@@ -38,6 +38,9 @@ pub mod telemetry;
 // Q-0 (doer chipset tuning): the performance contract + eval harness — the
 // pass/fail measuring stick for per-silicon inference (parko/QUANTIZATION_DESIGN.md).
 pub mod perf_contract;
+// Q-2: precision-aware selection — the evidence-derived precision ladder walked
+// by operational proof, degrading visibly (parko/QUANTIZATION_DESIGN.md §5).
+pub mod precision;
 
 pub use audit::{
     AuditClient, DecisionRecord, FaultRecord, HealthRecord, MockAuditClient, NoopAuditClient,
@@ -63,6 +66,10 @@ pub use backend_selector::{
 
 pub use perf_contract::{
     evaluate, run_latency, ContractFailure, ContractVerdict, EvalRow, LatencyStats, PerfContract,
+};
+
+pub use precision::{
+    select_by_ladder, LadderSelection, PrecisionLadder, KIRRA_PRECISION_LADDER_ENV,
 };
 
 pub use backends::mock::MockBackend;
