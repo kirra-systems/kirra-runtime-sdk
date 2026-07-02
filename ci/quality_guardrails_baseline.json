@@ -1,7 +1,7 @@
 {
   "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). #721 (startup.rs extraction) then merged, removing ~227 lines from the bin — bin line ceiling tightened 4186→3959 to lock that gain, and the new SG-008 startup.rs is now tracked (line ceiling + panic_budget 0, keeping the fail-closed predicate panic-free) and added to ownership_scope. When a refactor legitimately raises a ceiling, bump it with a justification in the PR; when it lowers one, tighten it here.",
   "max_lines": {
-    "src/bin/kirra_verifier_service.rs": 3959,
+    "src/bin/kirra_verifier_service.rs": 3997,
     "src/bin/kirra_verifier_service/startup.rs": 248,
     "src/gateway/mod.rs": 538,
     "src/verifier.rs": 1092,

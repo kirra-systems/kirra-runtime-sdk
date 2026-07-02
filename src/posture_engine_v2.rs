@@ -135,30 +135,20 @@ pub fn resolve_post_promotion_posture(
 // ============================================================================
 // SECTION 2: Generation persistence across restarts
 // ============================================================================
-
-/*
-pub fn load_last_generation(&self) -> rusqlite::Result<u64> {
-    let result = self.conn.query_row(
-        "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
-        [],
-        |row| row.get::<_, String>(0),
-    );
-    match result {
-        Ok(s)  => Ok(s.parse::<u64>().unwrap_or(0)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-        Err(e) => Err(e),
-    }
-}
-
-pub fn save_last_generation(&self, generation: u64) -> rusqlite::Result<()> {
-    self.conn.execute(
-        "INSERT OR REPLACE INTO posture_engine_state (key, value)
-         VALUES ('last_generation', ?1)",
-        rusqlite::params![generation.to_string()],
-    )?;
-    Ok(())
-}
-*/
+//
+// IMPLEMENTED ELSEWHERE — this section used to hold a commented-out draft of
+// the persistence pair, which read as "the mechanism does not exist" (it was
+// flagged exactly that way in the 2026-07 architecture review, #G10). The
+// LIVE implementations are:
+//   - `VerifierStore::load_last_generation` / `save_last_generation`
+//     (src/verifier_store/posture.rs — monotonic high-water UPSERT, #695),
+//   - `posture_engine::init_generation_from_store` (B6 `fetch_max` init),
+//     called by the service binary at startup BEFORE the first recalc
+//     (WS-0.2 wired it; it was previously missing from the binary), and
+//   - the per-recalc persist inside `recalculate_and_broadcast`.
+// Restart contract test: `test_init_generation_raises_counter_above_
+// persisted_high_water` (unit) + tests/generation_persistence.rs (restart
+// simulation over one SQLite file).
 
 // ============================================================================
 // SECTION 3: PostureEngineTask — serialized recalculation with coalescing

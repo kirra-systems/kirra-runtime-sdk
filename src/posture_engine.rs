@@ -17,9 +17,25 @@ pub use crate::posture_cache::POSTURE_CACHE_TTL_MS;
 pub static POSTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Initialize the generation counter from the last persisted value.
-/// Call once at service startup after VerifierStore is opened.
-pub fn init_generation_from_store(app: &Arc<AppState>) {
-    let last = app.store.with(|store| store.load_last_generation().unwrap_or(0));
+/// Call once at service startup after VerifierStore is opened, BEFORE the
+/// first recalculation claims a generation — the service binary does this
+/// right after the initial node/dependency load (WS-0.2 / #G10: the call was
+/// previously missing from the binary entirely, so every restart reset the
+/// live counter to 1 while the store held the high-water mark; emitted
+/// generations regressed across restarts and `save_last_generation` rejected
+/// every persist until the counter caught up).
+///
+/// Returns the persisted high-water that was loaded (0 = fresh store).
+/// FAIL-CLOSED: a store read error is returned as `Err` — the caller must
+/// treat an unreadable generation high-water like any other unreadable
+/// startup state (refuse to serve), because proceeding would silently
+/// re-introduce the cross-restart time-reversal this function exists to
+/// prevent. (The prior signature swallowed the error via `unwrap_or(0)`.)
+pub fn init_generation_from_store(app: &Arc<AppState>) -> Result<u64, String> {
+    let last = app
+        .store
+        .with(|store| store.load_last_generation())
+        .map_err(|e| e.to_string())?;
     if last > 0 {
         // B6: `fetch_max`, not `store`. If any recalc already advanced the counter
         // past `last + 1` before this init runs (e.g. a cold-start recalc), a bare
@@ -29,6 +45,7 @@ pub fn init_generation_from_store(app: &Arc<AppState>) {
         // init/recalc ordering.
         POSTURE_GENERATION.fetch_max(last + 1, Ordering::SeqCst);
     }
+    Ok(last)
 }
 
 /// Returns the next generation number, strictly monotonically increasing.
@@ -1053,13 +1070,46 @@ mod posture_engine_tests {
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
         app.store.with(|s| s.save_last_generation(5).unwrap());
 
-        init_generation_from_store(&app);
+        let loaded = init_generation_from_store(&app).expect("readable store");
+        assert_eq!(loaded, 5, "init reports the persisted high-water it loaded");
 
         // With the old `store(last + 1)` this would have dropped the counter to 6;
         // `fetch_max(6)` cannot lower a counter already at/above `before`.
         assert!(
             POSTURE_GENERATION.load(Ordering::SeqCst) >= before,
             "init_generation_from_store must never move the generation counter backwards"
+        );
+    }
+
+    /// WS-0.2 / #G10 — the RAISE case: when the persisted high-water is AHEAD
+    /// of the live counter (the restart scenario: a prior process advanced the
+    /// store, this process booted fresh), init must lift the counter above it
+    /// so every generation emitted after a restart is strictly greater than
+    /// every generation emitted before it (the ordering federation peers and
+    /// SSE consumers rely on).
+    #[test]
+    fn test_init_generation_raises_counter_above_persisted_high_water() {
+        use std::sync::Arc;
+        use crate::verifier::{AppState, VerifierOperationMode};
+        use crate::verifier_store::VerifierStore;
+
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+
+        // Simulate a prior process having persisted a high-water far ahead of
+        // this process's live counter (offset keeps the test robust to the
+        // shared global being bumped concurrently by other tests).
+        let high_water = POSTURE_GENERATION.load(Ordering::SeqCst) + 10_000;
+        app.store.with(|s| s.save_last_generation(high_water).unwrap());
+
+        let loaded = init_generation_from_store(&app).expect("readable store");
+        assert_eq!(loaded, high_water);
+
+        let next = next_generation();
+        assert!(
+            next > high_water,
+            "the first generation after init must exceed the persisted high-water \
+             (got {next}, high-water {high_water}) — otherwise restarts time-reverse"
         );
     }
 

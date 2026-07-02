@@ -868,6 +868,44 @@ async fn main() {
         }
     }
 
+    // WS-0.2 / #G10: initialize the posture-generation counter from the
+    // persisted high-water BEFORE any recalculation claims a generation (the
+    // Active path's initial recalc and the standby promotion recalc both run
+    // after this point). Without this call — missing from the binary until
+    // now — every restart reset the live counter to 1: emitted generations
+    // regressed across restarts (breaking the ordering federation peers and
+    // SSE consumers rely on) and `save_last_generation`'s high-water guard
+    // rejected every persist until the counter caught back up.
+    // SAFETY: SG-HA-3 — store read runs off the tokio worker threads.
+    {
+        let app_gen = Arc::clone(&app_state);
+        match tokio::task::spawn_blocking(move || {
+            kirra_verifier::posture_engine::init_generation_from_store(&app_gen)
+        })
+        .await
+        {
+            Ok(Ok(last)) => tracing::info!(
+                persisted_high_water = last,
+                "posture: generation counter initialized from store (0 = fresh store)"
+            ),
+            Ok(Err(err)) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: unable to load the persisted posture-generation \
+                     high-water (fail-closed — serving would time-reverse generations)"
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "startup failed: generation-init task panicked (fail-closed)"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let signing_key = audit_signing_key.clone();
     // #87: the causal log persists to the SAME store the rest of the service
     // uses, so forensic causal rows land in the production DB and chain there.
