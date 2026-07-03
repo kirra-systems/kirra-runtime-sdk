@@ -15,6 +15,19 @@
 #define KIRRA_FFI_H
 
 #include <stdint.h>
+#include <stddef.h>  /* offsetof — for the #778 F1 layout gate below */
+
+/* #778 F1 — portable compile-time assert (C11 `_Static_assert` / C++ `static_assert`). */
+#if defined(__cplusplus)
+#  define KIRRA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#  define KIRRA_ALIGNOF(t) alignof(t)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#  define KIRRA_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#  define KIRRA_ALIGNOF(t) _Alignof(t)
+#else
+#  define KIRRA_STATIC_ASSERT(cond, msg) /* pre-C11: no static assert available */
+#  define KIRRA_ALIGNOF(t) 8u            /* unused: asserts compile out pre-C11 */
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +84,31 @@ typedef struct KirraContractView {
     uint8_t  integrity_ok;               /* upstream integrity assertion (1 = set) */
     uint8_t  header_torn;                /* explicit upstream tear flag (1 = torn) */
 } KirraContractView;
+
+/*
+ * #778 F1 — ABI LAYOUT GATE (C side). Every TU that includes this header now
+ * pins the documented LP64 layout at COMPILE TIME, independently of the Rust
+ * side (which pins the mirror in `kirra_judge.rs`). Reorder or resize a field on
+ * either side and the build fails here — replacing the old symbol-name `nm` grep,
+ * which passed through any struct-layout drift into the signed release artifact.
+ * Gated on 64-bit (the leading pointer + tail padding make sizeof==72 an LP64
+ * fact); both QNX 8.0 judge tuples are 64-bit.
+ */
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+KIRRA_STATIC_ASSERT(sizeof(KirraContractView) == 72, "KirraContractView must be 72 bytes (LP64)");
+KIRRA_STATIC_ASSERT(KIRRA_ALIGNOF(KirraContractView) == 8, "KirraContractView must be 8-byte aligned");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, payload) == 0, "payload@0");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, generation) == 8, "generation@8");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, magic) == 16, "magic@16");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, sequence) == 24, "sequence@24");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, last_accepted_sequence) == 32, "last_accepted_sequence@32");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, now_monotonic_ns) == 40, "now_monotonic_ns@40");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, deadline_monotonic_ns) == 48, "deadline_monotonic_ns@48");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, payload_len) == 56, "payload_len@56");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, commanded_velocity) == 60, "commanded_velocity@60");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, integrity_ok) == 64, "integrity_ok@64");
+KIRRA_STATIC_ASSERT(offsetof(KirraContractView, header_torn) == 65, "header_torn@65");
+#endif /* LP64 */
 
 /*
  * The Rust JUDGE entry. Renders the CONTRACT verdict (magic → sequence →

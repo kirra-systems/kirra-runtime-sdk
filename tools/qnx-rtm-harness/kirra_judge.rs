@@ -70,6 +70,32 @@ pub struct KirraContractView {
     pub header_torn: u8,
 }
 
+// #778 F1 — ABI LAYOUT GATE (Rust side). The old CI "ABI assert" was a symbol-name
+// grep (`nm | grep kirra_judge_assess`) that passes even if a field is reordered
+// or resized — a broken-contract judge would then be checksummed, cosign-signed,
+// and shipped as the partition verdict core. These compile-time asserts pin the
+// documented LP64 layout (`kirra_ffi.h`: sizeof == 72, alignof == 8, one offset
+// per field) INDEPENDENTLY of the C side, so drift on EITHER side fails the build.
+// Gated on 64-bit: the layout (leading pointer + tail padding) is defined for LP64,
+// which both QNX 8.0 judge tuples (aarch64 / x86_64) are.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<KirraContractView>() == 72, "KirraContractView must be 72 bytes (LP64)");
+    assert!(align_of::<KirraContractView>() == 8, "KirraContractView must be 8-byte aligned");
+    assert!(offset_of!(KirraContractView, payload) == 0);
+    assert!(offset_of!(KirraContractView, generation) == 8);
+    assert!(offset_of!(KirraContractView, magic) == 16);
+    assert!(offset_of!(KirraContractView, sequence) == 24);
+    assert!(offset_of!(KirraContractView, last_accepted_sequence) == 32);
+    assert!(offset_of!(KirraContractView, now_monotonic_ns) == 40);
+    assert!(offset_of!(KirraContractView, deadline_monotonic_ns) == 48);
+    assert!(offset_of!(KirraContractView, payload_len) == 56);
+    assert!(offset_of!(KirraContractView, commanded_velocity) == 60);
+    assert!(offset_of!(KirraContractView, integrity_ok) == 64);
+    assert!(offset_of!(KirraContractView, header_torn) == 65);
+};
+
 /// Render the CONTRACT verdict for a stabilized contract view.
 ///
 /// Check ORDER (fixed, documented): magic → sequence → deadline → integrity flag
