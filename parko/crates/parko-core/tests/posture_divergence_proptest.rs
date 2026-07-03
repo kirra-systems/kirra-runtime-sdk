@@ -44,13 +44,15 @@ fn effective_linear_velocity(action: EnforcementAction, proposed: f64) -> f64 {
 /// Evaluate with an explicit previous (current) velocity. `None` ⇒ no history
 /// (treated as stopped by the Degraded gate).
 ///
-/// The governor is FED (`with_external_rss_gate`) so the scene-RSS tier is
-/// satisfied and the POSTURE→kinematic tier is what's exercised. This matters
-/// since WS-0.1 (#770): a bare `KirraGovernor::new()` is `RssFeed::NeverFed`
-/// and short-circuits EVERY posture to `apply_mrc_profile` — which silently
-/// made the Nominal-ceiling property below vacuous (`0.0 <= 35.0`). Feeding
-/// restores the real Nominal envelope; the unfed fail-closed default is pinned
-/// separately by `unfed_governor_holds_at_zero_under_nominal`.
+/// The governor declares EXTERNAL GATING (`with_external_rss_gate`) — which
+/// makes the pushed-state scene-RSS tier intentionally quiescent (distinct from
+/// `update_rss_state`, which pushes an actual RSS verdict) — so the
+/// POSTURE→kinematic tier is what these properties exercise. This matters since
+/// WS-0.1 (#770): a bare `KirraGovernor::new()` is `RssFeed::NeverFed` and
+/// short-circuits EVERY posture to `apply_mrc_profile`, which silently made the
+/// Nominal-ceiling property below vacuous (`0.0 <= 35.0`). External gating
+/// restores the real Nominal envelope; the unfed `NeverFed` fail-closed default
+/// is pinned separately by `unfed_governor_holds_at_zero_under_nominal`.
 fn evaluate_governor_with(proposed: f64, previous: Option<f64>, posture: SafetyPosture) -> f64 {
     let governor = KirraGovernor::new().with_external_rss_gate();
     let cmd = ControlCommand {

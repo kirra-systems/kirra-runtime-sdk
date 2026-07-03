@@ -18,8 +18,8 @@
 //
 // The rewrite pins the CURRENT invariants (and is now added to CI, below):
 //   - unfed governor → hold at zero in every posture (#770 fail-closed);
-//   - fed + Nominal → admits accel-limited forward motion (0 < v < input);
-//   - fed + Degraded → HOLD at zero on first-tick re-initiation (#70);
+//   - externally-gated + Nominal → admits accel-limited forward motion (0 < v < input);
+//   - externally-gated + Degraded → HOLD at zero on first-tick re-initiation (#70);
 //   - Degraded is strictly more restrictive than Nominal.
 //
 // Run: cargo test -p parko-core --features test-helpers
@@ -92,11 +92,13 @@ impl SensorStream for SingleFrameStream {
     }
 }
 
-/// Build a ControlLoop over the over-speed backend. `fed` selects whether the
-/// governor's scene-RSS tier is satisfied: `true` declares external gating
-/// (`with_external_rss_gate`, so the posture→kinematic tier is what's
-/// exercised), `false` leaves it `NeverFed` (fail-closed — the #770 default).
-fn make_loop(fed: bool) -> (
+/// Build a ControlLoop over the over-speed backend. `externally_gated` selects
+/// the governor's scene-RSS tier: `true` DECLARES external gating
+/// (`with_external_rss_gate` — the pushed-state RSS tier goes quiescent,
+/// distinct from `update_rss_state` which pushes an actual verdict), so the
+/// posture→kinematic tier is what's exercised; `false` leaves it `NeverFed`
+/// (fail-closed — the #770 default that holds at zero).
+fn make_loop(externally_gated: bool) -> (
     ControlLoop<OverspeedBackend, SingleFrameStream>,
     mpsc::Receiver<ControlCommand>,
 ) {
@@ -111,7 +113,7 @@ fn make_loop(fed: bool) -> (
             },
         )),
     };
-    let governor = if fed {
+    let governor = if externally_gated {
         KirraGovernor::new().with_external_rss_gate()
     } else {
         KirraGovernor::new()
@@ -121,8 +123,8 @@ fn make_loop(fed: bool) -> (
     (control, rx)
 }
 
-async fn tick_velocity(fed: bool, state: RuntimeState) -> f64 {
-    let (mut control, _rx) = make_loop(fed);
+async fn tick_velocity(externally_gated: bool, state: RuntimeState) -> f64 {
+    let (mut control, _rx) = make_loop(externally_gated);
     control.set_state_for_test(state);
     control
         .tick()
@@ -145,7 +147,7 @@ async fn unfed_governor_holds_at_zero_in_every_posture() {
     assert_eq!(degraded, 0.0, "unfed governor must hold at zero under Degraded (fail-closed)");
 }
 
-/// Fed + Nominal: the scene-RSS tier is satisfied, so the posture→kinematic
+/// Externally-gated + Nominal: the scene-RSS tier is quiescent, so the posture→kinematic
 /// tier governs. On the first tick (current speed 0) the from-zero
 /// acceleration envelope binds, so the 65 m/s command is admitted only as a
 /// small accel-limited forward motion: strictly between 0 and the input.
@@ -154,11 +156,11 @@ async fn nominal_posture_admits_accel_limited_forward_motion() {
     let v = tick_velocity(true, RuntimeState::Nominal).await;
     assert!(
         v > 0.0 && v < OVERSPEED_MPS,
-        "fed Nominal must admit clamped forward motion (0 < v < {OVERSPEED_MPS}); got {v}"
+        "externally-gated Nominal must admit clamped forward motion (0 < v < {OVERSPEED_MPS}); got {v}"
     );
 }
 
-/// Fed + Degraded: even with RSS satisfied, Degraded is decel-to-stop-and-HOLD
+/// Externally-gated + Degraded: even with the RSS tier quiescent, Degraded is decel-to-stop-and-HOLD
 /// (#70). A first-tick command re-initiates motion from a stop, which is
 /// denied → HOLD at zero. (The pre-#70 semantics — a 5 m/s crawl — are gone.)
 #[tokio::test]
@@ -166,7 +168,7 @@ async fn degraded_posture_holds_at_zero_on_reinitiation() {
     let v = tick_velocity(true, RuntimeState::Degraded).await;
     assert_eq!(
         v, 0.0,
-        "fed Degraded must HOLD at zero on first-tick re-initiation (#70 stop-and-hold); got {v}"
+        "externally-gated Degraded must HOLD at zero on first-tick re-initiation (#70 stop-and-hold); got {v}"
     );
 }
 
@@ -187,8 +189,10 @@ async fn degraded_clamp_is_more_restrictive_than_nominal() {
     );
 }
 
-/// `set_state_for_test` overrides the initial Warmup state, and a Degraded
-/// (fed) loop produces a more restrictive result than the Nominal envelope.
+/// `set_state_for_test` overrides the initial Warmup state so the loop can be
+/// forced into Degraded; this asserts only that the over-speed command is
+/// clamped there. (The Degraded-vs-Nominal ordering is asserted by
+/// `degraded_clamp_is_more_restrictive_than_nominal` above.)
 #[tokio::test]
 async fn set_state_for_test_forces_degraded_behavior() {
     let (mut control, _rx) = make_loop(true);
