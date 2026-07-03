@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write  # WS-0.6: keyless cosign image signing (GitHub OIDC)
 
 jobs:
   verifier:
@@ -34,6 +35,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -42,6 +44,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # WS-0.6 — keyless cosign signature over the pushed image, BY DIGEST
+      # (a tag is mutable; the digest is the artifact). The signature is
+      # stored in the registry next to the image and recorded in Rekor;
+      # verify with:
+      #   cosign verify ghcr.io/<image>@<digest> \
+      #     --certificate-identity-regexp 'https://github.com/kirra-systems/kirra-runtime-sdk/\.github/workflows/docker\.yml@.*' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless, GitHub OIDC)
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
 
   dashboard:
     name: Build dashboard image
@@ -67,6 +81,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: dashboard
           file: dashboard/Dockerfile
@@ -76,3 +91,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # WS-0.6 — same keyless by-digest signature as the verifier image.
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless, GitHub OIDC)
+        run: cosign sign --yes "ghcr.io/${{ github.repository_owner }}/kirra-dashboard@${{ steps.build.outputs.digest }}"

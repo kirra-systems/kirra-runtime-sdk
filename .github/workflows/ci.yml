@@ -30,6 +30,37 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
+  # WS-0.6 — supply-chain gate. Deterministic checks only (licenses / bans /
+  # sources go red only when the dependency tree or the policy changes);
+  # advisories runs non-gating below because it goes red on events EXTERNAL
+  # to the repo (a freshly published CVE) — that is signal for a human, not
+  # a reason to block an unrelated PR. Policy: /deny.toml (single config,
+  # passed explicitly to BOTH workspaces so they cannot drift).
+  supply-chain:
+    name: supply-chain gate (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Deny gate — root workspace (licenses / bans / sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+          arguments: --locked
+      - name: Deny gate — parko workspace (licenses / bans / sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+          arguments: --locked
+          # parko/deny.toml is a symlink to the root deny.toml — one policy.
+          manifest-path: ./parko/Cargo.toml
+      - name: Advisories (non-gating — external-event signal, not a PR gate)
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          arguments: --locked
+
   test:
     name: Test
     runs-on: ubuntu-latest

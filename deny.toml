@@ -1,0 +1,78 @@
+# deny.toml — cargo-deny supply-chain policy (WS-0.6).
+#
+# Enforced in CI by the `supply-chain` job (.github/workflows/ci.yml) over
+# BOTH workspaces: the root workspace and `parko/` (its own lockfile).
+# `parko/deny.toml` is a SYMLINK to this file, so config discovery resolves
+# both workspaces to this single policy and they cannot drift.
+#
+# Checks gated red (deterministic — they change only when the dependency
+# tree changes):
+#   - licenses: every third-party crate must carry an allowlisted license.
+#   - bans:     wildcard version requirements are denied; duplicate crate
+#               versions warn (visible, not red — the tree has benign dupes).
+#   - sources:  crates.io ONLY. No git dependencies, no alternate
+#               registries (both lockfiles are 100% crates.io today; this
+#               pins that property).
+#
+# `advisories` runs as a separate NON-GATING CI step: it goes red on events
+# external to the repo (a new CVE), which is signal for a human, not a
+# reason to block an unrelated PR. Tighten to gating once triage rotation
+# exists.
+
+[graph]
+# Resolve the graph for the shipped feature set (default features), all
+# targets we release for. --all-features would drag CI/hardware-gated
+# resolution (ros2/r2r, TensorRT) into the policy graph.
+all-features = false
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "armv7-unknown-linux-musleabihf",
+]
+
+[licenses]
+# The workspace's own crates are proprietary (COPYRIGHT, publish = false);
+# they are not third-party supply chain and are excluded from the license
+# check. Everything that CAN reach a shipped artifact must match this
+# allowlist — permissive licenses only, no copyleft surprises in a
+# proprietary product.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are visible but not red: the tree carries benign
+# dupes (transitive semver splits) and going red on every new one would
+# make the gate noise. Wildcard requirements ARE red — a `*` requirement
+# is an unbounded trust grant.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace members reference each other by version-less PATH deps (both
+# workspaces are private, publish = false); those are not registry wildcards
+# and are exempted explicitly — a `*` on a REGISTRY dependency stays red.
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only — a git or alternate-registry dependency bypasses the
+# registry's immutability and yanking guarantees and must be an explicit,
+# reviewed policy change here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+# Consumed by the non-gating CI step (see header). db-path/db-urls default.
+version = 2
+yanked = "warn"

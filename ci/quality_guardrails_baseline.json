@@ -1,14 +1,14 @@
 {
-  "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). #721 (startup.rs extraction) then merged, removing ~227 lines from the bin — bin line ceiling tightened 4186→3959 to lock that gain, and the new SG-008 startup.rs is now tracked (line ceiling + panic_budget 0, keeping the fail-closed predicate panic-free) and added to ownership_scope. When a refactor legitimately raises a ceiling, bump it with a justification in the PR; when it lowers one, tighten it here.",
+  "_comment": "Quality-guardrail ratchet baseline. Metrics may only DECREASE without review; an INCREASE fails CI (see ci/check_quality_guardrails.py). #721 (startup.rs extraction) then merged, removing ~227 lines from the bin \u2014 bin line ceiling tightened 4186\u21923959 to lock that gain, and the new SG-008 startup.rs is now tracked (line ceiling + panic_budget 0, keeping the fail-closed predicate panic-free) and added to ownership_scope. WS-0.5 (/metrics, PR #774, reviewed+merged) grew three tracked files with observability code and its tests: the bin gained the LockedOut scrape DoD test (3997\u21924087 lines; panic budget 117\u2192121 \u2014 the four new expect/unwraps are all in that test), verifier.rs gained the AppState fleet_metrics field (1092\u21921099), policy_layer.rs gained the denial classifier + counting + two test modules (1036\u21921154). Ceilings re-pinned at exactly those values \u2014 the next growth still fails. When a refactor legitimately raises a ceiling, bump it with a justification in the PR; when it lowers one, tighten it here.",
   "max_lines": {
-    "src/bin/kirra_verifier_service.rs": 3997,
+    "src/bin/kirra_verifier_service.rs": 4087,
     "src/bin/kirra_verifier_service/startup.rs": 248,
     "src/gateway/mod.rs": 538,
-    "src/verifier.rs": 1092,
-    "src/gateway/policy_layer.rs": 1036
+    "src/verifier.rs": 1099,
+    "src/gateway/policy_layer.rs": 1154
   },
   "panic_budget": {
-    "src/bin/kirra_verifier_service.rs": 117,
+    "src/bin/kirra_verifier_service.rs": 121,
     "src/bin/kirra_verifier_service/startup.rs": 0,
     "src/gateway/mod.rs": 6,
     "src/verifier.rs": 27,

@@ -11,8 +11,10 @@
 #   1. Builds the React dashboard (once, shared across all platform builds)
 #   2. Builds binaries for x86_64, aarch64, and armv7 (Linux, musl static)
 #   3. Packages each as a .tar.gz with dashboard, install.sh and INSTALL.md
-#   4. Generates SHA256 checksums
-#   5. Creates a GitHub Release with all artifacts attached
+#   4. Generates a CycloneDX SBOM for the shipped binaries (WS-0.6)
+#   5. Generates SHA256 checksums
+#   6. Signs every artifact with cosign (keyless, GitHub OIDC — WS-0.6)
+#   7. Creates a GitHub Release with artifacts + SBOM + signature bundles
 
 name: Release
 
@@ -23,6 +25,7 @@ on:
 
 permissions:
   contents: write  # Required to create GitHub releases
+  id-token: write  # WS-0.6: keyless cosign signing (GitHub OIDC identity)
 
 jobs:
   build-dashboard:
@@ -141,9 +144,53 @@ jobs:
           path: kirra-*.tar.gz
           retention-days: 1
 
+  # WS-0.6 — CycloneDX SBOM for the shipped binaries. Generated from the
+  # committed lockfile (--locked: the SBOM must describe what the build jobs
+  # actually built, never a re-resolve). One SBOM per release, named with
+  # the version so it travels with the artifacts.
+  sbom:
+    name: Generate SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM for the release binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # `--describe binaries` emits one SBOM per workspace binary; the
+          # release ships exactly two (kirra_verifier_service and
+          # kirra_carla_client, both from the root crate — their SBOMs land
+          # in the repo root). Keep those two, version-prefixed so they are
+          # self-identifying next to the tarballs; the committed Cargo.lock
+          # is what cargo metadata resolves, so the SBOM describes what the
+          # build jobs actually built.
+          cargo cyclonedx --describe binaries --format json --spec-version 1.5 -q
+          for bin in kirra_verifier_service kirra_carla_client; do
+            mv "./${bin}_bin.cdx.json" "kirra-${VERSION}-${bin}.cdx.json"
+          done
+          # Trial outputs for non-shipped workspace binaries are not release
+          # artifacts — drop them so the upload glob can't pick one up.
+          find . -name '*_bin.cdx.json' -delete
+          find . -name '*.cdx.json' -not -name "kirra-${VERSION}-*" -delete
+          ls -l ./*.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kirra-sbom
+          path: kirra-*.cdx.json
+          retention-days: 1
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -158,8 +205,25 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz *.cdx.json > SHA256SUMS
           cat SHA256SUMS
+
+      # WS-0.6 — keyless cosign signatures over every release artifact.
+      # The signing identity is this workflow's GitHub OIDC identity (repo +
+      # workflow path + tag ref), recorded in the public Rekor transparency
+      # log; each artifact gets a self-contained .cosign.bundle (signature +
+      # certificate + Rekor proof) that verifies OFFLINE against the pinned
+      # identity — no key management, nothing to leak.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release artifacts (keyless, GitHub OIDC)
+        run: |
+          cd dist
+          for f in *.tar.gz *.cdx.json SHA256SUMS; do
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "${f}"
+          done
+          ls -l ./*.cosign.bundle
 
       - name: Extract changelog for this version
         id: changelog
@@ -173,6 +237,28 @@ jobs:
           if [ ! -s release_notes.md ]; then
             echo "Release ${VERSION}" > release_notes.md
           fi
+          # WS-0.6: verification instructions travel with every release.
+          cat >> release_notes.md <<'VERIFY'
+
+          ---
+          ### Verify artifact signatures (cosign, keyless)
+
+          Every artifact (tarballs, SBOM, `SHA256SUMS`) carries a
+          `.cosign.bundle` — signature + signing certificate + transparency-log
+          proof, verifiable offline:
+
+          ```sh
+          cosign verify-blob \
+            --bundle <artifact>.cosign.bundle \
+            --certificate-identity-regexp \
+              'https://github.com/kirra-systems/kirra-runtime-sdk/\.github/workflows/release\.yml@refs/tags/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            <artifact>
+          ```
+
+          The `kirra-*.cdx.json` files are the CycloneDX SBOM for the shipped
+          binaries, generated from the committed lockfile.
+          VERIFY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -181,6 +267,8 @@ jobs:
           body_path: release_notes.md
           files: |
             dist/*.tar.gz
+            dist/*.cdx.json
             dist/SHA256SUMS
+            dist/*.cosign.bundle
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
