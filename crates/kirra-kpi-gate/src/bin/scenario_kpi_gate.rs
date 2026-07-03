@@ -35,9 +35,15 @@ fn main() {
         "corpus: {} doer scenarios, {} perception frames",
         report.doer_scenarios, report.perception_frames
     );
+    // #777 F1: `*_seam_pinned` rows are a tautological harness smoke test (mock
+    // detector fed its own truth) — NOT a measurement. `negctl_*` rows are the
+    // real discriminance evidence: an injected detector fault MUST breach the
+    // metric (an unsafe fault → high unsafe_miss; a phantom → over-conservative,
+    // never unsafe). A red `negctl_*` row means the oracle was BLINDED.
+    println!("  (rows: *_seam_pinned = tautological smoke test; negctl_* = fault-injection discriminance)");
     for row in &report.rows {
         println!(
-            "  [{}] {:<26} {:.4} (must be {} {:.4})",
+            "  [{}] {:<34} {:.4} (must be {} {:.4})",
             if row.pass { "PASS" } else { "FAIL" },
             row.name,
             row.measured,
