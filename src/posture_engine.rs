@@ -355,13 +355,6 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         return;
     }
 
-    // WS-0.5 — count the COMMITTED transition for /metrics (a suppressed
-    // transition above is not counted, matching what subscribers observe;
-    // refresh traffic is not a transition). Observability only.
-    if is_transition {
-        app.fleet_metrics.record_transition(&new_posture);
-    }
-
     // #104: post-incident forensic sequence — OBSERVABILITY ONLY. Runs only
     // after the posture transition is committed to the chain (above); it never
     // perturbs or blocks the cache/broadcast path below. A failed forensic write
@@ -406,6 +399,18 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // transition. A broadcast without a corresponding cache update would
     // mislead subscribers.
     if cache_written && is_transition {
+        // WS-0.5 / #774 F4 — count the transition for /metrics HERE, gated on the
+        // SAME `cache_written && is_transition` as the broadcast, so
+        // `kirra_posture_transitions_total` reconciles exactly with the SSE stream
+        // and the cache generation. Counting it earlier (right after the audit
+        // commit) over-counted: a PassiveStandby early-returns before this point
+        // (audits but never enforces/broadcasts), and an Active recalc whose
+        // monotonic CAS lost the race (`cache_written == false`) never reached
+        // subscribers — both would tick a transition nobody observed. The audit
+        // CHAIN still records every committed transition (the forensic ledger); the
+        // METRIC now tracks enforced/broadcast transitions.
+        app.fleet_metrics.record_transition(&new_posture);
+
         let _ = app.posture_tx.send(crate::verifier::PostureStreamEvent {
             event_type: event_type.to_string(),
             node_id:    None,
@@ -959,6 +964,47 @@ mod posture_engine_tests {
 
     fn cache_posture(cache: &SharedPostureCache) -> Option<FleetPosture> {
         cache.read().ok().and_then(|g| g.as_ref().map(|c| c.posture))
+    }
+
+    /// #774 F4 — a PassiveStandby recalc AUDITS a transition (it lands in the
+    /// tamper-evident chain) but must NOT tick `kirra_posture_transitions_total`:
+    /// the standby never enforces or broadcasts, so counting it would be a phantom
+    /// transition nobody observed. Pins that the metric moved inside the
+    /// `cache_written && is_transition` (broadcast) gate.
+    #[test]
+    fn test_standby_transition_is_audited_but_not_counted() {
+        use crate::verifier::VerifierOperationMode;
+        use crate::verifier_store::VerifierStore;
+        let store = VerifierStore::new(":memory:").unwrap();
+        let app = std::sync::Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
+        insert_node(&app, "baseline", NodeTrustState::Trusted);
+        let cache = empty_cache();
+
+        // None → (computed) is a transition on the first recalc; the standby audits
+        // it but early-returns before the cache CAS / broadcast.
+        recalculate_and_broadcast(&app, &cache);
+
+        // NOT counted on any posture bucket.
+        for p in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
+            assert_eq!(
+                app.fleet_metrics.transition_count(&p),
+                0,
+                "a PassiveStandby transition must not tick the enforced-transition metric ({p:?})"
+            );
+        }
+        // The standby suppresses the cache write (it is not Active).
+        assert!(
+            cache.read().unwrap().is_none(),
+            "a PassiveStandby must not populate the cache"
+        );
+        // But the transition WAS audited to the tamper-evident chain.
+        let audited = app.store.with(|s| {
+            s.load_all_posture_events()
+                .unwrap()
+                .iter()
+                .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION")
+        });
+        assert!(audited, "the standby must still audit the transition to the chain");
     }
 
     fn empty_cache() -> SharedPostureCache {

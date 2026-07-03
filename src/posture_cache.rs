@@ -219,36 +219,42 @@ pub fn now_ms() -> u64 {
 // Command routing gate
 // ---------------------------------------------------------------------------
 
-/// Routes or blocks an operational command based on fleet posture and cache freshness.
+/// The AUTHORITATIVE routing verdict — `Ok(())` to route, `Err(reason)` to block
+/// with the machine-readable denial reason. This is the SINGLE decision authority
+/// (#774 F3): [`should_route_command`] is a `#[must_use]` bool shim over it, and
+/// the `/metrics` denial-reason label is taken straight from its `Err`. The prior
+/// `classify_gate_denial` re-implemented this decision tree with a silent
+/// catch-all (`_ => DegradedWriteDenied`) that would MISLABEL any new denial cause
+/// (a new `FleetPosture` variant, a change to the Degraded admit-set) on operator
+/// dashboards during an incident. Deriving the reason from the decision itself
+/// makes that drift impossible: every deny path carries its own explicit reason.
 ///
-/// Invariants preserved:
-///   - OperationalCommand::Unknown → false BEFORE posture check (invariant #9)
-///   - Stale cache → false (fail-closed, uses entry.is_stale() from CachedFleetPosture)
-///   - LockedOut → false for all commands
-///   - Degraded → true for ReadTelemetry and the inner-gated ActuatorMotion
-///                command only (Option A / ADR-0011); every other write denied
-///   - Nominal → true for all except Unknown
+/// Invariants preserved (identical to the prior `should_route_command` body):
+///   - `OperationalCommand::Unknown` → deny BEFORE posture check (invariant #9)
+///   - Stale cache → deny (fail-closed, via `entry.is_stale()`)
+///   - LockedOut → deny for all commands
+///   - Degraded → route `ReadTelemetry` and the inner-gated `ActuatorMotion` only
+///                (Option A / ADR-0011); every other write denied
+///   - Nominal → route all except Unknown
 ///
-/// The `now_ms` parameter accepts an injected clock value. In tests, pass
-/// `virtual_clock.now_ms()`; in production, pass `crate::clock::SystemClock.now_ms()`.
-/// This keeps the function testable without syscall access.
-#[must_use]
-pub fn should_route_command(
+/// The `now_ms` parameter accepts an injected clock value (see `should_route_command`).
+pub fn route_command_verdict(
     cache: &Option<CachedFleetPosture>,
     now_ms: u64,
     command: OperationalCommand,
-) -> bool {
+) -> Result<(), crate::metrics::GateDenialReason> {
+    use crate::metrics::GateDenialReason as R;
     // SAFETY: SG9 | REQ: unknown-command-denied | TEST: test_unknown_command_denied_before_posture_check,test_safety_goal_sg_006_unknown_command_denial
     // (≅ AEGIS SG-006.)
     // Invariant #9: Unknown is denied before any posture evaluation.
     // This early return must never be removed.
     if command == OperationalCommand::Unknown {
-        return false;
+        return Err(R::UnknownCommand);
     }
 
     let Some(entry) = cache.as_ref() else {
         // No cache entry — fail-closed
-        return false;
+        return Err(R::PostureCacheEmpty);
     };
 
     // SAFETY: SG8 SG9 | REQ: posture-cache-stale-fails-closed | TEST: test_stale_cache_denies_all_non_unknown_commands,test_entry_beyond_ttl_is_stale,test_stale_cache_fails_closed_after_virtual_clock_advance
@@ -261,13 +267,13 @@ pub fn should_route_command(
             ttl_ms          = entry.ttl_ms,
             now_ms          = now_ms,
             generation      = entry.generation,
-            "should_route_command: cache stale — blocking command"
+            "posture-routing gate: cache stale — blocking command"
         );
-        return false;
+        return Err(R::PostureCacheStale);
     }
 
     match entry.posture {
-        FleetPosture::Nominal   => true,
+        FleetPosture::Nominal   => Ok(()),
         // Degraded admits safe reads AND the inner-gated actuator-motion command
         // (Option A / ADR-0011): `ActuatorMotion` is the ONE write path mounted
         // behind `enforce_actuator_safety_envelope`, whose Degraded branch runs
@@ -277,12 +283,31 @@ pub fn should_route_command(
         // stop instead of holding its pre-Degraded speed. Every OTHER WriteState
         // / SystemMutation stays denied here. LockedOut still denies even
         // ActuatorMotion below (deny-all preserved at both gates).
-        FleetPosture::Degraded  => matches!(
-            command,
-            OperationalCommand::ReadTelemetry | OperationalCommand::ActuatorMotion
-        ),
-        FleetPosture::LockedOut => false,
+        FleetPosture::Degraded  => {
+            if matches!(
+                command,
+                OperationalCommand::ReadTelemetry | OperationalCommand::ActuatorMotion
+            ) {
+                Ok(())
+            } else {
+                Err(R::DegradedWriteDenied)
+            }
+        }
+        FleetPosture::LockedOut => Err(R::LockedOut),
     }
+}
+
+/// Routes or blocks an operational command based on fleet posture and cache
+/// freshness. `#[must_use]` bool shim over [`route_command_verdict`] — the single
+/// decision authority (#774 F3). See that function for the invariants and the
+/// `now_ms` clock-injection contract.
+#[must_use]
+pub fn should_route_command(
+    cache: &Option<CachedFleetPosture>,
+    now_ms: u64,
+    command: OperationalCommand,
+) -> bool {
+    route_command_verdict(cache, now_ms, command).is_ok()
 }
 
 #[cfg(test)]
