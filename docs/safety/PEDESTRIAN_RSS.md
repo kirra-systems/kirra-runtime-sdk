@@ -111,9 +111,11 @@ is exactly the sidewalk-courier posture.
 | Non-finite pedestrian field | Breach → MRC (unlocalizable perception fault; mirrors the vehicle-object rule) |
 | Non-finite pose speed/time | Breach → MRC |
 | Non-positive / non-finite `a_brake` | `required = ∞` → any moving pose breaches (an unbrakeable ego cannot prove VRU safety) |
+| Non-finite speed/time input or ANY corrupt `VruRssParams` field (non-finite or negative) | `required = ∞` → breach (a NaN would otherwise poison `dist < required` into failing OPEN) |
+| Non-finite trajectory pose field | Breach → MRC (self-contained — not dependent on containment rejecting it first) |
 | Absent VRU channel (`None` scene) | **No-op** — byte-identical path (the derate-only invariant: absent input never relaxes, never fabricates) |
 
-## 5. Parameters (`VruRssParams`) — all VALIDATION-PENDING
+## 5. Parameters (`VruRssParams`, plus the ego brake from `VehicleConfig`) — all VALIDATION-PENDING
 
 | Param | Default | Rationale / tuning obligation |
 |---|---|---|
@@ -122,7 +124,7 @@ is exactly the sidewalk-courier posture.
 | `clearance_m` | 0.5 | Comfort/robustness margin beyond the geometric envelopes. |
 | `reaction_time_s` | 0.5 | Matches the vehicle-RSS `RSS_REACTION_TIME_S` — one reaction model per checker. |
 | `stop_epsilon_mps` | 0.05 | Matches `STOP_EPSILON_MPS` (the Degraded stop-and-hold epsilon). |
-| `a_brake` | per-class `VehicleConfig::max_decel_mps2` | The ego's assured service braking from the per-class contract (`KIRRA_VEHICLE_CLASS`). Using full service braking is the *least* conservative element here; derating it (e.g. wet-surface factor) is a tracked refinement. |
+| `a_brake_mps2` (not a `VruRssParams` field — the validator passes `VehicleConfig::max_decel_mps2`) | per-class contract | The ego's assured service braking from the per-class contract (`KIRRA_VEHICLE_CLASS`). Using full service braking is the *least* conservative element here; derating it (e.g. wet-surface factor) is a tracked refinement. |
 
 Availability envelope at the defaults (euclidean `required`, pose `t = 0`):
 ego 1 m/s → 3.0 m; 2 m/s → 4.1 m; 4 m/s → 7.1 m; 6 m/s → 10.7 m. The

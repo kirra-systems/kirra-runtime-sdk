@@ -99,6 +99,18 @@ fn pedestrian_fields_finite(p: &PerceivedPedestrian) -> bool {
     finite_point(&p.pos) && finite_point(&p.vel)
 }
 
+/// Params are usable iff every field is finite and non-negative. A corrupt
+/// parameter set must FAIL CLOSED (an infinite requirement → guaranteed
+/// breach), never NaN-poison a comparison into admitting a trajectory.
+fn params_valid(p: &VruRssParams) -> bool {
+    let ok = |x: f64| x.is_finite() && x >= 0.0;
+    ok(p.v_ped_max_mps)
+        && ok(p.ped_radius_m)
+        && ok(p.clearance_m)
+        && ok(p.reaction_time_s)
+        && ok(p.stop_epsilon_mps)
+}
+
 /// The required center-to-center distance between a trajectory pose and a
 /// pedestrian for the pose to be VRU-safe (doc §4):
 ///
@@ -110,9 +122,11 @@ fn pedestrian_fields_finite(p: &PerceivedPedestrian) -> bool {
 /// ```
 ///
 /// `a_brake_mps2` is the ego's assured service braking (the per-class
-/// `VehicleConfig::max_decel_mps2`). Returns `f64::INFINITY` for a
-/// non-positive/non-finite brake (an unbrakeable ego can never prove VRU
-/// safety — fail closed).
+/// `VehicleConfig::max_decel_mps2`). Returns `f64::INFINITY` — a guaranteed
+/// breach once applied — for ANY invalid input: a non-positive/non-finite
+/// brake (an unbrakeable ego can never prove VRU safety), a non-finite
+/// speed/time, or a corrupt parameter set (fail closed; a NaN here would
+/// otherwise poison `dist < required` into admitting an unsafe trajectory).
 #[must_use]
 pub fn required_pedestrian_clearance_m(
     ego_speed_mps: f64,
@@ -120,7 +134,11 @@ pub fn required_pedestrian_clearance_m(
     a_brake_mps2: f64,
     params: &VruRssParams,
 ) -> f64 {
-    if !(a_brake_mps2.is_finite() && a_brake_mps2 > 0.0) {
+    if !(a_brake_mps2.is_finite() && a_brake_mps2 > 0.0)
+        || !ego_speed_mps.is_finite()
+        || !pose_time_s.is_finite()
+        || !params_valid(params)
+    {
         return f64::INFINITY;
     }
     let v = ego_speed_mps.abs();
@@ -155,7 +173,16 @@ pub fn pedestrian_breach(
         for tp in trajectory {
             let v = tp.velocity_mps;
             let t = tp.time_from_start_s;
-            if !(v.is_finite() && t.is_finite()) {
+            // Self-contained fail-closed: a non-finite pose would NaN the
+            // distance and fail OPEN in the comparison below. The validator's
+            // containment pass rejects such poses first, but this helper is
+            // public and must not depend on that ordering.
+            if !(v.is_finite()
+                && t.is_finite()
+                && tp.pose.x_m.is_finite()
+                && tp.pose.y_m.is_finite()
+                && tp.pose.heading_rad.is_finite())
+            {
                 return true;
             }
             if v.abs() <= scene.params.stop_epsilon_mps {
@@ -266,6 +293,43 @@ mod tests {
             required_pedestrian_clearance_m(1.0, 0.0, f64::NAN, &VruRssParams::default()),
             f64::INFINITY
         );
+    }
+
+    /// Fail-closed on corrupt inputs/params: a NaN speed, time, or ANY
+    /// parameter field yields an infinite requirement — never a NaN that
+    /// would fail OPEN in `dist < required`.
+    #[test]
+    fn corrupt_inputs_and_params_fail_closed_not_open() {
+        let p = VruRssParams::default();
+        assert_eq!(required_pedestrian_clearance_m(f64::NAN, 0.0, BRAKE, &p), f64::INFINITY);
+        assert_eq!(required_pedestrian_clearance_m(1.0, f64::NAN, BRAKE, &p), f64::INFINITY);
+        for corrupt in [
+            VruRssParams { v_ped_max_mps: f64::NAN, ..p },
+            VruRssParams { ped_radius_m: -1.0, ..p },
+            VruRssParams { clearance_m: f64::INFINITY, ..p },
+            VruRssParams { reaction_time_s: -0.5, ..p },
+            VruRssParams { stop_epsilon_mps: f64::NAN, ..p },
+        ] {
+            let r = required_pedestrian_clearance_m(1.0, 0.0, BRAKE, &corrupt);
+            assert_eq!(r, f64::INFINITY, "corrupt {corrupt:?} must fail closed");
+        }
+        // And through the breach predicate: corrupt params → a moving pose
+        // near ANY pedestrian breaches (never admits).
+        let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
+        let scene = PedestrianScene {
+            pedestrians: &[ped(1000.0, 0.0)],
+            params: VruRssParams { reaction_time_s: f64::NAN, ..p },
+        };
+        assert!(pedestrian_breach(&traj, &scene, BRAKE));
+    }
+
+    /// Fail-closed on a non-finite trajectory POSE (the distance would NaN
+    /// and fail open) — self-contained, not dependent on containment order.
+    #[test]
+    fn non_finite_pose_breaches() {
+        let mut traj = vec![pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
+        traj[1].pose.x_m = f64::NAN;
+        assert!(pedestrian_breach(&traj, &scene(&[ped(50.0, 0.0)]), BRAKE));
     }
 
     /// Monotonicity (the safety shape): the requirement never DECREASES
