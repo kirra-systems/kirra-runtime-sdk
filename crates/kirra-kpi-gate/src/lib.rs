@@ -20,7 +20,18 @@
 //!   seam and pin perfection (`unsafe_miss_rate = 0`, `hazard_recall = 1`);
 //!   when the real RGB→TensorRT detector lands behind the same seam, it
 //!   inherits this gate on day one and the thresholds become a negotiation
-//!   with evidence, not a wish.
+//!   with evidence, not a wish. These two rows are labelled `*_seam_pinned` in
+//!   the scorecard: they are a harness SMOKE TEST (the identity function scores
+//!   perfectly), **not** a measurement — a reader must not mistake their `0` for
+//!   a fielded miss rate.
+//! - **The oracle is proven to DISCRIMINATE** (#777 F1): because the seam-pinned
+//!   rows are tautological, the gate also carries NEGATIVE-CONTROL rows —
+//!   dropout / far-range-bias / class-confusion / lateral-shrink / phantom
+//!   detector faults injected over generated ground truth — each asserted to
+//!   BREACH the safety metric (an unsafe fault must drive `unsafe_miss_rate` high;
+//!   a phantom must stay over-conservative, never unsafe). This is mutation
+//!   testing OF the metric, in the gate itself: a future fusion change that
+//!   blinds the oracle turns a negative-control row red.
 //!
 //! Thresholds live in `ci/scenario_kpi_thresholds.json` (repo root) — the
 //! reviewed, versioned policy. The binary exits non-zero on any breach and
@@ -221,6 +232,105 @@ pub fn score_perception(cases: &[PerceptionCase]) -> SemanticEvalSummary {
 }
 
 // ---------------------------------------------------------------------------
+// #777 F1 — negative-control fault families (mutation testing OF the metric)
+//
+// The seam-pinned corpus above feeds the detector its own ground truth, so its
+// `unsafe_miss_rate = 0` / `hazard_recall = 1` rows are TAUTOLOGICAL — they
+// score the identity function and cannot fail under any code change. That pins
+// perfection, not discrimination. These negative controls instead DERIVE the
+// detector output from truth by applying a parameterized detector FAULT, and the
+// gate asserts the metric BREACHES — proving the oracle actually catches every
+// fault family it will be trusted to catch. If a future fusion change blinds the
+// oracle (e.g. a tolerance bump in `score_frame`), a negative-control row that no
+// longer breaches turns the gate red.
+// ---------------------------------------------------------------------------
+
+/// A parameterized detector fault, applied to ground truth to synthesize a
+/// faulty detector output for a negative-control corpus (#777 F1). Each maps to
+/// a real perception failure mode the safety oracle must catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectorFault {
+    /// The detector sees nothing — the true hazard is dropped entirely. The
+    /// corridor reads as free → the ego drives into the hazard (`UnsafeMiss`).
+    Dropout,
+    /// The detector reports the hazard ~6 m FARTHER out than it is, so the
+    /// drivable extent runs past the true hazard (`UnsafeMiss`). Mirrors the
+    /// `detector_seeing_the_hazard_too_far_out` unit case.
+    RangeBiasFar,
+    /// The detector mis-classifies the hazard as `Road` (drivable), so the
+    /// fusion filters it out and the corridor never clips (`UnsafeMiss`).
+    ClassConfusion,
+    /// The detector's lateral extent shrinks off the corridor, so the hazard no
+    /// longer overlaps and never binds (`UnsafeMiss`).
+    LateralShrink,
+}
+
+/// The far-range bias offset (m) applied by [`DetectorFault::RangeBiasFar`].
+/// Comfortably above `DEFAULT_CLIP_TOL_M` so the shift is a real miss, not jitter.
+const RANGE_BIAS_FAR_M: f64 = 6.0;
+
+/// Synthesize the faulty detector output for one frame's ground truth.
+#[must_use]
+fn faulted_detected(truth: &[SemanticDetection], fault: DetectorFault) -> Vec<SemanticDetection> {
+    match fault {
+        DetectorFault::Dropout => Vec::new(),
+        DetectorFault::RangeBiasFar => truth
+            .iter()
+            .map(|d| SemanticDetection { near_x_m: d.near_x_m + RANGE_BIAS_FAR_M, ..*d })
+            .collect(),
+        DetectorFault::ClassConfusion => truth
+            .iter()
+            .map(|d| SemanticDetection { class: SemanticClass::Road, ..*d })
+            .collect(),
+        DetectorFault::LateralShrink => truth
+            .iter()
+            // Push the lateral span far off the corridor centerline (the corridor
+            // is lidar-bounded to ~±30 m near the ego) so it no longer overlaps.
+            .map(|d| SemanticDetection { lateral_min_m: 500.0, lateral_max_m: 501.0, ..*d })
+            .collect(),
+    }
+}
+
+/// Build a negative-control corpus: the HAZARD frames of `base` (truth
+/// non-empty), with `detected` re-derived from `truth` under `fault`. Scoring
+/// this must breach `unsafe_miss_rate` (the oracle caught the fault).
+#[must_use]
+pub fn negative_control_corpus(base: &[PerceptionCase], fault: DetectorFault) -> Vec<PerceptionCase> {
+    base.iter()
+        .filter(|c| !c.truth.is_empty())
+        .map(|c| PerceptionCase {
+            name: format!("{}_{fault:?}", c.name),
+            corridor: c.corridor.clone(),
+            truth: c.truth.clone(),
+            detected: faulted_detected(&c.truth, fault),
+        })
+        .collect()
+}
+
+/// Build the PHANTOM negative-control corpus: the world is CLEAR (`truth`
+/// emptied) but the detector HALLUCINATES the hazard. This must drive
+/// `over_conservative_rate` high WHILE keeping `unsafe_miss_rate == 0` — a
+/// phantom is an availability cost, never a safety breach, and the oracle must
+/// classify it on the safe side.
+#[must_use]
+pub fn phantom_control_corpus(base: &[PerceptionCase]) -> Vec<PerceptionCase> {
+    base.iter()
+        .filter(|c| !c.truth.is_empty())
+        .map(|c| PerceptionCase {
+            name: format!("{}_Phantom", c.name),
+            corridor: c.corridor.clone(),
+            truth: Vec::new(),
+            detected: c.truth.clone(),
+        })
+        .collect()
+}
+
+/// The minimum `unsafe_miss_rate` a genuinely-unsafe fault family must produce
+/// for its negative-control row to pass — i.e. the oracle catches ≥ 90 % of the
+/// injected faults. Below this the oracle is considered blinded (gate red).
+const NEG_CONTROL_BREACH_MIN: f64 = 0.9;
+
+// ---------------------------------------------------------------------------
 // Thresholds + gate verdict
 // ---------------------------------------------------------------------------
 
@@ -301,15 +411,64 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
     let cases = generated_perception_corpus();
     let perception = score_perception(&cases);
 
+    let mut rows = vec![
+        KpiRow::at_least("geometric_admissibility", geo_rate, t.geometric_admissibility_min),
+        KpiRow::at_least("learned_admissibility", learned_rate, t.learned_admissibility_min),
+        // #777 F1: these two rows are SEAM-PINNED — the mock detector is fed its
+        // own ground truth, so they score the identity function and cannot fail.
+        // Kept as a harness smoke test (labelled so CI output can't be mistaken
+        // for a real measurement); the DISCRIMINANCE evidence is the
+        // negative-control rows below.
+        KpiRow::at_most(
+            "unsafe_miss_rate_seam_pinned",
+            perception.unsafe_miss_rate(),
+            t.unsafe_miss_rate_max,
+        ),
+        KpiRow::at_least(
+            "hazard_recall_seam_pinned",
+            perception.hazard_recall(),
+            t.hazard_recall_min,
+        ),
+    ];
+
+    // #777 F1 — negative-control fault families: each MUST breach the safety
+    // metric, proving the oracle discriminates the fault (mutation testing of the
+    // metric, in the gate itself rather than one unit test off to the side).
+    for fault in [
+        DetectorFault::Dropout,
+        DetectorFault::RangeBiasFar,
+        DetectorFault::ClassConfusion,
+        DetectorFault::LateralShrink,
+    ] {
+        let faulted = negative_control_corpus(&cases, fault);
+        let s = score_perception(&faulted);
+        // Static name so `KpiRow.name: &'static str` holds; one arm per fault.
+        let name: &'static str = match fault {
+            DetectorFault::Dropout => "negctl_dropout_unsafe_miss",
+            DetectorFault::RangeBiasFar => "negctl_range_bias_far_unsafe_miss",
+            DetectorFault::ClassConfusion => "negctl_class_confusion_unsafe_miss",
+            DetectorFault::LateralShrink => "negctl_lateral_shrink_unsafe_miss",
+        };
+        rows.push(KpiRow::at_least(name, s.unsafe_miss_rate(), NEG_CONTROL_BREACH_MIN));
+    }
+
+    // #777 F1 — phantom control: a hallucinated hazard over a CLEAR world is an
+    // availability cost, not a safety breach. The oracle must drive
+    // over_conservative_rate high (it caught the phantom) while keeping
+    // unsafe_miss_rate exactly 0 (it did NOT mislabel a phantom as unsafe).
+    let phantom = phantom_control_corpus(&cases);
+    let ps = score_perception(&phantom);
+    rows.push(KpiRow::at_least(
+        "negctl_phantom_over_conservative",
+        ps.over_conservative_rate(),
+        NEG_CONTROL_BREACH_MIN,
+    ));
+    rows.push(KpiRow::at_most("negctl_phantom_no_unsafe_miss", ps.unsafe_miss_rate(), 0.0));
+
     GateReport {
         doer_scenarios: corpus.len(),
         perception_frames: cases.len(),
-        rows: vec![
-            KpiRow::at_least("geometric_admissibility", geo_rate, t.geometric_admissibility_min),
-            KpiRow::at_least("learned_admissibility", learned_rate, t.learned_admissibility_min),
-            KpiRow::at_most("unsafe_miss_rate", perception.unsafe_miss_rate(), t.unsafe_miss_rate_max),
-            KpiRow::at_least("hazard_recall", perception.hazard_recall(), t.hazard_recall_min),
-        ],
+        rows,
     }
 }
 
@@ -387,6 +546,70 @@ mod tests {
         let s = score_perception(&cases);
         assert!(s.unsafe_miss_rate() > 0.5, "a blind detector must unsafe-miss most hazard frames");
         assert_eq!(s.hazard_recall(), 0.0, "a blind detector catches nothing");
+    }
+
+    /// #777 F1 — every UNSAFE fault family breaches the safety metric (the oracle
+    /// discriminates it), while the PHANTOM family is caught on the SAFE side
+    /// (over-conservative, never unsafe). This is mutation testing OF the metric:
+    /// if a future fusion change blinded the oracle, one of these would drop below
+    /// the breach floor.
+    #[test]
+    fn negative_control_families_breach_the_safety_metric() {
+        let base = generated_perception_corpus();
+
+        // Sanity: the SEAM-PINNED (identity) corpus does NOT breach — so the
+        // breaches below come from the injected fault, not the corpus.
+        assert_eq!(
+            score_perception(&base).unsafe_miss_rate(),
+            0.0,
+            "the identity corpus must score 0 unsafe-miss (else the negctls prove nothing)"
+        );
+
+        for fault in [
+            DetectorFault::Dropout,
+            DetectorFault::RangeBiasFar,
+            DetectorFault::ClassConfusion,
+            DetectorFault::LateralShrink,
+        ] {
+            let s = score_perception(&negative_control_corpus(&base, fault));
+            assert!(
+                s.unsafe_miss_rate() >= NEG_CONTROL_BREACH_MIN,
+                "{fault:?} must breach unsafe_miss_rate (>= {NEG_CONTROL_BREACH_MIN}); got {}",
+                s.unsafe_miss_rate()
+            );
+        }
+
+        let ps = score_perception(&phantom_control_corpus(&base));
+        assert!(
+            ps.over_conservative_rate() >= NEG_CONTROL_BREACH_MIN,
+            "a phantom hazard must drive over_conservative_rate high; got {}",
+            ps.over_conservative_rate()
+        );
+        assert_eq!(
+            ps.unsafe_miss_rate(),
+            0.0,
+            "a phantom must NEVER be scored as an unsafe miss (availability cost, not a breach)"
+        );
+    }
+
+    /// #777 F1 — the negative-control rows are PART OF THE GATE (not an off-to-the-
+    /// side unit test): the gate report carries a breach-asserting row per fault
+    /// family, and they pass on the current tree.
+    #[test]
+    fn gate_carries_passing_negative_control_rows() {
+        let report = run_gate(&committed_thresholds());
+        for name in [
+            "negctl_dropout_unsafe_miss",
+            "negctl_range_bias_far_unsafe_miss",
+            "negctl_class_confusion_unsafe_miss",
+            "negctl_lateral_shrink_unsafe_miss",
+            "negctl_phantom_over_conservative",
+            "negctl_phantom_no_unsafe_miss",
+        ] {
+            let row = report.rows.iter().find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("gate must carry the {name} row: {report:#?}"));
+            assert!(row.pass, "negative-control row {name} must pass (oracle discriminates the fault): {row:?}");
+        }
     }
 
     /// An empty corpus fails closed through the underlying tally (0.0 ≠ 1.0).
