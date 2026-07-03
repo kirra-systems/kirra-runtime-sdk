@@ -41,14 +41,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Deny gate — root workspace (licenses / bans / sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check licenses bans sources
           arguments: --locked
       - name: Deny gate — parko workspace (licenses / bans / sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check licenses bans sources
           arguments: --locked
@@ -56,10 +56,27 @@ jobs:
           manifest-path: ./parko/Cargo.toml
       - name: Advisories (non-gating — external-event signal, not a PR gate)
         continue-on-error: true
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check advisories
           arguments: --locked
+
+  # #775 F2 — enforce the M-6 action-pinning policy (SECURITY.md): every
+  # third-party action reference MUST be a 40-hex commit SHA, never a mutable
+  # tag. A repointed `@v3` on cosign-installer (which the release job runs while
+  # holding the OIDC signing identity) or `@v2` on cargo-deny-action (which IS
+  # this gate) would otherwise silently deliver attacker code. `--check` is
+  # network-free (no writes, no ls-remote) — it just greps for unpinned refs.
+  # Dependabot (.github/dependabot.yml, github-actions ecosystem) maintains the
+  # SHAs as new versions ship.
+  action-pinning:
+    name: action-pinning gate (M-6 SHA pins)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: All workflow actions must be SHA-pinned
+        run: scripts/pin-actions.sh --check
 
   # WS-3.1 — the scenario-KPI gate: thresholds unsafe_miss_rate /
   # admissibility / hazard_recall over the generated deterministic corpus
@@ -72,8 +89,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: KPI gate (unsafe_miss_rate / admissibility / hazard_recall)
         run: cargo run --locked -p kirra-kpi-gate --bin scenario_kpi_gate
 
@@ -89,14 +106,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rust-src
       - name: Build the judge staticlibs (x86_64 + aarch64 nto-qnx800)
         run: scripts/build_qnx_judge_artifact.sh dist-qnx
       - name: Upload artifact (PR inspection; releases ship the signed copy)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-qnx800-judge
           path: dist-qnx/
@@ -110,8 +127,8 @@ jobs:
     # timeout-minutes; these are the previously-unbounded jobs).
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Run tests
         # --locked: build the committed Cargo.lock exactly; never re-resolve on
         # the runner (a fresh resolve pulls drifting transitives — see the
@@ -134,8 +151,8 @@ jobs:
     # double run and red the job falsely.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
         with:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
@@ -173,7 +190,7 @@ jobs:
               -- --skip wcet_gate
           fi
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -183,8 +200,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Run WCET gate tests
         # Authoritative WCET measurement. Runs on stable, non-instrumented,
         # without llvm-cov. The coverage job above skips these tests because
@@ -196,8 +213,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: clippy
       - name: iceoryx2 frozen-contract carrier (full + minimal feature configs)
@@ -221,8 +238,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Runtime-isolation guard (#146)
         working-directory: parko
         run: ci/check-runtime-isolation.sh
@@ -275,8 +292,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: build the onnx + tensorrt backend-selection lanes
         # `parko_ros2::backend_select` compiles exactly ONE backend per feature
         # (mock / onnx / tensorrt), fail-closed, TensorRT taking precedence. The
@@ -295,8 +312,8 @@ jobs:
     name: Parko ONNX Backend Tests (ORT v1.23.2)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install ONNX Runtime v1.23.2
         # Exact version match: `ort 2.0.0-rc.11` (pinned in
         # parko-onnx/Cargo.toml) is compiled against ORT_API_VERSION = 23,
@@ -394,8 +411,8 @@ jobs:
     # No continue-on-error anywhere in this job; `parko-safety` remains the
     # primary gating safety check.
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Install ONNX Runtime v1.23.2 (cross-backend equivalence test)
         # The OpenVINO test suite includes a cross-backend equivalence
         # test (`ort_ov_output_equivalence_on_mnist`) that loads the SAME
@@ -517,8 +534,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: clippy
       - name: Quality guardrails (ratchet — line count / panic budget / ownership)
@@ -552,7 +569,7 @@ jobs:
         run: |
           git ls-files -z -- '*.sh' | xargs -0 -r shellcheck -S error 2>&1 | tee shellcheck-report.txt
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - name: Lint the Helm chart
         # Default values (ClusterIP, ingress disabled) do NOT trip the H-1
         # fail-closed transport guards, so a clean chart lints green.
@@ -571,7 +588,7 @@ jobs:
           set -o pipefail
           cargo audit 2>&1 | tee audit-report.txt
       - name: Upload reports
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: static-analysis-reports
@@ -587,7 +604,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Framework self-test
         # Pure shell — no hardware, root, or network. Asserts the target-
         # parameterized installer's behavior: dispatch correctness, honest
@@ -607,7 +624,7 @@ jobs:
     # progressing install now has headroom instead of timing out.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Harden apt for slow/stalling mirrors (flaky ros2 build)
         # The timeouts on this job were setup-ros's apt install crawling on a
         # degraded azure.archive.ubuntu.com mirror (kB/s, per-connection stalls) —
@@ -621,7 +638,7 @@ jobs:
           printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::ForceIPv4 "true";\n' \
             | sudo tee /etc/apt/apt.conf.d/99-kirra-ci-mirror
       - id: setup_ros
-        uses: ros-tooling/setup-ros@v0.7
+        uses: ros-tooling/setup-ros@649ef6bcd696da05bc27ceb3fab69d810c0daeab # v0.7
         with:
           required-ros-distributions: jazzy
         # setup-ros installs the new `ros2-apt-source` deb, resolving its version
@@ -636,7 +653,7 @@ jobs:
         run: sleep 90
       - name: setup-ros (retry)
         if: steps.setup_ros.outcome == 'failure'
-        uses: ros-tooling/setup-ros@v0.7
+        uses: ros-tooling/setup-ros@649ef6bcd696da05bc27ceb3fab69d810c0daeab # v0.7
         with:
           required-ros-distributions: jazzy
       - name: Build curated message workspace
@@ -659,7 +676,7 @@ jobs:
           cd ros2_ws
           colcon build --packages-up-to autoware_perception_msgs autoware_planning_msgs
       # Repo convention: dtolnay/rust-toolchain@stable (no rust-cache used).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: cargo build -p kirra-ros2-adapter --features ros2
         # `cargo test --workspace` never compiles the ros2-gated code, so this is
         # the only CI step that does. A full `build` (not `check`) catches BOTH

