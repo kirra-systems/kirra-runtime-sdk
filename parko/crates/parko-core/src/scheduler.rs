@@ -34,7 +34,49 @@ fn override_reason(action: &EnforcementAction) -> Option<&'static str> {
 /// Deliberately generous (20× the tick period @ 20 Hz) so it only fires on
 /// a genuine hang, never on ordinary latency jitter; deployments tighten it
 /// via `with_inference_deadline_ms` / `PARKO_INFERENCE_DEADLINE_MS`.
+///
+/// NOTE (#773 F1): this bounds only the command parko EMITS — on breach the loop
+/// publishes STOP and escalates posture (F2). The base controller consuming
+/// `cmd_vel` MUST additionally dead-man a silent command stream to STOP within
+/// this budget (else it would hold a pre-hang MOVING twist live across the hang).
+/// See `AOU-ACTUATION-DEADMAN-001` in `docs/safety/ASSUMPTIONS_OF_USE.md`.
+/// Budget-deriving this default from the FTTI decomposition (vs the current
+/// "generous" rationale) is a tracked safety-case item.
 pub const DEFAULT_INFERENCE_DEADLINE_MS: u64 = 1_000;
+
+/// WS-0.4 F6 — sanity CEILING on the per-tick inference deadline, ms. The
+/// deadline is the loop's only defence against an indefinite backend hang, so a
+/// value large enough to be a de-facto disable (`u64::MAX`, a 10-year timeout)
+/// silently defeats the "cannot be disabled" contract. `with_inference_deadline_ms`
+/// clamps to `[1, DEADLINE_CEILING_MS]` (60 s — comfortably above any legitimate
+/// backend warm-up, far below "never").
+pub const DEADLINE_CEILING_MS: u64 = 60_000;
+
+// --- WS-0.4 F2: deadline-breach → posture escalation, with hysteresis --------
+//
+// A backend hang is a serious platform-health event (wedged driver / deadlocked
+// EP). Per-tick it already fails closed to a stopped command, but before this
+// the fault never reached the POSTURE layer: the fleet stayed Nominal, no
+// watchdog counted repeated breaches toward LockedOut, and the instant the
+// straggler cleared the vehicle re-accelerated with zero confirmation. This is a
+// leaky-bucket escalator (mirroring the comparator's divergence accumulator so
+// the two fault-escalators read the same): each breach adds `INC`, each healthy
+// tick drains `DECAY`. Any non-zero accumulator recommends `Degraded`; reaching
+// `LOCKOUT_LEVEL` (three consecutive breaches) recommends `LockedOut`. The drain
+// is the recovery hysteresis — a single breach holds `Degraded` for
+// `INC / DECAY` = 3 healthy ticks (the same confirmation-streak discipline
+// `ControlLoop` uses), so a backend flapping at ~deadline period stays escalated
+// instead of oscillating move/stop/move at Nominal.
+
+/// Accumulator increment per deadline breach (or while-hung tick).
+const DEADLINE_BREACH_INC: u32 = 3;
+/// Accumulator decrement per healthy (within-deadline) tick.
+const DEADLINE_BREACH_DECAY: u32 = 1;
+/// Accumulator saturation ceiling (bounds the drain time after a breach storm).
+const DEADLINE_BREACH_CEILING: u32 = 12;
+/// Accumulator level at/above which the loop recommends `LockedOut`
+/// (= three consecutive breaches with no intervening recovery).
+const DEADLINE_LOCKOUT_LEVEL: u32 = 9;
 
 /// The join handle of an in-flight (possibly hung) inference task. The
 /// blocking task cannot be cancelled — `spawn_blocking` work holds an OS
@@ -98,6 +140,11 @@ pub struct InferenceLoop<B: InferenceBackend> {
     /// its (stale) result is reaped and discarded and normal operation
     /// resumes.
     hung_inference: Option<InFlightInference>,
+    /// WS-0.4 F2 — leaky-bucket accumulator of recent inference-deadline breaches.
+    /// Drives `recommended_posture` (Degraded while non-zero, LockedOut at
+    /// `DEADLINE_LOCKOUT_LEVEL`), so a hang escalates the FLEET posture with
+    /// recovery hysteresis, not just this tick's command.
+    deadline_breach_acc: u32,
 }
 
 fn capabilities_precision(caps: &BackendCapabilities) -> PrecisionMode {
@@ -146,17 +193,54 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             audit: None,
             inference_deadline_ms: DEFAULT_INFERENCE_DEADLINE_MS,
             hung_inference: None,
+            deadline_breach_acc: 0,
         }
     }
 
-    /// WS-0.4 — set the per-tick inference deadline (ms). Must be positive;
-    /// zero is coerced to 1 ms (a zero deadline would MRC every tick, which
-    /// is fail-closed but certainly a misconfiguration). The deadline cannot
-    /// be disabled: a backend hang must never stall the loop indefinitely.
+    /// WS-0.4 — set the per-tick inference deadline (ms). Clamped to
+    /// `[1, DEADLINE_CEILING_MS]`: zero would MRC every tick (fail-closed but a
+    /// misconfiguration), and a value large enough to be a de-facto disable
+    /// (`u64::MAX`) would silently defeat the "cannot be disabled" contract — a
+    /// backend hang must never stall the loop indefinitely (#773 F6).
+    ///
+    /// RUNTIME REQUIREMENT (#773 F4): `tick` arms a `tokio::time::timeout`, so it
+    /// must run on a Tokio runtime with the TIME DRIVER enabled (`enable_time()` /
+    /// `enable_all()`). On a time-less `current_thread` runtime the first tick
+    /// panics ("time driver not enabled"); under a `start_paused` runtime the
+    /// clock auto-advances while a `spawn_blocking` worker runs, firing the
+    /// deadline spuriously every tick. Drive it on a real-time runtime.
     #[must_use]
     pub fn with_inference_deadline_ms(mut self, deadline_ms: u64) -> Self {
-        self.inference_deadline_ms = deadline_ms.max(1);
+        self.inference_deadline_ms = deadline_ms.clamp(1, DEADLINE_CEILING_MS);
         self
+    }
+
+    /// WS-0.4 F2 — record a deadline breach (or a while-hung tick): charge the
+    /// leaky-bucket accumulator that drives `recommended_posture`.
+    fn record_deadline_breach(&mut self) {
+        self.deadline_breach_acc =
+            (self.deadline_breach_acc + DEADLINE_BREACH_INC).min(DEADLINE_BREACH_CEILING);
+    }
+
+    /// WS-0.4 F2 — record a healthy (within-deadline) tick: drain the
+    /// accumulator by `DECAY`. The drain IS the recovery hysteresis — the
+    /// posture recommendation stays escalated until the bucket empties.
+    fn record_deadline_healthy(&mut self) {
+        self.deadline_breach_acc = self.deadline_breach_acc.saturating_sub(DEADLINE_BREACH_DECAY);
+    }
+
+    /// WS-0.4 F2 — the posture the deadline watchdog recommends from its breach
+    /// history: `LockedOut` once persistent (`>= DEADLINE_LOCKOUT_LEVEL`),
+    /// `Degraded` while any recent breach is still draining, else `Nominal`.
+    #[must_use]
+    fn deadline_health_posture(&self) -> SafetyPosture {
+        if self.deadline_breach_acc >= DEADLINE_LOCKOUT_LEVEL {
+            SafetyPosture::LockedOut
+        } else if self.deadline_breach_acc > 0 {
+            SafetyPosture::Degraded
+        } else {
+            SafetyPosture::Nominal
+        }
     }
 
     /// Attach an [`AuditClient`] so the decision path records governor overrides
@@ -177,16 +261,25 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         self
     }
 
-    /// The posture the attached governor RECOMMENDS from its internal state (e.g. a redundancy
-    /// comparator escalating to `Degraded` / `LockedOut` on persistent divergence); `Nominal`
-    /// when no governor is attached. The tick driver reads this each cycle and escalates the
-    /// effective posture with it — closing the divergence→posture loop so a governor
-    /// disagreement actually drives the fleet posture, not just this tick's clamp.
+    /// The posture this loop RECOMMENDS to the fleet, the MORE RESTRICTIVE of two
+    /// independent fault-escalators (#773 F2): the attached governor's own
+    /// recommendation (e.g. a redundancy comparator escalating on persistent
+    /// divergence; `Nominal` when no governor is set), and the DEADLINE watchdog's
+    /// breach history (`Degraded` while a recent hang is still draining,
+    /// `LockedOut` once persistent — see `deadline_health_posture`).
+    ///
+    /// The tick driver reads this each cycle and escalates the effective posture
+    /// with it, so BOTH a governor disagreement AND a backend hang drive the fleet
+    /// posture, not just this tick's clamp. Before F2 the deadline breach fed only
+    /// this tick's stopped command; the fleet stayed Nominal and re-accelerated the
+    /// instant the straggler cleared.
     #[must_use]
     pub fn recommended_posture(&self) -> SafetyPosture {
-        self.governor
+        let governor = self
+            .governor
             .as_ref()
-            .map_or(SafetyPosture::Nominal, |g| g.recommended_posture())
+            .map_or(SafetyPosture::Nominal, |g| g.recommended_posture());
+        governor.escalate(self.deadline_health_posture())
     }
 
     /// Set the tick period (used for time-delta calculations passed to
@@ -255,6 +348,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 self.hung_inference = Some(straggler);
                 self.last_validated_command =
                     Some(ControlCommand::stopped(loop_start_ms));
+                // WS-0.4 F2: a while-hung tick is a continuing breach — keep the
+                // posture escalated (and drive it toward LockedOut on persistence).
+                self.record_deadline_breach();
                 // The onset was audited on the deadline tick; while-hung
                 // ticks stay quiet (a 20 Hz loop would flood the ledger) —
                 // the degraded MRC snapshots are the ongoing record.
@@ -303,6 +399,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                     });
                 }
                 self.hung_inference = Some(in_flight);
+                // WS-0.4 F2: escalate the fleet posture on the breach, with
+                // recovery hysteresis (the accumulator drains over healthy ticks).
+                self.record_deadline_breach();
                 // The next flush must carry a STOP, not the pre-hang command
                 // (fail-closed: after a hang the governor's `previous` is a
                 // stop, so Degraded's no-re-initiation gate holds at zero).
@@ -316,6 +415,14 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 ));
             }
         };
+        // WS-0.4 F2: the inference returned WITHIN the deadline (it did not hang) —
+        // drain the breach accumulator one step. This is the recovery hysteresis:
+        // after a hang, several consecutive healthy ticks are required before the
+        // posture recommendation relaxes from Degraded back to Nominal. A
+        // non-finite / backend-error result still counts as "not a hang" (it
+        // returned): the deadline watchdog governs stalls, not output validity.
+        self.record_deadline_healthy();
+
         // WS-0.4 F3: EVERY fault exit must leave `last_validated_command` a STOP,
         // not the pre-fault MOVING command. `tick` flushes `last_validated_command`
         // at the START of the next tick (one-tick-delayed publication), so a fault
@@ -1043,6 +1150,101 @@ mod tests {
             "recovery tick publishes the fresh backend output, not the stale straggler result"
         );
         assert!(!snap3.active_state_degraded, "recovered loop is healthy again");
+    }
+
+    /// WS-0.4 F2 — the deadline-breach posture escalator (leaky bucket) drives
+    /// `recommended_posture` with recovery hysteresis and a persistent-breach
+    /// LockedOut. Exercised directly (no real hangs) so the exact accumulator
+    /// contract is pinned: one breach → Degraded, held for `INC/DECAY` = 3
+    /// healthy ticks; three consecutive breaches → LockedOut.
+    #[test]
+    fn deadline_breach_accumulator_escalates_and_recovers_with_hysteresis() {
+        let backend = Arc::new(ConfigurableBackend { linear: 1.0 });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut engine = InferenceLoop::new(backend, model, tx);
+
+        // Fresh loop: no breach history → Nominal.
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Nominal);
+
+        // One breach → Degraded (acc = INC = 3).
+        engine.record_deadline_breach();
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded,
+            "a single deadline breach must recommend Degraded");
+
+        // Recovery hysteresis: it stays Degraded for INC/DECAY = 3 healthy ticks,
+        // clearing only when the bucket drains to 0.
+        engine.record_deadline_healthy(); // 3 → 2
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "still draining (2)");
+        engine.record_deadline_healthy(); // 2 → 1
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "still draining (1)");
+        engine.record_deadline_healthy(); // 1 → 0
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Nominal,
+            "recovered to Nominal only after the confirmation streak drained the bucket");
+
+        // Three consecutive breaches (no intervening recovery) → LockedOut.
+        engine.record_deadline_breach(); // 3
+        engine.record_deadline_breach(); // 6
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "two breaches: still Degraded");
+        engine.record_deadline_breach(); // 9 == DEADLINE_LOCKOUT_LEVEL
+        assert_eq!(engine.recommended_posture(), SafetyPosture::LockedOut,
+            "three consecutive breaches must escalate to LockedOut");
+    }
+
+    /// WS-0.4 F2 — the escalation is LIVE through the real tick path: a backend
+    /// hang not only MRCs the tick's command but escalates `recommended_posture`
+    /// to Degraded (the signal the tick driver feeds to the fleet posture),
+    /// then relaxes back to Nominal after a recovery streak of healthy ticks.
+    /// Before F2 a hang left the posture Nominal and re-accelerated instantly.
+    #[tokio::test]
+    async fn deadline_breach_escalates_recommended_posture_through_tick() {
+        let backend = Arc::new(HangOnceBackend {
+            hang_ms: 250,
+            runs: std::sync::atomic::AtomicU32::new(0),
+        });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut engine = InferenceLoop::new(Arc::clone(&backend), model, tx)
+            .with_inference_deadline_ms(30);
+        let mut stream = SimpleStream { next_id: 0 };
+
+        assert_eq!(engine.recommended_posture(), SafetyPosture::Nominal, "healthy at start");
+
+        // Tick 1: the backend hangs → deadline breach → posture escalates.
+        let _ = engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Degraded,
+            "a deadline breach must escalate the RECOMMENDED posture, not just the command"
+        );
+
+        // Let the straggler clear, then drive healthy ticks until the bucket
+        // drains. The posture must NOT snap back on the first healthy tick
+        // (hysteresis); it relaxes to Nominal only after the streak.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut recovered = false;
+        for _ in 0..6 {
+            let _ = engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+            if engine.recommended_posture() == SafetyPosture::Nominal {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "the posture must relax to Nominal after a recovery streak of healthy ticks");
+    }
+
+    /// #773 F6 — the deadline is clamped to a sanity ceiling so a `u64::MAX`
+    /// (de-facto "disable") value can't silently defeat the always-on contract.
+    #[test]
+    fn deadline_is_clamped_to_sanity_ceiling() {
+        let backend = Arc::new(ConfigurableBackend { linear: 1.0 });
+        let model = backend.load_model("").unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let engine = InferenceLoop::new(backend, model, tx).with_inference_deadline_ms(u64::MAX);
+        assert_eq!(
+            engine.inference_deadline_ms, DEADLINE_CEILING_MS,
+            "an absurd deadline must clamp to the ceiling, never act as a disable"
+        );
     }
 
     /// The deadline must not fire on a slow-but-completing backend: the

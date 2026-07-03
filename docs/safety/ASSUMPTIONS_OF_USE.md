@@ -47,6 +47,7 @@ the verification passes for the target deployment.
 | AOU-PERCEPTION-CLASS-001 | Reliable detection of the worst-case object classes (pedestrian / cyclist / child / low-contrast debris) at ≥ R_reliable | Integrator (perception) | **AoU-GAP** (base) → D1 IDC omission coverage | the speed cap (SPEED-VAL-001 row 4); the SG1/SG6 worst-case-object basis |
 | AOU-VEHICLE-FRICTION-001 | Effective deceleration ≥ 3.0 m/s² over the deployment ODD (else sub-ODD weather-derate) | Integrator (vehicle / road) | **OK-ANALYTICAL** (vehicle) + **AoU-GAP** (road friction) | the speed cap's SSD braking term (SPEED-VAL-001 row 3) |
 | AOU-ACTUATION-LATENCY-001 | Actuation completes safe-stop initiation ≤ 499 ms of the MRC verdict, and safe-stops on loss of a valid verdict | Integrator (actuation) | **OK-PROVEN** (Governor) + **AoU-GAP** (actuator residual) | the speed cap's t_react budget (SPEED-VAL-001 row 2); SS-003 MRC fallback |
+| AOU-ACTUATION-DEADMAN-001 | The base controller consuming the parko node's `cmd_vel` stream treats stream SILENCE beyond a dead-man budget (≤ the parko inference deadline) as STOP — it must not hold the last twist live indefinitely | Integrator (actuation / base controller) | **AoU-GAP** — integrator obligation; parko side fails closed to per-tick STOP + posture escalation (#773 F2) | the parko WS-0.4 inference deadline (`DEFAULT_INFERENCE_DEADLINE_MS`): on a backend hang the node publishes STOP, but a base controller that latches the last command would keep a pre-hang MOVING twist live across the hang window |
 | AOU-HW-POWER-001 (DR-1) | Governor D3 compute on an ASIL-D-class redundant / supervised power supply | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate | the ASIL-D PMHF target for the Governor element (KIRRA-OCCY-QUANT-001) |
 | AOU-HW-COMMBUS-001 (DR-2) | Governor comm path (Auto-Ethernet PHY+MAC) achieves LFM ≥ 90 % | Integrator (hardware / platform) | **AoU-GAP** — pre-production HW gate | the ASIL-D LFM target for the Governor element (KIRRA-OCCY-QUANT-001) |
 | AOU-LOCALIZATION-001 | Integrator localization ≤ 0.10 m 95th-pct lateral (cross-track) error over the ODD; else the documented 0.75 m conservative-fallback margin | Integrator (localization) | **AoU-GAP** (base) — integrator-characterized; runtime gate live (#123 / PR #264) | `CONTAINMENT_LATERAL_MARGIN_M = 0.40 m` (SG2 ASIL D); all map-anchored SG5 commit-zone enforcement (#260–#262) + the SG4 `MapKnownSafe` earn-back |
@@ -1268,3 +1269,61 @@ OS is not a partition guarantee). Discharged by hypervisor scheduling
 configuration + the HV-S1/HV-S2 campaign rows measuring governor-path latency
 percentiles UNDER guest flood/starve-burst, against the same budgets the
 Phase-I baseline established unloaded.
+
+---
+
+## AOU-ACTUATION-DEADMAN-001 — Base controller dead-mans a silent `cmd_vel` stream
+
+### Assumption
+
+The base controller (or motor driver) that consumes the parko node's `cmd_vel`
+command stream treats **stream silence** — no fresh command within a dead-man
+budget — as an immediate **STOP**, rather than latching the last-received twist
+live. The dead-man budget SHALL be no larger than the parko per-tick inference
+deadline (`DEFAULT_INFERENCE_DEADLINE_MS`, default 1000 ms; deployments tighten
+it via `PARKO_INFERENCE_DEADLINE_MS`).
+
+### Why it is load-bearing
+
+On a backend hang (wedged driver / deadlocked execution provider) the parko
+inference loop fails closed **at its own boundary**: the WS-0.4 deadline cuts the
+tick off, the loop publishes STOP, and the deadline-breach posture escalator
+(#773 F2) drives the fleet toward Degraded/LockedOut with recovery hysteresis.
+But that protection covers only the commands parko **emits**. A base controller
+that holds the last twist live on stream silence would keep a **pre-hang MOVING
+command** actuating across the hang window regardless — the parko STOP never
+reaches the wheels if the transport stalls, and even a delivered STOP is
+undermined if the controller ignores subsequent silence. The dead-man closes
+that residual, mirroring the SDK's own `503 → 0.0` consumer safe-stop discipline
+(the HTTP command consumer treats a fail-closed 503 as zero).
+
+### Pairs with
+
+- **AOU-ACTUATION-LATENCY-001** — safe-stop on loss of a valid *verdict* (the
+  MRC path). This entry is the finer-grained cmd_vel-stream analogue for the
+  parko doer path: loss of a valid *command stream* is also a stop.
+- **AOU-TIMESYNC-001** — the timestamps the dead-man ages must be in the
+  boundary clock domain (a non-monotonic stamp would mis-age the stream; cf. the
+  #770 F4 future-stamp-is-stale fix on the scene freshness gates).
+
+### Verification status — **AoU-GAP** (integrator obligation)
+
+The parko side is DISCHARGED: `InferenceLoop::tick` publishes STOP on every fault
+exit (deadline / non-finite / backend-error / join-error, WS-0.4 F3) and
+escalates the recommended posture on deadline breaches (F2), both regression-
+tested. The consumer-side dead-man is the integrator's obligation — parko cannot
+enforce what a downstream controller does with a silent topic.
+
+### Consequence if violated
+
+A base controller that latches the last `cmd_vel` and ignores stream silence
+converts a bounded, fail-closed parko hang into an **unbounded moving command**
+at the pre-hang velocity for the duration of the stall — defeating the WS-0.4
+deadline's entire purpose at the actuator.
+
+### Cross-references
+
+- `parko/crates/parko-core/src/scheduler.rs` — `DEFAULT_INFERENCE_DEADLINE_MS`,
+  the deadline watchdog, and the F2 breach→posture escalator.
+- `SAFE_STATE_SPECIFICATION.md` SS-003 (MRC fallback); the SDK `503 → 0.0`
+  consumer safe-stop (#405 / ADR-0011).

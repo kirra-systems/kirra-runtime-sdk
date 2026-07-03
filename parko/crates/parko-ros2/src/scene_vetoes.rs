@@ -41,17 +41,43 @@ pub struct StampedScene<T> {
     pub stamp_ms: u64,
 }
 
+/// #770 F4 — tolerated future-stamp skew, ms. `now_ms` comes from a
+/// NON-MONOTONIC wall clock (`SystemTime`), so a backward NTP step or a
+/// producer whose clock runs ahead can stamp a scene in the future relative to
+/// `now_ms`. A producer stamp up to this far ahead is tolerated as ordinary
+/// clock jitter; beyond it the stamp is IMPLAUSIBLE and the scene is treated as
+/// STALE (fail-closed), never age-0.
+pub const SCENE_FUTURE_SKEW_BUDGET_MS: u64 = 50;
+
 impl<T> StampedScene<T> {
     /// Age relative to `now_ms`; saturating (a future-stamped scene reads 0).
     #[must_use]
     pub fn age_ms(&self, now_ms: u64) -> u64 {
         now_ms.saturating_sub(self.stamp_ms)
     }
+
+    /// Fresh iff the stamp is neither too OLD (`age > max_age_ms`) nor
+    /// implausibly in the FUTURE (#770 F4). The naive `age_ms <= max_age_ms`
+    /// alone fails OPEN on a non-monotonic clock: `saturating_sub` reads any
+    /// future stamp as age 0, so a backward clock step (every cached scene now
+    /// "in the future") or a skewed-ahead producer keeps a STALE scene passing
+    /// the freshness gate indefinitely — silently disarming the interlock whose
+    /// whole purpose is "a stale scene is a perception gap, never a verdict."
+    /// Treating a beyond-skew future stamp as stale closes both holes fail-closed.
+    /// (A monotonic gate-clock domain is the fuller fix; this bounds the wall-clock
+    /// exposure now.)
+    #[must_use]
+    pub fn is_fresh(&self, now_ms: u64, max_age_ms: u64) -> bool {
+        if self.stamp_ms > now_ms.saturating_add(SCENE_FUTURE_SKEW_BUDGET_MS) {
+            return false; // implausible future stamp → fail closed (stale)
+        }
+        self.age_ms(now_ms) <= max_age_ms
+    }
 }
 
 /// Resolve an armed channel's slot to the scene the check runs on:
-/// fresh → the producer's scene; missing or stale → the supplied fail-closed
-/// worst-case variant.
+/// fresh → the producer's scene; missing, stale, OR implausibly-future-stamped
+/// → the supplied fail-closed worst-case variant (#770 F4).
 fn resolve_scene<T: Clone>(
     slot: Option<&StampedScene<T>>,
     max_age_ms: u64,
@@ -59,7 +85,7 @@ fn resolve_scene<T: Clone>(
     fail_closed: T,
 ) -> T {
     match slot {
-        Some(stamped) if stamped.age_ms(now_ms) <= max_age_ms => stamped.scene.clone(),
+        Some(stamped) if stamped.is_fresh(now_ms, max_age_ms) => stamped.scene.clone(),
         _ => fail_closed,
     }
 }
@@ -231,6 +257,27 @@ mod tests {
         let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 2_000);
         assert_eq!(out.twist.linear_x_mps, 0.0, "stale sightline must fail closed");
         assert_eq!(out.error, Some(TickError::OcclusionBreach));
+    }
+
+    #[test]
+    fn occlusion_future_stamped_scene_fails_closed() {
+        // #770 F4 — a KnownClear scene stamped implausibly in the FUTURE
+        // (backward clock step / skewed-ahead producer) must NOT read as age-0
+        // fresh: beyond the skew budget it is treated as stale → fail closed.
+        let s = stamped(OcclusionScene::KnownClear, 100_000);
+        let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 100);
+        assert_eq!(out.twist.linear_x_mps, 0.0, "future-stamped sightline must fail closed, not read fresh");
+        assert_eq!(out.error, Some(TickError::OcclusionBreach));
+    }
+
+    #[test]
+    fn scene_within_skew_budget_is_still_fresh() {
+        // #770 F4 — a stamp a few ms ahead (ordinary jitter, within the skew
+        // budget) is tolerated as fresh, so the fix doesn't over-reject.
+        let s = stamped(OcclusionScene::KnownClear, 110);
+        assert!(s.is_fresh(100, 500), "a stamp within the skew budget must stay fresh");
+        let out = apply_occlusion_gate(outcome(0.2), Some(&s), &params(), 500, 100);
+        assert!(out.error.is_none(), "within-skew-budget KnownClear must pass");
     }
 
     // ---- water --------------------------------------------------------------
