@@ -213,6 +213,21 @@ struct DivState {
     /// audit line: it drives the system to `Degraded` (and `LockedOut` once persistent),
     /// with hysteresis (it stays `Degraded` while the accumulator drains).
     recommended_posture: SafetyPosture,
+    /// WS-0.4 F5 — the PEAK best-available speed proxy observed since the current
+    /// divergence episode began, m/s. The angular rollover cap is evaluated here,
+    /// not at the reconciled (≤ 5 m/s) command. `previous` is the last *issued*
+    /// command, so once the comparator clamps the linear axis to ~5 the naive
+    /// per-tick proxy collapses to 5 while the vehicle is still physically at
+    /// speed (Copilot #781) — but a decaying estimate is UNSAFE (any decay faster
+    /// than the vehicle's actual decel undershoots true speed → looser cap). With
+    /// only past commands available, the sound choice is to HOLD the peak for the
+    /// (bounded) lost-trust episode: it captures the pre-divergence speed on the
+    /// first divergent tick and holds it until trust returns (accumulator drains
+    /// to 0 → reset) or the episode escalates to LockedOut. Over-conservative on
+    /// availability for a few ticks, which is the correct direction under lost
+    /// trust. A true through-transient bound needs a MEASURED-speed input the
+    /// comparator does not have (tracked: add `measured_speed_mps` to `evaluate`).
+    episode_peak_speed_mps: f64,
 }
 
 impl Default for DivState {
@@ -221,6 +236,7 @@ impl Default for DivState {
             accumulator: 0,
             first_divergence: None,
             recommended_posture: SafetyPosture::Nominal,
+            episode_peak_speed_mps: 0.0,
         }
     }
 }
@@ -413,6 +429,9 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             state.accumulator = state.accumulator.saturating_sub(DIVERGENCE_DECAY);
             if state.accumulator == 0 {
                 state.first_divergence = None;
+                // WS-0.4 F5 — trust restored: end the episode and release the
+                // held peak so the rollover cap recovers availability.
+                state.episode_peak_speed_mps = 0.0;
             }
             // Posture recovers only once the accumulator has fully drained (hysteresis): a
             // single agreeing tick after a burst of divergence does NOT immediately clear the
@@ -429,40 +448,17 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
 
         let reconciled_lin = reconcile(primary_lin, shadow_lin, MRC_VELOCITY_CEILING_MPS);
 
-        // Best-available current-speed proxy. There is no measured-speed
-        // input on `evaluate` (see STEP 0(f) of CERT-006 v2 prompt). The
-        // previously commanded velocity tracks vehicle speed closely if
-        // the AV is following commands; in the absence of `previous` we
-        // fall back to time-based escalation. (Computed here — moved above the
-        // angular cap for WS-0.4 F5 — and reused by the lockout gate below.)
+        // Best-available current-speed proxy: the previously *issued* command
+        // (there is no measured-speed input on `evaluate` — CERT-006 v2 STEP
+        // 0(f)). Tracks vehicle speed while the AV follows commands; `None`
+        // (no history) falls back to time-based escalation for the lockout gate.
         let current_speed_mps = previous.map(|p| p.linear_velocity.abs());
-
-        // WS-0.4 (F5 fix) — the angular reconciliation is capped by the
-        // SOTIF-derived MRC angular ceiling `ω_max(v)` (#136), evaluated at the
-        // vehicle's ACTUAL speed, not the reconciled COMMANDED linear velocity.
-        // `reconciled_lin` is ≤ MRC_VELOCITY_CEILING_MPS (5 m/s), and exactly 0.0
-        // on direction disagreement — so evaluating the bound there was the
-        // permissive point of a curve that is PROVEN non-increasing in speed
-        // (`angular_bound::prop_omega_max_is_non_increasing_in_speed`). During a
-        // divergence-at-speed transient (the exact CERT-006 scenario: the
-        // ClampMotion path has no stop-and-hold gate, so actual speed lags the
-        // commanded 5 for many ticks) that admitted up to ~3.4× the rollover-safe
-        // yaw at 30 m/s. Binding at `max(commanded, actual)` is strictly
-        // conservative by that non-increasing property; when no speed proxy
-        // exists it degrades to the commanded value (the prior behaviour). The
-        // MRC (posture-derated) bound is the envelope since divergence is a
-        // lost-trust condition; read from the PRIMARY arm (production wires both
-        // arms with identical platform params — a mismatch would spuriously
-        // diverge every tick anyway).
-        let v_bound = reconciled_lin.abs().max(current_speed_mps.unwrap_or(0.0));
-        let angular_cap = self.primary.mrc_omega_max(v_bound);
-        let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         // ATOMIC multi-step update under the single state mutex.
         // (Per CERT-006 v2 prompt STEP 1: separate atomics would NOT be
         // safe as a unit; one mutex covers accumulator + first_divergence
-        // + the lockout decision.)
-        let (accumulator, may_lockout) = {
+        // + the lockout decision + the WS-0.4 F5 episode peak.)
+        let (accumulator, may_lockout, episode_peak_speed) = {
             let mut state = self.state.lock().expect("DivState mutex poisoned");
 
             state.accumulator = (state.accumulator + DIVERGENCE_INC)
@@ -470,6 +466,9 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             if state.first_divergence.is_none() {
                 state.first_divergence = Some(Instant::now());
             }
+            // WS-0.4 F5 — HOLD the peak speed proxy for the divergence episode.
+            state.episode_peak_speed_mps =
+                state.episode_peak_speed_mps.max(current_speed_mps.unwrap_or(0.0));
 
             let persistent = state.accumulator >= DIVERGENCE_LOCKOUT_LEVEL;
             let may_lockout = match current_speed_mps {
@@ -497,8 +496,25 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
                 SafetyPosture::Degraded
             };
 
-            (state.accumulator, may_lockout)
+            (state.accumulator, may_lockout, state.episode_peak_speed_mps)
         };
+
+        // WS-0.4 (F5 fix) — cap the reconciled yaw at the SOTIF-derived MRC
+        // angular ceiling `ω_max(v)` (#136) evaluated at the EPISODE PEAK speed
+        // proxy, not the reconciled (≤ 5 m/s) command. `ω_max` is PROVEN
+        // non-increasing in v (`angular_bound::prop_omega_max_is_non_increasing_
+        // in_speed`), so the reconciled command was the permissive point of the
+        // curve — during a divergence-at-speed transient (the ClampMotion path
+        // has no stop-and-hold gate) that admitted up to ~3.4× the rollover-safe
+        // yaw at 30 m/s. Binding at `max(reconciled, episode_peak)` is strictly
+        // conservative by that property and holds through the (bounded) episode
+        // rather than collapsing when the command clamps (see `DivState::
+        // episode_peak_speed_mps`). Read from the PRIMARY arm (production wires
+        // both arms with identical platform params — a mismatch would spuriously
+        // diverge every tick anyway).
+        let v_bound = reconciled_lin.abs().max(episode_peak_speed);
+        let angular_cap = self.primary.mrc_omega_max(v_bound);
+        let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         let action = if may_lockout {
             EnforcementAction::Deny {
@@ -784,15 +800,14 @@ mod tests {
         );
     }
 
-    /// WS-0.4 F5 — the angular cap must bind at the vehicle's ACTUAL speed, not
-    /// the reconciled COMMANDED linear velocity. During a divergence-at-speed
-    /// decel transient (previous = 30 m/s, reconciled linear pinned at the 5 m/s
-    /// MRC ceiling) the ClampMotion path has no stop-and-hold gate, so actual
-    /// speed lags commanded for many ticks. Capping at the commanded 5 admitted
-    /// ~3.4× the rollover-safe yaw; capping at 30 (strictly conservative by the
-    /// proven non-increasing ω_max) is what the fix enforces.
+    /// WS-0.4 F5 — the angular cap must bind at the best-available SPEED PROXY
+    /// (the last commanded velocity), not the reconciled COMMANDED linear
+    /// velocity. On the first divergent tick at speed (previous = 30 m/s,
+    /// reconciled linear pinned at the 5 m/s MRC ceiling) capping at the
+    /// commanded 5 admitted ~3.4× the rollover-safe yaw; capping at 30 (strictly
+    /// conservative by the proven non-increasing ω_max) is what the fix enforces.
     #[test]
-    fn angular_cap_binds_at_actual_speed_not_commanded_during_divergence_at_speed() {
+    fn angular_cap_binds_at_speed_proxy_not_commanded_on_first_divergent_tick() {
         struct FixedAngularClamp(f64);
         impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
             fn evaluate(
@@ -814,7 +829,9 @@ mod tests {
         let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
 
         // A large yaw request, linear at the MRC ceiling; previous = 30 m/s is
-        // the ACTUAL vehicle speed decelerating from highway.
+        // the best-available speed proxy (the last commanded velocity, a stand-in
+        // for the vehicle decelerating from highway — see `DivState::
+        // episode_peak_speed_mps` for why the proxy is HELD across the episode).
         let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
         let prev = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
         let out = comparator.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
@@ -822,16 +839,156 @@ mod tests {
 
         let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
-        let cap_at_actual = mrc.omega_max(30.0);
+        let cap_at_proxy = mrc.omega_max(30.0);
         let cap_at_commanded = mrc.omega_max(5.0);
         // Sanity: the two caps genuinely differ (else the test proves nothing).
-        assert!(cap_at_actual < cap_at_commanded,
-            "precondition: ω_max(30)={cap_at_actual} must be tighter than ω_max(5)={cap_at_commanded}");
+        assert!(cap_at_proxy < cap_at_commanded,
+            "precondition: ω_max(30)={cap_at_proxy} must be tighter than ω_max(5)={cap_at_commanded}");
         assert!(
-            ang <= cap_at_actual + COMPARATOR_TOLERANCE,
-            "reconciled yaw {ang} must be bounded by the rollover-safe ω_max at the ACTUAL 30 m/s \
-             ({cap_at_actual}); the pre-fix code bounded at the commanded 5 m/s ({cap_at_commanded})"
+            ang <= cap_at_proxy + COMPARATOR_TOLERANCE,
+            "reconciled yaw {ang} must be bounded by the rollover-safe ω_max at the speed proxy 30 m/s \
+             ({cap_at_proxy}); the pre-fix code bounded at the commanded 5 m/s ({cap_at_commanded})"
         );
+    }
+
+    /// WS-0.4 F5 (episode-peak, Copilot #781 follow-up) — the speed proxy is the
+    /// last *issued* command, so after the first divergent tick the reconciled
+    /// command collapses to the ≤ 5 m/s MRC ceiling while the vehicle is still
+    /// physically near 30 m/s. A naive "cap at last-commanded speed" would let the
+    /// yaw cap loosen back to ω_max(5) on the very next tick — exactly the ~3.4×
+    /// over-permit the fix removes. This drives a SECOND divergent tick whose
+    /// `previous` has already collapsed to 5 m/s and asserts the reconciled yaw is
+    /// STILL bound at the held episode peak ω_max(30), not ω_max(5).
+    #[test]
+    fn angular_cap_holds_episode_peak_after_command_collapses() {
+        struct FixedAngularClamp(f64);
+        impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                EnforcementAction::ClampAngularVelocity(self.0)
+            }
+        }
+        use crate::angular_bound::{AngularVelocityBound, PlatformParams};
+
+        let mut primary = KirraGovernor::new();
+        primary.update_rss_state(safe_rss());
+        let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
+
+        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+
+        // Tick 1: previous = 30 m/s establishes the episode peak.
+        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let _ = comparator.evaluate(&proposed, Some(&prev_hi), 0.05, SafetyPosture::Nominal);
+
+        // Tick 2: previous has already collapsed to the 5 m/s MRC command — a
+        // naive last-commanded proxy would loosen the cap here. The held episode
+        // peak must keep it bound at ω_max(30).
+        let prev_lo = ControlCommand { linear_velocity: 5.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let out = comparator.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "expected a divergence ClampMotion, got {out:?}");
+
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
+        let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
+        let cap_at_peak = mrc.omega_max(30.0);
+        let cap_at_collapsed = mrc.omega_max(5.0);
+        assert!(cap_at_peak < cap_at_collapsed,
+            "precondition: ω_max(30)={cap_at_peak} must be tighter than ω_max(5)={cap_at_collapsed}");
+        assert!(
+            ang <= cap_at_peak + COMPARATOR_TOLERANCE,
+            "reconciled yaw {ang} must stay bound at the HELD episode peak ω_max(30)={cap_at_peak} \
+             even after the command collapsed to 5 m/s; a last-commanded proxy would loosen to \
+             ω_max(5)={cap_at_collapsed}"
+        );
+    }
+
+    /// WS-0.4 F5 — the held episode peak must RESET once trust is restored (the
+    /// accumulator drains to 0 on agreement), so a later, genuinely-slow
+    /// divergence episode is not perpetually over-constrained by a stale peak.
+    #[test]
+    fn episode_peak_resets_after_agreement_drains_accumulator() {
+        struct SwitchableClamp {
+            diverge: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl parko_core::safety::SafetyGovernor for SwitchableClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                if self.diverge.load(std::sync::atomic::Ordering::SeqCst) {
+                    EnforcementAction::ClampAngularVelocity(0.5)
+                } else {
+                    // Agree with the primary: pass the command through so
+                    // `actions_diverge` is false and the accumulator decays.
+                    EnforcementAction::Allow
+                }
+            }
+        }
+        use crate::angular_bound::{AngularVelocityBound, PlatformParams};
+        use std::sync::atomic::Ordering;
+
+        let mut primary = KirraGovernor::new();
+        primary.update_rss_state(safe_rss());
+        let diverge = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let shadow = SwitchableClamp { diverge: Arc::clone(&diverge) };
+        let comparator = GovernorComparator::new(primary, shadow);
+
+        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+
+        // Establish a HIGH episode peak (30 m/s) over one divergent tick.
+        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let _ = comparator.evaluate(&proposed, Some(&prev_hi), 0.05, SafetyPosture::Nominal);
+
+        // Agree until the accumulator fully drains (DIVERGENCE_INC=2 added, so a
+        // couple of agreeing ticks decay it back to 0 and end the episode).
+        diverge.store(false, Ordering::SeqCst);
+        for _ in 0..4 {
+            let _ = comparator.evaluate(&cmd(3.0), Some(&cmd(3.0)), 0.05, SafetyPosture::Nominal);
+        }
+        assert_eq!(comparator.recommended_posture(), SafetyPosture::Nominal,
+            "accumulator must have drained back to Nominal");
+
+        // New divergence episode at a genuinely LOW speed proxy (5 m/s). The cap
+        // must reflect ω_max(5), not the stale ω_max(30) peak from the prior
+        // episode.
+        diverge.store(true, Ordering::SeqCst);
+        let prev_lo = ControlCommand { linear_velocity: 5.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let out = comparator.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
+
+        // Robust reset proof: a FRESH comparator that never saw the 30 m/s peak,
+        // driven with the identical low-speed divergent tick, must produce the
+        // SAME reconciled yaw. Equality ⇒ the stale peak was fully released (a
+        // residual peak would have kept the recovered comparator's cap tighter).
+        let baseline_ang = {
+            let mut p = KirraGovernor::new();
+            p.update_rss_state(safe_rss());
+            // A diverge-locked SwitchableClamp is behaviorally identical to the
+            // primed comparator's shadow on a divergent tick (ClampAngularVelocity(0.5)).
+            let s = SwitchableClamp { diverge: Arc::new(std::sync::atomic::AtomicBool::new(true)) };
+            let fresh = GovernorComparator::new(p, s);
+            let out = fresh.evaluate(&proposed, Some(&prev_lo), 0.05, SafetyPosture::Nominal);
+            effective_angular_velocity(&out, proposed.angular_velocity).abs()
+        };
+        assert!(
+            (ang - baseline_ang).abs() <= COMPARATOR_TOLERANCE,
+            "post-recovery reconciled yaw {ang} must equal the fresh-comparator baseline \
+             {baseline_ang} (episode peak reset on trust recovery); a residual stale peak would \
+             keep it tighter"
+        );
+
+        // And the low-speed cap is genuinely looser than the stale one — so the
+        // equality above is a non-trivial release, not both being pinned low.
+        let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
+        assert!(mrc.omega_max(5.0) > mrc.omega_max(30.0),
+            "precondition: ω_max(5)={} must exceed ω_max(30)={}", mrc.omega_max(5.0), mrc.omega_max(30.0));
     }
 
     // -----------------------------------------------------------------
