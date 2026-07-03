@@ -705,6 +705,12 @@ pub async fn run_adapter(
                 // worst-cases over them, refusing a trajectory a predicted cut-in / turn-in
                 // breaches even though the snapshot showed the object laterally clear.
                 Some(&predicted_modes),
+                // WS-2 pedestrian/VRU RSS: no VRU perception channel is wired on the
+                // node yet -> None (no-op, byte-identical). The `~/input/pedestrians`
+                // subscription + classification ingest is the tracked follow-up
+                // (docs/safety/PEDESTRIAN_RSS.md par.6); once wired, the live scene
+                // arms the omnidirectional reachable-set bound in the checker.
+                None,
                 // Frame/localization integrity (S-FI1): the LIVE frame trust resolved from the
                 // integrator's per-tick `update_frame_integrity` report. With no source wired
                 // this returns `Trusted` — the AOU-LOCALIZATION-001 seam (byte-for-byte the
