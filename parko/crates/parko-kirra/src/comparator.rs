@@ -222,11 +222,17 @@ struct DivState {
     /// than the vehicle's actual decel undershoots true speed → looser cap). With
     /// only past commands available, the sound choice is to HOLD the peak for the
     /// (bounded) lost-trust episode: it captures the pre-divergence speed on the
-    /// first divergent tick and holds it until trust returns (accumulator drains
-    /// to 0 → reset) or the episode escalates to LockedOut. Over-conservative on
-    /// availability for a few ticks, which is the correct direction under lost
-    /// trust. A true through-transient bound needs a MEASURED-speed input the
-    /// comparator does not have (tracked: add `measured_speed_mps` to `evaluate`).
+    /// first divergent tick and holds it until TRUST RETURNS — i.e. the governors
+    /// agree and the accumulator drains to 0 (the agreement path resets the peak).
+    /// A LockedOut escalation deliberately does NOT reset it: on a `may_lockout`
+    /// tick the reconciled command is `Deny` (hard stop), so the cap is moot that
+    /// tick; and in the post-lockout drain/hysteresis window the episode is STILL
+    /// lost-trust, so persisting the peak keeps the yaw cap tight (more
+    /// conservative) — resetting there would LOOSEN it, the wrong direction.
+    /// Over-conservative on availability for a few ticks, which is the correct
+    /// direction under lost trust. A true through-transient bound needs a
+    /// MEASURED-speed input the comparator does not have (tracked: add
+    /// `measured_speed_mps` to `evaluate`).
     episode_peak_speed_mps: f64,
 }
 
@@ -989,6 +995,75 @@ mod tests {
         let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
         assert!(mrc.omega_max(5.0) > mrc.omega_max(30.0),
             "precondition: ω_max(5)={} must exceed ω_max(30)={}", mrc.omega_max(5.0), mrc.omega_max(30.0));
+    }
+
+    /// WS-0.4 F5 (Copilot #781 follow-up) — a LockedOut escalation must NOT reset
+    /// the held episode peak. The reset condition is TRUST RETURNING (agreement
+    /// drains the accumulator), and LockedOut is the opposite — escalation. On a
+    /// `may_lockout` tick the reconciled command is `Deny` (the cap is moot), and
+    /// in the post-lockout drain window the episode is still lost-trust, so the
+    /// peak must persist to keep the yaw cap tight (the conservative direction).
+    /// This pins that: after establishing a 30 m/s peak, a low-speed tick escalates
+    /// to LockedOut (Deny), then a subsequent still-divergent tick whose speed proxy
+    /// has risen just above the safe-lockout floor drops back to ClampMotion — and
+    /// its yaw is STILL bound at the held ω_max(30), not the loosened ω_max(proxy).
+    #[test]
+    fn episode_peak_survives_lockout_escalation() {
+        struct FixedAngularClamp(f64);
+        impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                EnforcementAction::ClampAngularVelocity(self.0)
+            }
+        }
+        use crate::angular_bound::{AngularVelocityBound, PlatformParams};
+
+        let mut primary = KirraGovernor::new();
+        primary.update_rss_state(safe_rss());
+        let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
+
+        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+        let prev_hi = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+
+        // Three high-speed divergent ticks drive the accumulator to the lockout
+        // level (INC=2, LEVEL=6) and establish the 30 m/s episode peak; speed > the
+        // safe-lockout floor (5) so these stay ClampMotion, not Deny.
+        for _ in 0..3 {
+            let out = comparator.evaluate(&proposed, Some(&prev_hi), 0.05, SafetyPosture::Nominal);
+            assert!(matches!(out, EnforcementAction::ClampMotion { .. }),
+                "high-speed persistent divergence must stay ClampMotion (speed > safe floor), got {out:?}");
+        }
+
+        // A low-speed divergent tick (proxy 3 ≤ safe floor 5) with the accumulator
+        // already ≥ LEVEL → may_lockout → hard-stop Deny. The peak must NOT reset here.
+        let prev_lockout = ControlCommand { linear_velocity: 3.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let out = comparator.evaluate(&proposed, Some(&prev_lockout), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::Deny { .. }),
+            "low-speed persistent divergence must escalate to LockedOut Deny, got {out:?}");
+
+        // Speed proxy rises just above the safe floor while still diverging → drops
+        // back to ClampMotion. The held peak (30) must still bind the yaw cap.
+        let prev_recover = ControlCommand { linear_velocity: 6.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let out = comparator.evaluate(&proposed, Some(&prev_recover), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::ClampMotion { .. }),
+            "speed above the safe floor must leave LockedOut for ClampMotion, got {out:?}");
+
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
+        let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
+        let cap_at_peak = mrc.omega_max(30.0);
+        let cap_at_recover_proxy = mrc.omega_max(6.0);
+        assert!(cap_at_peak < cap_at_recover_proxy,
+            "precondition: ω_max(30)={cap_at_peak} must be tighter than ω_max(6)={cap_at_recover_proxy}");
+        assert!(
+            ang <= cap_at_peak + COMPARATOR_TOLERANCE,
+            "post-lockout reconciled yaw {ang} must stay bound at the HELD episode peak \
+             ω_max(30)={cap_at_peak}; a reset-on-lockout would loosen it to ω_max(6)={cap_at_recover_proxy}"
+        );
     }
 
     // -----------------------------------------------------------------
