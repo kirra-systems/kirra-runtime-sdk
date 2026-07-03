@@ -190,7 +190,9 @@ pub struct DoerEvalSummary {
 /// [`PlanInput`] and the same corridor/objects to the checker within one call —
 /// the self-referential-borrow shape the planner tests build by hand.
 pub struct EvalScenario {
-    pub name: &'static str,
+    /// Scenario label. `String` so parameterized generators (WS-3.1) can mint
+    /// names like `hazard_x24_v4.0_g60`; the hand-written corpus uses literals.
+    pub name: String,
     corridor: MockCorridorSource,
     objects: Vec<PerceivedObject>,
     ego: EgoState,
@@ -205,7 +207,7 @@ impl EvalScenario {
     /// around and the checker runs RSS against.
     #[must_use]
     pub fn new(
-        name: &'static str,
+        name: impl Into<String>,
         corridor: MockCorridorSource,
         objects: Vec<PerceivedObject>,
         ego_x: f64,
@@ -213,7 +215,7 @@ impl EvalScenario {
         goal_x: f64,
     ) -> Self {
         Self {
-            name,
+            name: name.into(),
             corridor,
             objects,
             ego: EgoState {
@@ -233,6 +235,27 @@ impl EvalScenario {
     pub fn with_posture(mut self, posture: FleetPosture) -> Self {
         self.posture = posture;
         self
+    }
+
+    // Read-only world accessors (WS-3.1): the KPI gate scores planners other
+    // than the `ScoredPlanner` pair `evaluate_corpus` takes, so it needs the
+    // same world handles `verdict_of` wants. Borrowed, never mutable — a
+    // scenario stays immutable once built.
+    #[must_use]
+    pub fn corridor(&self) -> &MockCorridorSource {
+        &self.corridor
+    }
+    #[must_use]
+    pub fn objects(&self) -> &[PerceivedObject] {
+        &self.objects
+    }
+    #[must_use]
+    pub fn config(&self) -> &VehicleConfig {
+        &self.config
+    }
+    #[must_use]
+    pub fn posture(&self) -> FleetPosture {
+        self.posture
     }
 
     /// Build the borrowed [`PlanInput`] the planner sees. Every optional/behavioral

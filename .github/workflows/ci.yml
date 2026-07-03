@@ -61,6 +61,22 @@ jobs:
           command: check advisories
           arguments: --locked
 
+  # WS-3.1 — the scenario-KPI gate: thresholds unsafe_miss_rate /
+  # admissibility / hazard_recall over the generated deterministic corpus
+  # (248 doer scenarios + 71 perception frames) against the reviewed policy
+  # in ci/scenario_kpi_thresholds.json. Red = a fleet-safety KPI regressed
+  # (the corpus and planners are deterministic — never flake). The WS-3 DoD:
+  # no safety-relevant PR merges without this gate.
+  scenario-kpi-gate:
+    name: scenario-KPI gate (WS-3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: KPI gate (unsafe_miss_rate / admissibility / hazard_recall)
+        run: cargo run --locked -p kirra-kpi-gate --bin scenario_kpi_gate
+
   test:
     name: Test
     runs-on: ubuntu-latest
