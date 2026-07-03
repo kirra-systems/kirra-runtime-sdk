@@ -73,9 +73,12 @@ clears the ambiguity permanently (every active version will then be > 1.5).
   update` must not silently raise the effective floor past the pinned MSRV
   — if it would, either pin the dependency back or raise the MSRV by this
   process.
-- CI builds on current stable; the MSRV claim is re-verified at release
-  time (the release builds use the pinned toolchain expectations of the
-  committed lockfiles).
+- CI and release builds run on current stable Rust (≥ 1.88 by
+  construction); they do NOT themselves prove the MSRV. The MSRV claim is
+  verified explicitly — and must be re-verified when cutting a release or
+  updating either lockfile — by running
+  `cargo +1.88.0 check --workspace --locked` against both committed
+  lockfiles (root and `parko/`).
 
 ## 4. Release process contract
 
