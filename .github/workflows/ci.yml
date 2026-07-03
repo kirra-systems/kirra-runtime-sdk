@@ -255,6 +255,20 @@ jobs:
             | sed 's/^/--exclude /' | tr '\n' ' ')
           echo "Excluding runtime-dependent backends: $EXCLUDES"
           cargo test --workspace $EXCLUDES
+      - name: parko feature-gated safety tests (required-features targets)
+        # BLIND SPOT the workspace run above cannot see: `[[test]]` targets with
+        # `required-features` are NOT built by `cargo test --workspace`, so they
+        # silently rot — `test_posture_divergence` (test-helpers) stopped
+        # compiling AND stopped asserting current #70/#770 semantics for months
+        # with CI green. These features are dependency-free of any native
+        # runtime (test-helpers is empty; verifier-sink pulls only the pure-Rust
+        # SDK), so they run here in the runtime-free lane. Any NEW dependency-free
+        # feature-gated safety target MUST be added to this list — a
+        # runtime-DEPENDENT one belongs in the parko-onnx/openvino jobs instead.
+        working-directory: parko
+        run: |
+          cargo test -p parko-core --features test-helpers
+          cargo test -p parko-kirra --features verifier-sink
 
   parko-ros2-backends:
     name: Parko ros2 backend-selection lanes (build, no runtime)
