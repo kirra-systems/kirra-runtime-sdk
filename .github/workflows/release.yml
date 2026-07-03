@@ -153,10 +153,12 @@ jobs:
 
       - name: Install cross (for ARM targets)
         if: matrix.cross
-        # #775 F1 — pin `cross` to a released tag + `--locked` (was: unpinned
-        # `--git` HEAD, i.e. whatever upstream main was at run time, with its
-        # build scripts executing in the release pipeline).
-        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5 --locked
+        # #775 F1 — install `cross` from the crates.io REGISTRY at a pinned
+        # version + `--locked` (was: unpinned `--git` HEAD — whatever upstream
+        # main was at run time, with its build scripts executing in the release
+        # pipeline). Registry install is checksummed and covered by the cargo-deny
+        # supply-chain gate; it keeps no git/tag-resolution dependency in the build.
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build kirra_verifier_service
         run: |
