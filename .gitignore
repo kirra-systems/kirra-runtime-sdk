@@ -2,8 +2,11 @@ target/
 # The root Cargo.lock is committed: this repo ships binaries/services, so a
 # pinned, reproducible dependency graph is required (prevents transitive drift
 # like the alloc-no-stdlib 2.x/3.x split that broke the brotli build in CI).
-# Separate sub-workspaces keep their locks ignored for now.
-parko/Cargo.lock
+# WS-0.6: parko/Cargo.lock is now committed too — the supply-chain gate
+# (cargo-deny --locked) and the SBOM story need a pinned graph for BOTH
+# workspaces, and parko's CI jobs get the same drift protection the root
+# lock exists for. The iceoryx2 spike's lock stays ignored (host-side spike
+# tool, not a shipped or gated workspace).
 tools/iceoryx2-spike/Cargo.lock
 data/outputs/
 node_modules/
