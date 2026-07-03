@@ -188,9 +188,43 @@ jobs:
           path: kirra-*.cdx.json
           retention-days: 1
 
+  # WS-5.1 — the QNX governor-judge artifact: the no_std core-only verdict
+  # staticlib for both QNX 8.0 tuples, tarred with its ABI header and
+  # provenance manifest. Named kirra-<version>-qnx800-judge.tar.gz so the
+  # release job's existing *.tar.gz handling carries it into SHA256SUMS and
+  # the keyless cosign signing — the artifact enters the supply-chain trust
+  # chain like every platform tarball. Functional artifact only: timing/WCET
+  # evidence is QNX-target-only (PROVENANCE.txt states this).
+  qnx-artifact:
+    name: QNX governor-judge artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (+rust-src for -Zbuild-std)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - name: Build the judge staticlibs
+        run: scripts/build_qnx_judge_artifact.sh dist-qnx
+
+      - name: Package
+        run: |
+          VERSION="${{ github.ref_name }}"
+          tar -czf "kirra-${VERSION}-qnx800-judge.tar.gz" -C dist-qnx .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kirra-qnx800-judge
+          path: kirra-*-qnx800-judge.tar.gz
+          retention-days: 1
+
   release:
     name: Create GitHub Release
-    needs: [build, sbom]
+    needs: [build, sbom, qnx-artifact]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

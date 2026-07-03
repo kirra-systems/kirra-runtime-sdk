@@ -60,6 +60,16 @@ rustup component add rust-src --toolchain nightly
 script's first path — a direct `rustc --target` cross-build — is used instead and
 nightly/rust-src are not needed. The script tries direct first, then build-std.)
 
+> **WS-5.1 — this recipe is now a pipeline.** CI cross-builds the judge for
+> BOTH qnx800 tuples on every PR (`qnx-governor-artifact` job), and every
+> release ships `kirra-<version>-qnx800-judge.tar.gz` (staticlibs + the
+> `kirra_ffi.h` ABI + a provenance manifest) through the SHA256SUMS + cosign
+> chain. Entry point: `scripts/build_qnx_judge_artifact.sh` — stable +
+> `RUSTC_BOOTSTRAP=1 -Zbuild-std=core` (no SDP needed for the staticlib), with
+> machine-arch and `kirra_judge_assess` ABI-export acceptance checks. Note the
+> upstream tuple rename in flight (`*-nto-qnx800` → `x86_64-pc-qnx` /
+> `aarch64-unknown-qnx` on 2026 nightlies); the script follows it loudly.
+
 ### 1b. QNX target VM (Phase-I, x86 laptop)
 
 - Enable **Intel VT-x** (and **VT-d** if you'll pass through devices) in BIOS, so
