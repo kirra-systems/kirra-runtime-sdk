@@ -155,6 +155,60 @@ impl VerifierStore {
         tx.commit()
     }
 
+    /// Like [`Self::save_posture_event_chained`], but ALSO advances the
+    /// generation high-water in the SAME transaction (#771 F2). Folding the
+    /// stamp and its high-water into one commit closes the cross-restart crash
+    /// window the separate two-write path left open: a hard kill between the
+    /// audit-event commit and the high-water UPSERT re-seeded from a STALE
+    /// high-water on restart, so the durable audit chain could hold two events
+    /// stamped with the same generation, or an already-broadcast generation
+    /// could be re-issued. With one transaction the event and its high-water
+    /// are all-or-nothing: a failed commit lands neither, and the caller (which
+    /// gates cache/broadcast on success) fails closed.
+    ///
+    /// Returns whether the high-water ADVANCED (`true`) or the monotonic guard
+    /// rejected `generation` as stale/equal (`false`, a benign concurrent-recalc
+    /// race); either way the posture event + audit append committed.
+    ///
+    /// FAIL-CLOSED (#771 F4): a `generation` outside the storable INTEGER domain
+    /// (`>= i64::MAX`) is rejected BEFORE the transaction — SQLite's
+    /// `CAST(value AS INTEGER)` saturates at `i64::MAX`, so storing such a value
+    /// would silently corrupt the monotonic guard itself. The whole write errors.
+    pub fn save_posture_event_chained_with_generation(
+        &mut self,
+        node_id: &str,
+        event_type: &str,
+        posture_json: &str,
+        reason: Option<&str>,
+        created_at_ms: u64,
+        generation: u64,
+    ) -> Result<bool> {
+        if generation >= i64::MAX as u64 {
+            return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
+        }
+        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
+        tx.execute(
+            "INSERT INTO posture_events
+             (node_id, event_type, posture_json, reason, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+        )?;
+        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            &tx, event_type, posture_json, created_at_ms as i64, self.signing_key.as_ref(),
+        )?;
+        // Monotonic max-write — identical guard to `save_last_generation`, but
+        // in THIS transaction so the stamp and its high-water commit together.
+        let changed = tx.execute(
+            "INSERT INTO posture_engine_state (key, value)
+             VALUES ('last_generation', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1
+             WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
+            params![generation.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     pub fn load_last_generation(&self) -> Result<u64> {
         match self.conn.query_row(
             "SELECT value FROM posture_engine_state WHERE key = 'last_generation'",
@@ -165,13 +219,27 @@ impl VerifierStore {
             // CORRUPTION, not a fresh store. The prior `unwrap_or(0)` read it as
             // "no history", silently reintroducing the restart time-reversal the
             // boot init exists to prevent. Only a genuinely absent row is 0.
-            Ok(s) => s.parse::<u64>().map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            }),
+            Ok(s) => {
+                let parsed = s.parse::<u64>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                // #771 F4: a numeric-but-out-of-domain value (`>= i64::MAX`) is
+                // ALSO corruption, not a valid high-water. It parses cleanly but
+                // (a) `init_generation_from_store` would compute `last + 1` — a
+                // release-build wraparound to 0 with overflow-checks off, silently
+                // failing OPEN to the very restart time-reversal this guard exists
+                // to prevent; and (b) it breaks the store's own `CAST(value AS
+                // INTEGER)` monotonic guard (SQLite saturates at i64::MAX). Reject
+                // it fail-closed, exactly like the non-numeric case.
+                if parsed >= i64::MAX as u64 {
+                    return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
+                }
+                Ok(parsed)
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
             Err(e) => Err(e),
         }

@@ -155,6 +155,108 @@ mod attestation_registry_tests {
             "a non-numeric persisted generation must be a load ERROR, not 0"
         );
     }
+
+    /// #771 F4 — a NUMERIC-but-out-of-domain high-water (`>= i64::MAX`) is also
+    /// corruption. It parses cleanly, so the prior guard let it through — but
+    /// `init_generation_from_store` would then compute `last + 1`, a release-build
+    /// wraparound to 0 that silently fails OPEN to the restart time-reversal; and
+    /// it breaks the store's own `CAST(value AS INTEGER)` monotonic guard (SQLite
+    /// saturates at i64::MAX). It must fail closed exactly like the non-numeric case.
+    #[test]
+    fn test_numeric_but_out_of_domain_last_generation_fails_closed() {
+        let store = in_memory();
+        // u64::MAX — the exact value the review flagged.
+        store
+            .save_engine_state("last_generation", "18446744073709551615")
+            .unwrap();
+        assert!(
+            store.load_last_generation().is_err(),
+            "u64::MAX high-water must fail closed (corruption), not load as a value"
+        );
+        // i64::MAX is the inclusive boundary of the rejected range.
+        store
+            .save_engine_state("last_generation", &(i64::MAX as u64).to_string())
+            .unwrap();
+        assert!(
+            store.load_last_generation().is_err(),
+            "i64::MAX high-water is at the CAST-saturation boundary and must be rejected"
+        );
+        // A large but in-domain value still loads normally (no false positives).
+        store
+            .save_engine_state("last_generation", "1000000000")
+            .unwrap();
+        assert_eq!(
+            store.load_last_generation().unwrap(),
+            1_000_000_000,
+            "a large in-domain high-water must still load"
+        );
+    }
+
+    /// #771 F2 — the posture event, its audit-chain link, AND the generation
+    /// high-water must commit in ONE transaction. Folding the stamp and its
+    /// high-water removes the cross-restart crash window the separate two-write
+    /// path left open (an event durable at generation G while the high-water lagged
+    /// < G). This pins: (a) the happy path advances both; (b) a stale generation
+    /// still commits the event but leaves the high-water untouched; (c) a failed
+    /// audit append rolls back BOTH — neither the event nor the high-water lands.
+    #[test]
+    fn test_posture_event_and_generation_commit_atomically() {
+        let mut store = in_memory();
+
+        // (a) Happy path — event row lands AND high-water advances, one tx.
+        let advanced = store
+            .save_posture_event_chained_with_generation(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{}",
+                None,
+                1_000,
+                42,
+            )
+            .unwrap();
+        assert!(advanced, "first write must advance the high-water");
+        assert_eq!(store.load_last_generation().unwrap(), 42);
+        assert_eq!(store.load_all_posture_events().unwrap().len(), 1, "event must commit");
+
+        // (b) Stale generation — the monotonic guard rejects the high-water bump,
+        // but the event still commits (matches the old separate-write semantics).
+        let advanced2 = store
+            .save_posture_event_chained_with_generation(
+                "posture_engine",
+                "POSTURE_CACHE_REFRESHED",
+                "{}",
+                None,
+                2_000,
+                10,
+            )
+            .unwrap();
+        assert!(!advanced2, "a stale generation must not advance the high-water");
+        assert_eq!(store.load_last_generation().unwrap(), 42, "high-water unchanged by stale write");
+        assert_eq!(store.load_all_posture_events().unwrap().len(), 2, "the event still commits");
+
+        // (c) Atomicity on failure — break the audit-chain append so the tx must
+        // roll back; NEITHER the event NOR the high-water may land.
+        store.break_audit_chain_table_for_test();
+        let r = store.save_posture_event_chained_with_generation(
+            "posture_engine",
+            "SYSTEM_POSTURE_TRANSITION",
+            "{}",
+            None,
+            3_000,
+            99,
+        );
+        assert!(r.is_err(), "a failed audit append must error the whole write");
+        assert_eq!(
+            store.load_last_generation().unwrap(),
+            42,
+            "a rolled-back tx must NOT advance the high-water (atomicity)"
+        );
+        assert_eq!(
+            store.load_all_posture_events().unwrap().len(),
+            2,
+            "a rolled-back tx must NOT leave the posture-event row behind (atomicity)"
+        );
+    }
 }
 
 #[cfg(test)]
