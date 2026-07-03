@@ -205,10 +205,13 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
     ///
     /// RUNTIME REQUIREMENT (#773 F4): `tick` arms a `tokio::time::timeout`, so it
     /// must run on a Tokio runtime with the TIME DRIVER enabled (`enable_time()` /
-    /// `enable_all()`). On a time-less `current_thread` runtime the first tick
-    /// panics ("time driver not enabled"); under a `start_paused` runtime the
-    /// clock auto-advances while a `spawn_blocking` worker runs, firing the
-    /// deadline spuriously every tick. Drive it on a real-time runtime.
+    /// `enable_all()`) — on a time-less `current_thread` runtime the first tick
+    /// panics ("time driver not enabled"). Note also that `start_paused` changes
+    /// timeout semantics: the paused clock auto-advances while the runtime is idle,
+    /// but the inference runs on a real-time `spawn_blocking` thread, so whether
+    /// the join or the auto-advanced timer wins is timing-dependent. Tests that
+    /// need real wall-clock deadline behaviour should use real time
+    /// (`start_paused = false`), as the WS-0.4 tick tests do.
     #[must_use]
     pub fn with_inference_deadline_ms(mut self, deadline_ms: u64) -> Self {
         self.inference_deadline_ms = deadline_ms.clamp(1, DEADLINE_CEILING_MS);
