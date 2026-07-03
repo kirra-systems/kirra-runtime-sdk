@@ -136,6 +136,9 @@ pub fn validate_trajectory_slow(
     // (KIRRA-OCCY-PMON-003 slice-1).
     validate_trajectory_slow_capped(
         trajectory, corridor, objects, config, latest_odom, posture, None, None, None,
+        // WS-2: no VRU channel on the convenience wrapper → no-op (the node
+        // passes the live pedestrian scene once its subscription lands).
+        None,
         // Convenience/doer-side wrapper: assert AOU-LOCALIZATION-001 (Trusted →
         // primary 0.40 m containment margin). The production slow loop passes a
         // resolved FrameTrust; see `validate_trajectory_slow_capped`.
@@ -177,6 +180,7 @@ pub fn validate_trajectory_slow_capped(
     effective_perception_cap: Option<f64>,
     visibility_range_m: Option<f64>,
     predicted_modes: Option<&[PredictedMode<'_>]>,
+    pedestrians: Option<&crate::vru::PedestrianScene<'_>>,
     frame_trust: FrameTrust,
 ) -> TrajectoryVerdict {
     // ----- Posture short-circuit (M1) ----------------------------------
@@ -525,6 +529,25 @@ pub fn validate_trajectory_slow_capped(
     // stopped hazard. Absent input → skipped, so the Nominal path is unchanged.
     if let Some(vis) = visibility_range_m {
         if outruns_assured_clear_distance(trajectory, vis, config.max_decel_mps2) {
+            return TrajectoryVerdict::MRCFallback;
+        }
+    }
+
+    // ----- D2) Pedestrian / VRU RSS (WS-2, KIRRA-VRU-RSS-001) -----------
+    //
+    // The omnidirectional reachable-set bound (`crate::vru`): at each
+    // time-matched pose the pedestrian may move ANY direction at v_ped_max;
+    // a moving ego must be able to stop before its envelope meets the grown
+    // reachable disc. Deliberately NO lateral filter (a kerbside VRU can
+    // step in — the vehicle-object lateral band above is unsound for VRUs)
+    // and NO requirement on stopped/stopping poses (RSS responsibility +
+    // the safe_stop admissibility invariant: this gate can never deadlock
+    // the doer↔checker loop). Absent input → skipped: the path without a
+    // VRU channel is byte-identical (derate-only invariant). Fail-closed:
+    // a non-finite pedestrian is a perception fault → MRC.
+    // SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: vru_pedestrian_in_path_mrcs,vru_far_pedestrian_admits,vru_safe_stop_next_to_pedestrian_admits,vru_kerbside_pedestrian_binds_despite_lateral_clearance,vru_absent_channel_is_byte_identical,vru_non_finite_pedestrian_mrcs
+    if let Some(scene) = pedestrians {
+        if crate::vru::pedestrian_breach(trajectory, scene, config.max_decel_mps2) {
             return TrajectoryVerdict::MRCFallback;
         }
     }

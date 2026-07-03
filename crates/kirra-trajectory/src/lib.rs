@@ -18,6 +18,8 @@ pub mod config;
 pub mod corridor;
 pub mod state;
 pub mod validation;
+// WS-2 — pedestrian / VRU RSS primitive (KIRRA-VRU-RSS-001).
+pub mod vru;
 // Multi-modal predictive-RSS mode producer (gap #3) — rolls live perceived objects
 // into CV/CTRV `PredictedMode` hypotheses so the checker's multi-modal pass runs
 // against real perception. Pure, no ROS.
