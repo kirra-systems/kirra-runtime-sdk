@@ -1948,6 +1948,7 @@ mod posture_gate_real_router_tests {
             "kirra_audit_write_drops_total{",
             "kirra_capture_drops_total{",
             "kirra_post_incident_write_failures_total{",
+            "kirra_incident_durability_failures_total{",
             "kirra_command_source_write_failures_total{",
         ] {
             assert!(

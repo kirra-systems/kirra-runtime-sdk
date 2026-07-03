@@ -300,6 +300,14 @@ pub struct AppState {
     /// detected but could not be durably recorded (#245/#247 pattern). MUST be 0
     /// in a healthy deployment; never gates the verdict path.
     pub post_incident_write_failures: Arc<AtomicU64>,
+    /// WS-0.3 / #772 F3 — operator-observable count of INCIDENT-CLASS posture
+    /// transitions whose hard-power-loss-durable (FULL-connection) write failed
+    /// and fell back to the checkpoint-bounded NORMAL write. The row IS in the
+    /// chain (durable to the next checkpoint), only its at-write-time power-loss
+    /// durability was degraded — DISTINCT from `post_incident_write_failures`
+    /// (row MISSING from the chain). MUST be 0 in a healthy deployment; never
+    /// gates the verdict path (a durability fault must not suppress an escalation).
+    pub incident_durability_failures: Arc<AtomicU64>,
     /// #112 — operator-observable count of command-source handoff audit writes
     /// that were detected but could not be durably recorded (#245/#247 pattern).
     /// MUST be 0 in a healthy deployment; never gates the verdict path.
@@ -363,6 +371,7 @@ impl AppState {
             frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
+            incident_durability_failures: Arc::new(AtomicU64::new(0)),
             command_source_write_failures: Arc::new(AtomicU64::new(0)),
             audit_write_drops: Arc::new(AtomicU64::new(0)),
             capture_drops: Arc::new(AtomicU64::new(0)),

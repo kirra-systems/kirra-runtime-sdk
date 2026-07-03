@@ -894,34 +894,34 @@ mod durability_tests {
         assert_eq!(pragma_synchronous(dc), 2, "durable conn is FULL (2)");
     }
 
-    /// WS-0.3 — `fsync_wal_durable` commits the durability marker (and, on a
-    /// file-backed store, rides the `synchronous=FULL` connection whose pragma
-    /// `durable_connection_is_full_main_is_normal` pins — a FULL commit fsyncs
-    /// the shared WAL, carrying every previously committed audit frame).
+    /// #772 F2 — an incident-class posture row written via
+    /// `save_posture_event_chained_with_generation_durable` commits the row + its
+    /// audit link + the generation high-water in ONE transaction on the durable
+    /// (FULL, file-backed) connection: the row is present and its generation
+    /// high-water advanced, atomically. (Hard-power-loss durability itself rests
+    /// on the FULL pragma, pinned by `durable_connection_is_full_main_is_normal`.)
     #[test]
-    fn test_fsync_wal_durable_writes_marker_on_file_and_memory_stores() {
-        // File-backed: the marker rides the durable (FULL) connection.
-        let db = TmpDb::new("fsync_marker");
-        let s = VerifierStore::new(db.path()).unwrap();
-        s.fsync_wal_durable(1_234).unwrap();
-        assert_eq!(
-            s.load_engine_state("last_incident_durable_ms").unwrap().as_deref(),
-            Some("1234"),
-            "marker must be committed and readable"
-        );
-        // Marker is an upsert — the latest incident instant wins.
-        s.fsync_wal_durable(5_678).unwrap();
-        assert_eq!(
-            s.load_engine_state("last_incident_durable_ms").unwrap().as_deref(),
-            Some("5678")
-        );
-
-        // In-memory fallback: no durable conn, semantics preserved on main.
-        let m = VerifierStore::new(":memory:").unwrap();
-        m.fsync_wal_durable(9).unwrap();
-        assert_eq!(
-            m.load_engine_state("last_incident_durable_ms").unwrap().as_deref(),
-            Some("9")
+    fn test_durable_posture_write_commits_row_and_generation_atomically() {
+        let db = TmpDb::new("durable_incident");
+        let mut s = VerifierStore::new(db.path()).unwrap();
+        let advanced = s
+            .save_posture_event_chained_with_generation_durable(
+                "posture_engine",
+                "SYSTEM_POSTURE_TRANSITION",
+                "{}",
+                None,
+                1_234,
+                7,
+            )
+            .unwrap();
+        assert!(advanced, "the durable write must advance the high-water");
+        assert_eq!(s.load_last_generation().unwrap(), 7, "high-water committed with the row");
+        assert!(
+            s.load_all_posture_events()
+                .unwrap()
+                .iter()
+                .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
+            "the incident row must be committed and readable on the durable connection"
         );
     }
 

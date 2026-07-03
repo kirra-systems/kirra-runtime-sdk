@@ -2,22 +2,22 @@
 //
 // WS-0.3 (#G10 audit axis) — incident-class audit rows survive an ungraceful
 // process death, proven by a REAL kill: a child process commits a posture
-// TRANSITION (which triggers the WS-0.3 `fsync_wal_durable` marker commit on
-// the `synchronous=FULL` connection) and then `std::process::abort()`s —
-// no destructors, no shutdown `durable_checkpoint`, no SIGTERM path. The
-// parent reopens the SQLite file and must find the transition row, the
-// durability marker, and an intact audit chain.
+// TRANSITION (written DIRECTLY on the `synchronous=FULL` connection since #772
+// F2, so the commit itself fsyncs the WAL) and then `std::process::abort()`s —
+// no destructors, no shutdown `durable_checkpoint`, no SIGTERM path. The parent
+// reopens the SQLite file and must find the transition row and an intact chain.
 //
 // HONESTY NOTE on what this can and cannot prove: a userspace test can kill a
 // PROCESS, not the power. WAL-committed data survives a process kill even at
 // `synchronous=NORMAL` (the OS page cache persists), so process death alone
 // cannot distinguish NORMAL from FULL. The hard-power-loss half of the WS-0.3
-// claim therefore rests on the asserted MECHANISM — the marker commit rides
-// the FULL connection (`durable_connection_is_full_main_is_normal` pins the
-// pragma; `fsync_wal_durable` rides `durable_ref()`), and a FULL commit
-// fsyncs the shared WAL file, carrying every previously committed frame with
-// it. This test pins the abort-path end-to-end behaviour AND the presence of
-// the fsync marker at the moment of death.
+// claim therefore rests on the MECHANISM — since #772 F2 the incident ROW is
+// itself written on the FULL connection (`durable_connection_is_full_main_is_
+// normal` pins the pragma; `save_posture_event_chained_with_generation_durable`
+// rides `durable_conn`), so the row IS the fsync'd operation rather than a
+// neighbouring marker's side effect. This test pins the abort-path end-to-end
+// behaviour (the child truly died by SIGABRT, not a graceful unwind) and the
+// survival of the incident row it committed a moment before death.
 
 use std::process::Command;
 
@@ -71,6 +71,28 @@ fn incident_row_survives_ungraceful_process_death() {
         .output()
         .expect("spawn child test process");
 
+    // #772 F10: assert the child died by SIGABRT specifically, not merely
+    // "non-success". A child that PANICS after the recalc (e.g. the cache assert)
+    // also exits non-zero, but unwinding runs destructors — the exact graceful
+    // path this test exists to EXCLUDE. Only a true `abort()` proves the row was
+    // durable with no shutdown hook in between.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // SIGABRT == 6 on every common unix (Linux/macOS/BSD). Avoiding a `libc`
+        // dev-dependency for a single well-known constant.
+        const SIGABRT: i32 = 6;
+        assert_eq!(
+            output.status.signal(),
+            Some(SIGABRT),
+            "the child must die by SIGABRT (abort), not a panic-unwind or clean exit \
+             (status: {:?}, stdout: {}, stderr: {})",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[cfg(not(unix))]
     assert!(
         !output.status.success(),
         "the child must die by abort, not exit cleanly (status: {:?}, stdout: {}, stderr: {})",
@@ -92,18 +114,6 @@ fn incident_row_survives_ungraceful_process_death() {
             .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION"),
         "the posture-transition row committed immediately before the kill must \
          be present on reopen; got events: {events:?}"
-    );
-
-    // The WS-0.3 durability marker was committed on the FULL connection at the
-    // moment of the incident — its presence pins that the fsync path ran
-    // before the death.
-    let marker = store
-        .load_engine_state("last_incident_durable_ms")
-        .expect("parent: engine state readable");
-    assert!(
-        marker.is_some(),
-        "the incident-durability fsync marker must exist — the WS-0.3 fsync \
-         path did not run before the kill"
     );
 
     // The chain the incident row landed on is intact after the kill.

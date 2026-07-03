@@ -262,25 +262,62 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
 
     // SAFETY: SG-HA-3 — durable writes must not execute on Tokio workers.
     // `recalculate_and_broadcast` is run on blocking/offline paths when called from async workers.
+    let payload = audit_payload.to_string();
     let audit_committed = app.store.with(|store| {
         // #771 F2: the posture event, its audit-chain link, AND the generation
-        // high-water now commit in ONE transaction (see
-        // `save_posture_event_chained_with_generation`). Previously the high-water
-        // was a SEPARATE write whose `Err` was deliberately tolerated — which left
-        // a cross-restart crash window: a hard kill after the audit event committed
-        // at generation G but before the high-water reached G re-seeded stale on
-        // restart, so the durable chain could hold two events at the same
-        // generation or re-issue an already-broadcast one. Folding them removes the
-        // window: either both land (proceed) or neither lands (fail closed here,
-        // exactly like the audit-chain write did).
-        match store.save_posture_event_chained_with_generation(
-            "posture_engine",
-            event_type,
-            &audit_payload.to_string(),
-            Some("Fleet posture recomputed from DAG traversal"),
-            ts,
-            generation,
-        ) {
+        // high-water commit in ONE transaction (either variant below) — a failed
+        // commit lands none of them and we fail closed, closing the cross-restart
+        // window where the chain could hold a duplicate/regressed generation.
+        //
+        // #772 F2: an incident-class TRANSITION is written DIRECTLY on the FULL
+        // (synchronous=FULL) connection, so the commit ITSELF fsyncs the WAL — the
+        // row is hard-power-loss durable at write time, atomically, with no
+        // separate marker and no cross-connection piggyback inference. The 20 Hz
+        // POSTURE_CACHE_REFRESHED traffic stays on the NORMAL connection (INV-12
+        // throughput). #772 F3: if the durable write FAILS we do NOT suppress the
+        // (possibly escalating) transition over a degraded durability guarantee —
+        // we fall back to the NORMAL write so the row still lands (durable to the
+        // next checkpoint) and count the degradation for /metrics.
+        let write_result = if is_transition {
+            match store.save_posture_event_chained_with_generation_durable(
+                "posture_engine",
+                event_type,
+                &payload,
+                Some("Fleet posture recomputed from DAG traversal"),
+                ts,
+                generation,
+            ) {
+                Ok(advanced) => Ok(advanced),
+                Err(e) => {
+                    app.incident_durability_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        error = %e,
+                        generation,
+                        "INCIDENT-DURABILITY DEGRADED: FULL-connection write of a posture transition failed — falling back to the checkpoint-bounded write; the transition is NOT suppressed (WS-0.3 / #772 F3)"
+                    );
+                    store.save_posture_event_chained_with_generation(
+                        "posture_engine",
+                        event_type,
+                        &payload,
+                        Some("Fleet posture recomputed from DAG traversal"),
+                        ts,
+                        generation,
+                    )
+                }
+            }
+        } else {
+            store.save_posture_event_chained_with_generation(
+                "posture_engine",
+                event_type,
+                &payload,
+                Some("Fleet posture recomputed from DAG traversal"),
+                ts,
+                generation,
+            )
+        };
+
+        match write_result {
             Ok(high_water_advanced) => {
                 // #695: a `false` means the in-tx monotonic guard rejected this
                 // generation as stale — a benign concurrent-recalc race (another
@@ -294,26 +331,12 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
                         "Generation high-water rejected a stale persist in-tx (benign race unless persistent) — #695/#771"
                     );
                 }
-                // WS-0.3: a posture TRANSITION is incident-class — make its
-                // just-committed audit row hard-power-loss durable NOW (one
-                // FULL-sync marker commit fsyncs the shared WAL). The periodic
-                // POSTURE_CACHE_REFRESHED traffic is NOT fsync'd (INV-12
-                // throughput rationale). Best-effort by the same reasoning as
-                // the generation persist above: the row IS committed and the
-                // live (possibly escalating) transition must not be suppressed
-                // over a degraded durability guarantee — log loudly instead.
-                if is_transition {
-                    if let Err(e) = store.fsync_wal_durable(ts) {
-                        tracing::error!(
-                            error = %e,
-                            generation,
-                            "INCIDENT-DURABILITY DEGRADED: WAL fsync after posture transition failed — the transition row is committed but not yet power-loss durable (WS-0.3)"
-                        );
-                    }
-                }
                 true
             }
             // SAFETY: SG-HA-4 — DB errors demote node to safe state (fail-closed).
+            // Reached only when BOTH the durable write AND the NORMAL-connection
+            // fallback failed (a genuinely wedged store), so the chain has no row —
+            // suppress cache/broadcast.
             Err(e) => {
                 tracing::error!(
                     error      = %e,
@@ -1188,51 +1211,81 @@ mod posture_engine_tests {
         );
     }
 
-    /// WS-0.3 — the incident-durability marker write is gated on TRANSITIONS:
-    /// a posture change commits the marker (and on a file-backed store, that
-    /// commit fsyncs the shared WAL — this test's in-memory store exercises
-    /// only the gating); the periodic POSTURE_CACHE_REFRESHED traffic does
-    /// not (INV-12 throughput rationale — no 20 Hz per-row fsync
-    /// re-introduced through the back door).
+    /// WS-0.3 / #772 F2+F6 — the incident-class DURABLE write is gated on
+    /// TRANSITIONS: a posture change is written on the FULL (fsync-per-commit)
+    /// connection via `save_posture_event_chained_with_generation_durable`, while
+    /// the periodic POSTURE_CACHE_REFRESHED traffic stays on the NORMAL connection
+    /// (INV-12 throughput rationale — no 20 Hz per-row fsync re-introduced through
+    /// the back door). On this in-memory store `durable_conn` falls back to `conn`,
+    /// so the gate is observed via the test-only durable-write COUNTER rather than
+    /// any OS-level fsync (which a `:memory:` store cannot exercise).
     #[test]
-    fn test_incident_fsync_fires_on_transition_not_on_refresh() {
+    fn test_incident_durable_write_fires_on_transition_not_on_refresh() {
         let app = active_app();
         let cache = empty_cache();
 
-        // First recalc: None → Nominal is a transition → marker committed.
+        // First recalc: None → Nominal is a transition → at least one durable
+        // write (the posture-engine transition itself; a LockedOut transition
+        // would add post-incident durable rows too — hence `>=`, not `==`).
         recalculate_and_broadcast(&app, &cache);
-        let after_transition = app
-            .store
-            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
+        let after_transition = app.store.with(|s| s.durable_posture_write_count());
         assert!(
-            after_transition.is_some(),
-            "a posture transition must fsync the WAL (marker present)"
+            after_transition >= 1,
+            "a posture transition must take the FULL-connection durable write path"
         );
 
-        // Poison the marker, then recalc with NO posture change: the refresh
-        // path must NOT re-fsync (marker stays poisoned).
-        app.store
-            .with(|s| s.save_engine_state("last_incident_durable_ms", "sentinel").unwrap());
+        // Recalc with NO posture change: the refresh path must add ZERO durable
+        // writes — the load-bearing INV-12 gate (no 20 Hz per-row fsync).
         recalculate_and_broadcast(&app, &cache);
-        let after_refresh = app
-            .store
-            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
         assert_eq!(
-            after_refresh.as_deref(),
-            Some("sentinel"),
-            "a no-change refresh must not fsync (INV-12: transitions only)"
+            app.store.with(|s| s.durable_posture_write_count()),
+            after_transition,
+            "a no-change refresh must NOT durable-write (INV-12: transitions only)"
         );
 
-        // Force a real transition (trust the DAG down): marker advances again.
+        // Force a real transition (trust the DAG down): the counter advances again.
         insert_node(&app, "faulty", NodeTrustState::Untrusted("test".into()));
         recalculate_and_broadcast(&app, &cache);
-        let after_second_transition = app
-            .store
-            .with(|s| s.load_engine_state("last_incident_durable_ms").unwrap());
-        assert_ne!(
-            after_second_transition.as_deref(),
-            Some("sentinel"),
-            "a real transition must fsync again (marker overwritten)"
+        assert!(
+            app.store.with(|s| s.durable_posture_write_count()) > after_transition,
+            "a real transition must take the durable write path again"
+        );
+    }
+
+    /// #772 F3 — a FAILED durable (FULL-connection) write of a posture transition
+    /// must NOT suppress the (possibly escalating) transition. The recalc counts
+    /// the degradation in `incident_durability_failures` and FALLS BACK to the
+    /// NORMAL write, so the row still lands and the cache is still populated (the
+    /// transition is broadcast). Exercised via the store's durable-write fault seam.
+    #[test]
+    fn test_durable_write_failure_counts_and_falls_back_not_suppressed() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.store.with(|s| s.set_fail_durable_posture_writes(true));
+
+        // None → Nominal is a transition; its durable write is forced to fail.
+        recalculate_and_broadcast(&app, &cache);
+
+        assert_eq!(
+            app.incident_durability_failures
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed durable transition write must be counted (#772 F3)"
+        );
+        assert!(
+            cache.read().unwrap().is_some(),
+            "the transition must NOT be suppressed — it falls back to the NORMAL write and \
+             populates the cache"
+        );
+        let has_row = app.store.with(|s| {
+            s.load_all_posture_events()
+                .unwrap()
+                .iter()
+                .any(|e| e["event_type"] == "SYSTEM_POSTURE_TRANSITION")
+        });
+        assert!(
+            has_row,
+            "the fallback NORMAL write must have committed the transition row"
         );
     }
 
