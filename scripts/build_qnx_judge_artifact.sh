@@ -98,6 +98,7 @@ opt-level = 2
 debug = false
 EOF
 
+BUILT_TARGETS=""
 for want in $TARGETS; do
     tgt="$(resolve_target "$want")" || { echo "ERROR: no usable tuple for '$want' on $(rustc --version)" >&2; exit 2; }
     echo "== building judge staticlib for $tgt (-Zbuild-std=core, $(rustc --version | cut -d' ' -f2))"
@@ -128,6 +129,7 @@ for want in $TARGETS; do
         || { echo "ERROR: $tgt archive does not export kirra_judge_assess (ABI break?)" >&2; exit 1; }
     echo "   abi ok: kirra_judge_assess exported"
     cp "$lib" "$OUT/libkirra_judge-$tgt.a"
+    BUILT_TARGETS="${BUILT_TARGETS:+$BUILT_TARGETS }$tgt"
 done
 
 cp "$FFI_HEADER" "$OUT/kirra_ffi.h"
@@ -137,8 +139,9 @@ cat > "$OUT/PROVENANCE.txt" <<EOF
 kirra QNX governor-judge artifact (WS-5.1)
 ==========================================
 source      : tools/qnx-rtm-harness/kirra_judge.rs (+ kirra_ffi.h, the ABI)
+requested   : $TARGETS
 commit      : $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
-targets     : $TARGETS
+targets     : $BUILT_TARGETS
 toolchain   : $(rustc --version)
 build       : cargo -Zbuild-std=core --release (staticlib; panic=abort, opt-level=2)
 dependencies: NONE beyond rust core/compiler_builtins (the judge is
