@@ -1,16 +1,28 @@
 // crates/parko-core/tests/test_posture_divergence.rs
 //
-// Verifies that ControlLoop with a KirraGovernor selects different
-// kinematic contract profiles based on derived SafetyPosture, and that
-// this produces materially different clamping behavior for the same input.
+// ControlLoop + KirraGovernor posture-driven enforcement.
 //
-// Confirmed Kirra profile values (surveyed from
-// kirra_core::kinematics_contract):
-// - nominal_reference_profile().max_speed_mps == 35.0
-// - mrc_fallback_profile().max_speed_mps == 5.0
+// HISTORY / WHY THIS WAS REWRITTEN (verification-integrity fix): this target
+// is gated `required-features = ["test-helpers"]`, and the default CI runs
+// (`cargo test --workspace`) never build it — so it silently bit-rotted
+// through THREE unrelated changes and stopped compiling AND stopped asserting
+// current safety semantics:
+//   1. `BackendCapabilities` lost `precision_modes`/`supports_zero_copy_inputs`/
+//      `vendor_name` and `max_batch_size` became `Option` (compile break).
+//   2. Issue #70 made Degraded a decel-to-stop-and-HOLD, not a 5 m/s crawl —
+//      so the old "Degraded clamps 65→5.0" assertion tested a semantics that
+//      was deliberately removed.
+//   3. WS-0.1 (#770) made `KirraGovernor::new()` start `RssFeed::NeverFed`
+//      (fail-closed) — so an UNFED governor now HOLDs at zero in every
+//      posture, and the old "Nominal clamps 65→35.0" assertion is impossible.
 //
-// This test target requires the `test-helpers` feature:
-//   cargo test -p parko-core --features test-helpers
+// The rewrite pins the CURRENT invariants (and is now added to CI, below):
+//   - unfed governor → hold at zero in every posture (#770 fail-closed);
+//   - externally-gated + Nominal → admits accel-limited forward motion (0 < v < input);
+//   - externally-gated + Degraded → HOLD at zero on first-tick re-initiation (#70);
+//   - Degraded is strictly more restrictive than Nominal.
+//
+// Run: cargo test -p parko-core --features test-helpers
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +41,11 @@ use parko_core::{
     sensor::{SensorFrame, SensorStream},
 };
 
-/// Mock backend that emits a single dangerous over-speed command (65.0 m/s).
+/// The over-speed command the mock emits (m/s) — far above any envelope, so
+/// every admitted result below is a genuine clamp, not a pass-through.
+const OVERSPEED_MPS: f64 = 65.0;
+
+/// Mock backend that emits a single dangerous over-speed command.
 struct OverspeedBackend;
 
 impl InferenceBackend for OverspeedBackend {
@@ -48,7 +64,7 @@ impl InferenceBackend for OverspeedBackend {
         _inputs: &TensorBatch,
     ) -> Result<TensorBatch<'static>, BackendError> {
         let mut named = HashMap::new();
-        named.insert("cmd_vel_linear".into(), TensorStorage::Owned(vec![65.0]));
+        named.insert("cmd_vel_linear".into(), TensorStorage::Owned(vec![OVERSPEED_MPS as f32]));
         named.insert("cmd_vel_angular".into(), TensorStorage::Owned(vec![0.0]));
         Ok(TensorBatch {
             named_tensors: named,
@@ -58,10 +74,9 @@ impl InferenceBackend for OverspeedBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
-            precision_modes: vec![PrecisionMode::FP32],
-            supports_zero_copy_inputs: false,
-            max_batch_size: 1,
-            vendor_name: "overspeed-mock",
+            supports_int8: false,
+            supports_fp16: false,
+            max_batch_size: Some(1),
         }
     }
 }
@@ -77,7 +92,13 @@ impl SensorStream for SingleFrameStream {
     }
 }
 
-fn make_loop() -> (
+/// Build a ControlLoop over the over-speed backend. `externally_gated` selects
+/// the governor's scene-RSS tier: `true` DECLARES external gating
+/// (`with_external_rss_gate` — the pushed-state RSS tier goes quiescent,
+/// distinct from `update_rss_state` which pushes an actual verdict), so the
+/// posture→kinematic tier is what's exercised; `false` leaves it `NeverFed`
+/// (fail-closed — the #770 default that holds at zero).
+fn make_loop(externally_gated: bool) -> (
     ControlLoop<OverspeedBackend, SingleFrameStream>,
     mpsc::Receiver<ControlCommand>,
 ) {
@@ -92,78 +113,98 @@ fn make_loop() -> (
             },
         )),
     };
+    let governor = if externally_gated {
+        KirraGovernor::new().with_external_rss_gate()
+    } else {
+        KirraGovernor::new()
+    };
     let (tx, rx) = mpsc::channel(8);
-    let control = ControlLoop::new(backend, model, stream, tx, 20.0)
-        .with_governor(KirraGovernor::new());
+    let control = ControlLoop::new(backend, model, stream, tx, 20.0).with_governor(governor);
     (control, rx)
 }
 
+async fn tick_velocity(externally_gated: bool, state: RuntimeState) -> f64 {
+    let (mut control, _rx) = make_loop(externally_gated);
+    control.set_state_for_test(state);
+    control
+        .tick()
+        .await
+        .expect("tick should succeed")
+        .expect("tick should fire")
+        .active_command
+        .linear_velocity
+}
+
+/// #770 fail-closed default: an UNFED `KirraGovernor::new()` (RssFeed::NeverFed)
+/// must HOLD at zero in EVERY posture — never admit the over-speed command,
+/// regardless of Nominal vs Degraded. This is the invariant WS-0.1 established
+/// and the reason the old 35.0/5.0 assertions are impossible.
 #[tokio::test]
-async fn nominal_posture_clamps_to_nominal_profile_max_speed() {
-    let (mut control, _rx) = make_loop();
-    control.set_state_for_test(RuntimeState::Nominal);
+async fn unfed_governor_holds_at_zero_in_every_posture() {
+    let nominal = tick_velocity(false, RuntimeState::Nominal).await;
+    let degraded = tick_velocity(false, RuntimeState::Degraded).await;
+    assert_eq!(nominal, 0.0, "unfed governor must hold at zero even under Nominal (fail-closed)");
+    assert_eq!(degraded, 0.0, "unfed governor must hold at zero under Degraded (fail-closed)");
+}
 
-    let snapshot = control.tick().await.expect("tick should succeed").expect("tick should fire");
-
-    assert_eq!(
-        snapshot.active_command.linear_velocity, 35.0,
-        "Nominal posture should clamp 65.0 m/s to nominal profile max_speed_mps (35.0)"
+/// Externally-gated + Nominal: the scene-RSS tier is quiescent, so the posture→kinematic
+/// tier governs. On the first tick (current speed 0) the from-zero
+/// acceleration envelope binds, so the 65 m/s command is admitted only as a
+/// small accel-limited forward motion: strictly between 0 and the input.
+#[tokio::test]
+async fn nominal_posture_admits_accel_limited_forward_motion() {
+    let v = tick_velocity(true, RuntimeState::Nominal).await;
+    assert!(
+        v > 0.0 && v < OVERSPEED_MPS,
+        "externally-gated Nominal must admit clamped forward motion (0 < v < {OVERSPEED_MPS}); got {v}"
     );
 }
 
+/// Externally-gated + Degraded: even with the RSS tier quiescent, Degraded is decel-to-stop-and-HOLD
+/// (#70). A first-tick command re-initiates motion from a stop, which is
+/// denied → HOLD at zero. (The pre-#70 semantics — a 5 m/s crawl — are gone.)
 #[tokio::test]
-async fn degraded_posture_clamps_to_mrc_fallback_profile_max_speed() {
-    let (mut control, _rx) = make_loop();
-    control.set_state_for_test(RuntimeState::Degraded);
-
-    let snapshot = control.tick().await.expect("tick should succeed").expect("tick should fire");
-
+async fn degraded_posture_holds_at_zero_on_reinitiation() {
+    let v = tick_velocity(true, RuntimeState::Degraded).await;
     assert_eq!(
-        snapshot.active_command.linear_velocity, 5.0,
-        "Degraded posture should clamp 65.0 m/s to MRC fallback profile max_speed_mps (5.0)"
+        v, 0.0,
+        "externally-gated Degraded must HOLD at zero on first-tick re-initiation (#70 stop-and-hold); got {v}"
     );
 }
 
+/// The load-bearing ordering invariant, independent of exact numbers:
+/// Degraded is strictly more restrictive than Nominal for the same input,
+/// and both clamp the over-speed command.
 #[tokio::test]
-async fn degraded_clamp_is_more_restrictive_than_nominal_clamp() {
-    let (mut control_nominal, _rx_n) = make_loop();
-    control_nominal.set_state_for_test(RuntimeState::Nominal);
-    let snap_nominal = control_nominal.tick().await.unwrap().unwrap();
-
-    let (mut control_degraded, _rx_d) = make_loop();
-    control_degraded.set_state_for_test(RuntimeState::Degraded);
-    let snap_degraded = control_degraded.tick().await.unwrap().unwrap();
-
-    let v_nominal = snap_nominal.active_command.linear_velocity;
-    let v_degraded = snap_degraded.active_command.linear_velocity;
-
+async fn degraded_clamp_is_more_restrictive_than_nominal() {
+    let v_nominal = tick_velocity(true, RuntimeState::Nominal).await;
+    let v_degraded = tick_velocity(true, RuntimeState::Degraded).await;
     assert!(
         v_degraded < v_nominal,
-        "Degraded clamp ({}) must be strictly more restrictive than Nominal clamp ({})",
-        v_degraded,
-        v_nominal,
+        "Degraded clamp ({v_degraded}) must be strictly more restrictive than Nominal ({v_nominal})"
     );
     assert!(
-        v_nominal < 65.0 && v_degraded < 65.0,
-        "Both postures must clamp the 65.0 m/s input"
+        v_nominal < OVERSPEED_MPS && v_degraded < OVERSPEED_MPS,
+        "both postures must clamp the {OVERSPEED_MPS} m/s input"
     );
 }
 
+/// `set_state_for_test` overrides the initial Warmup state so the loop can be
+/// forced into Degraded; this asserts only that the over-speed command is
+/// clamped there. (The Degraded-vs-Nominal ordering is asserted by
+/// `degraded_clamp_is_more_restrictive_than_nominal` above.)
 #[tokio::test]
 async fn set_state_for_test_forces_degraded_behavior() {
-    let (mut control, _rx) = make_loop();
+    let (mut control, _rx) = make_loop(true);
     control.set_state_for_test(RuntimeState::Degraded);
-
     assert_eq!(
         control.state(),
         RuntimeState::Degraded,
         "set_state_for_test must override the initial Warmup state"
     );
-
     let snapshot = control.tick().await.expect("tick should succeed").expect("tick should fire");
-
     assert!(
-        snapshot.active_command.linear_velocity < 35.0,
-        "Degraded state must produce a more restrictive clamp than Nominal (35.0 m/s)"
+        snapshot.active_command.linear_velocity < OVERSPEED_MPS,
+        "Degraded state must clamp the over-speed command"
     );
 }

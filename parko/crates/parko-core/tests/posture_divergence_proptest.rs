@@ -43,8 +43,18 @@ fn effective_linear_velocity(action: EnforcementAction, proposed: f64) -> f64 {
 
 /// Evaluate with an explicit previous (current) velocity. `None` ⇒ no history
 /// (treated as stopped by the Degraded gate).
+///
+/// The governor declares EXTERNAL GATING (`with_external_rss_gate`) — which
+/// makes the pushed-state scene-RSS tier intentionally quiescent (distinct from
+/// `update_rss_state`, which pushes an actual RSS verdict) — so the
+/// POSTURE→kinematic tier is what these properties exercise. This matters since
+/// WS-0.1 (#770): a bare `KirraGovernor::new()` is `RssFeed::NeverFed` and
+/// short-circuits EVERY posture to `apply_mrc_profile`, which silently made the
+/// Nominal-ceiling property below vacuous (`0.0 <= 35.0`). External gating
+/// restores the real Nominal envelope; the unfed `NeverFed` fail-closed default
+/// is pinned separately by `unfed_governor_holds_at_zero_under_nominal`.
 fn evaluate_governor_with(proposed: f64, previous: Option<f64>, posture: SafetyPosture) -> f64 {
-    let governor = KirraGovernor::new();
+    let governor = KirraGovernor::new().with_external_rss_gate();
     let cmd = ControlCommand {
         linear_velocity: proposed,
         angular_velocity: 0.0,
@@ -77,7 +87,11 @@ proptest! {
         proposed in 0.0f64..=1000.0f64
     ) {
         prop_assume!(proposed.is_finite());
-        let output = evaluate_governor(proposed, SafetyPosture::Nominal);
+        // previous == proposed ⇒ zero implied acceleration, so the from-zero
+        // accel limit does NOT bind and the 35 m/s SPEED ceiling is what the
+        // property actually exercises (with previous=None every input clamps to
+        // ~accel·dt and the ceiling itself is never reached — a weaker test).
+        let output = evaluate_governor_with(proposed, Some(proposed), SafetyPosture::Nominal);
         prop_assert!(
             output <= NOMINAL_CEILING_MPS,
             "KirraGovernor Nominal output {} > ceiling {} for proposed {}",
@@ -139,6 +153,28 @@ proptest! {
             0.0,
             "LockedOut must always produce hard stop (0.0), got {} for input {}",
             output, proposed
+        );
+    }
+
+    /// WS-0.1 (#770) fail-closed default: an UNFED `KirraGovernor::new()`
+    /// (RssFeed::NeverFed) must HOLD at zero under Nominal for any command above
+    /// the stop floor — the scene-RSS tier gates as unsafe → decel-to-stop, so
+    /// no motion is ever autonomously re-initiated without an RSS feed. This is
+    /// the invariant that made the fed helpers necessary; pin it directly so a
+    /// regression to a fail-OPEN default is caught.
+    #[test]
+    fn unfed_governor_holds_at_zero_under_nominal(
+        proposed in 0.1f64..=1000.0f64
+    ) {
+        prop_assume!(proposed.is_finite());
+        let governor = KirraGovernor::new(); // UNFED — NeverFed
+        let cmd = ControlCommand { linear_velocity: proposed, angular_velocity: 0.0, timestamp_ms: 0 };
+        let action = governor.evaluate(&cmd, None, 0.05, SafetyPosture::Nominal);
+        prop_assert_eq!(
+            effective_linear_velocity(action, proposed),
+            0.0,
+            "unfed governor must hold at zero under Nominal (fail-closed), got motion for proposed {}",
+            proposed
         );
     }
 
