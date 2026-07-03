@@ -1,0 +1,7 @@
+{
+  "_comment": "WS-3.1 scenario-KPI gate thresholds (see crates/kirra-kpi-gate). The corpus is deterministic (closed-form generators, seeded planner), so measured values are exact rationals and these bounds sit AT the current floor: geometric admissibility 240/248 = 0.96774..., learned (SafetyAware, seed 7) 224/248 = 0.90322...; perception runs through the scripted MockSemanticDetector seam and pins perfection (unsafe_miss_rate 0, hazard_recall 1) — the real detector inherits these bars behind the same trait. A KPI may only move DOWN past its bound with a reviewed justification in the PR that changes this file; improvements should tighten the bound here (ratchet).",
+  "geometric_admissibility_min": 0.9677,
+  "learned_admissibility_min": 0.9032,
+  "unsafe_miss_rate_max": 0.0,
+  "hazard_recall_min": 1.0
+}

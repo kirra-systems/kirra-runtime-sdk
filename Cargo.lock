@@ -2126,6 +2126,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-kpi-gate"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-doer-eval",
+ "kirra-planner",
+ "kirra-taj",
+ "kirra-trajectory",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-l3-e2e"
 version = "0.1.0"
 dependencies = [
