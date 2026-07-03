@@ -43,7 +43,18 @@ pub fn init_generation_from_store(app: &Arc<AppState>) -> Result<u64, String> {
         // monotonicity invariant that federation peers rely on for report ordering.
         // `fetch_max` only ever raises it, so the counter is monotone regardless of
         // init/recalc ordering.
-        POSTURE_GENERATION.fetch_max(last + 1, Ordering::SeqCst);
+        //
+        // #771 F4: `checked_add`, not `last + 1`. `load_last_generation` already
+        // rejects a stored high-water `>= i64::MAX`, so `last + 1` cannot overflow
+        // in practice — but the release profile builds with overflow-checks OFF, so
+        // a bare `+ 1` on a `u64::MAX` that slipped past the store guard would wrap
+        // to 0 and fail OPEN (fetch_max(0) is a no-op → counter stays 1 → the exact
+        // restart time-reversal). Belt-and-suspenders: overflow is corruption, fail
+        // closed.
+        let next = last.checked_add(1).ok_or_else(|| {
+            format!("generation high-water {last} at u64::MAX — refusing to overflow the counter (corruption)")
+        })?;
+        POSTURE_GENERATION.fetch_max(next, Ordering::SeqCst);
     }
     Ok(last)
 }
@@ -252,41 +263,36 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // SAFETY: SG-HA-3 — durable writes must not execute on Tokio workers.
     // `recalculate_and_broadcast` is run on blocking/offline paths when called from async workers.
     let audit_committed = app.store.with(|store| {
-        match store.save_posture_event_chained(
+        // #771 F2: the posture event, its audit-chain link, AND the generation
+        // high-water now commit in ONE transaction (see
+        // `save_posture_event_chained_with_generation`). Previously the high-water
+        // was a SEPARATE write whose `Err` was deliberately tolerated — which left
+        // a cross-restart crash window: a hard kill after the audit event committed
+        // at generation G but before the high-water reached G re-seeded stale on
+        // restart, so the durable chain could hold two events at the same
+        // generation or re-issue an already-broadcast one. Folding them removes the
+        // window: either both land (proceed) or neither lands (fail closed here,
+        // exactly like the audit-chain write did).
+        match store.save_posture_event_chained_with_generation(
             "posture_engine",
             event_type,
             &audit_payload.to_string(),
             Some("Fleet posture recomputed from DAG traversal"),
             ts,
+            generation,
         ) {
-            Ok(()) => {
-                // #695: a `false` here means the generation high-water rejected this
-                // write as stale. In normal operation that's a benign concurrent-
-                // recalc race (another recalc already persisted a higher generation),
-                // so it is logged at debug; a PERSISTENT rejection of the latest
-                // generation would indicate a regression/time-reversal worth
-                // investigating. An Err is a real DB failure.
-                //
-                // We deliberately DO NOT fail the transition closed on this Err
-                // (unlike the audit-chain write below, SG-HA-4). Failing closed
-                // here would not restore the cross-restart monotonicity invariant
-                // anyway: the in-memory `generation` was already claimed by
-                // `next_generation()` (an irreversible `fetch_add`) AND the audit
-                // chain above already committed durably AT this generation. So the
-                // persisted high-water is equally behind whether we proceed or
-                // suppress — suppressing only drops a live, already-audited posture
-                // transition (possibly a safety ESCALATION), which is the wrong
-                // trade. The high-water is a self-healing monotonic max-write (the
-                // next successful recalc re-persists it), and a SYSTEMIC DB failure
-                // is still caught fail-closed by the audit-chain write on the next
-                // cycle. So: log loudly and let the live broadcast proceed.
-                match store.save_last_generation(generation) {
-                    Ok(true) => {}
-                    Ok(false) => tracing::debug!(
+            Ok(high_water_advanced) => {
+                // #695: a `false` means the in-tx monotonic guard rejected this
+                // generation as stale — a benign concurrent-recalc race (another
+                // recalc already persisted a higher generation); logged at debug.
+                // A PERSISTENT rejection of the latest generation would indicate a
+                // regression worth investigating. The posture event still committed
+                // in the same tx, so the live transition proceeds.
+                if !high_water_advanced {
+                    tracing::debug!(
                         generation,
-                        "Generation high-water rejected a stale persist (benign race unless persistent) — #695"
-                    ),
-                    Err(e) => tracing::error!(error = %e, generation, "Failed to persist last generation (high-water self-heals on next recalc; live transition not suppressed) — #695"),
+                        "Generation high-water rejected a stale persist in-tx (benign race unless persistent) — #695/#771"
+                    );
                 }
                 // WS-0.3: a posture TRANSITION is incident-class — make its
                 // just-committed audit row hard-power-loss durable NOW (one

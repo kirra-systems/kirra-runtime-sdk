@@ -55,7 +55,7 @@ use tokio::time::{interval, Duration};
 
 use crate::verifier::AppState;
 use crate::posture_cache::{SharedPostureCache, now_ms};
-use crate::posture_engine::recalculate_and_broadcast;
+use crate::posture_engine::{init_generation_from_store, recalculate_and_broadcast};
 use crate::posture_engine_v2::resolve_post_promotion_posture;
 
 // ---------------------------------------------------------------------------
@@ -892,6 +892,53 @@ async fn perform_promotion(
         ts,
     );
 
+    // Step 4d (#771 F1): RE-SEED the generation counter from the SHARED store
+    // before the first Active recalc. HA pairs share one SQLite file; the dead
+    // primary advanced the durable generation high-water for its ENTIRE uptime
+    // (~34,560 generations/day at the recalc cadence), while THIS node's in-memory
+    // `POSTURE_GENERATION` was seeded once — at its own boot — and is now far
+    // behind. Without this re-seed the first post-promotion recalc (Step 5) emits
+    // a generation BELOW the dead primary's last, time-reversing the sequence that
+    // federation peers hard-reject (`GenerationRegress`, fail-closed) and SSE
+    // consumers order by — roughly a day of cross-fleet trust blindness per day of
+    // prior primary uptime, on the exact event (primary death) where fresh posture
+    // matters most. `init_generation_from_store` is idempotent (`fetch_max` only
+    // ever RAISES the counter), so re-running it at promotion cannot regress a
+    // counter another racing recalc already advanced. Runs AFTER the epoch claim /
+    // promotion records so a fenced loser (which returned early above) never
+    // touches it. Fail-closed: a store read error aborts promotion and self-demotes
+    // — a promoted Active that would time-reverse generations is worse than staying
+    // PassiveStandby for another instance / a later retry to handle.
+    // SAFETY: SG-HA-3 — durable read offloaded off the async runtime.
+    // SAFETY: SG-HA-4 — DB/offload failure fails closed (self-demote, return false).
+    let app_for_seed = Arc::clone(app);
+    match tokio::task::spawn_blocking(move || init_generation_from_store(&app_for_seed)).await {
+        Ok(Ok(seeded_high_water)) => {
+            tracing::info!(
+                instance_id = %id,
+                epoch = new_epoch,
+                seeded_high_water,
+                "promotion: re-seeded generation counter from shared store (#771 F1) — first Active recalc will emit above the dead primary's last generation"
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch,
+                "promotion ABORTED — cannot re-seed generation high-water from shared store; staying PassiveStandby (fail-closed) to avoid time-reversing generations"
+            );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e, instance_id = %id, epoch = new_epoch,
+                "promotion ABORTED — generation re-seed offload failed; staying PassiveStandby (fail-closed)"
+            );
+            app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+    }
+
     // Step 5: Initial recalculation as Active instance.
     // is_active() now returns true, so recalculate_and_broadcast will write
     // to the cache and emit broadcasts instead of returning early.
@@ -1466,6 +1513,52 @@ mod sg_009_promotion_act_tests {
             .with(|store| store.verify_audit_chain_full(None)).unwrap();
         assert!(audit.total_entries >= 1,
             "promotion must append a STANDBY_PROMOTED_TO_ACTIVE audit event");
+    }
+
+    /// #771 F1 — a promoted standby must RE-SEED the generation counter from the
+    /// SHARED store before its first Active recalc, so its first emitted
+    /// generation is ABOVE the dead primary's last (which advanced the durable
+    /// high-water for the primary's whole uptime). Before the fix `perform_promotion`
+    /// recalculated with THIS node's stale boot counter, time-reversing the sequence
+    /// federation peers hard-reject.
+    ///
+    /// The store carries a high-water `H` well ABOVE the current live counter
+    /// (offset like the other generation tests to survive the process-global
+    /// `POSTURE_GENERATION` that concurrent tests also mutate — #771 F7 debt). After
+    /// promotion the persisted high-water — bumped by the first Active recalc — must
+    /// exceed `H`. Without the re-seed the recalc stamps a generation BELOW `H`, the
+    /// monotonic guard rejects the persist, and the high-water stays exactly `H`
+    /// (assertion fails). Verified to fail on the pre-fix code.
+    #[test]
+    fn test_promotion_reseeds_generation_above_dead_primary_highwater() {
+        use crate::posture_engine::POSTURE_GENERATION;
+
+        let store = VerifierStore::new(":memory:").expect("store");
+        // The dead primary's durable high-water: far above any value concurrent
+        // tests could have pushed the shared counter to.
+        let h = POSTURE_GENERATION.load(Ordering::SeqCst) + 1_000_000;
+        assert!(
+            store.save_last_generation(h).expect("seed high-water"),
+            "seeding the dead-primary high-water must persist"
+        );
+
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::PassiveStandby));
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        assert!(!app.is_active(), "must start as PassiveStandby");
+
+        run_promotion(&app, &cache, "standby-f1", "HEARTBEAT_TIMEOUT");
+        assert!(app.is_active(), "promotion must complete");
+
+        let persisted = app
+            .store
+            .with(|s| s.load_last_generation())
+            .expect("load high-water");
+        assert!(
+            persisted > h,
+            "post-promotion high-water {persisted} must EXCEED the dead primary's {h} \
+             (re-seed at promotion, #771 F1); without the re-seed the recalc stamps below {h} \
+             and the monotonic guard leaves it unchanged"
+        );
     }
 
     /// Drives the real async promotion on a deterministic current-thread runtime.
