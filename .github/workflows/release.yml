@@ -233,8 +233,18 @@ jobs:
           # whose heading names the pushed tag; a missing/empty section
           # FAILS the release — no more "Release vX" fallback notes. Write
           # the section in CHANGELOG.md (rename [Unreleased]) and re-tag.
-          awk "/^## \[?${VERSION}\]?/{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md \
-              > release_notes.md
+          #
+          # Exact-prefix match on the BRACKETED heading ("## [vX.Y.Z]") —
+          # the version is compared as a STRING, never interpolated into a
+          # regex, so dots can't wildcard and "v1.1.2" can't match a
+          # "v1.1.21" section (the closing bracket bounds it).
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::CHANGELOG.md is missing — a release must ship real notes (WS-0.7)."
+            exit 1
+          fi
+          awk -v ver="${VERSION}" '
+            /^## / { want = "## [" ver "]"; flag = (substr($0, 1, length(want)) == want); next }
+            flag' CHANGELOG.md > release_notes.md
           if [ ! -s release_notes.md ]; then
             echo "::error file=CHANGELOG.md::No '## [${VERSION}]' section found in CHANGELOG.md —" \
                  "a release must ship real notes (WS-0.7). Add the section (rename [Unreleased])," \
