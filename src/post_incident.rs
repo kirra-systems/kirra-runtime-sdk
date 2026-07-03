@@ -102,20 +102,24 @@ fn note_failure(app: &AppState, event_type: &str, why: &str) {
 /// Append one post-incident event to the signed, hash-chained audit log.
 /// Best-effort: a failure bumps the counter and logs; it never propagates.
 fn emit(app: &AppState, event_type: &str, body: &serde_json::Value, ts: u64) {
+    // WS-0.3 / #772 F2+F4: every post-incident sequence event is incident-class
+    // by definition, so it is written DIRECTLY on the FULL (synchronous=FULL)
+    // connection — the commit itself fsyncs the WAL, making the forensic row
+    // hard-power-loss durable at write time, ATOMICALLY. This replaces the prior
+    // "NORMAL commit then separate `fsync_wal_durable` marker" two-step, which
+    // (a) left a crash window between the two commits and (b) routed a fsync
+    // failure into `note_failure` — conflating "row MISSING from the chain" with
+    // "row committed, durability degraded". Now a single `Err` means exactly the
+    // former (the row did not commit), so the counter's documented meaning holds.
+    // Same best-effort contract: a failure is counted, never propagated.
     let outcome = app.store.with(|store| {
-        store.save_posture_event_chained(
+        store.save_posture_event_chained_durable(
             POST_INCIDENT_NODE_ID,
             event_type,
             &body.to_string(),
             Some("post-incident forensic sequence (#104)"),
             ts,
-        )?;
-        // WS-0.3: every post-incident sequence event is incident-class by
-        // definition — fsync the WAL so the forensic row survives a hard
-        // power loss (the incident record must not be the least durable
-        // write in the system). Same best-effort contract as the rest of
-        // this module: a failure is counted, never propagated.
-        store.fsync_wal_durable(ts)
+        )
     });
     if let Err(e) = outcome {
         note_failure(app, event_type, &e.to_string());

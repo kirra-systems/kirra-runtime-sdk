@@ -294,6 +294,20 @@ pub struct VerifierStore {
     /// Retained so a [`StoreHandle`](crate::store_handle::StoreHandle) can open
     /// independent READ-ONLY replica connections to the same WAL file.
     db_path: String,
+    /// #772 F6 — TEST-ONLY invocation counter for the incident-class durable
+    /// posture-event writes (`save_posture_event_chained*_durable`). Lets the
+    /// gating test prove that a TRANSITION takes the FULL-connection durable path
+    /// while a 20 Hz `POSTURE_CACHE_REFRESHED` does NOT — the load-bearing INV-12
+    /// gate that is otherwise invisible on an in-memory store (where `durable_conn`
+    /// falls back to `conn`). Never compiled into production.
+    #[cfg(test)]
+    durable_posture_writes: std::sync::atomic::AtomicU64,
+    /// #772 F3 — TEST-ONLY fault seam: when set, the durable posture-event writes
+    /// return `Err` at entry WITHOUT touching the DB, so a test can exercise the
+    /// recalc's "durable write failed → count it, fall back to the NORMAL write,
+    /// do NOT suppress the transition" path. Never compiled into production.
+    #[cfg(test)]
+    fail_durable_posture_writes: std::sync::atomic::AtomicBool,
 }
 
 // --- audit key-rotation helpers (#76) --------------------------------------
@@ -794,7 +808,16 @@ impl VerifierStore {
             Some(dc)
         };
 
-        Ok(Self { conn, durable_conn, signing_key: None, db_path: path.to_string() })
+        Ok(Self {
+            conn,
+            durable_conn,
+            signing_key: None,
+            db_path: path.to_string(),
+            #[cfg(test)]
+            durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     /// The database path this store was opened from.
@@ -832,6 +855,10 @@ impl VerifierStore {
             durable_conn: None,
             signing_key: None,
             db_path: path.to_string(),
+            #[cfg(test)]
+            durable_posture_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            fail_durable_posture_writes: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -888,45 +915,16 @@ impl VerifierStore {
     /// before an UNGRACEFUL power cut may be lost — a forensic gap, never a
     /// safety-state gap (the verdict path is store-free). Do NOT assume the audit
     /// tail is hard-power-loss-durable — EXCEPT incident-class rows: since
-    /// WS-0.3, a posture TRANSITION and every post-incident sequence event are
-    /// followed by `fsync_wal_durable`, so the record of the incident preceding
-    /// a power cut is fsync-durable at write time. The periodic refresh tail
-    /// keeps the checkpoint-bounded window. See
-    /// docs/safety/CODING_GUIDELINES.md INV-12.
+    /// WS-0.3 (#772 F2), a posture TRANSITION and every post-incident sequence
+    /// event are written DIRECTLY on the FULL connection
+    /// (`save_posture_event_chained*_durable`), so the commit itself fsyncs the
+    /// WAL and the record of the incident preceding a power cut is durable at
+    /// write time, atomically. The periodic refresh tail keeps the
+    /// checkpoint-bounded window. See docs/safety/CODING_GUIDELINES.md INV-12.
     pub fn durable_checkpoint(&self) -> Result<()> {
         if let Some(dc) = &self.durable_conn {
             dc.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         }
-        Ok(())
-    }
-
-    /// WS-0.3 (#G10 audit axis) — make everything committed so far on the
-    /// shared WAL **hard-power-loss durable**, by committing one tiny marker
-    /// row on the `synchronous=FULL` connection. A FULL commit fsyncs the WAL
-    /// file, and fsync flushes the file's dirty pages wholesale — including
-    /// every frame previously committed by the NORMAL connection. So the
-    /// incident row committed immediately before this call survives an
-    /// ungraceful power cut, without per-row fsync on the 20 Hz+ audit path
-    /// and without a checkpoint's reader/writer coordination.
-    ///
-    /// Call AFTER committing an INCIDENT-CLASS audit row (a posture
-    /// TRANSITION, a post-incident sequence event) — never on the periodic
-    /// `POSTURE_CACHE_REFRESHED` traffic, which keeps the INV-12 throughput
-    /// rationale intact (transitions are rare state changes, not steady-state
-    /// load). The marker itself (`last_incident_durable_ms`) doubles as a
-    /// forensic breadcrumb: the last instant the audit tail was known
-    /// fsync-durable.
-    ///
-    /// In-memory stores have no durable connection (and nothing to make
-    /// durable); the marker then rides the main connection — semantics
-    /// preserved for tests.
-    pub fn fsync_wal_durable(&self, now_ms: u64) -> Result<()> {
-        self.durable_ref().execute(
-            "INSERT INTO posture_engine_state (key, value)
-             VALUES ('last_incident_durable_ms', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = ?1",
-            params![now_ms.to_string()],
-        )?;
         Ok(())
     }
 

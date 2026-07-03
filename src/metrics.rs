@@ -86,6 +86,11 @@ pub struct FleetMetricsSnapshot {
     /// `AppState::post_incident_write_failures` — post-incident forensic
     /// audit writes that could not be durably recorded (#104).
     pub post_incident_write_failures: u64,
+    /// `AppState::incident_durability_failures` — incident-class transitions
+    /// whose FULL-connection durable write failed and fell back to the
+    /// checkpoint-bounded write (WS-0.3 / #772 F3). Row is in the chain but not
+    /// power-loss durable at write time. Distinct from the "missing" counters.
+    pub incident_durability_failures: u64,
     /// `AppState::command_source_write_failures` — command-source handoff
     /// audit writes that could not be durably recorded (#112).
     pub command_source_write_failures: u64,
@@ -294,6 +299,15 @@ impl FleetSafetyMetrics {
         );
         family(
             &mut out,
+            "incident_durability_failures_total",
+            "counter",
+            "Incident-class posture transitions whose power-loss-durable (FULL-connection) \
+             write failed and fell back to the checkpoint-bounded write (WS-0.3 / #772) — the \
+             row is in the chain but not power-loss durable at write time; MUST be 0 when healthy",
+            &[("", snap.incident_durability_failures)],
+        );
+        family(
+            &mut out,
             "command_source_write_failures_total",
             "counter",
             "Command-source handoff audit writes that could not be durably recorded (#112) \
@@ -371,6 +385,7 @@ mod fleet_metrics_tests {
             audit_write_drops: 11,
             capture_drops: 12,
             post_incident_write_failures: 13,
+            incident_durability_failures: 15,
             command_source_write_failures: 14,
         }
     }
@@ -392,6 +407,7 @@ mod fleet_metrics_tests {
             "audit_write_drops_total",
             "capture_drops_total",
             "post_incident_write_failures_total",
+            "incident_durability_failures_total",
             "command_source_write_failures_total",
         ] {
             assert!(
@@ -453,6 +469,7 @@ mod fleet_metrics_tests {
             "kirra_audit_write_drops_total{node_id=\"n\"} 11\n",
             "kirra_capture_drops_total{node_id=\"n\"} 12\n",
             "kirra_post_incident_write_failures_total{node_id=\"n\"} 13\n",
+            "kirra_incident_durability_failures_total{node_id=\"n\"} 15\n",
             "kirra_command_source_write_failures_total{node_id=\"n\"} 14\n",
         ] {
             assert!(text.contains(expected), "missing exact sample {expected:?} in:\n{text}");

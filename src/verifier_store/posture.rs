@@ -129,11 +129,63 @@ impl VerifierStore {
         rows.collect()
     }
 
+    /// Shared body of every chained posture-event write. Runs the posture-row
+    /// INSERT, the `AuditChainLinker` append, and (when `generation` is `Some`)
+    /// the monotonic high-water UPSERT in ONE `Immediate` transaction on the
+    /// GIVEN connection. Callers pass either the NORMAL `conn` (checkpoint-bounded
+    /// durability, INV-12 throughput path) or the FULL `durable_conn` (per-commit
+    /// fsync — hard-power-loss durable at write time, #772 F2). Threading the
+    /// connection + signing key as params keeps the durable and normal variants a
+    /// single source of truth so they cannot drift.
+    ///
+    /// Returns whether the high-water ADVANCED (`false` when `generation` is
+    /// `None`, or when the monotonic guard rejected a stale/equal generation).
+    #[allow(clippy::too_many_arguments)] // faithful pass-through of the write's columns
+    fn write_posture_event_chained_tx(
+        conn: &mut Connection,
+        signing_key: Option<&ed25519_dalek::SigningKey>,
+        node_id: &str,
+        event_type: &str,
+        posture_json: &str,
+        reason: Option<&str>,
+        created_at_ms: u64,
+        generation: Option<u64>,
+    ) -> Result<bool> {
+        let tx = Self::audit_tx(conn)?; // #685: Immediate — non-forking audit append
+        tx.execute(
+            "INSERT INTO posture_events
+             (node_id, event_type, posture_json, reason, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+        )?;
+        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
+            &tx, event_type, posture_json, created_at_ms as i64, signing_key,
+        )?;
+        let advanced = match generation {
+            Some(g) => {
+                // Monotonic max-write — identical guard to `save_last_generation`,
+                // but in THIS transaction so the stamp and its high-water commit
+                // together (#771 F2).
+                let changed = tx.execute(
+                    "INSERT INTO posture_engine_state (key, value)
+                     VALUES ('last_generation', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = ?1
+                     WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
+                    params![g.to_string()],
+                )?;
+                changed > 0
+            }
+            None => false,
+        };
+        tx.commit()?;
+        Ok(advanced)
+    }
+
     /// Audit-chained posture-event insert. **All production posture-event
-    /// writes MUST go through this function**; the non-chained inserter is
-    /// `#[cfg(test)]`-only so events cannot bypass the audit chain. Writes
-    /// the posture row and the corresponding `AuditChainLinker` entry in
-    /// the same SQLite transaction so the chain is never partially updated.
+    /// writes MUST go through this (or a `_chained*` sibling)**; the non-chained
+    /// inserter is `#[cfg(test)]`-only so events cannot bypass the audit chain.
+    /// Writes the posture row and its `AuditChainLinker` entry in one transaction
+    /// on the NORMAL connection (checkpoint-bounded durability).
     pub fn save_posture_event_chained(
         &mut self,
         node_id: &str,
@@ -142,17 +194,13 @@ impl VerifierStore {
         reason: Option<&str>,
         created_at_ms: u64,
     ) -> Result<()> {
-        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
-        tx.execute(
-            "INSERT INTO posture_events
-             (node_id, event_type, posture_json, reason, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+        // Disjoint field borrows: the tx borrows `self.conn`, the append reads
+        // `self.signing_key` — different fields, so both live at once.
+        Self::write_posture_event_chained_tx(
+            &mut self.conn, self.signing_key.as_ref(),
+            node_id, event_type, posture_json, reason, created_at_ms, None,
         )?;
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx, event_type, posture_json, created_at_ms as i64, self.signing_key.as_ref(),
-        )?;
-        tx.commit()
+        Ok(())
     }
 
     /// Like [`Self::save_posture_event_chained`], but ALSO advances the
@@ -186,27 +234,106 @@ impl VerifierStore {
         if generation >= i64::MAX as u64 {
             return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
         }
-        let tx = Self::audit_tx(&mut self.conn)?; // #685: Immediate — non-forking audit append
-        tx.execute(
-            "INSERT INTO posture_events
-             (node_id, event_type, posture_json, reason, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+        Self::write_posture_event_chained_tx(
+            &mut self.conn, self.signing_key.as_ref(),
+            node_id, event_type, posture_json, reason, created_at_ms, Some(generation),
+        )
+    }
+
+    /// INCIDENT-CLASS durable variant of [`Self::save_posture_event_chained`]
+    /// (#772 F2). Writes the row + audit link on the `synchronous=FULL`
+    /// connection, so the COMMIT ITSELF fsyncs the WAL: the forensic row is
+    /// hard-power-loss durable at write time, atomically, with no separate marker
+    /// and no cross-connection piggyback inference. Use for post-incident forensic
+    /// rows — never for the 20 Hz `POSTURE_CACHE_REFRESHED` traffic (INV-12
+    /// throughput). On an in-memory store `durable_conn` is absent and this rides
+    /// the main connection (semantics preserved for tests).
+    pub fn save_posture_event_chained_durable(
+        &mut self,
+        node_id: &str,
+        event_type: &str,
+        posture_json: &str,
+        reason: Option<&str>,
+        created_at_ms: u64,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.durable_posture_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_durable_posture_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Self::injected_durable_fault());
+            }
+        }
+        // Disjoint field borrows: `durable_conn`/`conn` for the tx, `signing_key`
+        // for the append.
+        let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
+        Self::write_posture_event_chained_tx(
+            conn, self.signing_key.as_ref(),
+            node_id, event_type, posture_json, reason, created_at_ms, None,
         )?;
-        crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx, event_type, posture_json, created_at_ms as i64, self.signing_key.as_ref(),
-        )?;
-        // Monotonic max-write — identical guard to `save_last_generation`, but
-        // in THIS transaction so the stamp and its high-water commit together.
-        let changed = tx.execute(
-            "INSERT INTO posture_engine_state (key, value)
-             VALUES ('last_generation', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = ?1
-             WHERE CAST(?1 AS INTEGER) > CAST(value AS INTEGER)",
-            params![generation.to_string()],
-        )?;
-        tx.commit()?;
-        Ok(changed > 0)
+        Ok(())
+    }
+
+    /// INCIDENT-CLASS durable variant of
+    /// [`Self::save_posture_event_chained_with_generation`] (#772 F2). Folds the
+    /// posture row, audit link, AND generation high-water into one transaction on
+    /// the `synchronous=FULL` connection — the atomic, evidence-grade replacement
+    /// for the prior "NORMAL-commit then separate `fsync_wal_durable` marker"
+    /// two-step (which left a crash window and rested on emergent whole-inode
+    /// fsync semantics rather than a documented per-write guarantee). Use for a
+    /// posture TRANSITION. Same `>= i64::MAX` fail-closed guard as the normal
+    /// variant.
+    pub fn save_posture_event_chained_with_generation_durable(
+        &mut self,
+        node_id: &str,
+        event_type: &str,
+        posture_json: &str,
+        reason: Option<&str>,
+        created_at_ms: u64,
+        generation: u64,
+    ) -> Result<bool> {
+        if generation >= i64::MAX as u64 {
+            return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
+        }
+        #[cfg(test)]
+        {
+            self.durable_posture_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_durable_posture_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Self::injected_durable_fault());
+            }
+        }
+        let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
+        Self::write_posture_event_chained_tx(
+            conn, self.signing_key.as_ref(),
+            node_id, event_type, posture_json, reason, created_at_ms, Some(generation),
+        )
+    }
+
+    /// TEST-ONLY (#772 F6): how many incident-class durable posture-event writes
+    /// this store has performed. The gating test asserts a TRANSITION bumps this
+    /// and a `POSTURE_CACHE_REFRESHED` does not.
+    #[cfg(test)]
+    pub fn durable_posture_write_count(&self) -> u64 {
+        self.durable_posture_writes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// TEST-ONLY (#772 F3): force the durable posture-event writes to fail at
+    /// entry (no DB touch), so the recalc's fall-back-to-NORMAL-write path can be
+    /// exercised without a real fsync/BUSY fault.
+    #[cfg(test)]
+    pub fn set_fail_durable_posture_writes(&self, fail: bool) {
+        self.fail_durable_posture_writes
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn injected_durable_fault() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            Some("injected durable-write fault (#772 F3 test)".into()),
+        )
     }
 
     pub fn load_last_generation(&self) -> Result<u64> {
