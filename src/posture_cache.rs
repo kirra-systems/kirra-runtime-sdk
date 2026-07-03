@@ -267,7 +267,7 @@ pub fn route_command_verdict(
             ttl_ms          = entry.ttl_ms,
             now_ms          = now_ms,
             generation      = entry.generation,
-            "should_route_command: cache stale — blocking command"
+            "posture-routing gate: cache stale — blocking command"
         );
         return Err(R::PostureCacheStale);
     }
