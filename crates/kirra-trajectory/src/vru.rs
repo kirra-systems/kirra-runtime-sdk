@@ -111,6 +111,33 @@ fn params_valid(p: &VruRssParams) -> bool {
         && ok(p.stop_epsilon_mps)
 }
 
+/// The ego-body reach term for the VRU bound (#779 F1): the max distance from
+/// the pose (the REAR AXLE) to any point of the ego footprint,
+/// `max(wheelbase+overhang_front, overhang_rear).hypot(half_width)` —
+/// direction-independent, matching the omnidirectional disc model.
+///
+/// FAIL-CLOSED (Copilot #788): returns `f64::NAN` — which makes
+/// [`required_pedestrian_clearance_m`] return `∞`, a guaranteed breach — on ANY
+/// non-finite OR negative geometry input. `f64::max` uses IEEE `maxNum` semantics
+/// (it IGNORES NaN and returns the other argument), so a naive `max` would MASK a
+/// corrupt footprint field (e.g. `overhang_rear = NaN`) into a FINITE reach and
+/// defeat the downstream `is_finite()` check. The explicit validation prevents that.
+#[must_use]
+pub fn ego_reach_m(
+    wheelbase_m: f64,
+    overhang_front_m: f64,
+    overhang_rear_m: f64,
+    width_m: f64,
+) -> f64 {
+    let geom_ok = [wheelbase_m, overhang_front_m, overhang_rear_m, width_m]
+        .iter()
+        .all(|x| x.is_finite() && *x >= 0.0);
+    if !geom_ok {
+        return f64::NAN; // corrupt ego geometry → fail closed downstream
+    }
+    f64::max(wheelbase_m + overhang_front_m, overhang_rear_m).hypot(width_m / 2.0)
+}
+
 /// The required distance between a trajectory pose (the ego REAR AXLE) and a
 /// pedestrian for the pose to be VRU-safe (doc §4):
 ///
@@ -318,6 +345,32 @@ mod tests {
         let with_accel = required_pedestrian_clearance_m(4.0, 0.0, BRAKE, A_MAX, ego_reach(), &p);
         let no_accel = required_pedestrian_clearance_m(4.0, 0.0, BRAKE, 0.0, ego_reach(), &p);
         assert!(with_accel > no_accel, "the a_max·ρ response phase must add distance");
+    }
+
+    /// #779 F1 / Copilot #788 — `ego_reach_m` fails closed (NaN → downstream ∞) on
+    /// ANY non-finite or negative geometry. The `overhang_rear = NaN` case is the
+    /// one a naive `f64::max` would MASK (max ignores NaN, returning the finite
+    /// front reach) — the explicit validation must catch it.
+    #[test]
+    fn ego_reach_fails_closed_on_corrupt_geometry() {
+        // Sound robotaxi geometry → finite, equals the worked-reference reach.
+        let r = ego_reach_m(2.8, 0.9, 1.1, 1.85);
+        assert!((r - ego_reach()).abs() < 1e-9, "sound geometry: got {r}");
+        // A NaN in ANY field → NaN (fail closed).
+        assert!(ego_reach_m(f64::NAN, 0.9, 1.1, 1.85).is_nan());
+        assert!(ego_reach_m(2.8, f64::NAN, 1.1, 1.85).is_nan());
+        assert!(
+            ego_reach_m(2.8, 0.9, f64::NAN, 1.85).is_nan(),
+            "the overhang_rear=NaN case f64::max would MASK must fail closed"
+        );
+        assert!(ego_reach_m(2.8, 0.9, 1.1, f64::NAN).is_nan());
+        // Negative geometry also fails closed.
+        assert!(ego_reach_m(2.8, 0.9, -1.0, 1.85).is_nan());
+        // And the NaN reach makes the requirement ∞ (breach) downstream.
+        assert_eq!(
+            required_pedestrian_clearance_m(2.0, 0.0, BRAKE, A_MAX, f64::NAN, &VruRssParams::default()),
+            f64::INFINITY
+        );
     }
 
     /// #779 F3 — the posture-composed brake matters: the weaker Degraded MRC

@@ -555,11 +555,15 @@ pub fn validate_trajectory_slow_capped(
         // #779 F1 — the ego is a BODY: the pose is the rear axle, so the required
         // clearance must include the max distance from the axle to any footprint
         // corner (direction-independent, matching the omnidirectional disc).
-        let ego_reach_m = f64::max(
-            kinematics.wheelbase_m + kinematics.overhang_front_m,
+        // #779 F1 — the ego-body reach, fail-closed on corrupt geometry (the
+        // helper forces NaN → ∞ → breach; a naive `f64::max` would MASK a NaN
+        // footprint field, Copilot #788).
+        let ego_reach_m = crate::vru::ego_reach_m(
+            kinematics.wheelbase_m,
+            kinematics.overhang_front_m,
             kinematics.overhang_rear_m,
-        )
-        .hypot(kinematics.width_m / 2.0);
+            kinematics.width_m,
+        );
         if crate::vru::pedestrian_breach(
             trajectory,
             scene,
