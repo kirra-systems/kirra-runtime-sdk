@@ -249,7 +249,7 @@ pub fn score_perception(cases: &[PerceptionCase]) -> SemanticEvalSummary {
 /// faulty detector output for a negative-control corpus (#777 F1). Each maps to
 /// a real perception failure mode the safety oracle must catch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetectorFault {
+pub(crate) enum DetectorFault {
     /// The detector sees nothing — the true hazard is dropped entirely. The
     /// corridor reads as free → the ego drives into the hazard (`UnsafeMiss`).
     Dropout,
@@ -295,7 +295,7 @@ fn faulted_detected(truth: &[SemanticDetection], fault: DetectorFault) -> Vec<Se
 /// non-empty), with `detected` re-derived from `truth` under `fault`. Scoring
 /// this must breach `unsafe_miss_rate` (the oracle caught the fault).
 #[must_use]
-pub fn negative_control_corpus(base: &[PerceptionCase], fault: DetectorFault) -> Vec<PerceptionCase> {
+pub(crate) fn negative_control_corpus(base: &[PerceptionCase], fault: DetectorFault) -> Vec<PerceptionCase> {
     base.iter()
         .filter(|c| !c.truth.is_empty())
         .map(|c| PerceptionCase {
@@ -313,7 +313,7 @@ pub fn negative_control_corpus(base: &[PerceptionCase], fault: DetectorFault) ->
 /// phantom is an availability cost, never a safety breach, and the oracle must
 /// classify it on the safe side.
 #[must_use]
-pub fn phantom_control_corpus(base: &[PerceptionCase]) -> Vec<PerceptionCase> {
+pub(crate) fn phantom_control_corpus(base: &[PerceptionCase]) -> Vec<PerceptionCase> {
     base.iter()
         .filter(|c| !c.truth.is_empty())
         .map(|c| PerceptionCase {
