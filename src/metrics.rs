@@ -124,9 +124,13 @@ impl FleetSafetyMetrics {
         Self::default()
     }
 
-    /// Count a COMMITTED posture transition (called by the posture engine
-    /// after the audit-chain write succeeds — a suppressed transition is
-    /// not counted, matching what subscribers observe).
+    /// Count an ENFORCED-AND-BROADCAST posture transition (#774 F4). The posture
+    /// engine calls this only inside its `cache_written && is_transition` block —
+    /// the SAME gate as the SSE broadcast — so this counter reconciles exactly
+    /// with what subscribers observe and with the cache generation. It does NOT
+    /// count transitions that were audit-committed but never enforced (a
+    /// PassiveStandby audits without broadcasting; an Active recalc can lose the
+    /// monotonic cache CAS) — those live in the audit chain, not here.
     pub fn record_transition(&self, to: &FleetPosture) {
         let c = match to {
             FleetPosture::Nominal => &self.transitions_nominal,
@@ -243,8 +247,9 @@ impl FleetSafetyMetrics {
             &mut out,
             "posture_transitions_total",
             "counter",
-            "Committed fleet posture transitions by target posture \
-             (periodic cache refreshes are not transitions)",
+            "Enforced-and-broadcast fleet posture transitions by target posture \
+             (reconciles with the SSE stream; periodic cache refreshes are not \
+             transitions; audit-committed-but-unenforced transitions are in the audit chain)",
             &[
                 ("posture=\"nominal\"", self.transitions_nominal.load(Ordering::Relaxed)),
                 ("posture=\"degraded\"", self.transitions_degraded.load(Ordering::Relaxed)),

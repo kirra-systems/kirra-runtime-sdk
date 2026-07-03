@@ -114,6 +114,48 @@ pub fn resolve_posture_with_reason(
     }
 }
 
+/// SILENT, single-read snapshot resolver for the OBSERVABILITY scrape path
+/// (#774 F1 + F5). Returns the effective fail-closed posture, the lockout reason
+/// (if any), AND the generation of the cache entry that produced the posture —
+/// all from ONE `cache.read()` (F5: the prior scrape read the cache twice, so a
+/// replace between the reads could pair a stale posture with a fresh entry's
+/// generation). Emits NO tracing (F1): unlike the gate/promotion callers of
+/// [`resolve_posture_with_reason`], the unauthenticated `/metrics` endpoint hits
+/// this on every scrape — a healthy PassiveStandby has an empty cache forever, so
+/// the logging resolver would mint a WARN per scrape (thousands/day, and an
+/// unauthenticated log-amplification lever). The generation is `0` when the cache
+/// is empty/poisoned (no coherent generation to report); on a stale entry it is
+/// that entry's own generation, so posture and generation always describe the
+/// same snapshot.
+///
+/// The stale/empty/poisoned → LockedOut mapping and the staleness authority
+/// (`is_stale_with_ttl`) are IDENTICAL to `resolve_posture_with_reason`; the only
+/// difference is the absence of logging and the extra generation return. The
+/// agreement is pinned by `silent_snapshot_matches_logging_resolver`.
+pub fn resolve_posture_snapshot_silent(
+    cache: &SharedPostureCache,
+    posture_cache_ttl_ms: u64,
+) -> (FleetPosture, Option<LockoutReason>, u64) {
+    let ts = now_ms_engine();
+    match cache.read() {
+        Ok(guard) => match guard.as_ref() {
+            Some(cached) => {
+                if cached.is_stale_with_ttl(ts, posture_cache_ttl_ms) {
+                    (
+                        FleetPosture::LockedOut,
+                        Some(LockoutReason::PostureCacheStale),
+                        cached.generation,
+                    )
+                } else {
+                    (cached.posture, None, cached.generation)
+                }
+            }
+            None => (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheEmpty), 0),
+        },
+        Err(_) => (FleetPosture::LockedOut, Some(LockoutReason::PostureCachePoisoned), 0),
+    }
+}
+
 /// Post-promotion posture-freshness gate (#83).
 ///
 /// A standby that has just promoted to Active MUST hold a non-stale posture
@@ -515,6 +557,51 @@ mod posture_engine_v2_tests {
         assert_eq!(LockoutReason::WatchdogTimeout.to_string(),      "WATCHDOG_TIMEOUT");
         assert_eq!(LockoutReason::ManualLockout.to_string(),        "MANUAL_LOCKOUT");
         assert_eq!(LockoutReason::FrameIntegrityUntrusted.to_string(), "FRAME_INTEGRITY_UNTRUSTED");
+    }
+
+    /// #774 F1+F5 — the silent scrape resolver agrees with the logging gate
+    /// resolver on (posture, reason) for every cache state, and returns a
+    /// generation coherent with the SAME single read (fresh/stale → the entry's
+    /// own generation; empty → 0). This pins that the silent variant can't drift
+    /// from the logging one, and that posture+generation are never torn.
+    #[test]
+    fn silent_snapshot_matches_logging_resolver() {
+        use crate::posture_cache::{CachedFleetPosture, POSTURE_CACHE_TTL_MS};
+
+        let mk = |posture: FleetPosture, generated_at_ms: u64, generation: u64| {
+            let c: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+                CachedFleetPosture { posture, generated_at_ms, ttl_ms: POSTURE_CACHE_TTL_MS, generation },
+            )));
+            c
+        };
+        let now = now_ms_engine();
+
+        // Fresh Nominal: both resolve to Nominal/None; silent reports the entry's generation.
+        let fresh = mk(FleetPosture::Nominal, now, 42);
+        let (lp, lr) = resolve_posture_with_reason(&fresh, POSTURE_CACHE_TTL_MS);
+        let (sp, sr, sg) = resolve_posture_snapshot_silent(&fresh, POSTURE_CACHE_TTL_MS);
+        assert_eq!(lp, sp, "fresh: posture must agree");
+        assert_eq!(lr, sr, "fresh: reason must agree");
+        assert_eq!(sg, 42, "fresh: generation must be the entry's own");
+
+        // Stale (generated far in the past): both fail closed to LockedOut/Stale;
+        // silent still reports the STALE entry's generation (coherent snapshot).
+        let stale = mk(FleetPosture::Nominal, now.saturating_sub(POSTURE_CACHE_TTL_MS * 4), 7);
+        let (lp, lr) = resolve_posture_with_reason(&stale, POSTURE_CACHE_TTL_MS);
+        let (sp, sr, sg) = resolve_posture_snapshot_silent(&stale, POSTURE_CACHE_TTL_MS);
+        assert_eq!(lp, sp, "stale: posture must agree");
+        assert_eq!(lr, sr, "stale: reason must agree");
+        assert_eq!(sr, Some(LockoutReason::PostureCacheStale));
+        assert_eq!(sg, 7, "stale: generation is the stale entry's own, not 0");
+
+        // Empty: both LockedOut/Empty; silent generation is 0 (no coherent entry).
+        let empty: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        let (lp, lr) = resolve_posture_with_reason(&empty, POSTURE_CACHE_TTL_MS);
+        let (sp, sr, sg) = resolve_posture_snapshot_silent(&empty, POSTURE_CACHE_TTL_MS);
+        assert_eq!(lp, sp, "empty: posture must agree");
+        assert_eq!(lr, sr, "empty: reason must agree");
+        assert_eq!(sr, Some(LockoutReason::PostureCacheEmpty));
+        assert_eq!(sg, 0, "empty: no coherent generation → 0");
     }
 
     // --- S-FI1d: frame-integrity posture coupling ---------------------------

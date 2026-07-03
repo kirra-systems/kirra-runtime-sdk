@@ -51,15 +51,12 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
 
     // Effective fail-closed posture via the single TTL authority — the gauge
     // reports what the ROUTING GATE would enforce (cold/stale/poisoned →
-    // LockedOut), not a possibly-stale cached optimism.
-    let (effective_posture, stale_reason) =
-        resolve_posture_with_reason(&svc.posture_cache, POSTURE_CACHE_TTL_MS);
-    let posture_generation = svc
-        .posture_cache
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.generation))
-        .unwrap_or(0);
+    // LockedOut), not a possibly-stale cached optimism. #774 F1+F5: the SILENT
+    // single-read resolver — no WARN-per-scrape on an empty standby cache / from
+    // an unauthenticated peer, and posture + generation come from ONE cache read
+    // (no torn snapshot).
+    let (effective_posture, stale_reason, posture_generation) =
+        resolve_posture_snapshot_silent(&svc.posture_cache, POSTURE_CACHE_TTL_MS);
 
     let snap = kirra_verifier::metrics::FleetMetricsSnapshot {
         effective_posture,

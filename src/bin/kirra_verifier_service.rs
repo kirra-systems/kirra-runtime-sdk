@@ -24,7 +24,9 @@ use kirra_verifier::verifier::{
 };
 use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
 use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
-use kirra_verifier::posture_engine_v2::{resolve_posture_with_reason, LockoutReason};
+use kirra_verifier::posture_engine_v2::{
+    resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
+};
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
