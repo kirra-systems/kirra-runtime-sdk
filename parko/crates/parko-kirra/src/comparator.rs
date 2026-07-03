@@ -428,27 +428,35 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
         // ---------------- Divergence path ----------------
 
         let reconciled_lin = reconcile(primary_lin, shadow_lin, MRC_VELOCITY_CEILING_MPS);
-        // WS-0.4 — the angular reconciliation is capped by the SOTIF-derived
-        // MRC angular ceiling `ω_max(v)` (#136), evaluated at the RECONCILED
-        // linear velocity (matching `apply_mrc_profile`, which evaluates the
-        // bound at the post-clamp linear command). Divergence is a lost-trust
-        // condition, so the MRC (posture-derated) bound — not the Nominal one
-        // — is the envelope. The bound is read from the PRIMARY arm: the
-        // production wiring configures both arms with identical platform
-        // params by construction (a mismatched shadow would spuriously
-        // diverge on every tick anyway). Replaces the interim
-        // `f64::INFINITY` pure min-of-magnitudes, which left the reconciled
-        // yaw rate unbounded whenever both governors admitted a
-        // large-but-differing angular command.
-        let angular_cap = self.primary.mrc_omega_max(reconciled_lin);
-        let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         // Best-available current-speed proxy. There is no measured-speed
         // input on `evaluate` (see STEP 0(f) of CERT-006 v2 prompt). The
         // previously commanded velocity tracks vehicle speed closely if
         // the AV is following commands; in the absence of `previous` we
-        // fall back to time-based escalation.
+        // fall back to time-based escalation. (Computed here — moved above the
+        // angular cap for WS-0.4 F5 — and reused by the lockout gate below.)
         let current_speed_mps = previous.map(|p| p.linear_velocity.abs());
+
+        // WS-0.4 (F5 fix) — the angular reconciliation is capped by the
+        // SOTIF-derived MRC angular ceiling `ω_max(v)` (#136), evaluated at the
+        // vehicle's ACTUAL speed, not the reconciled COMMANDED linear velocity.
+        // `reconciled_lin` is ≤ MRC_VELOCITY_CEILING_MPS (5 m/s), and exactly 0.0
+        // on direction disagreement — so evaluating the bound there was the
+        // permissive point of a curve that is PROVEN non-increasing in speed
+        // (`angular_bound::prop_omega_max_is_non_increasing_in_speed`). During a
+        // divergence-at-speed transient (the exact CERT-006 scenario: the
+        // ClampMotion path has no stop-and-hold gate, so actual speed lags the
+        // commanded 5 for many ticks) that admitted up to ~3.4× the rollover-safe
+        // yaw at 30 m/s. Binding at `max(commanded, actual)` is strictly
+        // conservative by that non-increasing property; when no speed proxy
+        // exists it degrades to the commanded value (the prior behaviour). The
+        // MRC (posture-derated) bound is the envelope since divergence is a
+        // lost-trust condition; read from the PRIMARY arm (production wires both
+        // arms with identical platform params — a mismatch would spuriously
+        // diverge every tick anyway).
+        let v_bound = reconciled_lin.abs().max(current_speed_mps.unwrap_or(0.0));
+        let angular_cap = self.primary.mrc_omega_max(v_bound);
+        let reconciled_ang = reconcile(primary_ang, shadow_ang, angular_cap);
 
         // ATOMIC multi-step update under the single state mutex.
         // (Per CERT-006 v2 prompt STEP 1: separate atomics would NOT be
@@ -773,6 +781,56 @@ mod tests {
         assert!(
             ang.abs() <= mrc_ceiling + COMPARATOR_TOLERANCE,
             "reconciled yaw {ang} must be ≤ the derated MRC ω_max(0) = {mrc_ceiling}"
+        );
+    }
+
+    /// WS-0.4 F5 — the angular cap must bind at the vehicle's ACTUAL speed, not
+    /// the reconciled COMMANDED linear velocity. During a divergence-at-speed
+    /// decel transient (previous = 30 m/s, reconciled linear pinned at the 5 m/s
+    /// MRC ceiling) the ClampMotion path has no stop-and-hold gate, so actual
+    /// speed lags commanded for many ticks. Capping at the commanded 5 admitted
+    /// ~3.4× the rollover-safe yaw; capping at 30 (strictly conservative by the
+    /// proven non-increasing ω_max) is what the fix enforces.
+    #[test]
+    fn angular_cap_binds_at_actual_speed_not_commanded_during_divergence_at_speed() {
+        struct FixedAngularClamp(f64);
+        impl parko_core::safety::SafetyGovernor for FixedAngularClamp {
+            fn evaluate(
+                &self,
+                _proposed: &ControlCommand,
+                _previous: Option<&ControlCommand>,
+                _delta_time_s: f64,
+                _posture: SafetyPosture,
+            ) -> EnforcementAction {
+                EnforcementAction::ClampAngularVelocity(self.0)
+            }
+        }
+        use crate::angular_bound::{AngularVelocityBound, PlatformParams};
+
+        let mut primary = KirraGovernor::new(); // conservative-default DERIVED bounds
+        primary.update_rss_state(safe_rss());
+        // Shadow clamps yaw to a fixed 0.5 rad/s — differs from the primary's
+        // nominal clamp, so the angular axis diverges and the cap must bind.
+        let comparator = GovernorComparator::new(primary, FixedAngularClamp(0.5));
+
+        // A large yaw request, linear at the MRC ceiling; previous = 30 m/s is
+        // the ACTUAL vehicle speed decelerating from highway.
+        let proposed = ControlCommand { linear_velocity: 5.0, angular_velocity: 3.0, timestamp_ms: 0 };
+        let prev = ControlCommand { linear_velocity: 30.0, angular_velocity: 0.0, timestamp_ms: 0 };
+        let out = comparator.evaluate(&proposed, Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert!(matches!(out, EnforcementAction::ClampMotion { .. }), "expected a divergence ClampMotion, got {out:?}");
+
+        let ang = effective_angular_velocity(&out, proposed.angular_velocity).abs();
+        let mrc = AngularVelocityBound::mrc(PlatformParams::conservative_default());
+        let cap_at_actual = mrc.omega_max(30.0);
+        let cap_at_commanded = mrc.omega_max(5.0);
+        // Sanity: the two caps genuinely differ (else the test proves nothing).
+        assert!(cap_at_actual < cap_at_commanded,
+            "precondition: ω_max(30)={cap_at_actual} must be tighter than ω_max(5)={cap_at_commanded}");
+        assert!(
+            ang <= cap_at_actual + COMPARATOR_TOLERANCE,
+            "reconciled yaw {ang} must be bounded by the rollover-safe ω_max at the ACTUAL 30 m/s \
+             ({cap_at_actual}); the pre-fix code bounded at the commanded 5 m/s ({cap_at_commanded})"
         );
     }
 

@@ -316,11 +316,28 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 ));
             }
         };
-        let (output_tensors, inference_latency_ms) =
-            joined.map_err(|e| format!("inference worker join failure: {}", e))?;
+        // WS-0.4 F3: EVERY fault exit must leave `last_validated_command` a STOP,
+        // not the pre-fault MOVING command. `tick` flushes `last_validated_command`
+        // at the START of the next tick (one-tick-delayed publication), so a fault
+        // path that returns without re-stamping causes the loop to re-flush the
+        // last moving command on `actuator_tx` every subsequent tick — at 20 Hz
+        // indefinitely while the fault persists. The deadline path already stamps
+        // stop; the join-error, backend-error, and non-finite paths must too.
+        let (output_tensors, inference_latency_ms) = match joined {
+            Ok(v) => v,
+            Err(e) => {
+                self.last_validated_command = Some(ControlCommand::stopped(loop_start_ms));
+                return Err(format!("inference worker join failure: {}", e));
+            }
+        };
 
-        let processed_outputs =
-            output_tensors.map_err(|e| format!("backend inference error: {}", e))?;
+        let processed_outputs = match output_tensors {
+            Ok(v) => v,
+            Err(e) => {
+                self.last_validated_command = Some(ControlCommand::stopped(loop_start_ms));
+                return Err(format!("backend inference error: {}", e));
+            }
+        };
 
         // Jitter update.
         self.jitter_tracker.update(inference_latency_ms);
@@ -356,6 +373,10 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                     backend_precision: capabilities_precision(&self.cached_capabilities),
                     backend_vendor: std::borrow::Cow::Borrowed(descriptor_vendor(&self.cached_descriptor)),
                 };
+                // WS-0.4 F3: re-stamp STOP so the next tick's flush does not
+                // re-send the pre-fault MOVING command while the model keeps
+                // emitting non-finite output.
+                self.last_validated_command = Some(ControlCommand::stopped(loop_start_ms));
                 return Ok(PostureSnapshot {
                     frame_id: current_frame.frame_id,
                     active_command: ControlCommand::stopped(loop_start_ms),
@@ -1073,6 +1094,108 @@ mod tests {
             Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
         }
 
+    }
+
+    /// WS-0.4 F3 — a backend that emits a good MOVING command on run 1, then a
+    /// fault on every later run: NaN (non-finite output) if `nan`, else a
+    /// backend `ExecutionFailure`. Models a model/driver that goes bad after
+    /// producing valid commands — the case where `last_validated_command`
+    /// holds a moving command when the fault begins.
+    struct GoodThenFaultBackend {
+        runs: std::sync::atomic::AtomicU32,
+        nan: bool,
+    }
+
+    impl InferenceBackend for GoodThenFaultBackend {
+        fn load_model(&self, _: &str) -> Result<ModelHandle, BackendError> {
+            Ok(ModelHandle {
+                model_id: "good-then-fault".to_string(),
+                input_shapes: HashMap::new(),
+                output_shapes: HashMap::new(),
+                expected_precision: PrecisionMode::FP32,
+            })
+        }
+        fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
+            let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                let mut map = HashMap::new();
+                map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![2.0_f32]));
+                map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
+                return Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() });
+            }
+            if self.nan {
+                let mut map = HashMap::new();
+                map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![f32::NAN]));
+                map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
+                Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            } else {
+                Err(BackendError::ExecutionFailure("injected post-good failure".into()))
+            }
+        }
+    }
+
+    /// F3: once a fault begins, the loop must NOT keep re-flushing the pre-fault
+    /// MOVING command on `actuator_tx`. Tick 1 validates 2.0 m/s; from tick 2 the
+    /// backend emits NaN. The flush is one-tick-delayed, so tick-2 flushes tick-1's
+    /// 2.0 (expected), but tick-3 must flush a STOP — not 2.0 again. Pre-fix, the
+    /// non-finite path left `last_validated_command` at 2.0 and it re-flushed at
+    /// 20 Hz forever.
+    #[tokio::test]
+    async fn nonfinite_fault_restamps_stop_no_moving_reflush() {
+        let backend = Arc::new(GoodThenFaultBackend {
+            runs: std::sync::atomic::AtomicU32::new(0),
+            nan: true,
+        });
+        let model = backend.load_model("").unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx); // no governor
+        let mut stream = SimpleStream { next_id: 0 };
+
+        let s1 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        assert_eq!(s1.active_command.linear_velocity, 2.0, "tick 1 validates the good 2.0 m/s command");
+
+        let s2 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        assert_eq!(s2.active_command.linear_velocity, 0.0, "NaN tick returns a stopped snapshot");
+        assert!(s2.active_state_degraded);
+
+        let _s3 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+
+        let flush_after_good = rx.recv().await.unwrap();
+        let flush_after_fault = rx.recv().await.unwrap();
+        assert_eq!(flush_after_good.linear_velocity, 2.0, "tick-2 flush is tick-1's good command");
+        assert_eq!(
+            flush_after_fault.linear_velocity, 0.0,
+            "tick-3 flush MUST be a STOP — the pre-fault moving command must not re-flush (F3)"
+        );
+    }
+
+    /// F3 (backend-error path): the same re-stamp discipline on the `Err` exit.
+    /// A backend that errors after a good command must not leave the moving
+    /// command staged for re-flush.
+    #[tokio::test]
+    async fn backend_error_fault_restamps_stop_no_moving_reflush() {
+        let backend = Arc::new(GoodThenFaultBackend {
+            runs: std::sync::atomic::AtomicU32::new(0),
+            nan: false,
+        });
+        let model = backend.load_model("").unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx);
+        let mut stream = SimpleStream { next_id: 0 };
+
+        let _s1 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        // Tick 2: backend errors → tick returns Err (after flushing tick-1's good cmd).
+        assert!(loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.is_err());
+        // Tick 3: also errors, but its flush publishes tick-2's post-fault stamp first.
+        let _ = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await;
+
+        let flush_after_good = rx.recv().await.unwrap();
+        let flush_after_fault = rx.recv().await.unwrap();
+        assert_eq!(flush_after_good.linear_velocity, 2.0, "tick-2 flush is tick-1's good command");
+        assert_eq!(
+            flush_after_fault.linear_velocity, 0.0,
+            "tick-3 flush MUST be a STOP after a backend error, not the re-flushed moving command (F3)"
+        );
     }
 
     /// Governor that records the proposed linear velocity and allows the command through.
