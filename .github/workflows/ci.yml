@@ -77,6 +77,31 @@ jobs:
       - name: KPI gate (unsafe_miss_rate / admissibility / hazard_recall)
         run: cargo run --locked -p kirra-kpi-gate --bin scenario_kpi_gate
 
+  # WS-5.1 — the QNX governor-judge cross-build: the EPIC-#270 no_std
+  # core-only judge staticlib for both QNX 8.0 tuples (x86_64 + the aarch64
+  # deployment ISA), via stable + -Zbuild-std=core (no proprietary SDP — a
+  # staticlib needs no final link). Proves on every PR that the partition
+  # verdict core still cross-compiles; the release workflow ships the same
+  # artifact into the SHA256SUMS + cosign chain. NO timing claim (see the
+  # script header / PROVENANCE.txt).
+  qnx-governor-artifact:
+    name: QNX governor-judge cross-build (WS-5.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+      - name: Build the judge staticlibs (x86_64 + aarch64 nto-qnx800)
+        run: scripts/build_qnx_judge_artifact.sh dist-qnx
+      - name: Upload artifact (PR inspection; releases ship the signed copy)
+        uses: actions/upload-artifact@v7
+        with:
+          name: kirra-qnx800-judge
+          path: dist-qnx/
+          retention-days: 7
+
   test:
     name: Test
     runs-on: ubuntu-latest
