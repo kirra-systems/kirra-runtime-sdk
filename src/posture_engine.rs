@@ -289,8 +289,11 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
             ) {
                 Ok(advanced) => Ok(advanced),
                 Err(e) => {
+                    // Relaxed: a monotonic best-effort observability counter that
+                    // gates nothing and synchronizes with no other memory — matching
+                    // how the /metrics snapshot loads it (see fleet.rs).
                     app.incident_durability_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::error!(
                         error = %e,
                         generation,
@@ -1268,7 +1271,7 @@ mod posture_engine_tests {
 
         assert_eq!(
             app.incident_durability_failures
-                .load(std::sync::atomic::Ordering::SeqCst),
+                .load(std::sync::atomic::Ordering::Relaxed),
             1,
             "a failed durable transition write must be counted (#772 F3)"
         );
