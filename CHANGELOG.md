@@ -97,6 +97,20 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
   hardware) lands additively at that one call site. The `kirra-l3-e2e`
   measurement harness now draws its fixed key through the seam (proving a live
   caller). Docs: `docs/safety/GOVERNOR_KEY_PROVISIONING.md`.
+- **WS-1 (#G7) — opt-in in-process TLS termination (Track 1.2).** The verifier
+  can now terminate TLS itself (`src/bin/kirra_verifier_service/tls.rs`): set
+  `KIRRA_TLS_CERT_PATH` + `KIRRA_TLS_KEY_PATH` (PEM). It is **default-OFF** — with
+  neither set the serve path is byte-identical plaintext, so ADR-0006 Clause 3's
+  mesh-first default is unchanged; this only ADDS TLS for mesh-less deployments and
+  discharges the `AOU-TRANSPORT-TLS-001` trusted-proxy assumption when enabled.
+  Fail-closed: exactly one of the two set, or an invalid/missing cert/key, aborts
+  startup **before bind** (never a silent plaintext fallback). rustls is pinned to
+  the **`ring`** provider (no `aws-lc-rs` in the tree; no new rustls major — 0.23
+  was already resolved via reqwest), and each connection gets its own handshake
+  task (no accept-loop head-of-line blocking). A live-handshake test drives a real
+  client TLS handshake + HTTP round-trip through the production config-loader. mTLS
+  client-cert → principal identity is the tracked follow-up.
+  Docs: `docs/safety/TRANSPORT_SECURITY.md` §4.
 
 ### Changed
 
