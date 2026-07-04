@@ -22,7 +22,7 @@
 The frozen instance `kirra_core::kinematics_contract`
 (`nominal_reference_profile` / `mrc_fallback_profile`; re-exported via
 `src/gateway/kinematics_contract.rs`; re-pinned to logic blob
-`33b47b564caee20313cfeeffd2c2a0dcc42fb891` after the reviewed stop-gate H1/M1
+`ed00f4da30afe8f3f83ff10a0d31103737526622` after the reviewed stop-gate H1/M1
 amendment — see `CAPTURE_PIPELINE_SPEC.md` §0) is **NOT edited** by the profile
 work. Per-class profiles
 are **siblings**: new constructors that *return the existing public

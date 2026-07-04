@@ -354,20 +354,26 @@ impl DiverseKirraGovernor {
         // is acceleration. The prior direction-blind interval bounded reverse
         // acceleration by the (larger) brake limit — the same bug the primary
         // kernel carried, so the two diverse governors agreed on the WRONG value.
-        let (max_up, max_down) = if current > 0.0 {
+        //
+        // "From rest" uses the `STOP_EPSILON_MPS` magnitude band, NOT `== 0.0`,
+        // matching the primary kernel: near-zero jitter (e.g. +0.01) with a
+        // reverse command is a LAUNCH (accel-bounded either way), not a
+        // brake-bounded reversal. The band stays offset by `current` so it agrees
+        // with the kernel's `current ± accel·dt` clamp target.
+        let (max_up, max_down) = if current > STOP_EPSILON_MPS {
             (
                 current + self.nominal_contract.max_accel_mps2 * dt,
                 current - self.nominal_contract.max_brake_mps2 * dt,
             )
-        } else if current < 0.0 {
+        } else if current < -STOP_EPSILON_MPS {
             (
                 current + self.nominal_contract.max_brake_mps2 * dt,
                 current - self.nominal_contract.max_accel_mps2 * dt,
             )
         } else {
             (
-                self.nominal_contract.max_accel_mps2 * dt,
-                -self.nominal_contract.max_accel_mps2 * dt,
+                current + self.nominal_contract.max_accel_mps2 * dt,
+                current - self.nominal_contract.max_accel_mps2 * dt,
             )
         };
         // The primary's tolerance is `+1e-9` in acceleration space; in

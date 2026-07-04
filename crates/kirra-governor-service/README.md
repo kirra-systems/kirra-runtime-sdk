@@ -7,7 +7,7 @@ prototype — see `docs/adr/KIRRA_BRINGUP_RUNBOOK.md` (Prompt A), `ADR-0001`, an
 It wraps the **existing** verdict core (`kirra_core::kinematics_contract`) —
 not forked, not reimplemented. The talisman is amended ONLY under review + a
 re-pin; the stop-gate H1/M1 amendment (ClampBoth + direction-aware accel/brake)
-re-pinned it to logic blob `33b47b564caee20313cfeeffd2c2a0dcc42fb891`
+re-pinned it to logic blob `ed00f4da30afe8f3f83ff10a0d31103737526622`
 (superseding the historical `997fb7ae…`; see `docs/CAPTURE_PIPELINE_SPEC.md` §0).
 Because that core imports only `serde` + `std`, this binary's whole dependency
 tree is **serde + bincode + std** — no `tokio`, ROS 2, `r2r`, or DDS, matching

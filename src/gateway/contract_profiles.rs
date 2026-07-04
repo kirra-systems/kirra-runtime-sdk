@@ -12,7 +12,7 @@
 // `src/gateway/kinematics_contract.rs`) is NOT touched by the PROFILE work here.
 // (The contract itself received ONE deliberate, reviewed amendment under stop-gate
 // review H1/M1 — ClampBoth + direction-aware accel/brake — re-pinned to logic blob
-// 33b47b564caee20313cfeeffd2c2a0dcc42fb891, superseding the historical
+// ed00f4da30afe8f3f83ff10a0d31103737526622, superseding the historical
 // 997fb7ae…; see docs/CAPTURE_PIPELINE_SPEC.md §0.) Profiles are SIBLINGS:
 // new constructors here that return the existing public `VehicleKinematicsContract`
 // struct, exactly the idiom `nominal_reference_profile` / `mrc_fallback_profile`

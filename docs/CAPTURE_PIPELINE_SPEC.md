@@ -14,7 +14,7 @@ Linux collector joins it with bus telemetry into the full triple.
 > `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
 > capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
 > measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
-> verdict-path anchor is the reviewed-amended talisman blob `33b47b56…` (H1/M1; it superseded
+> verdict-path anchor is the reviewed-amended talisman blob `ed00f4da…` (H1/M1; it superseded
 > the historical `997fb7ae…` — see §0).
 
 ## 0. The non-negotiable constraint
@@ -29,7 +29,7 @@ in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
 > BOTH axes instead of dropping the velocity correction) and direction-aware
 > accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
 > not the brake limit). The talisman re-pins to the amended logic blob
-> `crates/kirra-core/src/kinematics_contract.rs = 33b47b564caee20313cfeeffd2c2a0dcc42fb891`
+> `crates/kirra-core/src/kinematics_contract.rs = ed00f4da30afe8f3f83ff10a0d31103737526622`
 > (superseding the historical `997fb7ae…`, which predated the Stage-3 relocation
 > and matched no current file). Any FURTHER change re-pins again + re-runs the
 > WCET/MC-DC/proptest gates.
@@ -156,7 +156,7 @@ it never links the verdict path.
 ## 7. Build phases
 1. **Verdict record + ring + drain + call-site hook** (Rust, in `node.rs`/adapter — NOT
    `kinematics_contract.rs`). Tests: capture never blocks; **the verdict path blob is
-   unchanged by capture** (the reviewed-amended talisman `33b47b56…`); verdicts identical
+   unchanged by capture** (the reviewed-amended talisman `ed00f4da…`); verdicts identical
    with capture on vs off.
 2. **Sink** (telemetry topic or file) + a tiny reader.
 3. **Linux collector** (bus tap + record ingest + join → sample).
@@ -171,5 +171,5 @@ adjacent code — everything after is Linux-side tooling.
 > `KIRRA_CAPTURE_ENABLED` (default OFF), mirroring the existing fire-and-forget emit
 > discipline (`audit_writer_tx.try_send` — wait-free, drop-on-full) and the
 > `KIRRA_PERCEPTION_DERATE_ENABLED` default-off precedent. The verdict path is unchanged by
-> capture (the reviewed-amended talisman `33b47b56…`); the on-tick push is a bounded, droppable enqueue that
+> capture (the reviewed-amended talisman `ed00f4da…`); the on-tick push is a bounded, droppable enqueue that
 > the verdict never waits on.

@@ -10,6 +10,6 @@
 // rule stands: the contract is amended ONLY under explicit review + a re-pin. It received
 // ONE such reviewed amendment (stop-gate review H1/M1 — `EnforceAction::ClampBoth` and
 // direction-aware accel/brake selection); re-pinned to logic blob
-// 33b47b564caee20313cfeeffd2c2a0dcc42fb891 (see docs/CAPTURE_PIPELINE_SPEC.md §0). This
+// ed00f4da30afe8f3f83ff10a0d31103737526622 (see docs/CAPTURE_PIPELINE_SPEC.md §0). This
 // shim stays a pure re-export.
 pub use kirra_core::kinematics_contract::*;

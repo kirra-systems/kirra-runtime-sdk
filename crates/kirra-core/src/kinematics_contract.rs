@@ -566,14 +566,23 @@ pub fn validate_vehicle_command(
     // ~1.8× more permissively than intended, the UNSAFE direction.
     //
     // "Speeding up" requires SAME direction (or launching from rest) AND a larger
-    // magnitude: a command that CROSSES zero (e.g. +10 → -20) is decelerating
-    // toward zero in the immediate tick, so it is braking (bounded by max_brake)
-    // even though its final magnitude is larger — treating it as acceleration
-    // would over-restrict a legitimate hard stop. The clamp target moves toward
-    // `current` along the sign of the delta in every case.
+    // magnitude: a command that CROSSES zero from a MEANINGFUL forward/reverse
+    // speed (e.g. +10 → -20) is decelerating toward zero in the immediate tick,
+    // so it is braking (bounded by max_brake) even though its final magnitude is
+    // larger — treating it as acceleration would over-restrict a legitimate hard
+    // stop. The clamp target moves toward `current` along the sign of the delta
+    // in every case.
+    //
+    // "From rest" uses a `STOP_EPSILON_MPS` magnitude threshold, NOT `== 0.0`:
+    // real/simulated velocity jitters around zero, and `f64::signum` maps ±0.0 to
+    // ±1.0, so an exact-zero test would misclassify a near-stopped vehicle
+    // (e.g. +0.01 → -20) as a cross-zero reversal and bound the reverse LAUNCH by
+    // the larger brake limit — the M1 unsafe direction, reintroduced under noise.
+    // Anything within the stop band is a launch: acceleration in either gear.
     let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
     let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
-    let same_direction_or_from_rest = cmd.current_velocity_mps == 0.0
+    let from_rest = cmd.current_velocity_mps.abs() <= STOP_EPSILON_MPS;
+    let same_direction_or_from_rest = from_rest
         || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum();
     let speeding_up = same_direction_or_from_rest
         && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
@@ -855,6 +864,36 @@ mod kinematics_contract_tests {
                 assert!(
                     (clamped - expected).abs() < 1e-9,
                     "reverse accel must be bounded by max_accel: expected {expected}, got {clamped}"
+                );
+            }
+            other => panic!("Expected ClampLinear bounded by max_accel, got {other:?}"),
+        }
+    }
+
+    // review M1 (near-zero robustness, Copilot #818): a near-stopped vehicle
+    // (|current| ≤ STOP_EPSILON_MPS) commanded to reverse hard is a LAUNCH, bounded
+    // by the ACCEL limit — NOT a cross-zero reversal bounded by brake. A `== 0.0`
+    // "from rest" test would misclassify the jittery +0.01 case (signs differ) as a
+    // reversal and bound it by the larger brake limit (the M1 unsafe direction).
+    #[test]
+    fn test_near_zero_forward_reverse_command_bounded_by_accel() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: -20.0,
+            current_velocity_mps: 0.01, // within the stop band, opposite sign to the command
+            delta_time_s: 0.5,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        match validate_vehicle_command(&cmd, &contract) {
+            EnforceAction::ClampLinear(clamped) => {
+                // Launch bounded by max_accel (2.5): 0.01 - 2.5*0.5 = -1.24.
+                // The pre-fix (== 0.0) path treated it as a reversal → brake (4.5):
+                // 0.01 - 4.5*0.5 = -2.24 (harder reverse accel, unsafe).
+                let expected = 0.01_f64 - (2.5 * 0.5);
+                assert!(
+                    (clamped - expected).abs() < 1e-9,
+                    "near-zero reverse launch must be accel-bounded: expected {expected}, got {clamped}"
                 );
             }
             other => panic!("Expected ClampLinear bounded by max_accel, got {other:?}"),
