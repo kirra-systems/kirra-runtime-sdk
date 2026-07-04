@@ -1,10 +1,29 @@
 // src/config.rs
+//
+// G18 config governance (WS-2): the industrial Modbus gateway's runtime config
+// (`src/main.rs` → the water-flow PLC deployment). This surface is now VERSIONED
+// (fail-closed on a schema newer than the binary understands) and carries an
+// effective-config DIGEST — a stable fingerprint answering "which config is this
+// process running?" for audit/attestation (docs/roadmap/PRODUCT_EXECUTION_PLAN.md).
 
 use crate::kirra_core::ContractProfile;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+/// The config-schema version THIS binary understands. A config declaring a HIGHER
+/// version is refused: the binary cannot be sure it interprets a newer schema, so
+/// it fails closed rather than mis-reading fields (e.g. a renamed safety bound).
+/// Bump this — and document the migration — whenever the config shape changes.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// An unversioned config (pre-governance file) is treated as the CURRENT schema, so
+/// existing `config/asset_profile.json`-style files still load. New configs SHOULD
+/// declare `config_version` explicitly.
+fn default_config_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetworkConfig {
@@ -22,13 +41,40 @@ pub struct TelemetryConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KirraRuntimeConfig {
+    /// Config-schema version. Absent → the current schema (back-compat). Validated
+    /// fail-closed: `0`, or a version NEWER than [`CONFIG_SCHEMA_VERSION`], is refused.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     pub network: NetworkConfig,
     pub telemetry: TelemetryConfig,
     pub contract: ContractProfile,
 }
 
 impl KirraRuntimeConfig {
+    /// SHA-256 (hex) of the canonical serialization of the effective config — a
+    /// stable fingerprint for audit/attestation ("which config is this process
+    /// running?"). Structs serialize in declaration order, so the encoding is
+    /// deterministic; a serialization failure (never expected for this struct)
+    /// yields the digest of the empty string rather than panicking.
+    #[must_use]
+    pub fn effective_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = serde_json::to_string(self).unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     pub fn validate_safety_invariants(&self) -> Result<(), &'static str> {
+        // Schema-version gate FIRST (fail-closed): a config from an unknown future
+        // schema must never be interpreted against this binary's field meanings.
+        if self.config_version == 0 {
+            return Err("CONFIG_INVALID: config_version must be >= 1 (0 is not a valid schema version).");
+        }
+        if self.config_version > CONFIG_SCHEMA_VERSION {
+            return Err("CONFIG_INVALID: config_version is newer than this binary supports — refusing a config from an unknown future schema (fail-closed).");
+        }
+
         let n = &self.network;
         let c = &self.contract;
 
@@ -76,5 +122,79 @@ impl KirraRuntimeConfig {
         let parsed: Self = serde_json::from_str(&contents).map_err(|e| format!("JSON_DESERIALIZE_ERROR: {}", e))?;
         parsed.validate_safety_invariants().map_err(|e| e.to_string())?;
         Ok(parsed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A valid reference config (mirrors config/asset_profile.json's shape).
+    fn valid_json(version_field: &str) -> String {
+        format!(
+            r#"{{
+                {version_field}
+                "network": {{
+                    "proxy_listen_port": 5502, "plc_target_port": 5503,
+                    "admin_reset_port": 5504, "metrics_http_port": 8080,
+                    "max_concurrent_connections": 32
+                }},
+                "telemetry": {{ "log_directory": "/var/log/kirra" }},
+                "contract": {{
+                    "asset_register_offset": 10,
+                    "min_permissible_ceiling": 1000.0, "max_permissible_ceiling": 3000.0,
+                    "max_angular_velocity_ceiling": 1.5, "max_rate_of_change_dt": 100.0,
+                    "fallback_safe_setpoint": 1200.0,
+                    "constraint_cap_min": 1100.0, "constraint_cap_max": 2000.0,
+                    "engineering_scale_factor": 10.0
+                }}
+            }}"#
+        )
+    }
+
+    fn parse(json: &str) -> KirraRuntimeConfig {
+        serde_json::from_str(json).expect("valid json")
+    }
+
+    #[test]
+    fn absent_version_defaults_to_current_schema() {
+        // Back-compat: a pre-governance (unversioned) config loads as the current schema.
+        let cfg = parse(&valid_json(""));
+        assert_eq!(cfg.config_version, CONFIG_SCHEMA_VERSION);
+        assert!(cfg.validate_safety_invariants().is_ok());
+    }
+
+    #[test]
+    fn explicit_current_version_is_accepted() {
+        let cfg = parse(&valid_json(r#""config_version": 1,"#));
+        assert_eq!(cfg.config_version, 1);
+        assert!(cfg.validate_safety_invariants().is_ok());
+    }
+
+    #[test]
+    fn zero_version_is_refused() {
+        let cfg = parse(&valid_json(r#""config_version": 0,"#));
+        assert!(cfg.validate_safety_invariants().is_err());
+    }
+
+    #[test]
+    fn future_version_is_refused_fail_closed() {
+        // A config from a newer schema than this binary understands must not run.
+        let cfg = parse(&valid_json(&format!(r#""config_version": {},"#, CONFIG_SCHEMA_VERSION + 1)));
+        let err = cfg.validate_safety_invariants().unwrap_err();
+        assert!(err.contains("newer than this binary supports"), "got: {err}");
+    }
+
+    #[test]
+    fn digest_is_deterministic_and_change_sensitive() {
+        let a = parse(&valid_json(r#""config_version": 1,"#));
+        let b = parse(&valid_json(r#""config_version": 1,"#));
+        assert_eq!(a.effective_digest(), b.effective_digest(), "same config → same digest");
+        assert_eq!(a.effective_digest().len(), 64, "sha-256 hex is 64 chars");
+
+        // A changed safety bound changes the digest — the fingerprint tracks content.
+        let mut c = a.clone();
+        c.contract.max_permissible_ceiling = 3001.0;
+        assert_ne!(a.effective_digest(), c.effective_digest());
     }
 }

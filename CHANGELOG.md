@@ -23,6 +23,16 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
 
 ### Added
 
+- **Config schema versioning + effective-config digest (G18, WS-2).** The
+  industrial Modbus gateway's `KirraRuntimeConfig` (`src/config.rs`,
+  `config/asset_profile.json`) now carries a `config_version` (default
+  `CONFIG_SCHEMA_VERSION`; an unversioned pre-governance file still loads) that is
+  validated **fail-closed** — `0` or a version NEWER than the binary understands is
+  refused, so a config from an unknown future schema is never mis-interpreted
+  against renamed fields. `effective_digest()` computes a stable SHA-256 fingerprint
+  of the loaded config, and the gateway prints `schema vN · sha256:…` at boot — the
+  "which config is this process running?" answer for audit/attestation. First slice
+  of G18; broad env-sprawl absorption for the verifier service remains.
 - **SDK quickstart examples + rustdoc gate (G20, WS-2).** A runnable Rust example
   (`examples/governor_quickstart.rs` — the checker bounding a doer's proposals,
   fail-closed) and a C example (`examples/c/kirra_ffi_demo.c` + `build_and_run.sh`)
