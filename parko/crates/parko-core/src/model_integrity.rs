@@ -7,8 +7,11 @@
 //!
 //! This module is the shared, backend-agnostic primitive: hash the model file and
 //! compare it to an operator-configured allow-list before the model is allowed to
-//! run. It is PURE (no logging, no globals) so it is fully unit-testable; the
-//! backends call [`verify_model_file`] from their `load_model` and surface the
+//! run. The hashing/parsing/verification core ([`sha256_file`], [`ModelAllowList::parse`],
+//! [`verify_model_file`]) is pure — no logging and no retained global state — so it
+//! is fully unit-testable; [`ModelAllowList::from_env`] is the small
+//! environment-reading wrapper backends use to obtain the policy. Backends call
+//! [`verify_model_file`] from their `load_model` and surface the
 //! [`BackendError::IntegrityRejected`] verdict.
 //!
 //! **Fail-closed policy.**
@@ -17,7 +20,7 @@
 //! |---|---|---|---|
 //! | has entries | any | in the list | `Ok { verified: true }` |
 //! | has entries | any | NOT in the list | **`Err(IntegrityRejected)`** |
-//! | empty / unset | `1`/`true` | (nothing allowed) | **`Err(IntegrityRejected)`** — high-assurance: no model may load without an explicit entry |
+//! | empty / unset | `1`/`true`/`yes`/`on` | (nothing allowed) | **`Err(IntegrityRejected)`** — high-assurance: no model may load without an explicit entry |
 //! | empty / unset | off | — | `Ok { verified: false }` — enforcement OFF; the digest is still computed for audit, acceptance is byte-identical to today (a warn is the caller's job) |
 //! | (enforcing or not) | — | file unreadable | **`Err(Io)`** — a model that cannot be hashed cannot be proven, and cannot be loaded anyway |
 //!

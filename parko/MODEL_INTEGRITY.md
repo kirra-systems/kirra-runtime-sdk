@@ -10,7 +10,7 @@ A backend loaded whatever model file it was pointed at. `parko-tensorrt`
 *computed* a SHA-256 of its cached engine but only **logged** it;
 `parko-onnx` computed **nothing**. So a substituted or corrupted ML artifact
 loaded and ran undetected — a fail-**open** in an otherwise fail-closed stack
-(`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md` G16, ROI shortlist #—).
+(`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md` G16).
 
 ## 2. The primitive
 
