@@ -31,6 +31,11 @@ BUILD="$HERE/build-qnx"
 JUDGE_SRC="$HERE/kirra_judge.rs"
 JUDGE_LIB="$BUILD/libkirra_judge.a"
 
+# #790 F6 — the judge codegen flags come from the ONE canonical fragment, shared
+# with scripts/build_qnx_judge_artifact.sh (and mirrored by CMakeLists.txt).
+# shellcheck source=judge_build_flags.sh
+source "$HERE/judge_build_flags.sh"
+
 ARCH="${KIRRA_QNX_ARCH:-x86_64}"
 case "$ARCH" in
     x86_64)
@@ -60,9 +65,10 @@ echo "=============================================================="
 build_judge_direct() {
     rustc --print target-list 2>/dev/null | grep -qx "$RUST_TARGET" || return 1
     echo "[judge] rustc knows '$RUST_TARGET' — trying a direct cross-build (prebuilt core)…"
-    rustc --edition 2021 --target "$RUST_TARGET" \
-          --crate-type staticlib --crate-name kirra_judge \
-          -C panic=abort -C opt-level=2 -C debuginfo=0 \
+    # Codegen flags from judge_build_flags.sh (#790 F6).
+    rustc --edition "$KIRRA_JUDGE_EDITION" --target "$RUST_TARGET" \
+          --crate-type staticlib --crate-name "$KIRRA_JUDGE_CRATE_NAME" \
+          "${KIRRA_JUDGE_RUSTC_CFLAGS[@]}" \
           -o "$JUDGE_LIB" "$JUDGE_SRC" 2>"$BUILD/rustc_direct.log"
 }
 
@@ -74,19 +80,22 @@ build_judge_buildstd() {
     cp "$JUDGE_SRC" "$C/src/lib.rs"
     # The leading empty [workspace] table DETACHES this throwaway crate from the
     # repo's parent Cargo workspace (else cargo refuses to build it).
+    # Profile keys from judge_build_flags.sh (#790 F6/F2).
     cat > "$C/Cargo.toml" <<EOF
 [workspace]
 
 [package]
-name = "kirra_judge"
+name = "${KIRRA_JUDGE_CRATE_NAME}"
 version = "0.0.0"
-edition = "2021"
+edition = "${KIRRA_JUDGE_EDITION}"
 [lib]
 crate-type = ["staticlib"]
 [profile.release]
-panic = "abort"
-opt-level = 2
+panic = "${KIRRA_JUDGE_PANIC}"
+opt-level = ${KIRRA_JUDGE_OPT_LEVEL}
 debug = false
+codegen-units = ${KIRRA_JUDGE_CODEGEN_UNITS}
+lto = "${KIRRA_JUDGE_LTO}"
 EOF
     # build-std needs the rust-src component for the active toolchain.
     if ! rustc --print sysroot >/dev/null 2>&1 \

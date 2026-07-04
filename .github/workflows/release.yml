@@ -207,13 +207,19 @@ jobs:
           cp install.sh     staging/
           cp INSTALL.md     staging/
           cp README.md      staging/ 2>/dev/null || true
-          cp LICENSE        staging/ 2>/dev/null || true
+          # #790 F7 — the licence is REQUIRED in every tarball. No `|| true`: a
+          # missing licence is a packaging failure, not something to swallow. The
+          # repo's licence file is COPYRIGHT (there is no LICENSE).
+          cp COPYRIGHT      staging/
           cp scripts/kirra-verifier.service   staging/systemd/
           cp scripts/kirra-dashboard.service  staging/systemd/
           echo "${VERSION}" > staging/VERSION
 
-          # Create archive
-          tar -czf "${ARCHIVE_NAME}" -C staging .
+          # Create archive — #790 F2 deterministic tar+gzip (sorted names, fixed
+          # mtime/owner, gzip -n) so the tarball bytes are a function of the content,
+          # not of build timestamps.
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
+              -cf - -C staging . | gzip -n > "${ARCHIVE_NAME}"
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "${GITHUB_ENV}"
 
       - name: Upload artifact
@@ -285,6 +291,7 @@ jobs:
     name: QNX governor-judge artifact
     needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # #790 F9
     permissions:
       contents: read
     env:
@@ -293,18 +300,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
+      # #790 F5 — PIN the compiler: the signed judge core must be built by the SAME
+      # explicit toolchain the PR CI lane proves (see ci.yml). A floating `stable`
+      # could rename the nto-qnx800 tuples or change -Zbuild-std syntax on any
+      # release day. Recorded in the artifact PROVENANCE.txt.
       - name: Install Rust toolchain (+rust-src for -Zbuild-std)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: "1.94.1"
           components: rust-src
 
       - name: Build the judge staticlibs
         run: scripts/build_qnx_judge_artifact.sh dist-qnx
 
+      # #790 F2 — reproducibility gate BEFORE this artifact enters the SHA256SUMS +
+      # cosign chain: rebuild and byte-compare the staticlibs (PROVENANCE.txt is
+      # excluded — it intentionally records the ci-run id). A non-deterministic
+      # verdict core must never be signed.
+      - name: Reproducibility (double-build cmp)
+        run: |
+          scripts/build_qnx_judge_artifact.sh dist-qnx-2
+          rc=0
+          for a in dist-qnx/libkirra_judge-*.a; do
+            b="dist-qnx-2/$(basename "$a")"
+            cmp -s "$a" "$b" && echo "reproducible: $(basename "$a")" \
+              || { echo "::error::non-reproducible staticlib: $(basename "$a")"; rc=1; }
+          done
+          cmp -s dist-qnx/kirra_ffi.h dist-qnx-2/kirra_ffi.h || { echo "::error::kirra_ffi.h differs"; rc=1; }
+          exit $rc
+
       - name: Package
         run: |
-          # $VERSION from job env (#775 F5).
-          tar -czf "kirra-${VERSION}-qnx800-judge.tar.gz" -C dist-qnx .
+          # $VERSION from job env (#775 F5). #790 F2 — deterministic tar+gzip.
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
+              -cf - -C dist-qnx . | gzip -n > "kirra-${VERSION}-qnx800-judge.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
