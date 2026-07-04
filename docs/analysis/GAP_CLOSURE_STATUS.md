@@ -21,7 +21,7 @@ names its evidence.
 | G16 model integrity | SHA-256 allow-list at model load (CPU + TRT via one seam) | #801; `parko/MODEL_INTEGRITY.md` |
 | G17 observability | `/metrics` mounted; fleet-safety Prometheus series | WS-0.5 (#774) |
 | G20 (partial) | CHANGELOG + semver/MSRV/deprecation policy | WS-0.7 |
-| **G7 key/identity (WS-1, core)** | **Unified** per-principal API tokens: DB-backed `api_principals` (SHA-256 at rest, mint/revoke), 4-role × scope RBAC, admin-action attribution into the signed chain, transport-security gate | #802–#805, #807, + the WS-1 unification PR (this branch); `PRINCIPAL_TOKENS.md`, `TRANSPORT_SECURITY.md` |
+| **G7 key/identity (WS-1, core)** | **Unified** per-principal API tokens: DB-backed `api_principals` (SHA-256 at rest, mint/revoke), 4-role × scope RBAC, admin-action attribution into the signed chain, transport-security gate | #802–#805, #807, #808 (unification, merged); `PRINCIPAL_TOKENS.md`, `TRANSPORT_SECURITY.md` |
 
 **Gate A (WS-0, "code tells the truth") is closed.** The parallel-implementation
 episode note: WS-1 was built twice (env registry #802/#803 vs the DB-backed
