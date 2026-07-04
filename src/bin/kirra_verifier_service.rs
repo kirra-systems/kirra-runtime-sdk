@@ -19,7 +19,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
 use kirra_verifier::verifier::{
-    validate_client_identity_headers, AppState, BackupExport, FlapStatus,
+    request_transport_is_secure, validate_client_identity_headers, AppState, BackupExport, FlapStatus,
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
@@ -266,6 +266,32 @@ async fn require_client_identity(
         request.headers(),
     ) {
         return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
+/// #G7 — fail-closed transport-security gate. When `KIRRA_REQUIRE_SECURE_TRANSPORT`
+/// is on, a request that the trusted proxy/mesh does not assert arrived over TLS
+/// (via the forwarded-proto header) is rejected with 403 BEFORE authentication —
+/// a bearer token or attestation nonce must never be processed off a plaintext leg.
+/// When off, this is a no-op (byte-identical to before). Layered OUTERMOST on the
+/// sensitive route groups (admin, actuator, identity-gated).
+async fn require_secure_transport(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let cfg = &svc.app.transport_security;
+    if !request_transport_is_secure(
+        cfg.require_secure_transport,
+        &cfg.forwarded_proto_header,
+        request.headers(),
+    ) {
+        tracing::warn!(
+            path = request.uri().path(),
+            "transport-security deny (#G7): request not asserted over TLS (KIRRA_REQUIRE_SECURE_TRANSPORT)"
+        );
+        return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
 }
@@ -1645,7 +1671,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
@@ -1677,7 +1706,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // only: NOT the actuator (high-rate control) nor the self-auditing
         // identity-gated evaluations.
         .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let actuator_routes = Router::new()
         .route("/actuator/motion/command", post(handle_actuator_motion_command))
@@ -1685,11 +1717,19 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let attestation_routes = Router::new()
         .route("/attestation/challenge/{node_id}", post(issue_challenge))
-        .route("/attestation/verify", post(verify_attestation));
+        .route("/attestation/verify", post(verify_attestation))
+        // #G7 (Copilot #805) — the challenge/verify flow exchanges attestation
+        // nonces + signatures; when secure transport is required they must not be
+        // processed off a plaintext leg either, even though the flow is otherwise
+        // unauthenticated (the challenge-response provides its own guarantee).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let probe_routes = Router::new()
         .route("/health", get(health))
@@ -1857,6 +1897,107 @@ mod g7_admin_action_attribution_tests {
         assert!(!should_record_admin_action("POST", StatusCode::INTERNAL_SERVER_ERROR));
         assert!(!should_record_admin_action("POST", StatusCode::FORBIDDEN));
         assert!(!should_record_admin_action("POST", StatusCode::BAD_REQUEST));
+    }
+}
+
+#[cfg(test)]
+mod g7_transport_security_router_tests {
+    use super::build_app;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // for `oneshot`
+
+    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
+    use kirra_verifier::verifier::{AppState, FleetPosture, TransportSecurityConfig, VerifierOperationMode};
+    use kirra_verifier::verifier_store::VerifierStore;
+
+    // Inject the transport-security config via the PUBLIC field (no env mutation —
+    // INVARIANT #13), then assemble the REAL router. The posture cache is seeded
+    // Nominal so the GLOBAL posture gate steps aside and the request actually
+    // reaches the per-group transport-security gate under test.
+    fn state_requiring_secure_transport(require: bool) -> Arc<ServiceState> {
+        let store = VerifierStore::new(":memory:").expect("in-memory store");
+        let mut app = AppState::new(store, VerifierOperationMode::Active);
+        app.transport_security = TransportSecurityConfig {
+            require_secure_transport: require,
+            forwarded_proto_header: "x-forwarded-proto".to_string(),
+        };
+        let posture_cache: SharedPostureCache =
+            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+        Arc::new(ServiceState {
+            app: Arc::new(app),
+            posture_cache,
+            started_at_ms: now_ms(),
+            audit_verifying_key: None,
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    // A protected admin mutation route. With no auth header, `require_admin_token`
+    // returns 401/503 — never 403 — so a 403 can ONLY come from the (outer)
+    // transport-security gate. That is what makes 403-vs-not-403 an unambiguous
+    // ordering probe.
+    async fn dependencies_post_status(svc: Arc<ServiceState>, proto: Option<&str>) -> StatusCode {
+        let mut b = Request::builder().method("POST").uri("/fleet/dependencies");
+        if let Some(p) = proto {
+            b = b.header("x-forwarded-proto", p);
+        }
+        build_app(svc)
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .expect("router should not panic")
+            .status()
+    }
+
+    /// #G7 (Copilot #805) — the transport-security gate is WIRED on the real router,
+    /// runs OUTERMOST (before auth), and is off by default.
+    #[tokio::test]
+    async fn secure_transport_gate_is_wired_outermost_and_fail_closed() {
+        // Enforced + no https assertion → 403 from the transport gate, BEFORE auth
+        // (which would otherwise 401/503) — proves it is wired AND outermost.
+        assert_eq!(
+            dependencies_post_status(state_requiring_secure_transport(true), None).await,
+            StatusCode::FORBIDDEN,
+            "enforced + no forwarded-proto must 403 at the transport gate, before auth"
+        );
+        // Enforced + https assertion → passes the transport gate; auth then denies
+        // (401/503), never 403 — proves an https leg satisfies the gate.
+        assert_ne!(
+            dependencies_post_status(state_requiring_secure_transport(true), Some("https")).await,
+            StatusCode::FORBIDDEN,
+            "an https-asserted request must pass the transport gate"
+        );
+        // Not enforced (default) → the gate is a no-op; auth denies, never 403.
+        assert_ne!(
+            dependencies_post_status(state_requiring_secure_transport(false), None).await,
+            StatusCode::FORBIDDEN,
+            "off by default: the transport gate must not fire"
+        );
+    }
+
+    /// The attestation nonce flow (Copilot #805) is gated too: enforced + no https
+    /// → 403 before the unauthenticated challenge handler runs.
+    #[tokio::test]
+    async fn attestation_challenge_is_gated_by_secure_transport() {
+        let status = build_app(state_requiring_secure_transport(true))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/attestation/challenge/node-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router should not panic")
+            .status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "attestation nonce flow must require secure transport");
     }
 }
 
