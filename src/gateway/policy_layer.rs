@@ -518,6 +518,39 @@ fn is_posture_exempt(path: &str) -> bool {
         || path.starts_with("/console/")
 }
 
+/// The HA fence verdict for a `WriteState`/`SystemMutation` at the outer gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutationFence {
+    /// Active instance with a fresh/uncontested epoch — admit (subject to the
+    /// posture check downstream).
+    Admit,
+    /// Not Active (demoted or standby) — refuse. This is the authoritative HA
+    /// fence: it does NOT depend on the epoch cache, which is defeated on a
+    /// disk-wedge self-demotion (the heartbeat loop stops, freezing
+    /// `cached_db_epoch == held_epoch` so the stale-epoch check can never fire).
+    DenyNotActive,
+    /// Active but the held epoch is stale vs the cached durable epoch — a newer
+    /// primary exists; self-demote and refuse (the fast first-line fence for the
+    /// non-top-tier writes, which have no in-transaction epoch re-check).
+    DenyStaleEpoch,
+}
+
+/// Pure fence predicate (stop-gate review H3) — no env, no store, unit-tested
+/// exhaustively over the finite domain {active, standby} × {0,1,2}² (the epoch
+/// class representatives). A non-Active instance is ALWAYS fenced (independent of
+/// the epoch cache); an Active instance is fenced only when its held epoch is
+/// present and disagrees with the present cached durable epoch (a `0` on either
+/// side = cold start / unclaimed → admit).
+fn mutation_fence_verdict(is_active: bool, held_epoch: u64, cached_db_epoch: u64) -> MutationFence {
+    if !is_active {
+        return MutationFence::DenyNotActive;
+    }
+    if cached_db_epoch != 0 && held_epoch != 0 && held_epoch != cached_db_epoch {
+        return MutationFence::DenyStaleEpoch;
+    }
+    MutationFence::Admit
+}
+
 /// Global command-classification + posture-routing gate.
 ///
 /// Mounts as the outermost layer of the assembled router. Every inbound
@@ -614,32 +647,53 @@ pub async fn enforce_posture_routing(
                         .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
                 })?;
         }
-        // Other mutations keep the fast CACHED epoch check (Pass B1): they ARE
-        // backstopped by the in-transaction `assert_epoch_held` on their durable
-        // write, so a stale cache here can at worst let one write REACH the durable
-        // layer, where it is rejected. `cached_db_epoch` is re-stamped by
-        // `perform_promotion` (post-CAS) and the heartbeat writer, both Release;
-        // Acquire here pairs with both. A 0 cache (cold start) falls through to the
-        // mode/posture checks below.
+        // Other mutations. UNLIKE the actuator + top-tier writes
+        // (`save_federated_report_chained`, `record_key_rotation`), the ordinary
+        // registry writes (`persist_and_insert_node`/`_deps`, operator grants, …)
+        // do NOT re-assert the epoch inside their durable transaction — so the
+        // cached-epoch check below is their ONLY epoch fence. That check is
+        // defeated on a disk-wedge self-demotion: the heartbeat loop stops after
+        // the tick that would advance `cached_db_epoch`, freezing it EQUAL to
+        // `held_epoch`, so `held != db` can never fire again. A recovered old
+        // primary could then double-write the shared store (split-brain /
+        // audit-chain fork). Gate on `mode_active` FIRST (stop-gate review H3):
+        // it is set false authoritatively on every demotion path, so a
+        // demoted/standby instance is refused regardless of the epoch cache.
+        // `cached_db_epoch` is re-stamped by `perform_promotion` (post-CAS) and
+        // the heartbeat writer, both Release; Acquire here pairs with both.
         OperationalCommand::WriteState | OperationalCommand::SystemMutation => {
             let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
             let db = svc.app.cached_db_epoch.load(std::sync::atomic::Ordering::Acquire);
-            if db != 0 && held != 0 && held != db {
-                svc.app
-                    .mode_active
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                tracing::error!(
-                    method = %method,
-                    path   = %path,
-                    held   = held,
-                    db     = db,
-                    "FENCED — held epoch stale; self-demoting and rejecting mutation (HA split-brain prevention)"
-                );
-                // WS-0.5: count the fence denial for /metrics.
-                svc.app
-                    .fleet_metrics
-                    .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            match mutation_fence_verdict(svc.app.is_active(), held, db) {
+                MutationFence::Admit => {}
+                MutationFence::DenyNotActive => {
+                    svc.app
+                        .fleet_metrics
+                        .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
+                    tracing::error!(
+                        method = %method,
+                        path   = %path,
+                        "FENCED — instance not Active (demoted/standby); rejecting mutation (HA split-brain prevention)"
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                MutationFence::DenyStaleEpoch => {
+                    svc.app
+                        .mode_active
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    // WS-0.5: count the fence denial for /metrics.
+                    svc.app
+                        .fleet_metrics
+                        .record_gate_denial(crate::metrics::GateDenialReason::HaFenced);
+                    tracing::error!(
+                        method = %method,
+                        path   = %path,
+                        held   = held,
+                        db     = db,
+                        "FENCED — held epoch stale; self-demoting and rejecting mutation (HA split-brain prevention)"
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
             }
         }
         // ActuatorMotion with held == 0 (this instance never claimed an epoch —
@@ -800,6 +854,43 @@ mod actuator_middleware_tests {
         ));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    // Stop-gate review H3 — the mutation fence must refuse a non-Active instance
+    // INDEPENDENT of the epoch cache (which is frozen == held on a disk-wedge
+    // self-demotion), and still self-demote an Active instance whose held epoch is
+    // stale. This drives the predicate over the FULL finite domain
+    // {active, standby} × {0,1,2}² (18 cases): `{0,1,2}` spans every distinction
+    // the predicate makes — held==0, db==0, held==db (both nonzero), and
+    // held!=db (both nonzero) — so it is genuinely exhaustive over the class
+    // representatives, not a hand-picked sample.
+    #[test]
+    fn mutation_fence_exhaustive_over_finite_domain() {
+        for is_active in [false, true] {
+            for held in 0u64..=2 {
+                for db in 0u64..=2 {
+                    // Expected verdict computed independently of the predicate,
+                    // straight from the H3 spec.
+                    let expected = if !is_active {
+                        // Not Active → ALWAYS fenced, including the frozen-cache
+                        // case (held == db) the stale-epoch check cannot catch.
+                        MutationFence::DenyNotActive
+                    } else if db != 0 && held != 0 && held != db {
+                        // Active + both epochs present + disagree → self-demote.
+                        MutationFence::DenyStaleEpoch
+                    } else {
+                        // Active + fresh/uncontested (a 0 on either side = cold
+                        // start / unclaimed, or held == db) → admit.
+                        MutationFence::Admit
+                    };
+                    assert_eq!(
+                        mutation_fence_verdict(is_active, held, db),
+                        expected,
+                        "is_active={is_active}, held={held}, db={db}"
+                    );
+                }
+            }
+        }
     }
 
     fn service_from_store(store: VerifierStore) -> Arc<ServiceState> {
