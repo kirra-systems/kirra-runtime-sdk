@@ -156,7 +156,8 @@ impl PrincipalRegistry {
         Self { principals }
     }
 
-    /// Number of registered principals.
+    /// Number of registered principal-token ENTRIES (duplicates allowed for
+    /// overlapping-window rotation, so this is a count of tokens, not unique ids).
     #[must_use]
     pub fn len(&self) -> usize {
         self.principals.len()
@@ -171,18 +172,33 @@ impl PrincipalRegistry {
     /// Constant-time resolve: return the principal id whose token matches
     /// `provided`, comparing against EVERY entry via [`constant_time_compare`]
     /// with NO early-out (so a match does not leak its position by timing).
+    ///
     /// `None` if nothing matches. Parse forbids empty tokens, so an empty
-    /// `provided` can never match.
+    /// `provided` can never match. A token that matches the SAME id more than once
+    /// (overlapping-window rotation) resolves to that id; a token that matches
+    /// MULTIPLE DISTINCT ids is a misconfiguration whose attribution would be
+    /// ambiguous, so it is treated as **deny** (`None`) — fail-closed, never a
+    /// non-deterministic audit identity (Copilot #802).
     #[must_use]
     pub fn resolve(&self, provided: &str) -> Option<&str> {
         let mut matched: Option<&str> = None;
+        let mut ambiguous = false;
         for (id, token) in &self.principals {
             // Deliberately no `break` — evaluate all entries in constant work.
             if constant_time_compare(provided.as_bytes(), token.as_bytes()) {
-                matched = Some(id.as_str());
+                match matched {
+                    None => matched = Some(id.as_str()),
+                    // Same id repeated (rotation) is fine; a DISTINCT id is ambiguous.
+                    Some(prev) if prev != id.as_str() => ambiguous = true,
+                    Some(_) => {}
+                }
             }
         }
-        matched
+        if ambiguous {
+            None
+        } else {
+            matched
+        }
     }
 }
 
@@ -356,6 +372,20 @@ mod g7_principal_token_tests {
     #[test]
     fn resolve_empty_provided_never_matches() {
         assert_eq!(registry().resolve(""), None, "parse forbids empty tokens, so '' matches nothing");
+    }
+
+    #[test]
+    fn same_id_rotation_resolves_but_distinct_id_collision_denies() {
+        // Overlapping-window rotation: SAME id, two tokens → both resolve to the id.
+        let rot = PrincipalRegistry::parse(Some("alice=old-tok, alice=new-tok"));
+        assert_eq!(rot.resolve("old-tok"), Some("alice"));
+        assert_eq!(rot.resolve("new-tok"), Some("alice"));
+
+        // Misconfiguration: the SAME token for DISTINCT ids → ambiguous attribution
+        // → deny (fail-closed, Copilot #802). A unique token still resolves.
+        let collide = PrincipalRegistry::parse(Some("alice=shared, bob=shared, carol=carol-tok"));
+        assert_eq!(collide.resolve("shared"), None, "a token mapping to 2 ids must deny");
+        assert_eq!(collide.resolve("carol-tok"), Some("carol"), "unambiguous tokens still resolve");
     }
 
     #[test]

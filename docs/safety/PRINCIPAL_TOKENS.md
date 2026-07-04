@@ -43,7 +43,10 @@ The extension is **purely additive** and **cannot fail open**:
 2. **INVARIANT #2.** Every token comparison — root and per-principal — goes
    through `constant_time_compare`. `PrincipalRegistry::resolve` compares against
    **every** entry with no early-out, so a match does not leak its position by
-   timing.
+   timing. A token that matches the same id twice (overlapping-window rotation)
+   resolves to that id; a token that matches **multiple distinct** ids is an
+   ambiguous misconfiguration and **denies** (fail-closed — never a
+   non-deterministic audit identity).
 3. **Root path unchanged.** With `KIRRA_PRINCIPAL_TOKENS` unset the registry is
    empty and behavior is byte-identical to before (root-token-only).
 4. **INVARIANT #13.** The decision logic is pure and unit-tested without touching

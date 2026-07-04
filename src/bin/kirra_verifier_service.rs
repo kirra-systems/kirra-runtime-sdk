@@ -109,7 +109,7 @@ fn principal_registry() -> &'static PrincipalRegistry {
     REGISTRY.get_or_init(|| {
         let reg = PrincipalRegistry::from_env();
         if !reg.is_empty() {
-            tracing::info!(principals = reg.len(), "loaded per-principal admin tokens (#G7)");
+            tracing::info!(principal_tokens = reg.len(), "loaded per-principal admin tokens (#G7)");
         }
         reg
     })
