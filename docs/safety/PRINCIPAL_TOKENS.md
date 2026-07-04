@@ -1,10 +1,12 @@
-# Per-Principal Admin Tokens + RBAC (#G7, slices 1–2)
+# Per-Principal Admin Tokens + RBAC + Attribution (#G7, slices 1–3)
 
 **Status:** LIVE. Gap **G7 — key/identity lifecycle**
 (`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md`). Slice 1 = per-principal tokens
-(rotation / revocation / attribution); slice 2 = coarse method-based **RBAC**
-(`readonly` scope). Finer per-endpoint capabilities, audit-chain attribution, TPM
-key-binding, and TLS/mTLS are tracked remainders (§4).
+(rotation / revocation); slice 2 = coarse method-based **RBAC** (`readonly`
+scope); slice 3 = **audit-chain attribution** (successful admin mutations recorded
+in the signed hash chain, naming the principal). Finer per-endpoint capabilities,
+per-domain-event attribution, TPM key-binding, and TLS/mTLS are tracked
+remainders (§4).
 
 ## 1. The gap
 
@@ -50,6 +52,24 @@ A `readonly` token is therefore a safe least-privilege **monitoring / audit**
 credential that can never register a node, export a backup, rotate a key, or
 command an actuator.
 
+### Attribution audit (slice 3)
+
+After a **successful** admin **mutation** (a 2xx response on a non-safe method),
+`require_admin_token` appends an `ADMIN_ACTION` event to the **signed, hash-chained
+audit ledger** (`save_posture_event_chained` → `append_audit_event_tx`) with
+`{ principal, role, method, path }`. So the tamper-evident record names **who
+changed what, and when** — the accountability the single shared token could never
+provide.
+
+- Only successful mutations are recorded (`should_record_admin_action`): reads
+  (`GET`) and failed requests (non-2xx) are not, so the ledger names who actually
+  CHANGED state, not every authorized touch.
+- The write is **best-effort** and off the request's critical section: a failure
+  is logged and increments no request error — it never fails an already-completed
+  mutation (mirrors the `action_filter` audit path).
+- The `ADMIN_ACTION` row is a distinct, correlated attribution row; embedding the
+  actor into each domain event (the node-registration row itself) is a §4 refinement.
+
 ## 3. Fail-closed & invariant preservation
 
 The extension is **purely additive** and **cannot fail open**:
@@ -82,9 +102,10 @@ The extension is **purely additive** and **cannot fail open**:
    mutate). A capability model (e.g. distinguishing node-registration from
    backup-export from actuator) is a follow-up — `AdminPrincipal` carries the
    identity + role to scope on.
-2. **Audit-chain attribution.** The principal is attached to the request
-   extension and logged; recording it on each SHA-256-chained audit row is a
-   follow-up.
+2. **Per-domain-event attribution.** Slice 3 records a correlated `ADMIN_ACTION`
+   row per successful mutation; embedding the actor INTO each domain event's own
+   audit row (so the node-registration row itself names the principal) is a
+   finer follow-up.
 3. **TPM-bind the governor release-token signing key** (`tpm.rs` exists at the
    fleet layer) — remove the in-process signing key.
 4. **TLS / mTLS on the verifier** — the bind is currently plaintext with
@@ -102,3 +123,4 @@ The extension is **purely additive** and **cannot fail open**:
 | Principal token → `Named{id, role}`; unknown denies | `authorize_principal_token_is_named_and_attributed` |
 | **Principal denied when root token absent/empty (no fail-open)** | `principal_token_denied_when_root_token_absent_or_empty` |
 | **RBAC: `ReadOnly` allowed only on safe methods** | `admin_rbac_allows_read_only_only_on_safe_methods` |
+| **Attribution: only successful mutations recorded** | `g7_admin_action_attribution_tests::admin_action_recorded_only_on_successful_mutation` (binary) |
