@@ -547,7 +547,30 @@ pub fn validate_trajectory_slow_capped(
     // a non-finite pedestrian is a perception fault → MRC.
     // SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: vru_pedestrian_in_path_mrcs,vru_far_pedestrian_admits,vru_safe_stop_next_to_pedestrian_admits,vru_kerbside_pedestrian_binds_despite_lateral_clearance,vru_absent_channel_is_byte_identical,vru_non_finite_pedestrian_mrcs
     if let Some(scene) = pedestrians {
-        if crate::vru::pedestrian_breach(trajectory, scene, config.max_decel_mps2) {
+        // #779 F3 — the POSTURE-COMPOSED brake (`kinematics.max_brake_mps2`), not
+        // the Nominal service brake `config.max_decel_mps2`: under Degraded the
+        // vehicle is commanded to brake no harder than the MRC contract (e.g. 3.0
+        // vs 4.5), so the Nominal value would understate the stopping distance in
+        // exactly the posture where a subsystem is already faulted.
+        // #779 F1 — the ego is a BODY: the pose is the rear axle, so the required
+        // clearance must include the max distance from the axle to any footprint
+        // corner (direction-independent, matching the omnidirectional disc).
+        // #779 F1 — the ego-body reach, fail-closed on corrupt geometry (the
+        // helper forces NaN → ∞ → breach; a naive `f64::max` would MASK a NaN
+        // footprint field, Copilot #788).
+        let ego_reach_m = crate::vru::ego_reach_m(
+            kinematics.wheelbase_m,
+            kinematics.overhang_front_m,
+            kinematics.overhang_rear_m,
+            kinematics.width_m,
+        );
+        if crate::vru::pedestrian_breach(
+            trajectory,
+            scene,
+            kinematics.max_brake_mps2,   // #779 F3
+            config.max_accel_mps2,       // #779 F2 (RSS response-phase term)
+            ego_reach_m,                 // #779 F1
+        ) {
             return TrajectoryVerdict::MRCFallback;
         }
     }

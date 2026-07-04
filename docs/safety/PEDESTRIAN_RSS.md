@@ -50,11 +50,28 @@ stopping envelope meeting the disc as it grows over the whole stopping
 interval:
 
 ```text
-t_stop   = ρ + v / a_brake                       — time to full stop
-d_stop   = v·ρ + v² / (2·a_brake)                — RSS stopping distance
-required = d_stop + r_ped + v_ped_max · (t + t_stop) + clearance
+v_after  = v + a_max · ρ                          — worst-case speed AFTER the response phase (F2)
+t_stop   = ρ + v_after / a_brake                  — time to full stop
+d_stop   = v·ρ + ½·a_max·ρ² + v_after² / (2·a_brake)   — RSS stopping distance
+required = d_stop + r_ped + v_ped_max · (t + t_stop) + clearance + ego_reach
 UNSAFE   ⟺ dist(pose, ped) < required
 ```
+
+where:
+- **`a_max`** is the ego's max acceleration: during the reaction time ρ the
+  plan/actuator may still be executing acceleration, so the ego brakes from
+  `v_after`, not `v` (Shalev-Shwartz Def. 1 / Lemma 2; IEEE 2846). This is the
+  same response-phase term the vehicle RSS carries (#779 F2).
+- **`ego_reach`** = `max(wheelbase+overhang_front, overhang_rear).hypot(half_width)`
+  — the max distance from the pose (the **rear axle**) to any point of the ego
+  footprint. The ego is a BODY, not a point: without this term the distance was
+  rear-axle-to-pedestrian and the robotaxi's ~3.8 m nose swept past the pedestrian
+  before the disc growth counted (#779 F1). Direction-independent, matching the
+  omnidirectional model.
+- **`a_brake`** is the **posture-composed** brake the validator passes
+  (`kinematics.max_brake_mps2`) — the Nominal service brake under Nominal, the
+  weaker MRC brake under Degraded (#779 F3), so a faulted-posture ego is held to
+  its actual stopping power.
 
 Distance is **euclidean** — deliberately no lateral filter and no
 behind-ego filter (§1; a VRU beside or behind the path can enter it — the
@@ -75,14 +92,16 @@ own review, and it can never be introduced as a silent default.
 
 ### 2.2 Worked reference point
 
-`v = 2 m/s`, pose `t = 0`, defaults (ρ = 0.5 s, a_brake = 4.5 m/s²,
-v_ped_max = 2.0, r_ped = 0.3, clearance = 0.5):
+`v = 2 m/s`, pose `t = 0`, robotaxi (`default_urban`) defaults (ρ = 0.5 s,
+a_brake = 4.5 m/s², a_max = 2.5 m/s², v_ped_max = 2.0, r_ped = 0.3,
+clearance = 0.5, ego_reach = `3.7.hypot(0.925)` ≈ 3.814 m):
 
 ```text
-t_stop   = 0.5 + 2/4.5            = 0.944 s
-d_stop   = 2·0.5 + 4/(2·4.5)      = 1.444 m
-reach    = 0.3 + 2.0 · 0.944      = 2.189 m
-required = 1.444 + 2.189 + 0.5    = 4.133 m
+v_after  = 2 + 2.5·0.5                 = 3.25 m/s
+t_stop   = 0.5 + 3.25/4.5              = 1.2222 s
+d_stop   = 2·0.5 + ½·2.5·0.25 + 3.25²/9 = 2.4861 m
+reach    = 0.3 + 2.0 · 1.2222          = 2.7444 m
+required = 2.4861 + 2.7444 + 0.5 + 3.814 = 9.5444 m
 ```
 
 (pinned by `vru::tests::worked_reference_point_matches_the_doc`).
@@ -110,7 +129,7 @@ is exactly the sidewalk-courier posture.
 |---|---|
 | Non-finite pedestrian field | Breach → MRC (unlocalizable perception fault; mirrors the vehicle-object rule) |
 | Non-finite pose speed/time | Breach → MRC |
-| Non-positive / non-finite `a_brake` | `required = ∞` → any moving pose breaches (an unbrakeable ego cannot prove VRU safety) |
+| Non-positive / non-finite `a_brake`, or non-finite/negative `a_max` / `ego_reach` | `required = ∞` → any moving pose breaches (an unbrakeable ego, or corrupt ego geometry, cannot prove VRU safety) |
 | Non-finite speed/time input or ANY corrupt `VruRssParams` field (non-finite or negative) | `required = ∞` → breach (a NaN would otherwise poison `dist < required` into failing OPEN) |
 | Non-finite trajectory pose field | Breach → MRC (self-contained — not dependent on containment rejecting it first) |
 | Absent VRU channel (`None` scene) | **No-op** — byte-identical path (the derate-only invariant: absent input never relaxes, never fabricates) |
@@ -124,13 +143,19 @@ is exactly the sidewalk-courier posture.
 | `clearance_m` | 0.5 | Comfort/robustness margin beyond the geometric envelopes. |
 | `reaction_time_s` | 0.5 | Matches the vehicle-RSS `RSS_REACTION_TIME_S` — one reaction model per checker. |
 | `stop_epsilon_mps` | 0.05 | Matches `STOP_EPSILON_MPS` (the Degraded stop-and-hold epsilon). |
-| `a_brake_mps2` (not a `VruRssParams` field — the validator passes `VehicleConfig::max_decel_mps2`) | per-class contract | The ego's assured service braking from the per-class contract (`KIRRA_VEHICLE_CLASS`). Using full service braking is the *least* conservative element here; derating it (e.g. wet-surface factor) is a tracked refinement. |
+| `a_brake_mps2` (not a `VruRssParams` field — the validator passes the **posture-composed** `kinematics.max_brake_mps2`, #779 F3) | per-class contract | The ego's assured braking: the Nominal service brake under Nominal, the weaker MRC brake under Degraded (so a faulted-posture ego is held to its actual stopping power). Derating it further (e.g. wet-surface factor) is a tracked refinement. |
+| `a_max_mps2` (not a `VruRssParams` field — the validator passes `VehicleConfig::max_accel_mps2`, #779 F2) | per-class contract | The ego's max acceleration, for the RSS response-phase term (`v_after = v + a_max·ρ`). |
+| `ego_reach_m` (derived from the footprint by the validator, #779 F1) | per-class geometry | `max(wheelbase+overhang_front, overhang_rear).hypot(half_width)` — the ego body extent from the rear-axle pose. |
 
-Availability envelope at the defaults (euclidean `required`, pose `t = 0`):
-ego 1 m/s → 3.0 m; 2 m/s → 4.1 m; 4 m/s → 7.1 m; 6 m/s → 10.7 m. The
-courier persona (≤ ~2 m/s on sidewalks) keeps a ~4 m bubble around
-pedestrians — conservative but operable; a robotaxi at speed must rely on
-pedestrians being genuinely distant, which is correct.
+Availability envelope at the robotaxi (`default_urban`) defaults (euclidean
+`required`, pose `t = 0`, with the F1 ego-body + F2 response-phase terms):
+ego 1 m/s → 8.0 m; 2 m/s → 9.5 m; 4 m/s → 13.3 m; 6 m/s → 18.0 m. These are
+substantially larger than the pre-fix point-ego numbers — the sound bound is
+also a MORE conservative one. The courier persona (smaller footprint, lower
+a_max/speed) keeps a tighter bubble; a robotaxi at speed relies on pedestrians
+being genuinely distant. The over-conservatism at the urban ODD cap — road-
+structure / right-of-way semantics to shrink the disc to the corridor — is
+tracked as a §6 refinement (never a silent relaxation).
 
 ## 6. Integration status & tracked follow-ups
 
@@ -168,4 +193,5 @@ VRU channel is byte-identical.
 | Stop-proposal invariant | `vru_safe_stop_next_to_pedestrian_admits` (+ unit `safe_stop_next_to_pedestrian_is_admitted`) |
 | Omnidirectionality vs the lateral band | `vru_kerbside_pedestrian_binds_despite_lateral_clearance` (+ unit) |
 | Absent-channel byte-identity | `vru_absent_channel_is_byte_identical` |
-| Fail-closed non-finite / unbrakeable | `vru_non_finite_pedestrian_mrcs`, unit `non_positive_brake_fails_closed`, `non_finite_pedestrian_breaches` |
+| Fail-closed non-finite / unbrakeable / bad geometry | `vru_non_finite_pedestrian_mrcs`, unit `non_positive_brake_and_bad_geometry_fail_closed`, `non_finite_pedestrian_breaches` |
+| Ego-body term (F1) / response-phase term (F2) / posture brake (F3) | unit `ego_footprint_term_binds_the_body_not_the_axle`, `response_phase_accel_term_raises_the_requirement`, `weaker_degraded_brake_demands_more_clearance` |
