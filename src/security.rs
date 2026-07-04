@@ -77,14 +77,61 @@ pub fn admin_token_ok(provided: Option<&str>, configured: Option<&str>) -> bool 
 /// Env var naming the per-principal admin tokens (#G7).
 pub const PRINCIPAL_TOKENS_ENV: &str = "KIRRA_PRINCIPAL_TOKENS";
 
+/// The capability scope of a principal (#G7 slice 2 — per-route RBAC).
+///
+/// v2 is a coarse, method-based model that is enforceable in the single admin
+/// middleware without restructuring the router: `ReadOnly` permits only
+/// nullipotent (safe) HTTP methods on the admin surface, so a read-only monitoring
+/// / audit token can read (`GET` audit-verify, fabric state, subsystem lists) but
+/// is denied EVERY mutation and the actuator. `Admin` is unrestricted (the root
+/// token's scope). Finer per-endpoint capabilities are a tracked follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Role {
+    /// Full admin — every admin/actuator route (the root token's scope).
+    #[default]
+    Admin,
+    /// Read-only — nullipotent methods only; denied all mutations + the actuator.
+    ReadOnly,
+}
+
+impl Role {
+    /// Parse a role token (case-insensitive). `None` for an unrecognized value so
+    /// the caller can fail closed on a typo rather than silently granting Admin.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Role> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "admin" => Some(Role::Admin),
+            "readonly" | "read-only" | "ro" => Some(Role::ReadOnly),
+            _ => None,
+        }
+    }
+
+    /// May this role perform a MUTATING request? `Admin` → yes; `ReadOnly` → no.
+    /// The middleware classifies a method as mutating (anything not GET/HEAD/
+    /// OPTIONS) and denies (403) a `ReadOnly` principal on a mutating route.
+    #[must_use]
+    pub fn permits_mutation(&self) -> bool {
+        matches!(self, Role::Admin)
+    }
+
+    /// Lowercase label for logs/audit.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::ReadOnly => "readonly",
+        }
+    }
+}
+
 /// The authenticated caller identity resolved by the admin gate (#G7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminPrincipal {
-    /// Authenticated with the root `KIRRA_ADMIN_TOKEN`.
+    /// Authenticated with the root `KIRRA_ADMIN_TOKEN` — always [`Role::Admin`].
     Root,
     /// Authenticated with a registered per-principal token (carries its id, for
-    /// audit attribution).
-    Named(String),
+    /// audit attribution, and its RBAC [`Role`]).
+    Named { id: String, role: Role },
 }
 
 impl AdminPrincipal {
@@ -93,7 +140,16 @@ impl AdminPrincipal {
     pub fn label(&self) -> &str {
         match self {
             AdminPrincipal::Root => "root",
-            AdminPrincipal::Named(id) => id.as_str(),
+            AdminPrincipal::Named { id, .. } => id.as_str(),
+        }
+    }
+
+    /// The principal's RBAC role. The root token is always [`Role::Admin`].
+    #[must_use]
+    pub fn role(&self) -> Role {
+        match self {
+            AdminPrincipal::Root => Role::Admin,
+            AdminPrincipal::Named { role, .. } => *role,
         }
     }
 }
@@ -108,15 +164,16 @@ impl AdminPrincipal {
 /// before (INVARIANT #1/#6 unchanged), and a principal token NEVER authorizes
 /// unless a non-empty root token is also configured — [`authorize_admin`] denies
 /// before the registry is consulted when the root token is absent/empty, so this
-/// extension cannot fail open. v1 grants every principal the SAME capability as
-/// the root token (admin-equivalent); per-route RBAC scoping is a tracked
-/// follow-up.
+/// extension cannot fail open. A principal carries a [`Role`] (#G7 slice 2): an
+/// entry with no explicit role defaults to [`Role::Admin`] (backward-compatible
+/// with slice 1, root-token-equivalent); an explicit but UNRECOGNIZED role drops
+/// the entry (fail-closed against a typo silently granting Admin).
 #[derive(Debug, Default, Clone)]
 pub struct PrincipalRegistry {
-    /// `(principal_id, token)` pairs. A `Vec` (not a map) so [`resolve`] compares
-    /// against EVERY entry with no early-out that could leak set membership by
-    /// timing. [`resolve`]: PrincipalRegistry::resolve
-    principals: Vec<(String, String)>,
+    /// `(principal_id, role, token)` tuples. A `Vec` (not a map) so [`resolve`]
+    /// compares against EVERY entry with no early-out that could leak set
+    /// membership by timing. [`resolve`]: PrincipalRegistry::resolve
+    principals: Vec<(String, Role, String)>,
 }
 
 impl PrincipalRegistry {
@@ -127,11 +184,14 @@ impl PrincipalRegistry {
     }
 
     /// Pure parser (the testable core of [`from_env`]). Entries are
-    /// `principal_id=token`, separated by commas, semicolons, or newlines and
-    /// trimmed of surrounding whitespace. An entry with no `=`, an empty id, or an
-    /// empty token is IGNORED — never a usable credential (fail-closed against
-    /// malformed config). Duplicate ids are allowed (each token is independently
-    /// valid, which supports overlapping-window rotation).
+    /// `principal_id[:role]=token`, separated by commas, semicolons, or newlines
+    /// and trimmed of surrounding whitespace. The `role` is optional (`admin` |
+    /// `readonly`, case-insensitive); when omitted it defaults to [`Role::Admin`]
+    /// (backward-compatible with slice 1). An entry is IGNORED — never a usable
+    /// credential (fail-closed against malformed config) — when it has no `=`, an
+    /// empty id, an empty token, OR an explicit-but-UNRECOGNIZED role (so a typo'd
+    /// role can never silently become Admin). Duplicate ids are allowed (each token
+    /// is independently valid, supporting overlapping-window rotation).
     #[must_use]
     pub fn parse(spec: Option<&str>) -> Self {
         let mut principals = Vec::new();
@@ -142,15 +202,25 @@ impl PrincipalRegistry {
                     continue;
                 }
                 // Split on the FIRST '=' only — tokens may themselves contain '='.
-                let Some((id, token)) = entry.split_once('=') else {
+                let Some((id_role, token)) = entry.split_once('=') else {
                     continue; // no '=' → not a principal=token pair
                 };
-                let id = id.trim();
                 let token = token.trim();
-                if id.is_empty() || token.is_empty() {
-                    continue; // empty id or token is never a credential
+                if token.is_empty() {
+                    continue; // empty token is never a credential
                 }
-                principals.push((id.to_string(), token.to_string()));
+                // The id part may carry an optional `:role` suffix (first ':' splits).
+                let (id, role) = match id_role.split_once(':') {
+                    Some((id, role_str)) => match Role::parse(role_str) {
+                        Some(role) => (id.trim(), role),
+                        None => continue, // explicit but unrecognized role → drop (fail-closed)
+                    },
+                    None => (id_role.trim(), Role::default()), // no role → Admin
+                };
+                if id.is_empty() {
+                    continue; // empty id is never a credential
+                }
+                principals.push((id.to_string(), role, token.to_string()));
             }
         }
         Self { principals }
@@ -174,22 +244,24 @@ impl PrincipalRegistry {
     /// with NO early-out (so a match does not leak its position by timing).
     ///
     /// `None` if nothing matches. Parse forbids empty tokens, so an empty
-    /// `provided` can never match. A token that matches the SAME id more than once
-    /// (overlapping-window rotation) resolves to that id; a token that matches
-    /// MULTIPLE DISTINCT ids is a misconfiguration whose attribution would be
-    /// ambiguous, so it is treated as **deny** (`None`) — fail-closed, never a
-    /// non-deterministic audit identity (Copilot #802).
+    /// `provided` can never match. A token that matches the SAME (id, role) more
+    /// than once (overlapping-window rotation) resolves to it; a token that matches
+    /// MULTIPLE DISTINCT (id, role) pairs is a misconfiguration whose attribution
+    /// or scope would be ambiguous, so it is treated as **deny** (`None`) —
+    /// fail-closed, never a non-deterministic audit identity OR privilege (Copilot
+    /// #802). Returns the matched `(id, role)` on success.
     #[must_use]
-    pub fn resolve(&self, provided: &str) -> Option<&str> {
-        let mut matched: Option<&str> = None;
+    pub fn resolve(&self, provided: &str) -> Option<(&str, Role)> {
+        let mut matched: Option<(&str, Role)> = None;
         let mut ambiguous = false;
-        for (id, token) in &self.principals {
+        for (id, role, token) in &self.principals {
             // Deliberately no `break` — evaluate all entries in constant work.
             if constant_time_compare(provided.as_bytes(), token.as_bytes()) {
                 match matched {
-                    None => matched = Some(id.as_str()),
-                    // Same id repeated (rotation) is fine; a DISTINCT id is ambiguous.
-                    Some(prev) if prev != id.as_str() => ambiguous = true,
+                    None => matched = Some((id.as_str(), *role)),
+                    // Same (id, role) repeated (rotation) is fine; any distinct
+                    // id OR role is ambiguous (never pick a scope non-deterministically).
+                    Some((pid, prole)) if pid != id.as_str() || prole != *role => ambiguous = true,
                     Some(_) => {}
                 }
             }
@@ -236,7 +308,23 @@ pub fn authorize_admin(
         _ => return None,
     }
     let provided = provided?;
-    registry.resolve(provided).map(|id| AdminPrincipal::Named(id.to_string()))
+    registry
+        .resolve(provided)
+        .map(|(id, role)| AdminPrincipal::Named { id: id.to_string(), role })
+}
+
+/// The #G7-slice-2 RBAC decision applied AFTER authentication: may a principal
+/// with `role` issue a request with HTTP method `method` on the admin surface?
+///
+/// A nullipotent (safe) method — `GET` / `HEAD` / `OPTIONS` — is always allowed;
+/// any other (mutating) method requires a role that [`Role::permits_mutation`].
+/// So a `ReadOnly` principal reads the admin GETs (audit-verify, fabric state,
+/// subsystem lists) but is denied every POST mutation and the actuator (all POST).
+/// Pure so the middleware's decision is unit-testable without process env.
+#[must_use]
+pub fn admin_rbac_allows(role: Role, method: &str) -> bool {
+    let mutating = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+    !mutating || role.permits_mutation()
 }
 
 pub struct AdministrativeKeyContainer {
@@ -348,7 +436,7 @@ mod sg_015_admin_token_tests {
 // fail-open), and the root token still authorizes exactly as before.
 #[cfg(test)]
 mod g7_principal_token_tests {
-    use super::{authorize_admin, AdminPrincipal, PrincipalRegistry};
+    use super::{authorize_admin, AdminPrincipal, PrincipalRegistry, Role};
 
     fn registry() -> PrincipalRegistry {
         PrincipalRegistry::parse(Some("alice=alice-token, bob = bob-token ;carol=carol=eq"))
@@ -358,9 +446,10 @@ mod g7_principal_token_tests {
     fn parse_keeps_wellformed_drops_malformed() {
         let r = registry();
         assert_eq!(r.len(), 3, "alice, bob, carol are well-formed");
-        assert_eq!(r.resolve("alice-token"), Some("alice"));
-        assert_eq!(r.resolve("bob-token"), Some("bob"), "surrounding whitespace trimmed");
-        assert_eq!(r.resolve("carol=eq"), Some("carol"), "only the FIRST '=' splits id from token");
+        // No explicit role → Admin (backward-compatible with slice 1).
+        assert_eq!(r.resolve("alice-token"), Some(("alice", Role::Admin)));
+        assert_eq!(r.resolve("bob-token"), Some(("bob", Role::Admin)), "surrounding whitespace trimmed");
+        assert_eq!(r.resolve("carol=eq"), Some(("carol", Role::Admin)), "only the FIRST '=' splits id from token");
         assert_eq!(r.resolve("nope"), None);
 
         // Malformed entries are dropped (never a usable credential).
@@ -374,43 +463,88 @@ mod g7_principal_token_tests {
         assert_eq!(registry().resolve(""), None, "parse forbids empty tokens, so '' matches nothing");
     }
 
+    /// #G7 slice 2 — explicit roles parse; a readonly principal is scoped; an
+    /// explicit-but-unrecognized role drops the entry (fail-closed, never Admin).
+    #[test]
+    fn parse_roles_and_scope() {
+        let r = PrincipalRegistry::parse(Some(
+            "monitor:readonly=mon-tok, ops:admin=ops-tok, legacy=leg-tok, typo:supervisor=bad-tok",
+        ));
+        assert_eq!(r.len(), 3, "the unrecognized-role entry is dropped");
+        assert_eq!(r.resolve("mon-tok"), Some(("monitor", Role::ReadOnly)));
+        assert_eq!(r.resolve("ops-tok"), Some(("ops", Role::Admin)));
+        assert_eq!(r.resolve("leg-tok"), Some(("legacy", Role::Admin)), "no role → Admin default");
+        assert_eq!(r.resolve("bad-tok"), None, "typo'd role never becomes a credential");
+        // The scope predicate the middleware enforces.
+        assert!(Role::Admin.permits_mutation());
+        assert!(!Role::ReadOnly.permits_mutation(), "read-only must not mutate");
+        assert_eq!(Role::parse("RO"), Some(Role::ReadOnly));
+        assert_eq!(Role::parse("nonsense"), None);
+    }
+
     #[test]
     fn same_id_rotation_resolves_but_distinct_id_collision_denies() {
         // Overlapping-window rotation: SAME id, two tokens → both resolve to the id.
         let rot = PrincipalRegistry::parse(Some("alice=old-tok, alice=new-tok"));
-        assert_eq!(rot.resolve("old-tok"), Some("alice"));
-        assert_eq!(rot.resolve("new-tok"), Some("alice"));
+        assert_eq!(rot.resolve("old-tok"), Some(("alice", Role::Admin)));
+        assert_eq!(rot.resolve("new-tok"), Some(("alice", Role::Admin)));
 
         // Misconfiguration: the SAME token for DISTINCT ids → ambiguous attribution
         // → deny (fail-closed, Copilot #802). A unique token still resolves.
         let collide = PrincipalRegistry::parse(Some("alice=shared, bob=shared, carol=carol-tok"));
         assert_eq!(collide.resolve("shared"), None, "a token mapping to 2 ids must deny");
-        assert_eq!(collide.resolve("carol-tok"), Some("carol"), "unambiguous tokens still resolve");
+        assert_eq!(collide.resolve("carol-tok"), Some(("carol", Role::Admin)), "unambiguous tokens still resolve");
+
+        // #G7 slice 2 — same id but DISTINCT ROLE for one token is also ambiguous
+        // (never pick a privilege non-deterministically) → deny.
+        let role_collide = PrincipalRegistry::parse(Some("dave:admin=d-tok, dave:readonly=d-tok"));
+        assert_eq!(role_collide.resolve("d-tok"), None, "a token mapping to 2 roles must deny");
     }
 
     #[test]
     fn authorize_root_token_is_root_principal() {
         let r = registry();
-        assert_eq!(
-            authorize_admin(Some("root-secret"), Some("root-secret"), &r),
-            Some(AdminPrincipal::Root)
-        );
+        let p = authorize_admin(Some("root-secret"), Some("root-secret"), &r);
+        assert_eq!(p, Some(AdminPrincipal::Root));
+        assert_eq!(p.unwrap().role(), Role::Admin, "the root token is always Admin");
     }
 
     #[test]
     fn authorize_principal_token_is_named_and_attributed() {
-        let r = registry();
+        let r = PrincipalRegistry::parse(Some("bob=bob-token, monitor:readonly=mon-token"));
         assert_eq!(
             authorize_admin(Some("bob-token"), Some("root-secret"), &r),
-            Some(AdminPrincipal::Named("bob".to_string())),
-            "a registered principal token authorizes and is attributed to its id"
+            Some(AdminPrincipal::Named { id: "bob".to_string(), role: Role::Admin }),
+            "a registered principal token authorizes and is attributed to its id + role"
         );
+        // A readonly principal authenticates AND carries its scoped role.
+        let mon = authorize_admin(Some("mon-token"), Some("root-secret"), &r).unwrap();
+        assert_eq!(mon.label(), "monitor");
+        assert_eq!(mon.role(), Role::ReadOnly);
+        assert!(!mon.role().permits_mutation(), "the middleware will 403 this principal on a mutation");
         assert_eq!(
             authorize_admin(Some("unknown-token"), Some("root-secret"), &r),
             None,
             "an unregistered token denies"
         );
         assert_eq!(authorize_admin(None, Some("root-secret"), &r), None, "no bearer denies");
+    }
+
+    /// #G7 slice 2 — the RBAC method decision the middleware applies. Admin may
+    /// mutate; ReadOnly is confined to nullipotent methods (so a read-only token
+    /// is 403'd on every POST admin route AND the actuator).
+    #[test]
+    fn admin_rbac_allows_read_only_only_on_safe_methods() {
+        use super::admin_rbac_allows;
+        for m in ["GET", "HEAD", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"] {
+            assert!(admin_rbac_allows(Role::Admin, m), "admin may {m}");
+        }
+        for m in ["GET", "HEAD", "OPTIONS"] {
+            assert!(admin_rbac_allows(Role::ReadOnly, m), "read-only may {m}");
+        }
+        for m in ["POST", "PUT", "DELETE", "PATCH"] {
+            assert!(!admin_rbac_allows(Role::ReadOnly, m), "read-only must NOT {m}");
+        }
     }
 
     /// THE load-bearing #G7 invariant (INV #1/#6): with NO root admin token

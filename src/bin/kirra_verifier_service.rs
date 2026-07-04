@@ -27,7 +27,9 @@ use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
-use kirra_verifier::security::{authorize_admin, constant_time_compare, PrincipalRegistry};
+use kirra_verifier::security::{
+    admin_rbac_allows, authorize_admin, constant_time_compare, PrincipalRegistry,
+};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
     evaluate_unified_industrial_request, UnifiedIndustrialRequest,
@@ -144,9 +146,29 @@ async fn require_admin_token(mut request: Request, next: Next) -> Result<Respons
     // principal is attached to the request extensions for audit attribution.
     match authorize_admin(Some(&provided), Some(&expected), principal_registry()) {
         Some(principal) => {
+            // RBAC (#G7 slice 2): a scoped principal (e.g. `readonly`) may only
+            // issue nullipotent requests. The pure `admin_rbac_allows` decision
+            // (unit-tested) denies any mutating method (not GET/HEAD/OPTIONS) for a
+            // role without mutation rights — a read-only token is thus 403'd on
+            // every POST admin route AND the actuator, from this one middleware.
+            // The root token and `admin`-role principals are unrestricted.
+            if !admin_rbac_allows(principal.role(), request.method().as_str()) {
+                tracing::warn!(
+                    principal = principal.label(),
+                    role = principal.role().label(),
+                    method = request.method().as_str(),
+                    path = request.uri().path(),
+                    "RBAC deny (#G7): scoped principal attempted a mutating request"
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
             // Attribution (#G7): make the authenticated identity visible now (logs)
             // and available to downstream handlers/audit via the request extension.
-            tracing::debug!(principal = principal.label(), "admin request authorized (#G7)");
+            tracing::debug!(
+                principal = principal.label(),
+                role = principal.role().label(),
+                "admin request authorized (#G7)"
+            );
             request.extensions_mut().insert(principal);
             Ok(next.run(request).await)
         }
