@@ -72,7 +72,7 @@ The extension is **purely additive** and **cannot fail open**:
    process env (env is read only by the thin `from_env` wrapper), exactly like
    the sibling `admin_token_ok` (SG-015).
 
-4. **INVARIANT #2 (RBAC too).** A token that resolves to multiple **distinct
+5. **INVARIANT #2 (RBAC too).** A token that resolves to multiple **distinct
    (id, role)** pairs is ambiguous — attribution OR privilege would be
    non-deterministic — so it **denies** (never silently picks a scope).
 
