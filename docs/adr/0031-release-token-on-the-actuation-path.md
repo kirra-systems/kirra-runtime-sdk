@@ -101,6 +101,17 @@ key custody (the governor signing key living in hardware), which composes with C
 (the session-key signature is the rare, offloadable operation). Adopt only with measured
 numbers on the deployment SoC.
 
+**Key-custody seam (landed).** The *provisioning* half of Clause E — deciding **where**
+the governor signing key comes from — is now a fail-closed seam,
+`kirra_release_token::provisioning` (see `docs/safety/GOVERNOR_KEY_PROVISIONING.md`).
+`KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` selects `file:<path>` (a permission-checked, zeroized
+32-byte seed) or `dev-fixed` (the well-known harness key, admitted ONLY under
+`KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV`); an unset/misconfigured source **refuses** rather
+than minting an unpinnable key. `tpm:<handle>` is wired but **deferred** — it returns
+`TpmUnsealUnsupported` until tss2 libs + hardware land, so a deployment can *name* the TPM
+source without it ever silently degrading to a weaker one. The `kirra-l3-e2e` harness now
+draws its fixed key through this seam (`dev-fixed`, `allow_dev`), proving a live caller.
+
 ## Measurement standing
 
 `crates/kirra-l3-e2e` (PR #766) is the standing measurement harness — its

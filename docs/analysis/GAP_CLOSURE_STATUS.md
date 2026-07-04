@@ -31,12 +31,16 @@ registry — see the CHANGELOG Unification note.
 ## 2. Remaining — sequenced plan
 
 ### Track 1 — finish WS-1 (Stage 1, blocks Gate B)
-1. **TPM-bind the release-token signing key.** Verified: *no production
-   provisioning path exists* — the only signers are the l3-e2e demo harness and
-   tests; `tss2-esys` is absent in the dev environment. Plan: a fail-closed
-   key-provisioning seam (file source with permission checks + zeroization;
-   explicit dev-mode; absent → refuse) with a TPM-unseal source deferred until
-   tss2 libs + hardware land (named external dependency). Effort M.
+1. **TPM-bind the release-token signing key.** ✅ **Seam landed** — the file /
+   dev-fixed halves are live; the TPM-unseal source is the deferred remainder.
+   `kirra_release_token::provisioning` is the single fail-closed provisioning
+   point: `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` = `file:<path>` (permission-checked,
+   zeroized 32-byte seed) | `dev-fixed` (gated on `..._ALLOW_DEV`) | `tpm:<handle>`
+   (deferred → `TpmUnsealUnsupported`); unset/misconfigured → refuse (never mints
+   an unpinnable key). l3-e2e harness routed through the seam.
+   `docs/safety/GOVERNOR_KEY_PROVISIONING.md`, ADR-0031 Clause E.
+   **Remaining:** the TPM-unseal source itself (Phase-II; named external
+   dependency: tss2 libs + hardware — additive at one call site).
 2. **In-process TLS termination + mTLS client-cert → principal identity.**
    Mesh-enforcement gate is live (#805); this removes its trusted-proxy AoU.
    Serve-path change + rustls provider selection + live-handshake test. Effort M.
