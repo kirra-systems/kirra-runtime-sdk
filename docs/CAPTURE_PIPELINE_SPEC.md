@@ -11,9 +11,10 @@ Linux collector joins it with bus telemetry into the full triple.
 > D1–D6 (owner 2026-06-06) — see §6 below. **As-built note:** both emit seams exist on `main`
 > today — fast-loop command gateway (Phase 1, #191) and the slow-loop
 > `crates/kirra-ros2-adapter/src/node.rs` (Phase 1.5, #192): it binds `objects`,
-> `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`, and the
-> capture call goes immediately after `verdict`. The §0 verdict-path anchor `997fb7ae…` is
-> current on `main`.
+> `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
+> capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
+> measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
+> verdict-path anchor `997fb7ae…` is current on `main`.
 
 ## 0. The non-negotiable constraint
 The verdict path stays byte-identical: **`src/gateway/kinematics_contract.rs` =
@@ -39,9 +40,10 @@ let verdict = validate_trajectory_slow_capped(&traj.points, slow_corridor, &obje
 
 At that point the tick holds: `traj` (the doer's PROPOSAL), `objects` (perception),
 `odom` (ego), `posture`, `effective_perception_cap`, and `verdict` (the DECISION +
-correction). The capture call goes **immediately after `verdict` is bound** — in `node.rs`,
-not in `kinematics_contract.rs`. (Optionally a second, lighter record at the fast-loop
-`check_command_conforms` conformance site.)
+correction). The capture call lives **in `node.rs`, not in `kinematics_contract.rs`** — and
+as built runs LATER in the same tick (after `update_trajectory(...)` and the WCET
+measurement), so it captures the same verdict without counting against the slow-loop budget.
+(A second record fires at the fast-loop command-gateway site.)
 
 ## 2. What Kirra emits — the verdict record (small, safety-side)
 Keep the on-tick record tiny and fixed-shape; the bulky inputs are pulled from the bus by
@@ -64,12 +66,16 @@ This is the authoritative "what Kirra decided and did" — the **correction** ha
 triple — and only Kirra knows it. Note it does NOT carry the doer's model version (Kirra
 doesn't know it); that's joined on the Linux side (§3).
 
-## 3. Emission mechanism (WCET-safe, fire-and-forget)
-- The call-site pushes the fixed record into a **bounded lock-free SPSC ring** (pre-
-  allocated, no alloc, no lock, no syscall on the tick). If full → **drop/overwrite oldest**
-  (capture is best-effort; safety never waits).
-- A **separate low-priority drain task/thread** empties the ring and ships records to the
-  sink. On QNX this is a low-priority thread; on Linux (bench) the same — OS-agnostic.
+## 3. Emission mechanism (WCET-safe, fire-and-forget) — as built on `main`
+- The call-site `try_send`s the fixed record into a **bounded tokio mpsc channel**
+  (`CAPTURE_QUEUE_BOUND = 2048`, `crates/kirra-core/src/capture.rs`). `try_send` is
+  non-blocking; if the queue is **Full** (or the writer is **Closed**) the record is
+  **dropped** (best-effort, LOUD-logged, a `capture_drops` counter increments) —
+  capture never waits and never overwrites. *(A lock-free SPSC ring is the QNX-target
+  refinement if/when the emit runs on the partition; the Linux bench uses the mpsc.)*
+- A **separate low-priority drain task** (`spawn_capture_writer`, a `spawn_blocking`
+  worker) empties the channel and appends records to the sink, coalescing an `fsync`
+  per burst — so producers only ever `try_send`, never do I/O on the tick.
 - **Sink [RESOLVED — D1]:** local **JSONL files**, one per emitting process (the writers as
   built append JSONL). DDS becomes a transport later iff live fleet aggregation is wanted.
 
