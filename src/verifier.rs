@@ -206,11 +206,23 @@ pub struct TransportSecurityConfig {
 impl TransportSecurityConfig {
     pub fn from_env() -> Self {
         Self {
+            // Case-insensitive + trimmed (Copilot #805): for a SECURITY toggle,
+            // `TRUE`/`True`/` true ` from an env file must ENABLE enforcement, not
+            // silently leave it off (a fail-open relative to operator intent).
             require_secure_transport: std::env::var("KIRRA_REQUIRE_SECURE_TRANSPORT")
-                .map(|v| v == "true" || v == "1")
+                .map(|v| {
+                    let v = v.trim();
+                    v == "1" || v.eq_ignore_ascii_case("true")
+                })
                 .unwrap_or(false),
+            // Trim + lowercase the header name (Copilot #805): trailing whitespace
+            // would make it an invalid `HeaderName` and deny ALL requests; an empty
+            // value falls back to the default rather than breaking the lookup.
             forwarded_proto_header: std::env::var("KIRRA_FORWARDED_PROTO_HEADER")
-                .unwrap_or_else(|_| "x-forwarded-proto".to_string()),
+                .ok()
+                .map(|v| v.trim().to_ascii_lowercase())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "x-forwarded-proto".to_string()),
         }
     }
 }

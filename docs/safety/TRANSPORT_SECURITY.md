@@ -25,7 +25,9 @@ plaintext leg.
 - `request_transport_is_secure(require, header, headers)` — the **pure**, unit-
   tested decision.
 - `require_secure_transport` middleware — layered **OUTERMOST** on the sensitive
-  route groups (admin, actuator, identity-gated), so it runs before auth.
+  route groups (admin, actuator, identity-gated, **and attestation** — the
+  challenge/verify nonce flow, even though it is otherwise unauthenticated), so it
+  runs before auth.
 
 ### Env vars
 
@@ -74,3 +76,11 @@ provider selection + a live-handshake test).
 | Enabled → absent/plaintext/empty deny (fail-closed) | `enabled_rejects_insecure_or_absent_fail_closed` |
 | Proxy-chain: original client leg governs | `enabled_uses_original_client_protocol_from_a_proxy_chain` |
 | Custom header name respected | `custom_header_name_is_respected` |
+| **Router-level: gate wired, OUTERMOST (403 before auth), off by default** | `g7_transport_security_router_tests::secure_transport_gate_is_wired_outermost_and_fail_closed` (binary) |
+| **Attestation nonce flow gated** | `g7_transport_security_router_tests::attestation_challenge_is_gated_by_secure_transport` (binary) |
+
+**Env robustness (Copilot #805):** `KIRRA_REQUIRE_SECURE_TRANSPORT` is parsed
+case-insensitively and trimmed (`TRUE`/`True`/` true ` all enable — a security
+toggle must not silently stay off), and `KIRRA_FORWARDED_PROTO_HEADER` is
+trimmed + lowercased (trailing whitespace would otherwise be an invalid header name
+that denies every request).
