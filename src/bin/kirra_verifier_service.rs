@@ -28,6 +28,11 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::authz::{
+    authorize_request, generate_api_token, token_fingerprint, token_sha256_hex, ApiRole,
+    AuthzOutcome, ResolvedPrincipal, SCOPE_ACTUATOR_COMMAND, SCOPE_ADMIN, SCOPE_AUDIT_READ,
+    SCOPE_INTEGRATION_EVALUATE,
+};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
     evaluate_unified_industrial_request, UnifiedIndustrialRequest,
@@ -81,6 +86,8 @@ mod fabric;
 mod console;
 #[path = "kirra_verifier_service/operators.rs"]
 mod operators;
+#[path = "kirra_verifier_service/principals.rs"]
+mod principals;
 // SG-008 (ASIL D) startup sentinel — pure invariant predicate + its CERT-003
 // RTM coverage tests; extracted from this file to keep the entry point lean.
 #[path = "kirra_verifier_service/startup.rs"]
@@ -95,37 +102,154 @@ use actuator::*;
 use fabric::*;
 use console::*;
 use operators::*;
+use principals::*;
 use startup::*;
 
 
 // --- Auth middleware ---------------------------------------------------------
 
-async fn require_admin_token(request: Request, next: Next) -> Result<Response, StatusCode> {
-    let expected = std::env::var("KIRRA_ADMIN_TOKEN")
-        .unwrap_or_default();
+/// INVARIANT #1/#6 — the admin mutation gate, PRESERVED by name and role. WS-1
+/// (#G7) reimplements it as the `SCOPE_ADMIN` specialization of the unified
+/// [`authorize_scope`] gate: the break-glass `KIRRA_ADMIN_TOKEN` still authorizes
+/// under `constant_time_compare` and an absent/empty token is still a fail-closed
+/// 503 — it is only ever a STRICT SUPERSET (an `admin`-role API principal
+/// additionally qualifies; only that role holds `SCOPE_ADMIN`). NEVER commented
+/// out, bypassed, or removed from any mutation route.
+async fn require_admin_token(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_ADMIN, request, next).await
+}
 
-    // Fail-closed: absent or empty admin token → 503 (CRITICAL INVARIANT #1/#6).
-    // Kept distinct from the 401 below so an unconfigured server is never
-    // mistaken for a bad credential.
-    if expected.is_empty() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+/// WS-1 (#G7) — the identity-gated integration surface (`SCOPE_INTEGRATION_EVALUATE`).
+/// Admin token or an `integrator`-role principal qualifies.
+async fn require_integration_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_INTEGRATION_EVALUATE, request, next).await
+}
 
-    let provided = request
+/// WS-1 (#G7) — actuator command submission (`SCOPE_ACTUATOR_COMMAND`). Admin token
+/// or an `operator`-role principal qualifies (the inner safety envelope + the outer
+/// posture gate independently bound WHAT command is accepted).
+async fn require_actuator_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_ACTUATOR_COMMAND, request, next).await
+}
+
+/// WS-1 (#G7) — read-only audit-chain verification/export (`SCOPE_AUDIT_READ`).
+/// Admin token or an `auditor`-role principal qualifies.
+async fn require_audit_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_AUDIT_READ, request, next).await
+}
+
+/// The unified fail-closed authorization gate (WS-1 · #G7). Resolves the bearer to
+/// EITHER the break-glass root admin token OR a scoped API principal (by token
+/// hash), then delegates the verdict to the pure [`authorize_request`] predicate.
+///
+/// Store/env are lifted out of the predicate (INVARIANT #13-friendly): this thin
+/// wrapper reads `KIRRA_ADMIN_TOKEN`, does the hashed principal lookup ONLY when
+/// needed (admin configured, a non-admin bearer present), and fail-closes to
+/// "no principal" (→ 401) on any store error — never an authorized default.
+///
+/// Auditing (this PR): decisions are OBSERVED via structured `tracing` (denials
+/// warn; api-principal allows info; admin-token allows debug). They are NOT written
+/// to the tamper-evident audit chain here — an unauthenticated caller must not be
+/// able to append unboundedly (denial-flood DoS), and privileged MUTATIONS are
+/// already chained by their own handlers. Promoting scoped-principal ALLOWS into
+/// the chain (rate-limited) is a named follow-up.
+async fn authorize_scope(
+    svc: &Arc<ServiceState>,
+    required_scope: &'static str,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let admin_env = std::env::var("KIRRA_ADMIN_TOKEN").unwrap_or_default();
+    let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map(str::to_string);
 
-    // Single constant-time authorization decision (SG-015). `expected` is
-    // non-empty here, so this reduces to a constant_time_compare of the two
-    // tokens — behavior identical to the prior inline check, never `==`.
-    if !admin_token_ok(Some(provided), Some(&expected)) {
-        return Err(StatusCode::UNAUTHORIZED);
+    // Resolve a scoped principal ONLY when it could matter: admin configured, a
+    // bearer present, and it is NOT the root admin token (the admin token
+    // short-circuits to Admin in the predicate, so no store hit is needed).
+    let principal: Option<ResolvedPrincipal> = match (admin_env.is_empty(), bearer.as_deref()) {
+        (false, Some(tok)) if !admin_token_ok(Some(tok), Some(&admin_env)) => {
+            let hash = token_sha256_hex(tok);
+            match svc
+                .app
+                .store
+                .call_read(move |s| s.load_api_principal_by_token_hash(&hash))
+                .await
+            {
+                Ok(Ok(Some(rec))) => Some(ResolvedPrincipal {
+                    role: ApiRole::parse_role(&rec.role),
+                    revoked: rec.revoked_at_ms.is_some(),
+                    principal_id: rec.principal_id,
+                }),
+                // No such token, OR a store/read failure → fail-closed as "no
+                // principal" (the predicate then denies with 401).
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let decision = authorize_request(
+        required_scope,
+        Some(admin_env.as_str()),
+        bearer.as_deref(),
+        principal.as_ref(),
+    );
+
+    let fp = bearer.as_deref().map(token_fingerprint);
+    match decision.outcome {
+        AuthzOutcome::Allow => {
+            if decision.auth_method == "api-principal" {
+                tracing::info!(
+                    scope = required_scope,
+                    principal_id = decision.principal_id.as_deref().unwrap_or("?"),
+                    role = decision.role.map(ApiRole::as_str).unwrap_or("?"),
+                    "authz allow (api-principal)"
+                );
+            } else {
+                tracing::debug!(scope = required_scope, "authz allow (admin-token)");
+            }
+            Ok(next.run(request).await)
+        }
+        AuthzOutcome::Unconfigured => {
+            tracing::warn!(scope = required_scope,
+                "authz denied: KIRRA_ADMIN_TOKEN absent/empty → 503 (fail-closed)");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        AuthzOutcome::Unauthenticated => {
+            tracing::warn!(scope = required_scope, token_fp = fp.as_deref().unwrap_or("none"),
+                "authz denied: no/unknown/revoked credential → 401");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        AuthzOutcome::Forbidden => {
+            tracing::warn!(
+                scope = required_scope,
+                principal_id = decision.principal_id.as_deref().unwrap_or("?"),
+                role = decision.role.map(ApiRole::as_str).unwrap_or("?"),
+                "authz denied: principal lacks required scope → 403"
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
     }
-
-    Ok(next.run(request).await)
 }
 
 // SG-008 (ASIL D) process fail-closed startup sentinel — `StartupContext`,
@@ -1524,7 +1648,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
-        .layer(middleware::from_fn(require_admin_token));
+        // WS-1 (#G7): SCOPE_INTEGRATION_EVALUATE — the admin token (break-glass) OR
+        // an `integrator`-role principal. Previously admin-token-only.
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_integration_scope));
 
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
@@ -1533,10 +1659,11 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fleet/assets/register", post(handle_register_av_asset))
         .route("/fleet/av-subsystems", get(list_av_subsystems))
         .route("/system/backup/export", post(export_backup))
-        .route("/system/audit/verify", get(verify_audit_chain))
-        .route("/system/audit/causal/verify", get(verify_causal_chain))
-        .route("/system/audit/export", get(handle_audit_export))
         .route("/system/audit/rotate-signing-key", post(handle_audit_rotate_key))
+        // WS-1 (#G7) — API principal registry. SCOPE_ADMIN (admin-only); the mint
+        // returns the plaintext token exactly once.
+        .route("/system/principals", post(register_api_principal_handler).get(list_api_principals_handler))
+        .route("/system/principals/{principal_id}/revoke", post(revoke_api_principal_handler))
         .route("/federation/controllers/register", post(register_federation_controller))
         .route("/attestation/identity/register", post(register_node_identity))
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the
@@ -1551,7 +1678,18 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fabric/command/{asset_id}", post(handle_fabric_command))
         .route("/fabric/causal-log", get(handle_fabric_causal_log))
         .route("/fabric/causal-log/{entry_id}", get(handle_fabric_causal_chain))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token));
+
+    // WS-1 (#G7) — read-only audit-chain verification/export, carved out of the
+    // admin group so an `auditor`-role principal (least privilege — NO mutation
+    // rights) can reach them. SCOPE_AUDIT_READ; the admin token still qualifies
+    // (Admin holds every scope). The full-state `/system/backup/export` and the
+    // `rotate-signing-key` mutation stay admin-only above.
+    let auditor_routes = Router::new()
+        .route("/system/audit/verify", get(verify_audit_chain))
+        .route("/system/audit/causal/verify", get(verify_causal_chain))
+        .route("/system/audit/export", get(handle_audit_export))
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_audit_scope));
 
     let actuator_routes = Router::new()
         .route("/actuator/motion/command", post(handle_actuator_motion_command))
@@ -1559,7 +1697,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
-        .layer(middleware::from_fn(require_admin_token));
+        // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
+        // principal. Auth is outermost (runs before the envelope), order preserved.
+        .layer(middleware::from_fn_with_state(Arc::clone(&svc_state), require_actuator_scope));
 
     let attestation_routes = Router::new()
         .route("/attestation/challenge/{node_id}", post(issue_challenge))
@@ -1657,6 +1797,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .merge(probe_routes)
         .merge(identity_gated_routes)
         .merge(admin_routes)
+        .merge(auditor_routes)
         .merge(actuator_routes)
         .merge(attestation_routes)
         .merge(read_routes)
@@ -1886,6 +2027,40 @@ mod posture_gate_real_router_tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "LockedOut must still 503 at the posture gate even authenticated; got {locked}"
         );
+    }
+
+    /// WS-1 (#G7) — the new/rewired scope-gated groups are WIRED behind the authz
+    /// gate on the REAL assembled router and fail closed WITHOUT a credential. Under
+    /// Nominal the outer posture gate lets each request through to the scope layer,
+    /// which denies (503 when `KIRRA_ADMIN_TOKEN` is unset — INV-13 forbids setting
+    /// it here — or 401 if the CI env happens to configure one). Either way the
+    /// invariant is the same: NEVER 2xx without a valid credential. The positive
+    /// RBAC paths (integrator/auditor/operator reach exactly their surface) are
+    /// proven by `authz::tests` (pure truth table) + `tests/authz_rbac.rs`
+    /// (store↔authz composition), which need neither env nor router.
+    #[tokio::test]
+    async fn ws1_scope_gated_routes_fail_closed_on_real_router() {
+        // (method, path) for one route in each newly scope-gated group.
+        let cases = [
+            // admin group — the new principal-mint route (SCOPE_ADMIN).
+            ("POST", "/system/principals"),
+            // carved auditor group (SCOPE_AUDIT_READ) — must NOT be accidentally open.
+            ("GET", "/system/audit/verify"),
+            // integration group, switched admin-token → SCOPE_INTEGRATION_EVALUATE.
+            ("POST", "/action_filter/evaluate"),
+        ];
+        for (method, path) in cases {
+            let status =
+                status_through_real_app(state_with(FleetPosture::Nominal), method, path).await;
+            assert!(
+                status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+                "{method} {path} must fail closed (503/401) without a credential; got {status}"
+            );
+            assert!(
+                !status.is_success(),
+                "{method} {path} must never reach the handler unauthenticated; got {status}"
+            );
+        }
     }
 
     /// WS-0.5 DoD — "Prometheus scrape returns fleet-safety series", proven

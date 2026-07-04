@@ -115,6 +115,8 @@ src/
 ├── action_filter.rs          — ActionFilter<C>, ActionClaim, evaluate_action_claim
 ├── action_policy.rs          — UnstructuredTextParser (LLM JSON → typed AgentAction)
 ├── security.rs               — constant_time_compare
+├── authz.rs                  — WS-1 (#G7) RBAC: ApiRole, scopes, authorize_request
+│                               (pure fail-closed decision; store/env lifted out)
 ├── protocol_adapter.rs       — Modbus/OPC-UA industrial event mapping
 ├── kirra_core.rs             — KirraKernelGovernor (scalar clamping, rate limiting)
 ├── ros2_adapter.rs           — NaN/Inf rejection before ROS2 publish
@@ -158,6 +160,7 @@ src/
 | `trusted_federation_controllers` | Ed25519 public key registry |
 | `federation_report_nonces` | Burned nonces (replay prevention) |
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
+| `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
 
 ---
 
@@ -229,19 +232,39 @@ pass that fits the corridor, rejects one that doesn't or a misaligned straight-t
 
 ## Route Authorization Matrix
 
-### Tier 1 — Identity-gated (admin token + `x-kirra-client-id` header)
+**WS-1 (#G7) scoped RBAC.** Each gated group requires a SCOPE, satisfied by EITHER
+the break-glass `KIRRA_ADMIN_TOKEN` (Admin holds every scope — the tiers below are
+back-compatible) OR a per-principal API token (`api_principals`; role ∈
+{`admin`,`integrator`,`auditor`,`operator`}) whose role holds that scope. The gate
+is `authz::authorize_request` (`src/authz.rs`); `require_admin_token` is preserved as
+the `SCOPE_ADMIN` specialization (INVARIANT #1/#6 unchanged: absent/empty root → 503).
+Mint/manage principals via the admin-scoped `POST/GET /system/principals` +
+`POST /system/principals/{id}/revoke` (token returned once at mint; stored only as
+its SHA-256).
+
+### Tier 1 — Identity-gated (`SCOPE_INTEGRATION_EVALUATE` + `x-kirra-client-id` header)
+Admin token or an `integrator`-role principal.
 - `GET  /system/posture/stream` — SSE broadcast of posture events
 - `POST /federation/reports/submit` — Submit signed federated trust report
 - `POST /action_filter/evaluate` — Evaluate action claim against posture
 - `POST /industrial/evaluate` — Evaluate Modbus/OPC-UA industrial event
 
-### Tier 2 — Admin-only (Bearer `KIRRA_ADMIN_TOKEN`)
+### Tier 2 — Admin (`SCOPE_ADMIN`; Bearer `KIRRA_ADMIN_TOKEN` or `admin`-role principal)
 - `POST /attestation/register` — Register a node
 - `POST /fleet/dependencies` — Register dependency graph edges
-- `POST /system/backup/export` — Full state dump
-- `GET  /system/audit/verify` — Verify audit chain integrity
+- `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
+- `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
+- `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
+
+### Tier 2a — Auditor read-only (`SCOPE_AUDIT_READ`; admin token or `auditor`-role principal)
+- `GET  /system/audit/verify` — Verify audit chain integrity
+- `GET  /system/audit/causal/verify` — Verify the fabric causal chain
+- `GET  /system/audit/export` — Export the audit chain (read-only; no mutation rights)
+
+### Tier 2b — Actuator (`SCOPE_ACTUATOR_COMMAND`; admin token or `operator`-role principal)
+- `POST /actuator/motion/command` — behind the decel safety envelope + posture gate
 
 ### Unauthenticated (challenge-response provides its own guarantee)
 - `POST /attestation/challenge/:node_id`

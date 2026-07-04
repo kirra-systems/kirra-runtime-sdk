@@ -157,6 +157,26 @@ impl OperatorRecord {
     }
 }
 
+/// A registered API principal (WS-1 · G7). The bearer token is stored ONLY as its
+/// SHA-256 hex (`token_sha256`); the plaintext is shown once at mint and never
+/// persisted. `role` is the wire role string (parsed fail-closed by
+/// `authz::ApiRole::parse_role`). `revoked_at_ms` NULL = active.
+#[derive(Debug, Clone)]
+pub struct ApiPrincipalRecord {
+    pub principal_id: String,
+    pub role: String,
+    pub created_at_ms: u64,
+    pub revoked_at_ms: Option<u64>,
+}
+
+impl ApiPrincipalRecord {
+    /// True iff the principal is registered and not revoked.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.revoked_at_ms.is_none()
+    }
+}
+
 /// The latest clearance grant's delivery state for a node (console read surface).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClearanceGrantState {
@@ -485,6 +505,7 @@ mod nodes;
 mod posture;
 mod audit;
 mod operators;
+mod principals;
 mod federation;
 mod attestation;
 mod av_subsystem;
@@ -623,6 +644,22 @@ impl VerifierStore {
                 pubkey_pem        TEXT    NOT NULL,
                 registered_at_ms  INTEGER NOT NULL,
                 revoked_at_ms     INTEGER
+            )",
+            [],
+        )?;
+
+        // WS-1 (#G7) — API principals: per-principal scoped bearer tokens. Only the
+        // SHA-256 hex of the token is stored (UNIQUE, looked up by hash — never
+        // plaintext). `role` is the wire role string; `revoked_at_ms` NULL = active.
+        // Layers ON TOP of the `KIRRA_ADMIN_TOKEN` root (which stays the break-glass
+        // superuser); this table only ADDS least-privilege sub-credentials.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_principals (
+                principal_id   TEXT    PRIMARY KEY,
+                token_sha256   TEXT    NOT NULL UNIQUE,
+                role           TEXT    NOT NULL,
+                created_at_ms  INTEGER NOT NULL,
+                revoked_at_ms  INTEGER
             )",
             [],
         )?;

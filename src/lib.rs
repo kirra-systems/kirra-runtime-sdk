@@ -17,6 +17,7 @@ pub mod ros2_adapter;
 pub mod action_filter;
 pub mod action_policy;
 pub mod security;
+pub mod authz;
 pub mod telemetry;
 pub mod metrics;
 pub mod health;
