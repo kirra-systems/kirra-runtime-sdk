@@ -147,12 +147,20 @@ impl VruRssParams {
     #[must_use]
     pub fn sanitized(&self) -> VruRssParams {
         VruRssParams {
-            v_ped_max_mps: if self.v_ped_max_mps.is_finite() {
+            // Only floor a VALID (finite AND non-negative) value. A negative
+            // v_ped_max is corrupt — `max(-1.0, 2.0)` would LAUNDER it into a valid
+            // 2.0 and defeat the design-doc §4 fail-closed rule (a corrupt param →
+            // ∞ requirement → breach). Leave it untouched so `params_valid` fails
+            // closed. (Copilot #799.)
+            v_ped_max_mps: if self.v_ped_max_mps.is_finite() && self.v_ped_max_mps >= 0.0 {
                 self.v_ped_max_mps.max(V_PED_MAX_FLOOR_MPS)
             } else {
                 self.v_ped_max_mps
             },
-            stop_epsilon_mps: if self.stop_epsilon_mps.is_finite() {
+            // Same discipline for the epsilon clamp: `min(neg, 0.05)` already keeps a
+            // negative (so `params_valid` still fails), but guard explicitly so the
+            // fail-closed intent does not depend on `min`'s sign behavior.
+            stop_epsilon_mps: if self.stop_epsilon_mps.is_finite() && self.stop_epsilon_mps >= 0.0 {
                 self.stop_epsilon_mps.min(VRU_STOP_EPSILON_CEILING_MPS)
             } else {
                 self.stop_epsilon_mps
@@ -326,7 +334,7 @@ pub fn required_pedestrian_clearance_m(
 /// is bounded at [`MAX_PEDESTRIANS`] and the per-pose `required` is hoisted out of
 /// the pedestrian loop. A non-finite pedestrian / pose, a negative-or-non-finite
 /// age, an over-bound scene, or a malformed segment is a breach (fail closed).
-// SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: pedestrian_ahead_within_stopping_envelope_breaches,pedestrian_far_ahead_is_clear,safe_stop_next_to_pedestrian_is_admitted,kerbside_pedestrian_outside_lateral_band_still_binds,non_finite_pedestrian_breaches,empty_scene_is_noop,declared_zero_velocity_but_translating_pose_still_binds,loose_params_cannot_weaken_the_bound,measurement_age_grows_the_reachable_disc,too_many_pedestrians_fails_closed
+// SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: pedestrian_ahead_within_stopping_envelope_breaches,pedestrian_far_ahead_is_clear,safe_stop_next_to_pedestrian_is_admitted,kerbside_pedestrian_outside_lateral_band_still_binds,non_finite_pedestrian_breaches,empty_scene_is_noop,declared_zero_velocity_but_translating_pose_still_binds,loose_params_cannot_weaken_the_bound,measurement_age_grows_the_reachable_disc,too_many_pedestrians_fails_closed,corrupt_v_ped_max_is_not_laundered_and_fails_closed
 #[must_use]
 pub fn pedestrian_breach(
     trajectory: &[TrajectoryPoint],
@@ -399,6 +407,15 @@ pub fn pedestrian_breach(
             ego_reach_m,
             &params,
         );
+        // Fail closed on a non-finite base BEFORE adding the age term (Copilot #799):
+        // `required_base` is ∞ on any fault (invalid params / brake / accel / geometry),
+        // and `∞ + v_ped_max·age_s` becomes NaN when `v_ped_max` is non-finite and
+        // `age_s = 0` (NaN·0 = NaN) — then `dist < NaN` is false and the check would
+        // FAIL OPEN. A moving pose with an infinite requirement is an unconditional
+        // breach.
+        if !required_base.is_finite() {
+            return true;
+        }
         for ped in scene.pedestrians {
             // F8 — the disc has already been growing for `age_s` since the
             // measurement was taken; extend the required clearance accordingly.
@@ -745,6 +762,33 @@ mod tests {
         assert!(breaches(&traj, &scene(&[ped_age(1000.0, 0.0, f64::NAN)])));
     }
 
+    /// #789 (Copilot #799) — a corrupt `v_ped_max` must fail closed, not be
+    /// LAUNDERED by `sanitized()` into a valid 2.0, and the split age term must not
+    /// NaN-poison the requirement into failing OPEN. A negative value stays negative
+    /// (→ `params_valid` breach); a non-finite value forces `required_base = ∞`,
+    /// whose `∞ + v_ped_max·age` (NaN at age 0) is caught by the finite guard.
+    #[test]
+    fn corrupt_v_ped_max_is_not_laundered_and_fails_closed() {
+        // A negative v_ped_max is NOT floored to 2.0.
+        let neg = VruRssParams { v_ped_max_mps: -1.0, ..VruRssParams::default() };
+        assert!(neg.sanitized().v_ped_max_mps < 0.0, "a negative v_ped_max must NOT be floored");
+        // Through the predicate: a moving pose with a corrupt v_ped_max breaches even
+        // a FRESH (age 0) pedestrian placed arbitrarily far — no NaN fail-open. Each
+        // of these silently ADMITTED before the fix (negative → laundered to 2.0 with
+        // a finite requirement; NaN/∞ → `∞ + NaN` → `dist < NaN` false).
+        let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let sc = PedestrianScene {
+                pedestrians: &[ped_age(1000.0, 0.0, 0.0)],
+                params: VruRssParams { v_ped_max_mps: bad, ..VruRssParams::default() },
+            };
+            assert!(
+                pedestrian_breach(&traj, &sc, BRAKE, A_MAX, ego_reach()),
+                "corrupt v_ped_max={bad} must fail closed, not NaN-poison to fail open"
+            );
+        }
+    }
+
     /// #789 F9 — the pedestrian count is a fail-closed input bound: a scene AT the
     /// bound with all pedestrians far is admitted; one OVER the bound breaches
     /// regardless of placement (a malformed / over-bound perception input).
@@ -806,14 +850,20 @@ mod tests {
                 if v_eff <= params.stop_epsilon_mps {
                     continue;
                 }
-                let required = required_pedestrian_clearance_m(
+                // Mirror the fail-closed guard in `pedestrian_breach` (Copilot #799):
+                // an infinite base must breach before the age term can NaN-poison it.
+                let required_base = required_pedestrian_clearance_m(
                     v_eff,
                     tp.time_from_start_s,
                     brake,
                     amax,
                     reach,
                     &params,
-                ) + params.v_ped_max_mps * ped.age_s;
+                );
+                if !required_base.is_finite() {
+                    return true;
+                }
+                let required = required_base + params.v_ped_max_mps * ped.age_s;
                 let dx = ped.pos.x_m - tp.pose.x_m;
                 let dy = ped.pos.y_m - tp.pose.y_m;
                 let dist = (dx * dx + dy * dy).sqrt();

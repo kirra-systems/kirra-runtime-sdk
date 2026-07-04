@@ -163,8 +163,9 @@ is exactly the sidewalk-courier posture.
 bound. `VruRssParams::sanitized()`, applied once at the single choke point
 (`pedestrian_breach`), floors `v_ped_max` at `V_PED_MAX_FLOOR_MPS` (2.0) and clamps
 `stop_epsilon` to `VRU_STOP_EPSILON_CEILING_MPS` (the kernel `STOP_EPSILON_MPS`); both
-clamps are monotone-tightening, and non-finite fields are left for `params_valid` to
-fail closed rather than clamped into an admitting value. A full per-ODD derivation of
+clamps are monotone-tightening, and non-finite OR negative fields are left untouched for
+`params_valid` to fail closed rather than clamped/laundered into an admitting value (a
+negative `v_ped_max` is not floored to 2.0 — Copilot #799). A full per-ODD derivation of
 `v_ped_max` (mirroring `KIRRA_VEHICLE_CLASS` / `contract_for`) remains a deployment
 tuning obligation ON TOP of this floor.
 | `a_brake_mps2` (not a `VruRssParams` field — the validator passes the **posture-composed** `kinematics.max_brake_mps2`, #779 F3) | per-class contract | The ego's assured braking: the Nominal service brake under Nominal, the weaker MRC brake under Degraded (so a faulted-posture ego is held to its actual stopping power). Derating it further (e.g. wet-surface factor) is a tracked refinement. |
