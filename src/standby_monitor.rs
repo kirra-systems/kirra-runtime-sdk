@@ -529,8 +529,28 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache, on
 ///      spurious re-promotion; the H3 addition).
 /// Extracted so the promotion→wiring seam is unit-testable without the env-driven
 /// `promotion_loop`.
+///
+/// Fail-closed on a panicking hook (Copilot #817): this runs inside the
+/// supervised `promotion_loop`, and the supervisor ALWAYS restarts a task that
+/// panics (`supervisor.rs`: "a panic is a bug, never a legitimate exit"). If
+/// `on_promote` unwound, the loop would restart and re-run `perform_promotion`
+/// — which durably claims a NEW epoch each time — churning the HA epoch while
+/// leaving the node Active-but-unwired (the heartbeat writer below is never
+/// reached, so it never advertises liveness and the restarted loop just
+/// re-promotes on the still-stale heartbeat). Convert the panic into a clean
+/// process exit: this instance dies and another standby / a systemd restart
+/// re-promotes cleanly with the freshness wiring intact. (A hook that itself
+/// calls `std::process::exit` — the double-set guard in
+/// `wire_active_posture_freshness` — already terminates without unwinding, so
+/// `catch_unwind` is transparent to it.)
 fn apply_post_promotion(app: &Arc<AppState>, on_promote: &(dyn Fn() + Send + Sync)) {
-    on_promote();
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_promote)).is_err() {
+        tracing::error!(
+            "on_promote hook panicked after a successful promotion — exiting \
+             (fail-closed: a supervised re-promotion would churn the HA epoch)"
+        );
+        std::process::exit(1);
+    }
     spawn_heartbeat_writer(Arc::clone(app));
 }
 
