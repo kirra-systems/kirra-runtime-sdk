@@ -54,8 +54,14 @@ registry — see the CHANGELOG Unification note.
    `POST/GET /system/cert-principals`. **Track 1.2 complete.**
 
 ### Track 2 — WS-2 P1 surface remainders (Stage 1, blocks Gate B)
-3. **G15 learning-loop capture** — §3 capture-point decision still OPEN in
-   `LEARNING_LOOP_ARCHITECTURE.md`; verdict-emit machinery exists. Effort M.
+3. **G15 learning-loop capture** — ✅ **decision confirmed + capture BUILT:** §3 = hybrid (3)
+   CONFIRMED (owner 2026-07-04); the fire-and-forget verdict emit is live at both seams
+   (fast-loop #191 / slow-loop #192), captures **all** arms (not Deny-only), default-OFF
+   behind `KIRRA_CAPTURE_ENABLED`, verdict path byte-identical. The `CAPTURE_PIPELINE_SPEC §6`
+   sub-decisions are all resolved by `COLLECTOR_DESIGN.md` D1–D6, and the isolated
+   `kirra-collector` exists. **Remaining:** a live P1 bench install feeding the collector,
+   then the downstream train / sim-validation / human-gated-release loop (WS-6, hardware-
+   and-bench-gated).
 4. **G18 config governance** — ✅ **first slice landed:** `KirraRuntimeConfig` now
    has `config_version` + `CONFIG_SCHEMA_VERSION` (fail-closed on `0` / an unknown
    future schema) and `effective_digest()` (SHA-256 fingerprint printed at boot,

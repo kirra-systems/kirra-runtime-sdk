@@ -65,7 +65,10 @@ The gap analysis found a fail-closed codebase with a handful of fail-open or cla
 - **Pedestrian RSS** primitive (VRU longitudinal/lateral bounds + crossing model) wired into `validate_trajectory_slow` — the courier/sidewalk persona is P1's flagship, this is a launch blocker, not an AV-track item.
 - **Model integrity:** SHA allow-list verification at backend load (fingerprint exists, verify it); accelerator health watchdog; measured (not hardcoded) HW capabilities.
 - **Config governance:** one versioned, JSON-Schema'd config surface (`KirraRuntimeConfig` absorbs the env sprawl; env vars become overrides); migration story; startup prints effective config digest to audit chain.
-- **Learning loop capture:** close the §3 capture-point decision (hybrid), extend verdict emit to all arms (not just Deny), collector ingests from a live P1 install.
+- **Learning loop capture:** ✅ §3 capture-point decision CONFIRMED (hybrid, 2026-07-04); the
+  verdict emit already captures all arms (not just Deny) at both seams (#191/#192), default-OFF;
+  the isolated collector exists (`COLLECTOR_DESIGN.md` D1–D6). Remaining: a live P1 bench
+  install feeding the collector, then the train/sim/release stages (WS-6).
 - **Observability pack:** Grafana dashboards + alert rules shipped in helm; console wired to live telemetry (retire demo-seed as the default path).
 - **DoD = GATE B checklist** plus: examples CI-built; a fresh-machine install script test in CI.
 

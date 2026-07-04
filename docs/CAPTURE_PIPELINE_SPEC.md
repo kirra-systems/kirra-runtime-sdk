@@ -5,13 +5,16 @@ Status: SPEC (2026-06-05). Builds on `LEARNING_LOOP_ARCHITECTURE.md`. Assumes th
 Linux collector joins it with bus telemetry into the full triple.
 
 > **Recorded status.** Companion spec to `LEARNING_LOOP_ARCHITECTURE.md`. **The §3
-> capture-location decision in the architecture doc is OPEN** (owner, 2026-06-05); this spec
-> is the *hybrid-(3) elaboration*, conditional on that confirmation. Its own §6 decisions
-> (sink, correlation key, model-version attribution, dataset format, pass-sampling) are
-> likewise **open**. **As-built note:** the §1 hook seam exists on `main` today —
-> `crates/kirra-ros2-adapter/src/node.rs` binds `objects`, `effective_perception_cap`, then
-> `verdict = validate_trajectory_slow_capped(...)` in the slow loop; the capture call goes
-> immediately after `verdict`. The §0 verdict-path anchor `997fb7ae…` is current on `main`.
+> capture-location decision is CONFIRMED — hybrid (3)** (owner 2026-07-04); this spec is the
+> hybrid-(3) elaboration. Its own §6 decisions (sink, correlation key, model-version
+> attribution, dataset format, pass-sampling) are **all RESOLVED** by `COLLECTOR_DESIGN.md`
+> D1–D6 (owner 2026-06-06) — see §6 below. **As-built note:** both emit seams exist on `main`
+> today — fast-loop command gateway (Phase 1, #191) and the slow-loop
+> `crates/kirra-ros2-adapter/src/node.rs` (Phase 1.5, #192): it binds `objects`,
+> `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
+> capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
+> measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
+> verdict-path anchor `997fb7ae…` is current on `main`.
 
 ## 0. The non-negotiable constraint
 The verdict path stays byte-identical: **`src/gateway/kinematics_contract.rs` =
@@ -37,9 +40,10 @@ let verdict = validate_trajectory_slow_capped(&traj.points, slow_corridor, &obje
 
 At that point the tick holds: `traj` (the doer's PROPOSAL), `objects` (perception),
 `odom` (ego), `posture`, `effective_perception_cap`, and `verdict` (the DECISION +
-correction). The capture call goes **immediately after `verdict` is bound** — in `node.rs`,
-not in `kinematics_contract.rs`. (Optionally a second, lighter record at the fast-loop
-`check_command_conforms` conformance site.)
+correction). The capture call lives **in `node.rs`, not in `kinematics_contract.rs`** — and
+as built runs LATER in the same tick (after `update_trajectory(...)` and the WCET
+measurement), so it captures the same verdict without counting against the slow-loop budget.
+(A second record fires at the fast-loop command-gateway site.)
 
 ## 2. What Kirra emits — the verdict record (small, safety-side)
 Keep the on-tick record tiny and fixed-shape; the bulky inputs are pulled from the bus by
@@ -62,15 +66,18 @@ This is the authoritative "what Kirra decided and did" — the **correction** ha
 triple — and only Kirra knows it. Note it does NOT carry the doer's model version (Kirra
 doesn't know it); that's joined on the Linux side (§3).
 
-## 3. Emission mechanism (WCET-safe, fire-and-forget)
-- The call-site pushes the fixed record into a **bounded lock-free SPSC ring** (pre-
-  allocated, no alloc, no lock, no syscall on the tick). If full → **drop/overwrite oldest**
-  (capture is best-effort; safety never waits).
-- A **separate low-priority drain task/thread** empties the ring and ships records to the
-  sink. On QNX this is a low-priority thread; on Linux (bench) the same — OS-agnostic.
-- **Sink [DECISION]:** (a) append to a local log file, or (b) publish on a dedicated
-  **non-safety DDS telemetry topic** (`~/telemetry/verdict_record`). Recommend (b) so the
-  Linux collector subscribes uniformly alongside the bus tap; (a) is the simplest bring-up.
+## 3. Emission mechanism (WCET-safe, fire-and-forget) — as built on `main`
+- The call-site `try_send`s the fixed record into a **bounded tokio mpsc channel**
+  (`CAPTURE_QUEUE_BOUND = 2048`, `crates/kirra-core/src/capture.rs`). `try_send` is
+  non-blocking; if the queue is **Full** (or the writer is **Closed**) the record is
+  **dropped** (best-effort, LOUD-logged, a `capture_drops` counter increments) —
+  capture never waits and never overwrites. *(A lock-free SPSC ring is the QNX-target
+  refinement if/when the emit runs on the partition; the Linux bench uses the mpsc.)*
+- A **separate low-priority drain task** (`spawn_capture_writer`, a `spawn_blocking`
+  worker) empties the channel and appends records to the sink, coalescing an `fsync`
+  per burst — so producers only ever `try_send`, never do I/O on the tick.
+- **Sink [RESOLVED — D1]:** local **JSONL files**, one per emitting process (the writers as
+  built append JSONL). DDS becomes a transport later iff live fleet aggregation is wanted.
 
 ## 4. The Linux collector — assembling the triple
 A Linux-only service (never in the safety domain). It:
@@ -99,22 +106,37 @@ sample {
   verdict  { outcome, deny_code, applied_cap_mps, mrc, posture, derate_enabled }  # what Kirra did
 }
 ```
-- **Format [DECISION]:** Parquet/Arrow (columnar, ML-friendly) recommended; rosbag + a
-  sidecar index is the lower-friction bench option.
+- **Format [RESOLVED — D4]:** **Parquet/Arrow** for the joined tabular records; heavy sensor
+  blobs stay in the rosbag/MCAP with a URI/offset `bulk_ref` in the Parquet row (don't copy
+  multi-GB frames into Parquet). Partition `dataset/doer_version=<v>/source=<s>/*.parquet`.
 - **Versioning:** partition by `(model_version, date)`; append-only; rotate/bound on the
   bench (it generates a lot). Each training run slices "samples generated by model vN."
 - **Selection-bias note (from the architecture doc §5):** the dataset must include
   `is_intervention == false` samples (normal driving), not just corrections — the collector
   records every decision, with optional pass-sampling to control volume.
 
-## 6. Decisions to confirm
-1. **Sink:** DDS telemetry topic (recommended) vs local log file (simplest bring-up).
-2. **Correlation key:** node-assigned `decision_seq` (recommended) + stamps as cross-check.
-3. **Model-version attribution:** doer stamps its proposal/telemetry with its version, joined
-   by the collector (recommended — keeps Kirra ignorant of the model). Confirm the doer can
-   stamp it.
-4. **Dataset format:** Parquet/Arrow vs rosbag+sidecar.
-5. **Pass-sampling rate** (1.0 = log every decision) — start at 1.0 on the bench, tune later.
+## 6. Decisions — RESOLVED (by `COLLECTOR_DESIGN.md` D1–D6, owner 2026-06-06)
+All five sub-decisions this spec left open are now bound; the collector is where they take
+effect. Recorded here for traceability:
+
+1. **Sink → D1:** local **JSONL files** (one per emitting process), not DDS. DDS is a later
+   transport option for live fleet aggregation. *(The writers as built append JSONL.)*
+2. **Correlation key → D2:** `(source, decision_seq)` primary — `decision_seq` is
+   **per-process**, and there are two emitting processes, so it is not globally unique alone;
+   bounded by a `t_wall_ms` window and cross-checked with `traj.asset_id` /
+   `traj.trajectory_id` / `traj.objects_ms`. *(Follow-up: a gateway-record asset/instance id
+   is needed IFF multi-asset comes into scope — `COMMAND_GATEWAY` records carry no `asset_id`.)*
+3. **Model-version attribution → D3:** doer-stamped, collector joins, **Kirra stays ignorant**.
+   The bench run records the doer version (a latched `/kirra/doer_version` topic or bag
+   metadata); the collector partitions the dataset by it.
+4. **Dataset format → D4:** **Parquet/Arrow** for the tabular join + a `bulk_ref` URI/offset
+   to the heavy blobs in the rosbag/MCAP (not copied into Parquet).
+5. **Pass-sampling → D5:** **stratified** — keep ALL clamp/deny/MRC records always; sample
+   PASS records at a configurable rate. Bench default `pass_rate = 1.0` (keep everything).
+
+Plus **D6 (collector placement)**: a Rust in-repo `kirra-collector` binary reusing
+`CaptureRecord` from the SDK lib for a type-safe join (one authoritative schema, no drift);
+it never links the verdict path.
 
 ## 7. Build phases
 1. **Verdict record + ring + drain + call-site hook** (Rust, in `node.rs`/adapter — NOT

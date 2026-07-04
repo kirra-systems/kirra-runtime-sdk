@@ -7,7 +7,8 @@ continuous-improvement loop for the planner/perception **without** Kirra ever le
 > channel — the doer/checker boundary this loop is built on), the fixed verdict path
 > (`src/gateway/kinematics_contract.rs`, blob `997fb7ae…`), KIRRA-OCCY-DEPLOY-001 (bench →
 > vehicle topology), and #189 (QNX 8.0 / nto80, see §6). Open decisions are tracked in §8;
-> **§3 capture location is NOT yet confirmed** (recommended-but-open). See the as-built
+> **§3 capture location is CONFIRMED — hybrid (3)** (owner 2026-07-04), and is the shape the
+> repo already implements (Phase 1 #191 / Phase 1.5 #192, default-OFF). See the as-built
 > grounding appendix (§9) for the existing repo mechanisms this design builds on.
 
 ## 0. The one principle everything follows
@@ -64,7 +65,7 @@ This is richer than negative examples: a clamp gives you *(state, bad proposal, 
 correction)* — the same shape as learning from an expert who only steps in when you're
 about to err. High-quality supervision, and you already generate it for free.
 
-## 3. Capture — where it happens  [DECISION TO CONFIRM — OPEN]
+## 3. Capture — where it happens  [CONFIRMED — hybrid (3), owner 2026-07-04]
 The certified checker must NOT take on heavy logging/IO that could touch its determinism or
 WCET. Three options:
 
@@ -79,9 +80,14 @@ WCET. Three options:
   → certified checker's extra job stays tiny and non-blocking; all heavy data engineering
   lives on Linux.
 
-Recommendation: **(3)**. **Status: OPEN — not yet confirmed (owner, 2026-06-05).** Confirm
-before we build the capture pipeline. (§9 notes that the repo already has the off-hot-path
-emit primitive option (3) would generalize.)
+**Decision: (3) — CONFIRMED (owner, 2026-07-04).** The hybrid is also what the repo already
+implements: the fire-and-forget emit is live at both seams (fast-loop command gateway,
+Phase 1 #191; slow-loop trajectory, Phase 1.5 #192), default-OFF behind
+`KIRRA_CAPTURE_ENABLED`, wait-free `try_send` (drop-on-full), verdict path byte-identical
+(`997fb7ae…`). The Linux-side collector (`crates/kirra-collector`, `COLLECTOR_DESIGN.md`
+D1–D6) is the offline joiner. The emit records **every** verdict arm (Allow/Clamp/Deny —
+not Deny-only), deliberately, to avoid downstream selection bias
+(`src/gateway/policy_layer.rs`). (§9 grounds the off-hot-path emit primitive this generalized.)
 
 ## 4. The closed loop (with the human gate)
 1. **Drive** — doer proposes → Kirra governs → governed command executes; Kirra emits
@@ -141,10 +147,14 @@ regardless.)
 5. **(Later) QNX production deployment** of the unchanged checker.
 
 ## 8. Open decisions to confirm
-- §3 capture location: **hybrid (3)** recommended — **OPEN** (left open per owner, 2026-06-05).
+- ~~§3 capture location~~: **CONFIRMED — hybrid (3)** (owner 2026-07-04); as-built at both
+  seams (#191/#192). The `CAPTURE_PIPELINE_SPEC.md §6` sub-decisions are likewise resolved
+  by `COLLECTOR_DESIGN.md` D1–D6 (owner 2026-06-06).
 - Which model(s) learn first (perception/prediction vs planning) — pick the one whose
-  failures dominate Kirra's interventions once the capture data exists.
-- Dataset schema + storage (drives the capture-pipeline spec).
+  failures dominate Kirra's interventions once the capture data exists. **Still open**
+  (needs capture data from a bench run).
+- ~~Dataset schema + storage~~: **CONFIRMED** — Parquet + bulk-ref, partitioned by
+  `doer_version` (`COLLECTOR_DESIGN.md` D4).
 
 ## 9. As-built grounding (repo, verified 2026-06-05)
 Editorial appendix (not part of the original design; records how the design lands on the
