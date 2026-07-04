@@ -48,7 +48,7 @@
 | **Tracking / prediction** | Production multi-target trackers; learned interaction-aware prediction [VENDOR-EST] | Single-frame NN associator; CV/CTRV/lane-follow kinematic modes with honest plausibility gating [REPO] | **Critical gap** |
 | **Localization + maps** | Crowdsourced HD maps harvested from consumer fleets, continuously refreshed, auto-generated [VENDOR-PUBLIC] | Lanelet-lite local map, no localization, no versioning, sub-km projection [REPO] | **Critical gap**; also not Kirra's product to win |
 | **Certified runtime/silicon** | Custom ASIL-rated SoCs, deterministic RTOS on-chip [VENDOR-PUBLIC] | QNX partition design + measured sub-µs kernel + WCET methodology; certified artifact not yet built; hypervisor track license-blocked [REPO] | Gap, but the **architecture is aimed correctly** |
-| **Data engine** | Petabyte fleet harvesting, mining, sim farms [VENDOR-PUBLIC/EST] | Learning-loop architecture + real isolated collector (Parquet, lineage); capture point OPEN; train/sim/release unbuilt; ~7-scenario eval corpus [REPO] | **Major gap** (2–3 orders of magnitude on scenarios) |
+| **Data engine** | Petabyte fleet harvesting, mining, sim farms [VENDOR-PUBLIC/EST] | Learning-loop architecture + real isolated collector (Parquet, lineage); capture point CONFIRMED + BUILT (hybrid, all-arms, default-OFF); train/sim/release unbuilt; ~7-scenario eval corpus [REPO] | **Major gap** (2–3 orders of magnitude on scenarios) |
 | **Fleet ops (OTA/monitoring/keys)** | Consumer fleets OTA-updated; R155/R156 compliance [VENDOR-PUBLIC] | No OTA/A-B/rollback anywhere in code; single admin token; no PKI at scale [REPO] | **Critical gap** |
 | **Certification evidence** | TÜV-assessed, ASIL-B/D certified components [VENDOR-PUBLIC] | GSN-structured safety case, HARA, RTM — all Draft, ~20% test-level, no assessor [REPO] | **Major gap** in execution, not structure |
 | **Runtime assurance for third-party/AI planners** | Not offered publicly [VENDOR-PUBLIC] | The core product: fail-closed bounding of geometric/learned/LLM doers, proven end-to-end on QNX [REPO] | **Kirra's category** |
@@ -75,7 +75,7 @@ Severity = blocking effect on a production-grade claim. Effort: S <2wk · M <2mo
 | G12 | **Pedestrian RSS absent while the courier persona operates in pedestrian space** | High | `validation.rs` structured-road subset; mick sidewalk intents exist | Medium | M | ODD/safety-model mismatch for the flagship persona |
 | G13 | Map lifecycle (versioning/updates/localization integration/UTM) | Medium | ADR-0023 consequences | High | XL | Blocks geographic scale; possibly partner-supplied |
 | G14 | Transport security not executed (Zenoh TLS/QUIC disabled; UDP prototype; app-layer Ed25519 only, no rate limiting) | Medium | fleet-transport README | Medium | M | Honest spike, but fleet plane unhardened |
-| G15 | Learning loop open-circuit — capture decision OPEN, verdict emit fires only on Deny arm, train/sim/release stages unbuilt | Medium | `LEARNING_LOOP_ARCHITECTURE.md` §3, §9 | Medium | L | The flywheel is a diagram plus a collector |
+| G15 | Learning loop — capture decision CONFIRMED (hybrid §3, 2026-07-04) and BUILT: fire-and-forget emit at both seams captures ALL arms (not Deny-only), default-OFF; the isolated collector exists. Remaining open-circuit is the downstream train/sim/release stages (WS-6) | Medium | `LEARNING_LOOP_ARCHITECTURE.md` §3, §9; `COLLECTOR_DESIGN.md` | Medium | L | Capture + collector done; the flywheel's training/validation/release half is unbuilt |
 | G16 | Model integrity — SHA fingerprint computed but never verified against an allow-list; no accelerator watchdog; capabilities hardcoded | Medium | parko backends | Low | S–M | ML artifact substitution undetected |
 | G17 | Observability stack — no /metrics on the verifier binary (aggregator exists, unmounted), no Prometheus/Grafana/OTel | Medium | `metrics.rs:34` vs `build_app` | Low | S | Fleet safety events invisible to standard ops tooling |
 | G18 | Config governance — two paradigms (typed JSON vs env sprawl), no schema, no versioning | Medium | `config.rs` vs `ENVIRONMENT.md` | Low | M | Misconfiguration surface in a fail-closed system |
@@ -181,7 +181,9 @@ Scored against a production ADAS bar (10 = shippable at fleet scale). [REPO-deri
 9. Scenario-KPI regression gate: threshold `unsafe_miss_rate` / admissibility / `hazard_recall` in CI; grow corpus to low hundreds (G9).
 10. Pedestrian RSS primitive for the courier ODD (G12).
 11. TPM-bind the governor release-token key (tpm.rs exists at fleet layer); admin-token → per-principal tokens; TLS on the verifier or mandated mesh with enforcement check (G7).
-12. Close the learning-loop capture decision; extend verdict emit beyond the Deny arm (G15).
+12. ~~Close the learning-loop capture decision; extend verdict emit beyond the Deny arm~~
+    **DONE** (G15): §3 confirmed hybrid (2026-07-04); the emit already captures all arms and
+    the collector exists. Remaining G15 is the downstream train/sim/release loop (WS-6).
 13. Model allow-list verification + accelerator watchdog in parko (G16).
 
 **3–6 months (certification leg):**

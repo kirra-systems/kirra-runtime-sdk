@@ -23,6 +23,20 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
 
 ### Added
 
+- **Learning-loop capture — hybrid capture point confirmed (G15, WS-2).** The
+  `LEARNING_LOOP_ARCHITECTURE.md` §3 capture-location decision is **confirmed as
+  hybrid (3)**: the certified checker emits a small, fixed-shape, fire-and-forget
+  verdict record on a non-safety side channel, and an isolated Linux collector
+  joins it offline into the corrective-supervision triple. This is the shape the
+  repo already implements — the emit is live at both seams (fast-loop command
+  gateway, slow-loop trajectory), captures **every** verdict arm (Allow/Clamp/Deny,
+  to avoid selection bias), is **default-OFF** behind `KIRRA_CAPTURE_ENABLED`,
+  wait-free (`try_send`, drop-on-full), and keeps the verdict path byte-identical.
+  The `CAPTURE_PIPELINE_SPEC §6` sub-decisions (sink=JSONL files, correlation
+  key=`(source, decision_seq)`, doer-stamped model version, Parquet+bulk-ref
+  dataset, stratified pass-sampling) are all bound by `COLLECTOR_DESIGN.md` D1–D6,
+  and the offline `kirra-collector` exists. Remaining G15 is the downstream
+  train / sim-validation / human-gated-release loop (WS-6).
 - **Config schema versioning + effective-config digest (G18, WS-2).** The
   industrial Modbus gateway's `KirraRuntimeConfig` (`src/config.rs`,
   `config/asset_profile.json`) now carries a `config_version` (default
