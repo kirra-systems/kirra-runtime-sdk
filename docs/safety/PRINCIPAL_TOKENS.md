@@ -117,8 +117,11 @@ The extension is **purely additive** and **cannot fail open**:
    finer follow-up.
 3. **TPM-bind the governor release-token signing key** (`tpm.rs` exists at the
    fleet layer) — remove the in-process signing key.
-4. **TLS / mTLS on the verifier** — the bind is currently plaintext with
-   header-based identity.
+4. **TLS / mTLS on the verifier.** The **mesh-enforcement** option (fail-closed
+   `KIRRA_REQUIRE_SECURE_TRANSPORT` gate) is LIVE — see
+   `docs/safety/TRANSPORT_SECURITY.md`. **In-process TLS termination** on the
+   verifier and **mTLS client-certificate identity** (mapping a client cert to a
+   principal + role) remain tracked there.
 
 ## 5. Test traceability
 

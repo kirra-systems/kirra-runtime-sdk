@@ -19,7 +19,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
 use kirra_verifier::verifier::{
-    validate_client_identity_headers, AppState, BackupExport, FlapStatus,
+    request_transport_is_secure, validate_client_identity_headers, AppState, BackupExport, FlapStatus,
     FleetPosture, HealthResponse, NodeTrustState, PostureStreamEvent, RegisteredNode, VerifierOperationMode,
 };
 use kirra_verifier::verifier_store::{DurableWriteError, VerifierStore};
@@ -266,6 +266,32 @@ async fn require_client_identity(
         request.headers(),
     ) {
         return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
+/// #G7 — fail-closed transport-security gate. When `KIRRA_REQUIRE_SECURE_TRANSPORT`
+/// is on, a request that the trusted proxy/mesh does not assert arrived over TLS
+/// (via the forwarded-proto header) is rejected with 403 BEFORE authentication —
+/// a bearer token or attestation nonce must never be processed off a plaintext leg.
+/// When off, this is a no-op (byte-identical to before). Layered OUTERMOST on the
+/// sensitive route groups (admin, actuator, identity-gated).
+async fn require_secure_transport(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let cfg = &svc.app.transport_security;
+    if !request_transport_is_secure(
+        cfg.require_secure_transport,
+        &cfg.forwarded_proto_header,
+        request.headers(),
+    ) {
+        tracing::warn!(
+            path = request.uri().path(),
+            "transport-security deny (#G7): request not asserted over TLS (KIRRA_REQUIRE_SECURE_TRANSPORT)"
+        );
+        return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
 }
@@ -1645,7 +1671,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
@@ -1677,7 +1706,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // only: NOT the actuator (high-rate control) nor the self-auditing
         // identity-gated evaluations.
         .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let actuator_routes = Router::new()
         .route("/actuator/motion/command", post(handle_actuator_motion_command))
@@ -1685,7 +1717,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
-        .layer(middleware::from_fn(require_admin_token));
+        .layer(middleware::from_fn(require_admin_token))
+        // #G7 — OUTERMOST: reject an insecure-transport request before auth even
+        // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let attestation_routes = Router::new()
         .route("/attestation/challenge/{node_id}", post(issue_challenge))

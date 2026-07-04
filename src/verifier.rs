@@ -184,6 +184,65 @@ pub fn validate_client_identity_headers(
     !client_id.trim().is_empty()
 }
 
+/// Controls the `require_secure_transport` middleware (#G7 — the mesh-mTLS option
+/// of "TLS on the verifier OR mandated mesh with enforcement check"). In the
+/// standard mesh deployment the verifier binds plaintext over loopback to a trusted
+/// sidecar that performs (m)TLS with peers; the sidecar asserts the client leg was
+/// TLS via a forwarded-proto header. When `require_secure_transport` is on, a
+/// request that does NOT carry that assertion is rejected (fail-closed).
+///
+/// **AOU-TRANSPORT-TLS-001:** the trusted proxy/mesh MUST set — overwriting any
+/// client-supplied value — the forwarded-proto header. A directly-reachable
+/// (un-proxied) verifier would let a client spoof it, so this enforcement is only
+/// sound behind a trusted proxy (the same assumption that backs
+/// `KIRRA_TRUSTED_INGRESS_MODE` / `x-kirra-client-id`). In-process TLS termination
+/// on the verifier itself is the alternative (tracked separately).
+#[derive(Debug, Clone)]
+pub struct TransportSecurityConfig {
+    pub require_secure_transport: bool,
+    pub forwarded_proto_header: String,
+}
+
+impl TransportSecurityConfig {
+    pub fn from_env() -> Self {
+        Self {
+            require_secure_transport: std::env::var("KIRRA_REQUIRE_SECURE_TRANSPORT")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            forwarded_proto_header: std::env::var("KIRRA_FORWARDED_PROTO_HEADER")
+                .unwrap_or_else(|_| "x-forwarded-proto".to_string()),
+        }
+    }
+}
+
+/// Pure boundary check — fail-closed. When `require_secure_transport` is OFF,
+/// admit (backward-compatible, byte-identical to before). When ON, admit ONLY if
+/// the forwarded-proto header is present, readable, and its ORIGINAL-client value
+/// (the FIRST entry of a possibly comma-listed `client,proxy,…` chain — the
+/// standard `X-Forwarded-Proto` semantics) is `https` (case-insensitive). An
+/// absent header, an unreadable value, or a non-`https` client protocol is rejected.
+pub fn request_transport_is_secure(
+    require_secure_transport: bool,
+    forwarded_proto_header: &str,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    if !require_secure_transport {
+        return true;
+    }
+    let Some(value) = headers.get(forwarded_proto_header) else {
+        return false;
+    };
+    let Ok(proto) = value.to_str() else {
+        return false;
+    };
+    // `X-Forwarded-Proto: <client>,<proxy1>,…` — the leftmost is the protocol the
+    // ORIGINAL client used, which is what "did the client connect over TLS" asks.
+    match proto.split(',').next() {
+        Some(first) => first.trim().eq_ignore_ascii_case("https"),
+        None => false,
+    }
+}
+
 /// In-memory streak counter for RSS recovery hysteresis.
 /// Tracks consecutive safe RSS reports and the streak start timestamp.
 pub struct RssRecoveryStreak {
@@ -250,6 +309,10 @@ pub struct AppState {
     pub posture_tx: broadcast::Sender<PostureStreamEvent>,
     /// Transport identity enforcement config — reads from env at startup.
     pub transport_identity: TransportIdentityConfig,
+    /// Transport SECURITY (TLS-required) enforcement config (#G7) — reads from env
+    /// at startup. When enabled, the `require_secure_transport` middleware
+    /// fail-closes a request not asserted to have arrived over TLS.
+    pub transport_security: TransportSecurityConfig,
     /// True while an RSS safe-distance violation is active (recalculate elevates to Degraded).
     pub rss_active_violation: Arc<AtomicBool>,
     /// #99 — true while flood conditions are present. Read by the posture engine
@@ -361,6 +424,7 @@ impl AppState {
             capture_decision_seq: Arc::new(AtomicU64::new(0)),
             posture_tx,
             transport_identity: TransportIdentityConfig::from_env(),
+            transport_security: TransportSecurityConfig::from_env(),
             rss_active_violation: Arc::new(AtomicBool::new(false)),
             flood_condition_active: Arc::new(AtomicBool::new(false)),
             supervisor_tripped: Arc::new(AtomicBool::new(false)),
@@ -761,6 +825,55 @@ mod transport_identity_tests {
         headers.insert("x-custom-identity", HeaderValue::from_static("fleet-controller"));
         assert!(validate_client_identity_headers(true, "x-custom-identity", &headers));
         assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
+    }
+}
+
+#[cfg(test)]
+mod transport_security_tests {
+    use super::request_transport_is_secure;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn with_proto(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn disabled_admits_everything_backward_compatible() {
+        // require off → admit regardless of header (byte-identical to before).
+        assert!(request_transport_is_secure(false, "x-forwarded-proto", &HeaderMap::new()));
+        assert!(request_transport_is_secure(false, "x-forwarded-proto", &with_proto("http")));
+    }
+
+    #[test]
+    fn enabled_requires_https_assertion() {
+        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("https")));
+        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("HTTPS")), "case-insensitive");
+        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto(" https ")), "trimmed");
+    }
+
+    #[test]
+    fn enabled_rejects_insecure_or_absent_fail_closed() {
+        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &HeaderMap::new()), "absent header → deny");
+        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http")), "plaintext → deny");
+        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("")), "empty → deny");
+    }
+
+    #[test]
+    fn enabled_uses_original_client_protocol_from_a_proxy_chain() {
+        // X-Forwarded-Proto lists client,proxy,...: the FIRST (client) leg governs.
+        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("https, http")));
+        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http, https")),
+            "a plaintext ORIGINAL client leg must deny even if a later hop is https");
+    }
+
+    #[test]
+    fn custom_header_name_is_respected() {
+        let mut h = HeaderMap::new();
+        h.insert("x-mesh-proto", HeaderValue::from_static("https"));
+        assert!(request_transport_is_secure(true, "x-mesh-proto", &h));
+        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &h), "wrong header name → deny");
     }
 }
 
