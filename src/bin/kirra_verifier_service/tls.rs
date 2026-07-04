@@ -20,6 +20,16 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
+/// Max time a single client may take to complete the TLS handshake before its
+/// connection task is dropped — bounds a slow/never-completing handshake
+/// (slowloris-style resource exhaustion) so it cannot pin a task indefinitely.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// On shutdown, in-flight connection tasks are awaited for at most this long before
+/// any stragglers are aborted — a bounded graceful drain (mirrors the plaintext
+/// path's `with_graceful_shutdown`, which also drains then stops).
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// PEM certificate-chain path. Set together with [`ENV_TLS_KEY_PATH`] to enable TLS.
 pub const ENV_TLS_CERT_PATH: &str = "KIRRA_TLS_CERT_PATH";
 /// PEM private-key path. Set together with [`ENV_TLS_CERT_PATH`] to enable TLS.
@@ -113,8 +123,14 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
 ///
 /// Each accepted TCP connection is moved to its OWN task before the TLS handshake,
 /// so a slow/stalled handshake cannot head-of-line-block the accept loop (a DoS
-/// concern for a safety service). `shutdown` stops the accept loop; in-flight
-/// connections drain on their own tasks.
+/// concern for a safety service); the handshake itself is bounded by
+/// [`HANDSHAKE_TIMEOUT`] so a client that never completes it cannot pin a task.
+///
+/// Connection tasks are tracked in a [`JoinSet`](tokio::task::JoinSet). When
+/// `shutdown` fires the accept loop stops and in-flight connections are drained for
+/// up to [`DRAIN_GRACE`]; any still-running past that are aborted (bounded
+/// shutdown) — the same drain-then-stop shape as the plaintext path's
+/// `with_graceful_shutdown`.
 pub async fn serve_tls(
     listener: TcpListener,
     app: axum::Router,
@@ -127,10 +143,14 @@ pub async fn serve_tls(
 
     let acceptor = TlsAcceptor::from(config);
     tokio::pin!(shutdown);
+    let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
+            // Reap finished connection tasks so the set does not grow unbounded over
+            // a long uptime. Disabled while empty so it never busy-loops on `None`.
+            Some(_) = conns.join_next(), if !conns.is_empty() => {},
             accepted = listener.accept() => {
                 let (stream, _peer) = match accepted {
                     Ok(pair) => pair,
@@ -139,12 +159,15 @@ pub async fn serve_tls(
                 };
                 let acceptor = acceptor.clone();
                 let app = app.clone();
-                tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(stream).await {
-                        Ok(s) => s,
+                conns.spawn(async move {
+                    // Bound the handshake — a client that connects and stalls (or never
+                    // speaks TLS) is dropped after HANDSHAKE_TIMEOUT, not held forever.
+                    let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                        Ok(Ok(s)) => s,
                         // A failed handshake (bad client, scan, plaintext probe) drops
                         // this connection only.
-                        Err(e) => { tracing::debug!(error = %e, "tls: handshake failed"); return; }
+                        Ok(Err(e)) => { tracing::debug!(error = %e, "tls: handshake failed"); return; }
+                        Err(_) => { tracing::debug!("tls: handshake timed out"); return; }
                     };
                     let io = TokioIo::new(tls_stream);
                     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
@@ -160,6 +183,15 @@ pub async fn serve_tls(
             }
         }
     }
+
+    // Graceful, BOUNDED drain: stop accepting (drop the listener) and await in-flight
+    // connection tasks up to DRAIN_GRACE. Dropping `conns` afterward aborts any that
+    // outlast the grace window, so shutdown always terminates.
+    drop(listener);
+    let _ = tokio::time::timeout(DRAIN_GRACE, async {
+        while conns.join_next().await.is_some() {}
+    })
+    .await;
     Ok(())
 }
 
@@ -279,7 +311,11 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         assert_eq!(resp.text().await.unwrap(), "ok");
 
+        // Signal shutdown (breaks the accept loop), then abort rather than await:
+        // reqwest keeps the connection pooled, so awaiting would block the full
+        // DRAIN_GRACE for the idle keep-alive conn. The handshake + round-trip above
+        // is what this test asserts.
         let _ = tx.send(());
-        let _ = server.await;
+        server.abort();
     }
 }
