@@ -16,25 +16,53 @@ CLAUDE.md "Route Authorization Matrix".
 `constant_time_compare` (never `==`). The check is the pure predicate
 `security::admin_token_ok`, unit-tested in `src/security.rs` mod `sg_015_admin_token_tests`.
 
+> **WS-1 (#G7) update — scoped RBAC layered on top, admin root preserved.** The
+> gate is now the unified `authorize_scope` predicate (`src/authz.rs`,
+> `authorize_request`). `require_admin_token` is PRESERVED by name and role as the
+> `SCOPE_ADMIN` specialization (INVARIANT #1/#6 verbatim: absent/empty root →
+> 503; the admin token is compared constant-time). It is only ever a STRICT
+> SUPERSET: a per-principal API token (`api_principals` table; role ∈
+> {`admin`,`integrator`,`auditor`,`operator`}) may ADDITIONALLY authorize a route
+> whose scope its role holds. Absent/empty `KIRRA_ADMIN_TOKEN` still fail-closes
+> the WHOLE surface to 503 regardless of principals — principals never substitute
+> for the root. Decision truth-table: `authz::tests`; store↔authz composition:
+> `tests/authz_rbac.rs`; router wiring fail-closed: `posture_gate_real_router_tests
+> ::ws1_scope_gated_routes_fail_closed_on_real_router`.
+
 ### Gated mutation routes
 
-Each of the following route groups applies `middleware::from_fn(require_admin_token)`
-(verified on `cert/rtm-gap-closure`, `src/bin/kirra_verifier_service.rs`):
+Each route group terminates in a scope layer (WS-1: `middleware::from_fn_with_state
+(svc, require_<scope>)`; the admin group keeps `require_admin_token`). Every scope
+is satisfied by the break-glass admin token (Admin holds all scopes), so an
+admin-token-only deployment is unchanged:
 
-- **identity/industrial group** (`identity_gated_routes`, layered at the `.layer(...require_admin_token)`
-  after the route list; additionally gated by `require_client_identity`):
+- **identity/industrial group** (`identity_gated_routes`, `SCOPE_INTEGRATION_EVALUATE`
+  via `require_integration_scope`; additionally gated by `require_client_identity`):
   `/federation/reports/submit`, `/action_filter/evaluate`, `/industrial/evaluate`,
   `/industrial/ethernet-ip/evaluate`, `/industrial/canopen/evaluate`,
-  `/industrial/dnp3/evaluate` (and the `/system/posture/stream` SSE).
-- **admin group** (`admin_routes`): `/attestation/register`, `/fleet/dependencies`,
-  `/fleet/diagnostics/report`, `/fleet/assets/register`, `/system/backup/export`,
+  `/industrial/dnp3/evaluate` (and the `/system/posture/stream` SSE). Admin token or
+  an `integrator`-role principal.
+- **admin group** (`admin_routes`, `SCOPE_ADMIN` via `require_admin_token`):
+  `/attestation/register`, `/fleet/dependencies`, `/fleet/diagnostics/report`,
+  `/fleet/assets/register`, `/system/backup/export`,
   `/system/audit/rotate-signing-key`, `/federation/controllers/register`,
   `/attestation/identity/register`, `/fabric/assets/register`,
-  `/fabric/command/{asset_id}`. (The same layer additionally gates the admin GET
-  reads — `/system/audit/verify`, `/system/audit/export`, `/fabric/assets`,
-  `/fabric/state`, `/fabric/telemetry[/{asset_id}]`, `/fabric/causal-log[/{entry_id}]`
-  — so they are admin-only too, beyond the mutation set this claim is about.)
-- **actuator group** (`actuator_routes`): `/actuator/motion/command`.
+  `/fabric/command/{asset_id}`, and the WS-1 API-principal registry
+  (`POST/GET /system/principals`, `POST /system/principals/{principal_id}/revoke`).
+  (The same layer additionally gates the admin GET reads — `/fabric/assets`,
+  `/fabric/state`, `/fabric/telemetry[/{asset_id}]`, `/fabric/causal-log[/{entry_id}]`,
+  `/fleet/av-subsystems` — so they are admin-only too.) Admin token or an
+  `admin`-role principal.
+- **auditor group** (`auditor_routes`, `SCOPE_AUDIT_READ` via `require_audit_scope`) —
+  WS-1 carve-out of the read-only audit surface for a least-privilege auditor:
+  `/system/audit/verify`, `/system/audit/causal/verify`, `/system/audit/export`.
+  Admin token or an `auditor`-role principal (NO mutation rights). The full-state
+  `/system/backup/export` dump and the `rotate-signing-key` mutation deliberately
+  stay in the admin group.
+- **actuator group** (`actuator_routes`, `SCOPE_ACTUATOR_COMMAND` via
+  `require_actuator_scope`; auth outermost, then the inner safety envelope):
+  `/actuator/motion/command`. Admin token or an `operator`-role principal — the
+  envelope and the posture gate independently bound WHAT command is accepted.
 
 ### Deliberate carve-out — the attestation handshake (NOT a bypass)
 
@@ -74,12 +102,15 @@ handlers, this carve-out must be re-evaluated.**
 ### Verification (this branch)
 
 Router wiring confirmed in `src/bin/kirra_verifier_service.rs`: `identity_gated_routes`,
-`admin_routes`, and `actuator_routes` each terminate in
-`.layer(middleware::from_fn(require_admin_token))`; `attestation_routes` (the two handshake
-POSTs) is constructed and merged with **no** such layer. The gate predicate
-`security::admin_token_ok` uses `constant_time_compare` (never `==`) and is unit-tested in
-`src/security.rs` mod `sg_015_admin_token_tests` (absent/empty configured → deny;
-absent/mismatched provided → deny; exact token → allow).
+`admin_routes`, `auditor_routes`, and `actuator_routes` each terminate in a
+`.layer(middleware::from_fn_with_state(svc, require_<scope>))` scope layer (the admin
+group's is `require_admin_token`, the `SCOPE_ADMIN` specialization); `attestation_routes`
+(the two handshake POSTs) is constructed and merged with **no** such layer. The root
+predicate `security::admin_token_ok` still uses `constant_time_compare` (never `==`) and is
+unit-tested in `src/security.rs` mod `sg_015_admin_token_tests`; the RBAC layer above it is
+the pure `authz::authorize_request` (`src/authz.rs`), unit-tested in `authz::tests` and
+composed against a real store in `tests/authz_rbac.rs`. Per-principal tokens are stored ONLY
+as their SHA-256 (`api_principals.token_sha256`, UNIQUE), resolved by hash — never plaintext.
 
 ---
 

@@ -92,8 +92,12 @@ fn is_write_state_path(path: &str) -> bool {
         return true;
     }
     // Path-parameterised control-plane writes (prefix is fixed; the trailing
-    // segment is the {node_id} / {asset_id} parameter).
-    if path.starts_with("/attestation/challenge/") || path.starts_with("/fabric/command/") {
+    // segment is the {node_id} / {asset_id} / {principal_id} parameter).
+    if path.starts_with("/attestation/challenge/")
+        || path.starts_with("/fabric/command/")
+        // WS-1 (#G7) — `/system/principals/{principal_id}/revoke`.
+        || path.starts_with("/system/principals/")
+    {
         return true;
     }
     // Exact control-plane state-write endpoints.
@@ -115,6 +119,9 @@ fn is_write_state_path(path: &str) -> bool {
             | "/industrial/ethernet-ip/evaluate"
             | "/system/backup/export"
             | "/system/audit/rotate-signing-key"
+            // WS-1 (#G7) — mint an API principal (POST). The parameterised revoke
+            // is matched by the `/system/principals/` prefix above.
+            | "/system/principals"
     )
 }
 
@@ -180,6 +187,20 @@ mod tests {
             classify_http_command("POST", "/actuator/servo"),
             OperationalCommand::WriteState
         );
+    }
+
+    #[test]
+    fn test_classifies_api_principal_writes() {
+        // WS-1 (#G7): the principal mint (exact) and the parameterised revoke must
+        // classify as WriteState — NOT Unknown (which the outer posture gate denies
+        // in every posture, incl. Nominal — that would brick the routes).
+        assert_eq!(classify_http_command("POST", "/system/principals"), OperationalCommand::WriteState);
+        assert_eq!(
+            classify_http_command("POST", "/system/principals/svc-a/revoke"),
+            OperationalCommand::WriteState
+        );
+        // The GET list is a read.
+        assert_eq!(classify_http_command("GET", "/system/principals"), OperationalCommand::ReadTelemetry);
     }
 
     #[test]

@@ -62,6 +62,28 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
     `parko/Cargo.lock` is now committed.
   - WS-0.7 — this changelog, the versioning/MSRV/deprecation policy, and
     the fail-instead-of-fallback release-notes rule.
+- **WS-1 (#G7) — per-principal API tokens & scoped RBAC (first PR).** A new
+  `api_principals` registry (`POST/GET /system/principals`,
+  `POST /system/principals/{id}/revoke`, admin-scoped) mints least-privilege
+  bearer tokens across four roles (`admin` / `integrator` / `auditor` /
+  `operator`). The gated route groups now terminate in a scope layer
+  (`src/authz.rs`, `authorize_request`): the identity/integration surface,
+  the actuator command, and a NEW read-only `auditor_routes` carve-out
+  (audit verify / causal-verify / export) each admit their scoped role in
+  addition to the admin token. Tokens are stored ONLY as their SHA-256 (looked
+  up by hash, never plaintext); the plaintext is shown once at mint.
+  `KIRRA_ADMIN_TOKEN` is RETAINED as the break-glass superuser and its
+  fail-closed 503-when-absent root gate is unchanged (INVARIANT #1/#6), so an
+  admin-token-only deployment is byte-compatible. (TPM-bound signing-key
+  rotation and in-process TLS termination are the follow-up WS-1 PRs.)
+  **Unification note:** this DB-backed system SUPERSEDES the short-lived
+  env-configured registry (`KIRRA_PRINCIPAL_TOKENS`, #802/#803), which is
+  **removed** — one token system, one RBAC model. Migrate an env-registry
+  entry by minting a principal (`POST /system/principals`); `readonly` maps
+  to the `auditor` role. The #804 admin-action attribution middleware and
+  the #805 `KIRRA_REQUIRE_SECURE_TRANSPORT` transport-security gate carry
+  over unchanged and compose with the scope layers (transport gate
+  outermost; attribution names the resolved API principal or `root`).
 
 ### Changed
 

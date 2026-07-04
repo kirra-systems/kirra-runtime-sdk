@@ -1,99 +1,199 @@
-//! Auth middleware — extracted from the bin entry point to keep it lean (the #721
-//! `startup.rs` pattern), reclaiming quality-guardrail headroom. Holds the
-//! fail-closed admin auth + RBAC, the transport-identity and transport-security
-//! gates, and the admin-action audit-attribution middleware. `use super::*`
-//! inherits the bin's shared imports / DTOs (descendant-module visibility),
-//! exactly like the route-handler submodules.
+//! Auth middleware — the CRITICAL auth path, extracted from the bin entry point
+//! (the #721 `startup.rs` pattern). `use super::*` inherits the bin's shared
+//! imports / DTOs (descendant-module visibility), exactly like the route-handler
+//! submodules.
 //!
-//! SAFETY: this is the CRITICAL auth path — CRITICAL INVARIANTS #1/#2/#6/#13 are
-//! enforced here. The extraction is behaviour-preserving (byte-identical to the
-//! pre-extraction code); the G7 tests below moved with the functions and are the
-//! regression net.
+//! **Unified WS-1 (#G7) model.** One fail-closed authorization engine
+//! (`kirra_verifier::authz`) gates every protected route group by SCOPE:
+//! `SCOPE_ADMIN` / `SCOPE_INTEGRATION_EVALUATE` / `SCOPE_ACTUATOR_COMMAND` /
+//! `SCOPE_AUDIT_READ`, resolved from EITHER the break-glass root
+//! `KIRRA_ADMIN_TOKEN` (all scopes; constant-time; absent/empty → 503 —
+//! INVARIANTS #1/#2/#6 verbatim) OR a DB-backed API principal (token stored as
+//! SHA-256 hash only, minted/revoked via the admin-scoped `/system/principals`
+//! endpoints). The pure decision predicate (`authz::authorize_request`) reads no
+//! env and no store (INVARIANT #13), so the truth table is unit-tested without
+//! `set_var`; this module is the thin composition layer that lifts env + store in.
+//!
+//! Composed around it, unchanged from their prior slices:
+//! - [`require_secure_transport`] — the #G7 transport-security gate, OUTERMOST on
+//!   every gated group (a credential is never processed off a plaintext leg).
+//! - [`require_client_identity`] — the trusted-ingress header gate.
+//! - [`record_admin_action_audit`] — #G7 slice-3 attribution: a successful admin
+//!   mutation is recorded in the signed audit chain, naming the principal.
 use super::*;
 
-/// Process-wide per-principal admin token registry (#G7), loaded once from
-/// `KIRRA_PRINCIPAL_TOKENS`. Lazy `OnceLock` (env is fixed at process start);
-/// malformed entries are dropped by the parser, so a bad config degrades to
-/// fewer principals, never a fail-open.
-fn principal_registry() -> &'static PrincipalRegistry {
-    static REGISTRY: std::sync::OnceLock<PrincipalRegistry> = std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        let reg = PrincipalRegistry::from_env();
-        if !reg.is_empty() {
-            tracing::info!(principal_tokens = reg.len(), "loaded per-principal admin tokens (#G7)");
-        }
-        reg
-    })
+/// The authenticated identity attached to the request extensions on Allow, for
+/// downstream audit attribution (#G7 slice 3). `label` is `"root"` for the
+/// break-glass admin token, else the API principal id — never the token.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthenticatedPrincipal {
+    pub label: String,
+    pub role: ApiRole,
 }
 
-pub(crate) async fn require_admin_token(mut request: Request, next: Next) -> Result<Response, StatusCode> {
-    let expected = std::env::var("KIRRA_ADMIN_TOKEN")
-        .unwrap_or_default();
+/// INVARIANT #1/#6 — the admin mutation gate, PRESERVED by name and role. WS-1
+/// (#G7) implements it as the `SCOPE_ADMIN` specialization of the unified
+/// [`authorize_scope`] gate: the break-glass `KIRRA_ADMIN_TOKEN` still authorizes
+/// under `constant_time_compare` and an absent/empty token is still a fail-closed
+/// 503 — it is only ever a STRICT SUPERSET (an `admin`-role API principal
+/// additionally qualifies; only that role holds `SCOPE_ADMIN`). NEVER commented
+/// out, bypassed, or removed from any mutation route.
+pub(crate) async fn require_admin_token(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_ADMIN, request, next).await
+}
 
-    // Fail-closed: absent or empty admin token → 503 (CRITICAL INVARIANT #1/#6).
-    // Kept distinct from the 401 below so an unconfigured server is never
-    // mistaken for a bad credential. This gate stays FIRST, so a per-principal
-    // token can never authorize without a configured root token (no fail-open).
-    if expected.is_empty() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+/// WS-1 (#G7) — the identity-gated integration surface (`SCOPE_INTEGRATION_EVALUATE`).
+/// Admin token or an `integrator`-role principal qualifies.
+pub(crate) async fn require_integration_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_INTEGRATION_EVALUATE, request, next).await
+}
 
-    // Own the token before the mutable borrow below (attaching the principal to
-    // the request extensions). The extra allocation on the admin path is trivial.
-    let provided = request
+/// WS-1 (#G7) — actuator command submission (`SCOPE_ACTUATOR_COMMAND`). Admin token
+/// or an `operator`-role principal qualifies (the inner safety envelope + the outer
+/// posture gate independently bound WHAT command is accepted).
+pub(crate) async fn require_actuator_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_ACTUATOR_COMMAND, request, next).await
+}
+
+/// WS-1 (#G7) — read-only audit-chain verification/export (`SCOPE_AUDIT_READ`).
+/// Admin token or an `auditor`-role principal qualifies.
+pub(crate) async fn require_audit_scope(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    authorize_scope(&svc, SCOPE_AUDIT_READ, request, next).await
+}
+
+/// The unified fail-closed authorization gate (WS-1 · #G7). Resolves the bearer to
+/// EITHER the break-glass root admin token OR a scoped API principal (by token
+/// hash), then delegates the verdict to the pure [`authorize_request`] predicate.
+///
+/// Store/env are lifted out of the predicate (INVARIANT #13-friendly): this thin
+/// wrapper reads `KIRRA_ADMIN_TOKEN`, does the hashed principal lookup ONLY when
+/// needed (admin configured, a non-admin bearer present), and fail-closes to
+/// "no principal" (→ 401) on any store error — never an authorized default.
+///
+/// On Allow the resolved identity is attached to the request extensions as
+/// [`AuthenticatedPrincipal`] so [`record_admin_action_audit`] (layered inner on
+/// the admin state-mutation routes) can attribute the mutation in the signed
+/// audit chain.
+///
+/// Auditing of DECISIONS: observed via structured `tracing` (denials warn;
+/// api-principal allows info; admin-token allows debug). Denials are NOT written
+/// to the tamper-evident audit chain here — an unauthenticated caller must not be
+/// able to append unboundedly (denial-flood DoS); privileged MUTATIONS are chained
+/// by `record_admin_action_audit` after they succeed.
+async fn authorize_scope(
+    svc: &Arc<ServiceState>,
+    required_scope: &'static str,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let admin_env = std::env::var("KIRRA_ADMIN_TOKEN").unwrap_or_default();
+    let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .map(str::to_owned)
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map(str::to_string);
 
-    // Fail-closed authorization (#G7): the root KIRRA_ADMIN_TOKEN (constant-time,
-    // SG-015) OR a registered per-principal token. `expected` is non-empty here,
-    // so `authorize_admin` reduces to the prior admin_token_ok decision plus the
-    // additive principal-registry lookup; a `None` denies (401). The resolved
-    // principal is attached to the request extensions for audit attribution.
-    match authorize_admin(Some(&provided), Some(&expected), principal_registry()) {
-        Some(principal) => {
-            // RBAC (#G7 slice 2): a scoped principal (e.g. `readonly`) may only
-            // issue nullipotent requests. The pure `admin_rbac_allows` decision
-            // (unit-tested) denies any mutating method (not GET/HEAD/OPTIONS) for a
-            // role without mutation rights — a read-only token is thus 403'd on
-            // every POST admin route AND the actuator, from this one middleware.
-            // The root token and `admin`-role principals are unrestricted.
-            if !admin_rbac_allows(principal.role(), request.method().as_str()) {
-                tracing::warn!(
-                    principal = principal.label(),
-                    role = principal.role().label(),
-                    method = request.method().as_str(),
-                    path = request.uri().path(),
-                    "RBAC deny (#G7): scoped principal attempted a mutating request"
-                );
-                return Err(StatusCode::FORBIDDEN);
+    // Resolve a scoped principal ONLY when it could matter: admin configured, a
+    // bearer present, and it is NOT the root admin token (the admin token
+    // short-circuits to Admin in the predicate, so no store hit is needed).
+    let principal: Option<ResolvedPrincipal> = match (admin_env.is_empty(), bearer.as_deref()) {
+        (false, Some(tok)) if !admin_token_ok(Some(tok), Some(&admin_env)) => {
+            let hash = token_sha256_hex(tok);
+            match svc
+                .app
+                .store
+                .call_read(move |s| s.load_api_principal_by_token_hash(&hash))
+                .await
+            {
+                Ok(Ok(Some(rec))) => Some(ResolvedPrincipal {
+                    role: ApiRole::parse_role(&rec.role),
+                    revoked: rec.revoked_at_ms.is_some(),
+                    principal_id: rec.principal_id,
+                }),
+                // No such token, OR a store/read failure → fail-closed as "no
+                // principal" (the predicate then denies with 401).
+                _ => None,
             }
-            // Attribution (#G7): make the authenticated identity visible now (logs)
-            // and available to the attribution middleware / handlers via the request
-            // extension. The audit RECORDING happens in `record_admin_action_audit`,
-            // layered on the admin state-mutation routes only (see below).
-            tracing::debug!(
-                principal = principal.label(),
-                role = principal.role().label(),
-                "admin request authorized (#G7)"
-            );
-            request.extensions_mut().insert(principal);
+        }
+        _ => None,
+    };
+
+    let decision = authorize_request(
+        required_scope,
+        Some(admin_env.as_str()),
+        bearer.as_deref(),
+        principal.as_ref(),
+    );
+
+    let fp = bearer.as_deref().map(token_fingerprint);
+    match decision.outcome {
+        AuthzOutcome::Allow => {
+            if decision.auth_method == "api-principal" {
+                tracing::info!(
+                    scope = required_scope,
+                    principal_id = decision.principal_id.as_deref().unwrap_or("?"),
+                    role = decision.role.map(ApiRole::as_str).unwrap_or("?"),
+                    "authz allow (api-principal)"
+                );
+            } else {
+                tracing::debug!(scope = required_scope, "authz allow (admin-token)");
+            }
+            // Attribution (#G7 slice 3): record WHO was authorized so the
+            // attribution middleware / handlers can name the actor. Fail-safe
+            // defaults: the break-glass root is "root" with the Admin role.
+            let identity = AuthenticatedPrincipal {
+                label: decision.principal_id.unwrap_or_else(|| "root".to_string()),
+                role: decision.role.unwrap_or(ApiRole::Admin),
+            };
+            request.extensions_mut().insert(identity);
             Ok(next.run(request).await)
         }
-        None => Err(StatusCode::UNAUTHORIZED),
+        AuthzOutcome::Unconfigured => {
+            tracing::warn!(scope = required_scope,
+                "authz denied: KIRRA_ADMIN_TOKEN absent/empty → 503 (fail-closed)");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        AuthzOutcome::Unauthenticated => {
+            tracing::warn!(scope = required_scope, token_fp = fp.as_deref().unwrap_or("none"),
+                "authz denied: no/unknown/revoked credential → 401");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        AuthzOutcome::Forbidden => {
+            tracing::warn!(
+                scope = required_scope,
+                principal_id = decision.principal_id.as_deref().unwrap_or("?"),
+                role = decision.role.map(ApiRole::as_str).unwrap_or("?"),
+                "authz denied: principal lacks required scope → 403"
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
     }
 }
 
 /// #G7 slice 3 — admin-mutation attribution middleware. Layered ONLY on the admin
 /// **state-mutation** routes (register / backup / rotate-key / dependencies /
-/// operators / federation / fabric-command), INNER of `require_admin_token` (which
-/// authenticates and inserts the [`AdminPrincipal`] extension). After a SUCCESSFUL
-/// MUTATION it appends an `ADMIN_ACTION` event to the signed, hash-chained audit
-/// ledger, naming WHO did WHAT — the accountability the single shared token could
-/// never provide.
+/// operators / principals / federation / fabric-command), INNER of
+/// `require_admin_token` (which authenticates and inserts the
+/// [`AuthenticatedPrincipal`] extension). After a SUCCESSFUL MUTATION it appends
+/// an `ADMIN_ACTION` event to the signed, hash-chained audit ledger, naming WHO
+/// did WHAT — the accountability the single shared token could never provide.
 ///
 /// Deliberately NOT applied to the actuator route (a high-rate control path — a
 /// per-command signed audit row would be prohibitive) nor the identity-gated
@@ -108,12 +208,12 @@ pub(crate) async fn record_admin_action_audit(
     next: Next,
 ) -> Response {
     // Capture attribution facts before the request moves into `next.run`.
-    // `require_admin_token` (outer) always inserts the principal; fall back
+    // `require_admin_token` (outer) inserts the identity on Allow; fall back
     // defensively rather than panic if the extension is somehow absent.
     let (actor, role) = request
         .extensions()
-        .get::<AdminPrincipal>()
-        .map(|p| (p.label().to_owned(), p.role().label()))
+        .get::<AuthenticatedPrincipal>()
+        .map(|p| (p.label.clone(), p.role.as_str()))
         .unwrap_or_else(|| ("unknown".to_owned(), "unknown"));
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
@@ -179,7 +279,7 @@ pub(crate) async fn require_client_identity(
 /// (via the forwarded-proto header) is rejected with 403 BEFORE authentication —
 /// a bearer token or attestation nonce must never be processed off a plaintext leg.
 /// When off, this is a no-op (byte-identical to before). Layered OUTERMOST on the
-/// sensitive route groups (admin, actuator, identity-gated, attestation).
+/// sensitive route groups (admin, auditor, actuator, identity-gated, attestation).
 pub(crate) async fn require_secure_transport(
     State(svc): State<Arc<ServiceState>>,
     request: Request,
@@ -266,10 +366,10 @@ mod g7_transport_security_router_tests {
         })
     }
 
-    // A protected admin mutation route. With no auth header, `require_admin_token`
-    // returns 401/503 — never 403 — so a 403 can ONLY come from the (outer)
-    // transport-security gate. That is what makes 403-vs-not-403 an unambiguous
-    // ordering probe.
+    // A protected admin mutation route. With no auth header, the unified
+    // `authorize_scope` gate returns 401/503 — never 403 — so a 403 can ONLY come
+    // from the (outer) transport-security gate. That is what makes 403-vs-not-403
+    // an unambiguous ordering probe.
     async fn dependencies_post_status(svc: Arc<ServiceState>, proto: Option<&str>) -> StatusCode {
         let mut b = Request::builder().method("POST").uri("/fleet/dependencies");
         if let Some(p) = proto {
@@ -324,5 +424,22 @@ mod g7_transport_security_router_tests {
             .expect("router should not panic")
             .status();
         assert_eq!(status, StatusCode::FORBIDDEN, "attestation nonce flow must require secure transport");
+    }
+
+    /// The carved-out auditor read routes (WS-1) carry the same transport boundary.
+    #[tokio::test]
+    async fn auditor_routes_are_gated_by_secure_transport() {
+        let status = build_app(state_requiring_secure_transport(true))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/system/audit/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router should not panic")
+            .status();
+        assert_eq!(status, StatusCode::FORBIDDEN, "auditor routes must require secure transport");
     }
 }
