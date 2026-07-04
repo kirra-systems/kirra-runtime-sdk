@@ -56,8 +56,12 @@ registry — see the CHANGELOG Unification note.
 ### Track 2 — WS-2 P1 surface remainders (Stage 1, blocks Gate B)
 3. **G15 learning-loop capture** — §3 capture-point decision still OPEN in
    `LEARNING_LOOP_ARCHITECTURE.md`; verdict-emit machinery exists. Effort M.
-4. **G18 config governance** — `KirraRuntimeConfig` exists; no schema/versioning;
-   env sprawl remains. Effort M.
+4. **G18 config governance** — ✅ **first slice landed:** `KirraRuntimeConfig` now
+   has `config_version` + `CONFIG_SCHEMA_VERSION` (fail-closed on `0` / an unknown
+   future schema) and `effective_digest()` (SHA-256 fingerprint printed at boot,
+   `schema vN · sha256:…`). **Remaining:** absorbing the verifier-service env sprawl
+   (~66 `KIRRA_*` sites) into a typed/validated surface — deferred as broad + risky
+   (the `KIRRA_ADMIN_TOKEN` / reset-key env-only carve-outs must be preserved).
 5. **G20 SDK remainder** — ✅ **first slice landed:** a runnable Rust example
    (`governor_quickstart`) + a C example linking the cdylib over a now-documented
    `include/kirra.h`, a crate-level rustdoc landing page + documented FFI surface

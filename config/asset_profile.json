@@ -1,4 +1,5 @@
 {
+  "config_version": 1,
   "network": {
     "proxy_listen_port": 5502,
     "plc_target_port": 5503,
