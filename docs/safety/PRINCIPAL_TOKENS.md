@@ -54,18 +54,27 @@ command an actuator.
 
 ### Attribution audit (slice 3)
 
-After a **successful** admin **mutation** (a 2xx response on a non-safe method),
-`require_admin_token` appends an `ADMIN_ACTION` event to the **signed, hash-chained
-audit ledger** (`save_posture_event_chained` → `append_audit_event_tx`) with
-`{ principal, role, method, path }`. So the tamper-evident record names **who
-changed what, and when** — the accountability the single shared token could never
-provide.
+After a **successful** admin **mutation** (a 2xx response on a non-safe method), a
+dedicated `record_admin_action_audit` middleware appends an `ADMIN_ACTION` event to
+the **signed, hash-chained audit ledger** (`save_posture_event_chained` →
+`append_audit_event_tx`) with `{ principal, role, method, path }`. So the
+tamper-evident record names **who changed what, and when** — the accountability the
+single shared token could never provide.
 
+- **Scoped to the admin state-mutation routes only** (register / backup /
+  rotate-key / dependencies / operators / federation / fabric-command). The
+  attribution middleware is layered INNER of `require_admin_token` (which
+  authenticates and sets the `AdminPrincipal` extension). It is **deliberately NOT**
+  applied to the actuator route (a high-rate control path — a per-command signed
+  row would be prohibitive) nor the identity-gated evaluation routes (which already
+  self-audit).
 - Only successful mutations are recorded (`should_record_admin_action`): reads
   (`GET`) and failed requests (non-2xx) are not, so the ledger names who actually
   CHANGED state, not every authorized touch.
-- The write is **best-effort** and off the request's critical section: a failure
-  is logged and increments no request error — it never fails an already-completed
+- Because the only latency-sensitive path (the actuator) is excluded, the audit
+  write is **awaited** so the attribution is durably committed to the chain BEFORE
+  the (rare, sensitive) mutation is acknowledged — the stronger accountability
+  guarantee. A write failure is logged and never fails the already-completed
   mutation (mirrors the `action_filter` audit path).
 - The `ADMIN_ACTION` row is a distinct, correlated attribution row; embedding the
   actor into each domain event (the node-registration row itself) is a §4 refinement.

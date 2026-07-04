@@ -28,7 +28,7 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::security::{
-    admin_rbac_allows, authorize_admin, constant_time_compare, PrincipalRegistry,
+    admin_rbac_allows, authorize_admin, constant_time_compare, AdminPrincipal, PrincipalRegistry,
 };
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
@@ -117,11 +117,7 @@ fn principal_registry() -> &'static PrincipalRegistry {
     })
 }
 
-async fn require_admin_token(
-    State(svc): State<Arc<ServiceState>>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+async fn require_admin_token(mut request: Request, next: Next) -> Result<Response, StatusCode> {
     let expected = std::env::var("KIRRA_ADMIN_TOKEN")
         .unwrap_or_default();
 
@@ -167,53 +163,80 @@ async fn require_admin_token(
                 return Err(StatusCode::FORBIDDEN);
             }
             // Attribution (#G7): make the authenticated identity visible now (logs)
-            // and available to downstream handlers via the request extension.
-            let actor = principal.label().to_owned();
-            let role = principal.role().label(); // &'static str
-            tracing::debug!(principal = %actor, role, "admin request authorized (#G7)");
-            // Capture the request facts BEFORE the request moves into `next.run`.
-            let method = request.method().as_str().to_owned();
-            let path = request.uri().path().to_owned();
+            // and available to the attribution middleware / handlers via the request
+            // extension. The audit RECORDING happens in `record_admin_action_audit`,
+            // layered on the admin state-mutation routes only (see below).
+            tracing::debug!(
+                principal = principal.label(),
+                role = principal.role().label(),
+                "admin request authorized (#G7)"
+            );
             request.extensions_mut().insert(principal);
-
-            let response = next.run(request).await;
-
-            // Attribution audit (#G7 slice 3): a SUCCESSFUL admin MUTATION (a 2xx on
-            // a non-safe method) is recorded in the hash-chained, SIGNED audit ledger
-            // (`save_posture_event_chained` → `append_audit_event_tx`), naming WHO did
-            // WHAT — the tamper-evident record the single shared token could never
-            // attribute. Reads (GET) and failed requests are not recorded. Best-effort
-            // and off the request's critical section: a write failure is logged, never
-            // fails the already-completed mutation (mirrors the action_filter path).
-            if should_record_admin_action(&method, response.status()) {
-                let event = json!({
-                    "principal": actor,
-                    "role": role,
-                    "method": method,
-                    "path": path,
-                })
-                .to_string();
-                let now = now_ms();
-                let _ = svc
-                    .app
-                    .store
-                    .call(move |store| {
-                        if let Err(e) = store.save_posture_event_chained(
-                            "admin_action",
-                            "ADMIN_ACTION",
-                            &event,
-                            None,
-                            now,
-                        ) {
-                            tracing::warn!(error = %e, "failed to record admin-action attribution (#G7)");
-                        }
-                    })
-                    .await;
-            }
-            Ok(response)
+            Ok(next.run(request).await)
         }
         None => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+/// #G7 slice 3 — admin-mutation attribution middleware. Layered ONLY on the admin
+/// **state-mutation** routes (register / backup / rotate-key / dependencies /
+/// operators / federation / fabric-command), INNER of `require_admin_token` (which
+/// authenticates and inserts the [`AdminPrincipal`] extension). After a SUCCESSFUL
+/// MUTATION it appends an `ADMIN_ACTION` event to the signed, hash-chained audit
+/// ledger, naming WHO did WHAT — the accountability the single shared token could
+/// never provide.
+///
+/// Deliberately NOT applied to the actuator route (a high-rate control path — a
+/// per-command signed audit row would be prohibitive) nor the identity-gated
+/// evaluation routes (which already self-audit). Because the only latency-sensitive
+/// path is thus excluded, the audit write is AWAITED so the attribution is durably
+/// committed to the chain before the (rare, sensitive) mutation is acknowledged —
+/// the stronger accountability guarantee. A write failure is logged and never fails
+/// the already-completed mutation (mirrors the `action_filter` audit path).
+async fn record_admin_action_audit(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Capture attribution facts before the request moves into `next.run`.
+    // `require_admin_token` (outer) always inserts the principal; fall back
+    // defensively rather than panic if the extension is somehow absent.
+    let (actor, role) = request
+        .extensions()
+        .get::<AdminPrincipal>()
+        .map(|p| (p.label().to_owned(), p.role().label()))
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown"));
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+
+    let response = next.run(request).await;
+
+    if should_record_admin_action(&method, response.status()) {
+        let event = json!({
+            "principal": actor,
+            "role": role,
+            "method": method,
+            "path": path,
+        })
+        .to_string();
+        let now = now_ms();
+        let _ = svc
+            .app
+            .store
+            .call(move |store| {
+                if let Err(e) = store.save_posture_event_chained(
+                    "admin_action",
+                    "ADMIN_ACTION",
+                    &event,
+                    None,
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "failed to record admin-action attribution (#G7)");
+                }
+            })
+            .await;
+    }
+    response
 }
 
 /// Should a COMPLETED admin request be recorded as an attributed `ADMIN_ACTION`
@@ -1622,7 +1645,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token));
+        .layer(middleware::from_fn(require_admin_token));
 
     let admin_routes = Router::new()
         .route("/attestation/register", post(register_node))
@@ -1649,7 +1672,12 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fabric/command/{asset_id}", post(handle_fabric_command))
         .route("/fabric/causal-log", get(handle_fabric_causal_log))
         .route("/fabric/causal-log/{entry_id}", get(handle_fabric_causal_chain))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token));
+        // #G7 slice 3 — attribution runs INNER of require_admin_token (which sets
+        // the AdminPrincipal extension). Scoped to these admin state-mutation routes
+        // only: NOT the actuator (high-rate control) nor the self-auditing
+        // identity-gated evaluations.
+        .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
+        .layer(middleware::from_fn(require_admin_token));
 
     let actuator_routes = Router::new()
         .route("/actuator/motion/command", post(handle_actuator_motion_command))
@@ -1657,7 +1685,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
-        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token));
+        .layer(middleware::from_fn(require_admin_token));
 
     let attestation_routes = Router::new()
         .route("/attestation/challenge/{node_id}", post(issue_challenge))
