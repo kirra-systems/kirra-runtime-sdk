@@ -193,7 +193,7 @@ pub struct ClearanceGrantState {
 
 /// Why the in-transaction HA epoch fence rejected a top-tier durable write.
 ///
-/// Returned by [`VerifierStore::assert_epoch_held`], which re-reads the durable
+/// Returned by `VerifierStore::assert_epoch_held`, which re-reads the durable
 /// `ha_state.epoch` INSIDE the write transaction and compares it to the
 /// instance's in-memory `held_epoch`. Every variant is fail-closed: the
 /// enclosing transaction is dropped WITHOUT commit, so no partial write lands.

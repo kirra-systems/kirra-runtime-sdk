@@ -237,7 +237,7 @@ impl EnforcementOutcome {
 ///   LockedOut → immediate 403 FORBIDDEN     — fail-closed, no physics evaluation
 ///
 /// # Invariants
-/// - Uses State<Arc<ServiceState>> (invariant #11)
+/// - Uses `State<Arc<ServiceState>>` (invariant #11)
 /// - FleetPosture from crate::verifier
 /// - SharedPostureCache accessed via svc.posture_cache
 /// - LockedOut is always fail-closed

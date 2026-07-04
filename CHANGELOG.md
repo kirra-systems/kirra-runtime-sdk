@@ -23,6 +23,14 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
 
 ### Added
 
+- **SDK quickstart examples + rustdoc gate (G20, WS-2).** A runnable Rust example
+  (`examples/governor_quickstart.rs` — the checker bounding a doer's proposals,
+  fail-closed) and a C example (`examples/c/kirra_ffi_demo.c` + `build_and_run.sh`)
+  that links the `libkirra_verifier` cdylib over the now-documented `include/kirra.h`
+  ABI. Crate-level rustdoc landing page + documented FFI surface; the whole public
+  lib is rustdoc-clean under `-D warnings` (14 pre-existing broken intra-doc links /
+  unclosed-HTML doc tags fixed). New CI job **SDK docs + examples** gates the doc
+  build and builds+runs both examples so they never rot.
 - **Doer-checker planning & perception stack** — the swappable DOER
   (`kirra-planner`: geometric Occy, Mick intent seam incl. multi-junction
   `RouteTo`, learned Hydra-MDP-style planners) bounded by the CHECKER

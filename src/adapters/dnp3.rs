@@ -89,7 +89,7 @@ impl Dnp3Adapter {
     ///     fail-closed default),
     ///   - a value outside `[min, max]` → `Err(DNP3_ANALOG_OUTPUT_ENVELOPE_BREACH)`.
     ///
-    /// Only the control function codes (Select / Operate / Direct_Operate[_NR],
+    /// Only the control function codes (Select / Operate / `Direct_Operate[_NR]`,
     /// 0x03–0x06) carry a commanded setpoint; reads/responses are not bounded.
     /// A control with no g41 object (e.g. a CROB-only relay op) is `Ok` here —
     /// CROB is a relay control block, not a scalar magnitude.

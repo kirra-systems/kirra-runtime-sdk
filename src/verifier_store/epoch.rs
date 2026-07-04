@@ -49,7 +49,7 @@ impl VerifierStore {
     ///
     /// Unlike federation/key-rotation writes, the actuator command path does not
     /// naturally own a durable SQLite mutation whose transaction can carry
-    /// [`Self::assert_epoch_held`]. This helper creates a bounded
+    /// `Self::assert_epoch_held`. This helper creates a bounded
     /// `BEGIN IMMEDIATE` assertion transaction solely for the actuator authority
     /// check: while it is open, a competing epoch claim serializes behind it; if
     /// a competing claim already landed, the assertion observes the newer epoch

@@ -1,3 +1,14 @@
+//! # C ABI — the safety-governor integration boundary (ADR-0006 Clause 3)
+//!
+//! The stable C entry points declared in [`include/kirra.h`](https://github.com/kirra-systems/kirra-runtime-sdk/blob/main/include/kirra.h).
+//! A C/C++ integrator PROPOSES a scalar command; the governor BOUNDS it,
+//! fail-closed, against a hard kinematic envelope. All functions operate on one
+//! process-wide governor (`GLOBAL_GOVERNOR`) and are safe to call from any thread
+//! (an internal mutex serialises access); a poisoned lock fails closed to `0.0`.
+//!
+//! See `examples/c/kirra_ffi_demo.c` for a linked, runnable consumer, and the Rust
+//! `governor_quickstart` example for the equivalent in-process path.
+
 use std::sync::{Mutex, LazyLock};
 use crate::kirra_core::{KirraKernelGovernor, RuntimeTrustEngine};
 use crate::kinematics_contract::KinematicContract;
@@ -11,11 +22,20 @@ static GLOBAL_GOVERNOR: LazyLock<Mutex<KirraKernelGovernor<KinematicContract>>> 
     Mutex::new(KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0))
 });
 
+/// Bound a proposed LINEAR velocity (m/s) against the governor's envelope and
+/// rate-of-change limits, over a timestep `dt` (seconds). Returns the sanitized
+/// scalar to send to the actuator — ALWAYS finite and inside the envelope. A
+/// non-finite proposal, a non-positive `dt`, or a poisoned lock fails closed to the
+/// contract fallback (`0.0`).
 #[no_mangle]
 pub extern "C" fn kirra_filter_move_velocity(proposed_velocity: f64, dt: f64) -> f64 {
     GLOBAL_GOVERNOR.lock().map(|mut g| g.evaluate(proposed_velocity, dt).sanitized_scalar).unwrap_or(0.0)
 }
 
+/// Bound a proposed ANGULAR velocity (rad/s) to the governor's `max_angular_rate`.
+/// Returns the clamped rate — ALWAYS finite. A non-finite proposal (or a poisoned
+/// lock) fails closed to `0.0` and decays trust; an over-limit proposal is clamped
+/// to the bound and decays trust; an in-bound proposal passes through.
 #[no_mangle]
 pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) -> f64 {
     if let Ok(mut g) = GLOBAL_GOVERNOR.lock() {
@@ -39,6 +59,8 @@ pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) 
     } else { 0.0 }
 }
 
+/// The governor's current trust score (0–100). Safe ticks raise it; clamps and
+/// fail-closed rejections decay it. A poisoned lock reads as `0` (fail-closed).
 #[no_mangle]
 pub extern "C" fn kirra_get_trust_score() -> u32 {
     GLOBAL_GOVERNOR.lock().map(|g| g.trust_engine.current_score).unwrap_or(0)

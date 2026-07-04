@@ -58,8 +58,13 @@ registry — see the CHANGELOG Unification note.
    `LEARNING_LOOP_ARCHITECTURE.md`; verdict-emit machinery exists. Effort M.
 4. **G18 config governance** — `KirraRuntimeConfig` exists; no schema/versioning;
    env sprawl remains. Effort M.
-5. **G20 SDK remainder** — 2 Python examples only; `kirra.h` is a 20-line stub;
-   no Rust/C examples or published rustdoc. Effort S–M.
+5. **G20 SDK remainder** — ✅ **first slice landed:** a runnable Rust example
+   (`governor_quickstart`) + a C example linking the cdylib over a now-documented
+   `include/kirra.h`, a crate-level rustdoc landing page + documented FFI surface
+   (public lib rustdoc-clean under `-D warnings`), and a CI `SDK docs + examples`
+   job gating the doc build + both examples. **Remaining:** publishing rustdoc to
+   a hosted location (Pages) and, if desired, broadening `deny(missing_docs)`
+   beyond the FFI surface + enriching the C ABI beyond the 4 scalar functions.
 
 ### Track 3 — WS-4 fleet plane (Stage 2, blocks Gate C)
 6. **G6 secure/measured boot** — TPM feature off-by-default; needs a reference

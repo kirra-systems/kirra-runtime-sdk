@@ -8,6 +8,32 @@
 // pedantry.
 #![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 
+//! # Kirra — runtime legitimacy engine & safety governor
+//!
+//! Kirra is a fail-closed safety governor for AI-driven robotic and edge systems.
+//! Its load-bearing thesis is **doer / checker**: a planner (the DOER) PROPOSES a
+//! command; Kirra (the CHECKER) BOUNDS it against hard invariants, regardless of
+//! what an AI model, LLM output, or upstream orchestrator instructs. The doer is
+//! swappable and never trusted for safety — the checker is the invariant.
+//!
+//! ## Where to start
+//!
+//! - [`kirra_core::KirraKernelGovernor`] — the scalar governor: clamp a proposed
+//!   command to a [`kinematics_contract::KinematicContract`] envelope + rate limit,
+//!   fail-closed on non-finite input. Implements the [`SafetyGovernor`] trait.
+//! - [`GovernorInterceptResult`] / [`MitigationCode`] — a governor verdict and the
+//!   structured, zero-alloc reason it mitigated.
+//! - [`ffi`] — the C ABI (`include/kirra.h`) exposing the same governor to C/C++.
+//! - `authz`, `verifier`, `federation`, `audit_chain` — the fleet-legitimacy /
+//!   verifier-service side (trust attestation, scoped RBAC, hash-chained audit).
+//!
+//! ## Examples
+//!
+//! - `examples/governor_quickstart.rs` — the checker bounding a doer's proposals
+//!   (`cargo run --example governor_quickstart`).
+//! - `examples/c/kirra_ffi_demo.c` — the same over the C ABI
+//!   (`examples/c/build_and_run.sh`).
+
 pub mod kirra_core;
 pub mod governor_guard;
 pub mod modbus_adapter;

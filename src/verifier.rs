@@ -272,7 +272,7 @@ pub struct AppState {
     /// `pending_challenges` (INVARIANT #5): never persisted, TTL-bounded, single-use.
     pub pending_clearance_challenges: DashMap<String, ClearanceChallengeEntry>,
     /// Durable store for nodes and dependency graph (write-through, read on boot).
-    /// Accessed through the [`StoreHandle`] seam (`with` / `call`) — never a raw
+    /// Accessed through the `StoreHandle` seam (`with` / `call`) — never a raw
     /// lock. Phase 2 of the DB-actor migration swaps the handle's internals for a
     /// dedicated-thread connection owner.
     pub store: crate::store_handle::StoreHandle,
@@ -553,7 +553,7 @@ impl AppState {
         self.calculate_posture_memoized(node_id, &mut black)
     }
 
-    /// As [`calculate_posture`], but reuses a CALLER-OWNED `black` memo across
+    /// As `calculate_posture`, but reuses a CALLER-OWNED `black` memo across
     /// many roots (review P3). A node's fully-evaluated posture is
     /// root-INDEPENDENT (it is a property of the node + its dependency subgraph,
     /// not of which root reached it), so the whole-fleet recalc can share ONE

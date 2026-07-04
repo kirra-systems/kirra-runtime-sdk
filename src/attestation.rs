@@ -208,7 +208,7 @@ pub fn parse_ed25519_public_pem(pem: &str) -> Option<VerifyingKey> {
 // ---------------------------------------------------------------------------
 
 /// Domain tag for an operator clearance-grant signature. Distinct from
-/// [`ATTESTATION_DOMAIN`] so an operator signature can never be cross-replayed as
+/// `ATTESTATION_DOMAIN` so an operator signature can never be cross-replayed as
 /// a node attestation (or vice versa).
 pub const OPERATOR_GRANT_DOMAIN: &[u8] = b"KIRRA-OPERATOR-GRANT-v1";
 

@@ -221,7 +221,7 @@ impl ScenarioRunner {
     /// Processes all events and evaluates all assertions in timestamp order.
     /// Events and assertions at the same timestamp: events first, then assertions.
     ///
-    /// Returns a Vec<AssertionResult> for programmatic inspection.
+    /// Returns a `Vec<AssertionResult>` for programmatic inspection.
     /// Also panics on the first failed assertion with a descriptive message
     /// including the virtual timestamp. Set `panic_on_failure = false` via
     /// `run_collecting()` if you want to collect all results without panicking.
