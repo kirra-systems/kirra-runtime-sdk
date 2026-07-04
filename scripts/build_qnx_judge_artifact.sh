@@ -152,10 +152,13 @@ for want in $TARGETS; do
     tgt="$(resolve_target "$want")" || { echo "::error::no usable tuple for '$want' on $(rustc --version)" >&2; exit 2; }
     assert_is_qnx8 "$tgt" || exit 2   # #790 F4 hard stop
     echo "== building judge staticlib for $tgt (-Zbuild-std=core, $(rustc --version | cut -d' ' -f2))"
-    # --offline (#790 F9): the throwaway crate is dependency-free and build-std
-    # resolves `core` from the local rust-src, so the build is hermetic — no
-    # network, no registry index fetch that could vary the result.
-    ( cd "$CRATE" && "${BOOT[@]}" cargo build --release --offline -Z build-std=core --target "$tgt" )
+    # NOTE: NOT --offline. Although the throwaway crate is dependency-free, cargo's
+    # -Zbuild-std resolves the sysroot workspace (core/std/compiler_builtins), whose
+    # own manifests pull registry crates (e.g. `cfg-if`); a cold CI cache has none of
+    # them, so --offline fails resolution (#790 F9 follow-up). Reproducibility is
+    # unaffected — those versions are pinned by the toolchain's sysroot lockfile, so
+    # the fetched set is a deterministic function of the pinned toolchain.
+    ( cd "$CRATE" && "${BOOT[@]}" cargo build --release -Z build-std=core --target "$tgt" )
     lib="$CRATE/target/$tgt/release/libkirra_judge.a"
     [[ -f "$lib" ]] || { echo "ERROR: expected $lib missing" >&2; exit 1; }
 
