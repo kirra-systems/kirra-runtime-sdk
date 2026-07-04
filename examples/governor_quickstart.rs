@@ -28,6 +28,10 @@ fn main() {
         fallback_linear_speed: 0.0,    // the fail-closed safe-stop scalar
     };
 
+    // Capture the envelope ceiling before `contract` is moved into the governor, so
+    // the assertion below tracks the configured value rather than a magic number.
+    let max_speed = contract.max_linear_velocity;
+
     // KirraKernelGovernor<C>::new(contract, initial_scalar, cap_min, cap_max).
     let mut governor = KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0);
 
@@ -52,7 +56,7 @@ fn main() {
             "the checker must never emit a non-finite command"
         );
         assert!(
-            verdict.sanitized_scalar.abs() <= 2.0,
+            verdict.sanitized_scalar.abs() <= max_speed,
             "the checker must never emit outside the hard envelope"
         );
     }

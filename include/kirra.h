@@ -40,9 +40,10 @@ double kirra_filter_move_velocity(double demand, double dt);
  *
  * @param angular_demand  proposed angular velocity (rad/s).
  * @param dt              timestep (seconds); currently unused by the angular clamp.
- * @return the clamped angular rate — ALWAYS finite. A non-finite input (or lock
- *         failure) returns 0.0; an over-limit input is clamped to the bound. Both
- *         off-nominal cases decay the trust score.
+ * @return the clamped angular rate — ALWAYS finite. A non-finite input returns 0.0
+ *         and decays the trust score; an over-limit input is clamped to the bound and
+ *         decays trust. If the internal lock cannot be acquired it returns 0.0
+ *         WITHOUT touching trust (fail-closed).
  */
 double kirra_filter_rotate_velocity(double angular_demand, double dt);
 

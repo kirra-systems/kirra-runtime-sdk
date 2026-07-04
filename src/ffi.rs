@@ -33,9 +33,10 @@ pub extern "C" fn kirra_filter_move_velocity(proposed_velocity: f64, dt: f64) ->
 }
 
 /// Bound a proposed ANGULAR velocity (rad/s) to the governor's `max_angular_rate`.
-/// Returns the clamped rate — ALWAYS finite. A non-finite proposal (or a poisoned
-/// lock) fails closed to `0.0` and decays trust; an over-limit proposal is clamped
-/// to the bound and decays trust; an in-bound proposal passes through.
+/// Returns the clamped rate — ALWAYS finite. A non-finite proposal fails closed to
+/// `0.0` and decays trust; an over-limit proposal is clamped to the bound and decays
+/// trust; an in-bound proposal passes through. If the lock is poisoned it returns
+/// `0.0` WITHOUT touching trust (the engine was never acquired) — fail-closed.
 #[no_mangle]
 pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) -> f64 {
     if let Ok(mut g) = GLOBAL_GOVERNOR.lock() {
