@@ -60,7 +60,7 @@ impl VerifierStore {
     /// Returns the verifying key for the FIRST **self-attested** ledger row whose
     /// `key_id` matches — i.e. a `genesis` / `rotation` / `reanchor` row whose
     /// content-addressing holds and whose self-signature verifies
-    /// ([`ledger_row_is_self_attested`]). A forensic `backfill` row (empty
+    /// (`ledger_row_is_self_attested`). A forensic `backfill` row (empty
     /// signature, lost-private-key history) is NOT trusted as a verification key
     /// — `None`, never a key. This is what lets a ROTATED-OUT key still verify
     /// the audit-chain rows it signed, across a key rotation.

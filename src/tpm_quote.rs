@@ -18,7 +18,7 @@
 //!   6. the quoted `pcrDigest` equals the registered expectation.
 //!
 //! This module is the PURE, hardware-free verification engine (parser + checks),
-//! testable with synthetic quotes (see [`tests::marshal_quote`]). Generating a
+//! testable with synthetic quotes (see `tests::marshal_quote`). Generating a
 //! real quote on a node is a TPM/`tss-esapi` concern (the `tpm` feature).
 //!
 //! LIVE WIRING: [`verify_tpm_quote`] is enforced on `/attestation/verify` for a

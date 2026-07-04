@@ -174,6 +174,27 @@ jobs:
         # never silently rot if the unification path changes.
         run: cargo test -p kirra-core --features capture --locked
 
+  docs-and-sdk:
+    name: SDK docs + examples (G20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: rustdoc build gate (public API docs; broken intra-doc links fail)
+        # -D warnings turns any rustdoc warning (broken intra-doc link, unclosed
+        # HTML tag, private-item link from public docs) into a hard error, so the
+        # published SDK docs stay clean.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --lib --locked
+      - name: Rust SDK example (governor_quickstart) builds + runs
+        run: cargo run --example governor_quickstart --locked
+      - name: C SDK example builds + runs against the cdylib
+        # Compiles examples/c/kirra_ffi_demo.c against include/kirra.h + the
+        # libkirra_verifier cdylib and runs it — keeps the C ABI examples from rotting.
+        run: ./examples/c/build_and_run.sh
+
   coverage:
     name: Branch Coverage (MC/DC pending — issue #65)
     runs-on: ubuntu-latest

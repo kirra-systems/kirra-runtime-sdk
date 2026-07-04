@@ -182,7 +182,7 @@ pub struct ServiceState {
     pub fabric_causal_log: Arc<FabricCausalLog>,
     /// Channel to the serialized posture-engine worker. Populated by the
     /// Active startup path via `OnceLock::set` AFTER the `ServiceState` is
-    /// already wrapped in `Arc` (the worker spawn needs Arc<AppState>).
+    /// already wrapped in `Arc` (the worker spawn needs `Arc<AppState>`).
     /// `get() == None` on PassiveStandby (no worker is spawned until the
     /// standby promotes). Handlers that mutate trust state, dependency
     /// graph, or other recalc-relevant state call `.get()` and `try_send`

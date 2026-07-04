@@ -56,7 +56,7 @@ impl VerifierStore {
     }
 
     /// Load a single registered node by id, or `None` if unregistered. Additive
-    /// single-row loader (mirrors [`load_operator`] / `load_trusted_federation_controller_key`)
+    /// single-row loader (mirrors `load_operator` / `load_trusted_federation_controller_key`)
     /// — the targeted lookup [`crate::key_registry::KeyRegistry`] uses to resolve a
     /// node's `ak_public_pem` without scanning the whole registry.
     pub fn load_node(&self, node_id: &str) -> Result<Option<RegisteredNode>> {

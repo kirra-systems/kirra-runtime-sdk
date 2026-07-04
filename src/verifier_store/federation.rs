@@ -296,7 +296,7 @@ impl VerifierStore {
     }
 
     /// Typed loader for generation-ordered reconciliation (#329 v2 wiring). Returns
-    /// the stored reports for an asset as [`FederatedTrustReportV2`] so the caller can
+    /// the stored reports for an asset as `FederatedTrustReportV2` so the caller can
     /// run `authoritative_posture`. `nonce_hex` / `signature_b64` are NOT persisted in
     /// this table (they are consumed/verified at ingest), so they are left empty here —
     /// the reconciliation API (`reconcile_reports` / `authoritative_posture`) reads only

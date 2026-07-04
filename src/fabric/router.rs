@@ -218,7 +218,7 @@ impl FabricRouter {
     /// Cross-asset trust propagation rules.
     /// Returns a list of (asset_id, forced_posture) pairs to apply.
     ///
-    /// Thin map over [`FabricRouter::evaluate_cross_asset_trust`] — the returned
+    /// Thin map over `FabricRouter::evaluate_cross_asset_trust` — the returned
     /// `(follower, posture)` pairs (and their order) are byte-identical to the
     /// pre-SG-007-recording behavior. The richer trigger-tagged result is used
     /// only by [`FabricRouter::propagate_and_record`] for causal-log recording.
