@@ -28,7 +28,7 @@ use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
 use kirra_verifier::security::{
-    admin_rbac_allows, authorize_admin, constant_time_compare, PrincipalRegistry,
+    admin_rbac_allows, authorize_admin, constant_time_compare, AdminPrincipal, PrincipalRegistry,
 };
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
@@ -163,7 +163,9 @@ async fn require_admin_token(mut request: Request, next: Next) -> Result<Respons
                 return Err(StatusCode::FORBIDDEN);
             }
             // Attribution (#G7): make the authenticated identity visible now (logs)
-            // and available to downstream handlers/audit via the request extension.
+            // and available to the attribution middleware / handlers via the request
+            // extension. The audit RECORDING happens in `record_admin_action_audit`,
+            // layered on the admin state-mutation routes only (see below).
             tracing::debug!(
                 principal = principal.label(),
                 role = principal.role().label(),
@@ -174,6 +176,77 @@ async fn require_admin_token(mut request: Request, next: Next) -> Result<Respons
         }
         None => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+/// #G7 slice 3 — admin-mutation attribution middleware. Layered ONLY on the admin
+/// **state-mutation** routes (register / backup / rotate-key / dependencies /
+/// operators / federation / fabric-command), INNER of `require_admin_token` (which
+/// authenticates and inserts the [`AdminPrincipal`] extension). After a SUCCESSFUL
+/// MUTATION it appends an `ADMIN_ACTION` event to the signed, hash-chained audit
+/// ledger, naming WHO did WHAT — the accountability the single shared token could
+/// never provide.
+///
+/// Deliberately NOT applied to the actuator route (a high-rate control path — a
+/// per-command signed audit row would be prohibitive) nor the identity-gated
+/// evaluation routes (which already self-audit). Because the only latency-sensitive
+/// path is thus excluded, the audit write is AWAITED so the attribution is durably
+/// committed to the chain before the (rare, sensitive) mutation is acknowledged —
+/// the stronger accountability guarantee. A write failure is logged and never fails
+/// the already-completed mutation (mirrors the `action_filter` audit path).
+async fn record_admin_action_audit(
+    State(svc): State<Arc<ServiceState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Capture attribution facts before the request moves into `next.run`.
+    // `require_admin_token` (outer) always inserts the principal; fall back
+    // defensively rather than panic if the extension is somehow absent.
+    let (actor, role) = request
+        .extensions()
+        .get::<AdminPrincipal>()
+        .map(|p| (p.label().to_owned(), p.role().label()))
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown"));
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+
+    let response = next.run(request).await;
+
+    if should_record_admin_action(&method, response.status()) {
+        let event = json!({
+            "principal": actor,
+            "role": role,
+            "method": method,
+            "path": path,
+        })
+        .to_string();
+        let now = now_ms();
+        let _ = svc
+            .app
+            .store
+            .call(move |store| {
+                if let Err(e) = store.save_posture_event_chained(
+                    "admin_action",
+                    "ADMIN_ACTION",
+                    &event,
+                    None,
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "failed to record admin-action attribution (#G7)");
+                }
+            })
+            .await;
+    }
+    response
+}
+
+/// Should a COMPLETED admin request be recorded as an attributed `ADMIN_ACTION`
+/// audit event (#G7 slice 3)? Only a SUCCESSFUL (2xx) MUTATING (non-safe method)
+/// request — reads (GET/HEAD/OPTIONS) and non-2xx failures are not attributed, so
+/// the ledger records who actually CHANGED state, not every authorized touch.
+/// Pure, so the middleware's decision is unit-tested without process env.
+fn should_record_admin_action(method: &str, status: StatusCode) -> bool {
+    let mutating = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+    mutating && status.is_success()
 }
 
 // SG-008 (ASIL D) process fail-closed startup sentinel — `StartupContext`,
@@ -1599,6 +1672,11 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fabric/command/{asset_id}", post(handle_fabric_command))
         .route("/fabric/causal-log", get(handle_fabric_causal_log))
         .route("/fabric/causal-log/{entry_id}", get(handle_fabric_causal_chain))
+        // #G7 slice 3 — attribution runs INNER of require_admin_token (which sets
+        // the AdminPrincipal extension). Scoped to these admin state-mutation routes
+        // only: NOT the actuator (high-rate control) nor the self-auditing
+        // identity-gated evaluations.
+        .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
         .layer(middleware::from_fn(require_admin_token));
 
     let actuator_routes = Router::new()
@@ -1757,6 +1835,31 @@ async fn shutdown_signal() {
 // through `build_app()` — the exact production assembly — and proving the
 // posture gate (and its exemptions) are in force on it.
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod g7_admin_action_attribution_tests {
+    use super::should_record_admin_action;
+    use axum::http::StatusCode;
+
+    /// #G7 slice 3 — only a SUCCESSFUL MUTATION is attributed; reads and failures
+    /// are not (so the ledger names who CHANGED state, not every authorized touch).
+    #[test]
+    fn admin_action_recorded_only_on_successful_mutation() {
+        // Successful mutations → recorded.
+        assert!(should_record_admin_action("POST", StatusCode::OK));
+        assert!(should_record_admin_action("POST", StatusCode::CREATED));
+        assert!(should_record_admin_action("DELETE", StatusCode::NO_CONTENT));
+        assert!(should_record_admin_action("PUT", StatusCode::ACCEPTED));
+        // Reads → never (even on success).
+        assert!(!should_record_admin_action("GET", StatusCode::OK));
+        assert!(!should_record_admin_action("HEAD", StatusCode::OK));
+        assert!(!should_record_admin_action("OPTIONS", StatusCode::OK));
+        // Failed mutations → never (nothing changed).
+        assert!(!should_record_admin_action("POST", StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!should_record_admin_action("POST", StatusCode::FORBIDDEN));
+        assert!(!should_record_admin_action("POST", StatusCode::BAD_REQUEST));
+    }
+}
+
 #[cfg(test)]
 mod posture_gate_real_router_tests {
     use super::build_app;
