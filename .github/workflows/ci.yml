@@ -107,11 +107,43 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      # #790 F5 — PIN the compiler for the judge lane so the PR-proven compiler is
+      # the SAME one the release lane ships (a floating `stable` could rename the
+      # nto-qnx800 tuples or change -Zbuild-std syntax on any release day). Bump
+      # this in lock-step with the release workflow; the pinned version is recorded
+      # in the artifact PROVENANCE.txt.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: "1.94.1"
           components: rust-src
       - name: Build the judge staticlibs (x86_64 + aarch64 nto-qnx800)
         run: scripts/build_qnx_judge_artifact.sh dist-qnx
+      # #790 F2 — reproducibility gate: build a SECOND time and byte-compare the
+      # staticlibs (PROVENANCE.txt is intentionally build-varying — ci-run id etc. —
+      # so it is excluded). A non-deterministic judge core would fail here BEFORE it
+      # could be checksummed, cosign-signed, and shipped as the partition verdict.
+      - name: Reproducibility (double-build cmp of the staticlibs)
+        run: |
+          scripts/build_qnx_judge_artifact.sh dist-qnx-2
+          rc=0
+          for a in dist-qnx/libkirra_judge-*.a; do
+            b="dist-qnx-2/$(basename "$a")"
+            if cmp -s "$a" "$b"; then
+              echo "reproducible: $(basename "$a")"
+            else
+              echo "::error::non-reproducible staticlib: $(basename "$a")"; rc=1
+            fi
+          done
+          cmp -s dist-qnx/kirra_ffi.h dist-qnx-2/kirra_ffi.h || { echo "::error::kirra_ffi.h differs"; rc=1; }
+          exit $rc
+      # #790 F1 — host-native harness lane: link the C++ SHIM against a same-commit
+      # judge and run the FDIT/demo ctests, so the compile-time ABI layout asserts
+      # (kirra_ffi.h / kirra_judge.rs) actually fire against this judge build.
+      - name: Host-native harness (cmake + ctest)
+        run: |
+          cmake -S tools/qnx-rtm-harness -B build-harness
+          cmake --build build-harness
+          ctest --test-dir build-harness --output-on-failure
       - name: Upload artifact (PR inspection; releases ship the signed copy)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

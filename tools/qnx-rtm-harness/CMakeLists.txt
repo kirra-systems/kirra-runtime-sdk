@@ -43,9 +43,14 @@ else()
     set(KIRRA_JUDGE_LIB "${CMAKE_CURRENT_BINARY_DIR}/libkirra_judge.a")
 
     # Host build, or an nto-capable rustc with a prebuilt `core`: append --target.
+    # #790 F6 — these flags MIRROR the canonical single source
+    # `judge_build_flags.sh` (CMake cannot `source` shell). Keep them in lock-step:
+    # panic=abort, opt-level=2, debuginfo=0, codegen-units=1, lto=fat. Drift is
+    # caught by the host-native ctest lane (#790 F1) building this same judge.
     set(KIRRA_JUDGE_RUSTC_FLAGS
         --edition 2021 --crate-type staticlib --crate-name kirra_judge
-        -C panic=abort -C opt-level=2 -C debuginfo=0)
+        -C panic=abort -C opt-level=2 -C debuginfo=0
+        -C codegen-units=1 -C lto=fat)
     if(KIRRA_RUSTC_TARGET)
         list(APPEND KIRRA_JUDGE_RUSTC_FLAGS --target "${KIRRA_RUSTC_TARGET}")
     endif()
