@@ -225,6 +225,100 @@ fn spawn_local_asset_posture_feed(svc: Arc<ServiceState>) {
     });
 }
 
+/// Wire the Active-mode posture-freshness background tasks onto `svc`: the
+/// serialized posture-engine worker, the telemetry watchdog (SG9 sensor-
+/// liveness), the periodic recompute-and-restamp loop, and the verifier→fabric
+/// local-asset posture feed (#88).
+///
+/// Shared by TWO entry points (review H2): the Active startup path AND the
+/// standby→Active promotion path. The bug this closes: a node promoted from
+/// standby at runtime used to (re)start only the heartbeat writer, never these
+/// four tasks — so `POSTURE_CACHE_TTL_MS` after promotion the cache went stale
+/// and every gated route fail-closed (503) until process restart, negating the
+/// HA availability guarantee. Calling this from the promotion path keeps the
+/// freshly-promoted primary serving.
+///
+/// Does NOT perform the initial `recalculate_and_broadcast` — that is the
+/// caller's job (startup runs it synchronously before `axum::serve`;
+/// `perform_promotion` runs it as part of the promotion sequence, so the cache
+/// is already populated before this wiring starts the ongoing-freshness tasks).
+///
+/// Must be called inside a tokio runtime context (it spawns tasks). Fail-closed:
+/// a double-set of `posture_engine_tx` is an invariant breach — the cell must be
+/// empty on both the pre-serve Active path and a never-Active promoted standby —
+/// and aborts the process (a half-wired node is safer dead: another standby /
+/// systemd restart re-promotes cleanly).
+fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
+    let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
+        Arc::clone(&svc.app),
+        Arc::clone(&svc.posture_cache),
+    );
+    if svc.posture_engine_tx.set(posture_tx.clone()).is_err() {
+        tracing::error!(
+            "posture freshness wiring failed: posture_engine_tx already initialized (fail-closed)"
+        );
+        std::process::exit(1);
+    }
+    tracing::info!("posture: serialized worker started");
+
+    // SAFETY: SG9 | REQ: sensor-liveness-watchdog | TEST: test_watchdog_dead_mans_switch_fires_after_telemetry_timeout
+    // A node going silent past AV_TELEMETRY_TIMEOUT_MS produces a WatchdogTimeout
+    // trigger, which the posture engine worker consumes and recomputes the
+    // posture (typically collapsing the affected node to LockedOut, which fails
+    // the actuator gate closed).
+    kirra_verifier::telemetry_watchdog::spawn_telemetry_watchdog(
+        Arc::clone(&svc.app),
+        posture_tx.clone(),
+        Arc::clone(&svc.posture_cache),
+    );
+    tracing::info!(
+        timeout_ms = kirra_verifier::telemetry_watchdog::AV_TELEMETRY_TIMEOUT_MS,
+        "telemetry watchdog spawned (SG9 sensor-liveness)"
+    );
+
+    // Periodic recompute-and-restamp loop at POSTURE_REFRESH_INTERVAL_MS (= TTL/2)
+    // — load-bearing: without it the cache goes stale one TTL after the last
+    // event and the gate fails closed fleet-wide. It is also the engine-liveness
+    // signal (if the loop stops, the cache stales and the gate fail-closes).
+    let refresh_tx = posture_tx;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+            kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
+        ));
+        // Coalesce missed refresh windows instead of bursting catch-up recalcs
+        // after runtime starvation (the trigger only re-stamps the cache; bursts
+        // add no freshness and the posture worker already coalesces). Delay
+        // re-paces from the actual wake time.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick fires immediately; skip it (the caller's initial recalc
+        // already covered the populated-cache precondition).
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if refresh_tx
+                .try_send(kirra_verifier::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh)
+                .is_err()
+            {
+                tracing::error!(
+                    "posture periodic refresh: worker channel unavailable — \
+                     cache will go stale (gate will fail-close fleet-wide)"
+                );
+            }
+        }
+    });
+    tracing::info!(
+        interval_ms = kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
+        ttl_ms = kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
+        "posture: periodic refresh loop started"
+    );
+
+    // #88: verifier→fabric posture feed (single-local-asset model). Mirrors this
+    // controller's aggregate FleetPosture into the fabric posture for the one
+    // locally governed asset, so fabric command enforcement reflects real
+    // verified trust instead of the interim registration seed.
+    spawn_local_asset_posture_feed(Arc::clone(svc));
+}
+
 /// One idempotent push of the cached fleet posture into the local asset.
 ///
 /// Fail-closed: a poisoned OR stale cache yields NO push. The actuator gate
@@ -1041,9 +1135,18 @@ async fn main() {
             tracing::info!("Heartbeat writer started (Active mode)");
         }
         VerifierOperationMode::PassiveStandby => {
+            // review H2: hand the promotion monitor an on-promote hook that
+            // (re)starts the Active posture-freshness tasks on this node when it
+            // is promoted at runtime. Without it a promoted standby serves a
+            // stale cache one TTL later and fail-closes every gated route. The
+            // hook captures `ServiceState` (which the lib promotion path does
+            // not have — `spawn_local_asset_posture_feed` and `posture_engine_tx`
+            // are bin/ServiceState-local), so the wiring stays where it belongs.
+            let svc_for_promote = Arc::clone(&svc_state);
             spawn_promotion_monitor(
                 Arc::clone(&svc_state.app),
                 Arc::clone(&svc_state.posture_cache),
+                Arc::new(move || wire_active_posture_freshness(&svc_for_promote)),
             );
             tracing::info!("Promotion monitor started (PassiveStandby mode)");
         }
@@ -1110,16 +1213,20 @@ async fn main() {
     //       cache goes stale and the gate fails closed — the desired
     //       fail-safe.
     //
-    // PassiveStandby does not run this — its promotion path already calls
-    // recalculate_and_broadcast once on transition to Active. Ongoing
-    // freshness on the freshly-promoted node is filed as a C2 follow-up.
+    // PassiveStandby does not run this at startup — but its promotion path now
+    // calls the SAME `wire_active_posture_freshness` on transition to Active
+    // (review H2), so a runtime-promoted node keeps its cache fresh instead of
+    // fail-closing one TTL after promotion.
     // SG-008 startup-invariant fact: set true once the watchdog is spawned on
     // the Active path (PassiveStandby leaves it false — and the sentinel does
     // not require it there).
     let mut watchdog_spawned = false;
     if svc_state.app.is_active() {
-        // SAFETY: SG-HA-3 — initial posture recompute includes durable DB writes;
-        // run it off tokio worker threads.
+        // (a) SAFETY: SG-HA-3 — initial posture recompute includes durable DB
+        // writes; run it off tokio worker threads. This is the caller-specific
+        // half (see `wire_active_posture_freshness` doc): the Active startup
+        // path recomputes synchronously BEFORE `axum::serve` so the gate has a
+        // populated cache on the first request.
         let app_b = Arc::clone(&svc_state.app);
         let cache_b = Arc::clone(&svc_state.posture_cache);
         let initial_recalc = tokio::task::spawn_blocking(move || {
@@ -1135,82 +1242,14 @@ async fn main() {
         }
         tracing::info!("posture: initial recalc complete; cache populated");
 
-        let posture_tx = kirra_verifier::posture_engine_v2::start_posture_engine_worker(
-            Arc::clone(&svc_state.app),
-            Arc::clone(&svc_state.posture_cache),
-        );
-        if svc_state.posture_engine_tx.set(posture_tx.clone()).is_err() {
-            tracing::error!(
-                "startup failed: posture_engine_tx already initialized before startup wiring (fail-closed)"
-            );
-            std::process::exit(1);
-        }
-        tracing::info!("posture: serialized worker started");
-
-        // SAFETY: SG9 | REQ: sensor-liveness-watchdog | TEST: test_watchdog_dead_mans_switch_fires_after_telemetry_timeout
-        // Phase 4 (S131): wire the telemetry watchdog into the
-        // production binary. This is the first real consumer of the
-        // PostureEngineSender from a sensor-liveness path — gated until
-        // now on the cold-refresh deadlock fix that landed on
-        // `s3-watchdog-deadlock-fix`. The watchdog runs as a background
-        // task; a node going silent past AV_TELEMETRY_TIMEOUT_MS
-        // produces a WatchdogTimeout trigger, which the posture engine
-        // worker consumes and recomputes the posture (typically
-        // collapsing to LockedOut for the affected node, which fails
-        // the actuator gate closed).
-        kirra_verifier::telemetry_watchdog::spawn_telemetry_watchdog(
-            Arc::clone(&svc_state.app),
-            posture_tx.clone(),
-            Arc::clone(&svc_state.posture_cache),
-        );
+        // (b)–(e) the ongoing-freshness tasks (worker, watchdog, periodic
+        // refresh, local-asset feed) — shared verbatim with the promotion path.
+        wire_active_posture_freshness(&svc_state);
         watchdog_spawned = true;
-        tracing::info!(
-            timeout_ms = kirra_verifier::telemetry_watchdog::AV_TELEMETRY_TIMEOUT_MS,
-            "telemetry watchdog spawned (SG9 sensor-liveness)"
-        );
-
-        let refresh_tx = posture_tx;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(
-                kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
-            ));
-            // Coalesce missed refresh windows instead of bursting catch-up
-            // recalcs after runtime starvation (the trigger only re-stamps the
-            // cache; bursts add no freshness and the posture worker already
-            // coalesces). Delay re-paces from the actual wake time.
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // First tick fires immediately; skip it (the synchronous
-            // initial recalc above already covered cold start).
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if refresh_tx
-                    .try_send(kirra_verifier::posture_engine_v2::PostureRecalcTrigger::PeriodicRefresh)
-                    .is_err()
-                {
-                    tracing::error!(
-                        "posture periodic refresh: worker channel unavailable — \
-                         cache will go stale (gate will fail-close fleet-wide)"
-                    );
-                }
-            }
-        });
-        tracing::info!(
-            interval_ms = kirra_verifier::posture_cache::POSTURE_REFRESH_INTERVAL_MS,
-            ttl_ms = kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
-            "posture: periodic refresh loop started"
-        );
-
-        // #88: verifier→fabric posture feed (single-local-asset model).
-        // Mirrors this controller's aggregate FleetPosture into the fabric
-        // posture for the one locally governed asset, so fabric command
-        // enforcement reflects real verified trust instead of the interim
-        // registration seed. Spawned AFTER the initial recalc so the cache
-        // is populated for the feed's initial sync.
-        spawn_local_asset_posture_feed(Arc::clone(&svc_state));
     } else {
         tracing::info!(
-            "posture: freshness wiring skipped — passive standby (no recalc/worker/refresh)"
+            "posture: freshness wiring skipped at startup — passive standby \
+             (re-wired by the promotion path on transition to Active)"
         );
     }
 

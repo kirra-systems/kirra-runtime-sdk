@@ -17,12 +17,14 @@
 //       which primary it replaced
 //
 // STANDBY (PassiveStandby):
-//   spawn_promotion_monitor(app, cache)
+//   spawn_promotion_monitor(app, cache, on_promote)
 //     → every PROMOTION_POLL_MS, reads "primary_heartbeat_ms"
 //     → if age > PROMOTION_TIMEOUT_MS: promote
 //     → promotion: app.mode_active transitions false → true
 //       then calls recalculate_and_broadcast() once to populate the
 //       cache and begin enforcing posture
+//     → fires on_promote() to (re)start the Active posture-freshness
+//       tasks on the new primary (review H2), then starts heartbeating
 //     → logs a structured promotion event to the audit chain
 //     → task exits after promotion (one-way, no revert)
 //
@@ -492,7 +494,19 @@ impl HeartbeatFreshness {
 ///
 /// Exception: if KIRRA_FORCE_PROMOTE=1 is set, promotes immediately regardless
 /// of heartbeat state. Use for manual failover or testing.
-pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
+/// `on_promote` (review H2): a hook fired ONCE on a successful promotion, after
+/// the mode flip / durable epoch claim / initial recalc. The caller (the binary)
+/// uses it to (re)start the Active-mode posture-freshness tasks — the serialized
+/// posture-engine worker, the telemetry watchdog, the periodic refresh loop, and
+/// the local-asset feed — on the freshly-promoted node. Without it the promoted
+/// node's posture cache goes stale one `POSTURE_CACHE_TTL_MS` after promotion and
+/// every gated route fail-closes until process restart. It is a hook rather than
+/// inline wiring because those tasks need `ServiceState`/bin-local handles the
+/// library promotion path does not hold. `Arc<dyn Fn>` so the supervised task
+/// factory can clone it across a restart.
+pub type OnPromote = Arc<dyn Fn() + Send + Sync + 'static>;
+
+pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache, on_promote: OnPromote) {
     let id = instance_id();
     // C2: supervised so a panic doesn't permanently disable failover. NON-critical
     // (a standby cannot serve writes anyway, so a LockedOut escalation is moot);
@@ -502,11 +516,30 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache) {
         /* critical   */ false,
         /* run-forever */ false,
         None,
-        move || promotion_loop(Arc::clone(&app), cache.clone(), id.clone()),
+        move || promotion_loop(Arc::clone(&app), cache.clone(), id.clone(), Arc::clone(&on_promote)),
     );
 }
 
-async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: String) {
+/// Actions taken exactly once on a SUCCESSFUL promotion (reviews H2 + H3):
+///   1. `on_promote()` — (re)start the Active posture-freshness tasks on the
+///      newly-Active node (worker / watchdog / refresh / feed). Fixes H2: a
+///      promoted standby used to skip this and fail-close one TTL later.
+///   2. `spawn_heartbeat_writer` — start heartbeating as the new Active so any
+///      tertiary standby sees this node alive (no invisible-Active window /
+///      spurious re-promotion; the H3 addition).
+/// Extracted so the promotion→wiring seam is unit-testable without the env-driven
+/// `promotion_loop`.
+fn apply_post_promotion(app: &Arc<AppState>, on_promote: &(dyn Fn() + Send + Sync)) {
+    on_promote();
+    spawn_heartbeat_writer(Arc::clone(app));
+}
+
+async fn promotion_loop(
+    app: Arc<AppState>,
+    cache: SharedPostureCache,
+    id: String,
+    on_promote: OnPromote,
+) {
         let poll_ms = std::env::var("KIRRA_PROMOTION_POLL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -550,10 +583,9 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
                 "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
             );
             if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
-                // HA Part B (review H3): a newly-Active node MUST start heartbeating
-                // so any tertiary standby sees it as alive — otherwise it is Active
-                // but invisible, inviting a spurious second promotion / epoch churn.
-                spawn_heartbeat_writer(Arc::clone(&app));
+                // reviews H2 + H3: re-wire posture freshness AND start
+                // heartbeating on the newly-Active node (see apply_post_promotion).
+                apply_post_promotion(&app, on_promote.as_ref());
             }
             return;
         }
@@ -633,10 +665,9 @@ async fn promotion_loop(app: Arc<AppState>, cache: SharedPostureCache, id: Strin
                     "Primary heartbeat token unchanged past timeout — promoting to Active"
                 );
                 if perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await {
-                    // HA Part B (review H3): start heartbeating as the new Active so
-                    // a tertiary standby sees this node alive (no invisible-Active
-                    // window / spurious re-promotion).
-                    spawn_heartbeat_writer(Arc::clone(&app));
+                    // reviews H2 + H3: re-wire posture freshness AND start
+                    // heartbeating on the newly-Active node (see apply_post_promotion).
+                    apply_post_promotion(&app, on_promote.as_ref());
                 }
                 return;
             } else {
@@ -1568,6 +1599,42 @@ mod sg_009_promotion_act_tests {
             .build()
             .expect("runtime");
         rt.block_on(perform_promotion(app, cache, id, reason));
+    }
+
+    /// Review H2 — a successful promotion MUST fire the caller's `on_promote`
+    /// wiring hook (the seam the binary uses to re-start the posture-freshness
+    /// tasks on the freshly-promoted node). Before this fix `promotion_loop`
+    /// only re-spawned the heartbeat writer, so the promoted node's posture
+    /// cache went stale one TTL later and every gated route fail-closed. Here we
+    /// drive the extracted `apply_post_promotion` seam and assert the hook runs
+    /// exactly once (env-free — no `promotion_loop` / `KIRRA_FORCE_PROMOTE`).
+    #[test]
+    fn test_post_promotion_fires_on_promote_hook_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        let store = VerifierStore::new(":memory:").expect("store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_hook = Arc::clone(&calls);
+        let on_promote: OnPromote = Arc::new(move || {
+            calls_hook.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // apply_post_promotion also spawns the heartbeat writer, which needs a
+        // tokio context — run it on a current-thread runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            apply_post_promotion(&app, on_promote.as_ref());
+        });
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a successful promotion must fire the on_promote freshness-wiring hook exactly once"
+        );
     }
 
     // -----------------------------------------------------------------------
