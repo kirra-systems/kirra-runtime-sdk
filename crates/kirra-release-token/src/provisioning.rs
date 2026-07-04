@@ -139,7 +139,14 @@ pub fn parse_source(spec: &str) -> Result<SigningKeySource, ProvisionError> {
         return Ok(SigningKeySource::DevFixed);
     }
     if let Some(handle) = spec.strip_prefix("tpm:") {
-        return Ok(SigningKeySource::TpmUnseal(handle.trim().to_string()));
+        let handle = handle.trim();
+        // An empty handle is a misconfiguration, not a valid TPM source — report it
+        // as UnknownSource (as `file:` does for an empty path), not a late
+        // TpmUnsealUnsupported that reads as "TPM chosen but deferred".
+        if handle.is_empty() {
+            return Err(ProvisionError::UnknownSource(spec.to_string()));
+        }
+        return Ok(SigningKeySource::TpmUnseal(handle.to_string()));
     }
     Err(ProvisionError::UnknownSource(spec.to_string()))
 }
@@ -169,11 +176,19 @@ pub fn provision_signing_key(
 /// Load a 32-byte Ed25519 seed from `path`, permission-checked and zeroizing every
 /// intermediate buffer.
 fn load_seed_file(path: &Path) -> Result<SigningKey, ProvisionError> {
-    // Unix: refuse a key file any group/other principal can read (mode & 0o077).
+    use std::io::Read;
+    // Open ONCE. The permission check and the byte read both go through this single
+    // handle, so the path cannot be swapped between check and read (no TOCTOU).
+    let mut file = std::fs::File::open(path).map_err(|e| ProvisionError::FileUnreadable {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    })?;
+    // Unix: refuse a key file any group/other principal can read (mode & 0o077),
+    // read from the OPENED handle's metadata — the exact fd we read the bytes from.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| ProvisionError::FileUnreadable {
+        let meta = file.metadata().map_err(|e| ProvisionError::FileUnreadable {
             path: path.to_path_buf(),
             detail: e.to_string(),
         })?;
@@ -185,10 +200,16 @@ fn load_seed_file(path: &Path) -> Result<SigningKey, ProvisionError> {
             });
         }
     }
-    let mut bytes = std::fs::read(path).map_err(|e| ProvisionError::FileUnreadable {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    })?;
+    // Cap the read so a wrong (huge) file can't be slurped into memory — a seed is
+    // 32 bytes; reading up to 64 is enough to detect and reject any other length.
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ProvisionError::FileUnreadable {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        })?;
     if bytes.len() != 32 {
         let got = bytes.len();
         bytes.zeroize(); // whatever the file held may be secret regardless of length
@@ -277,6 +298,9 @@ mod tests {
         // `file:` with no path is not a valid file source.
         assert!(matches!(parse_source("file:"), Err(ProvisionError::UnknownSource(_))));
         assert!(matches!(parse_source("file:   "), Err(ProvisionError::UnknownSource(_))));
+        // `tpm:` with no handle is a misconfiguration, not a (deferred) TPM source.
+        assert!(matches!(parse_source("tpm:"), Err(ProvisionError::UnknownSource(_))));
+        assert!(matches!(parse_source("tpm:  "), Err(ProvisionError::UnknownSource(_))));
     }
 
     // --- provision_signing_key: dev + tpm (no I/O) ---------------------------
