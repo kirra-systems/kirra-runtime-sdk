@@ -7,5 +7,9 @@
 // kinematics_contract::*`) path keeps the SAME type — zero churn, zero logic change.
 //
 // The contract and its tests now live in `kirra_core::kinematics_contract`. The talisman
-// rule is unchanged: the contract is never modified, only relocated.
+// rule stands: the contract is amended ONLY under explicit review + a re-pin. It received
+// ONE such reviewed amendment (stop-gate review H1/M1 — `EnforceAction::ClampBoth` and
+// direction-aware accel/brake selection); re-pinned to logic blob
+// ed00f4da30afe8f3f83ff10a0d31103737526622 (see docs/CAPTURE_PIPELINE_SPEC.md §0). This
+// shim stays a pure re-export.
 pub use kirra_core::kinematics_contract::*;

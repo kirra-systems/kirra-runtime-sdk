@@ -54,6 +54,10 @@ fn render(action: &ClientEnforceAction, reason_code: u32) -> (String, String) {
         ClientEnforceAction::ClampSteering(v) => {
             ("CLAMP_STEER".into(), format!("ClampSteering({v:.3} deg)"))
         }
+        ClientEnforceAction::ClampBoth { linear, steering } => (
+            "CLAMP_BOTH".into(),
+            format!("ClampBoth({linear:.3} m/s, {steering:.3} deg)"),
+        ),
         ClientEnforceAction::DenyBreach(code) => {
             (format!("{code:?}"), format!("DenyBreach (reason_code={reason_code})"))
         }

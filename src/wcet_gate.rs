@@ -359,6 +359,30 @@ mod ci_gate_tests {
     }
 
     #[test]
+    fn wcet_validate_vehicle_command_clamp_both() {
+        // review H1: the ClampBoth path (P3 longitudinal ceiling AND P6 lateral
+        // envelope both breached). It runs the SAME full P0..P6 pipeline as the
+        // P6 case — no early return — plus the O(1) two-field enum construction,
+        // so its verdict cost must stay under the same budget. Confirms the new
+        // arm added no unbounded work to the hot path.
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 20.0, // 30 m/s² implied accel from 5 → P3
+            current_velocity_mps: 5.0,
+            delta_time_s: 0.5,
+            steering_angle_deg: 20.0, // lateral envelope breach at 20 m/s → P6
+            current_steering_angle_deg: 0.0,
+        };
+        let (max_ns, p999_ns) = measure_stats(ITERS, || {
+            let _ = std::hint::black_box(validate_vehicle_command(
+                std::hint::black_box(&cmd),
+                std::hint::black_box(&contract),
+            ));
+        });
+        assert_under_budget("validate_vehicle_command::ClampBoth", max_ns, p999_ns);
+    }
+
+    #[test]
     fn wcet_enforce_degraded_decel_to_stop_worst_case() {
         // Issue #70 (STEP 5): the Degraded gate adds only a fixed set of
         // finite-checks + magnitude/sign comparisons before delegating to the

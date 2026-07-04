@@ -775,7 +775,12 @@ impl KirraGovernor {
                     EnforceAction::DenyBreach(code) => EnforcementAction::Deny {
                         reason: code.reason().to_string(),
                     },
-                    EnforceAction::ClampLinear(safe_linear) => match angular_clamp {
+                    // ClampBoth carries a steering correction too (review H1), but
+                    // steering is meaningless for differential drive (see below),
+                    // so only the linear channel is honored — identical handling
+                    // to ClampLinear.
+                    EnforceAction::ClampLinear(safe_linear)
+                    | EnforceAction::ClampBoth { linear: safe_linear, .. } => match angular_clamp {
                         // Both axes need clamping → multi-axis enforcement.
                         Some(safe_angular) => EnforcementAction::ClampMotion {
                             linear:  Some(safe_linear),

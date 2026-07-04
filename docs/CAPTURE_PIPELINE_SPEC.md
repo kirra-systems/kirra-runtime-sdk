@@ -14,12 +14,27 @@ Linux collector joins it with bus telemetry into the full triple.
 > `effective_perception_cap`, then `verdict = validate_trajectory_slow_capped(...)`; the
 > capture emit runs LATER in the tick — after `update_trajectory(...)` and **after the WCET
 > measurement** — so the bounded `try_send` never counts against the slow-loop budget. The §0
-> verdict-path anchor `997fb7ae…` is current on `main`.
+> verdict-path anchor is the reviewed-amended talisman blob `ed00f4da…` (H1/M1; it superseded
+> the historical `997fb7ae…` — see §0).
 
 ## 0. The non-negotiable constraint
-The verdict path stays byte-identical: **`src/gateway/kinematics_contract.rs` =
-`997fb7ae15ce3e11adec9218044c7c84b049ad3b`** (`validate_vehicle_command`,
-`enforce_degraded_decel_to_stop`, `DenyCode`, `effective_max_speed_mps`, …). Capture is
+The verdict path is a FROZEN, reviewed talisman (`validate_vehicle_command`,
+`enforce_degraded_decel_to_stop`, `DenyCode`, `effective_max_speed_mps`, …), living
+in `kirra_core::kinematics_contract` (relocated verbatim in de-monolith Stage 3;
+`src/gateway/kinematics_contract.rs` is a re-export shim).
+
+> **Reviewed amendment (stop-gate review H1/M1).** The contract was DELIBERATELY
+> amended once under the stop-gate review: `EnforceAction::ClampBoth` (H1 — a
+> command breaching the longitudinal ceiling AND the lateral envelope now clamps
+> BOTH axes instead of dropping the velocity correction) and direction-aware
+> accel/brake selection (M1 — reverse acceleration is bounded by the accel limit,
+> not the brake limit). The talisman re-pins to the amended logic blob
+> `crates/kirra-core/src/kinematics_contract.rs = ed00f4da30afe8f3f83ff10a0d31103737526622`
+> (superseding the historical `997fb7ae…`, which predated the Stage-3 relocation
+> and matched no current file). Any FURTHER change re-pins again + re-runs the
+> WCET/MC-DC/proptest gates.
+
+Capture is
 **purely additive at the call site** and must never:
 - change the verdict, its inputs, or its timing/WCET;
 - block, allocate, or do I/O on the verdict path;
@@ -140,8 +155,9 @@ it never links the verdict path.
 
 ## 7. Build phases
 1. **Verdict record + ring + drain + call-site hook** (Rust, in `node.rs`/adapter — NOT
-   `kinematics_contract.rs`). Tests: capture never blocks; **verdict path blob still
-   `997fb7ae…`**; verdicts identical with capture on vs off.
+   `kinematics_contract.rs`). Tests: capture never blocks; **the verdict path blob is
+   unchanged by capture** (the reviewed-amended talisman `ed00f4da…`); verdicts identical
+   with capture on vs off.
 2. **Sink** (telemetry topic or file) + a tiny reader.
 3. **Linux collector** (bus tap + record ingest + join → sample).
 4. **Dataset store + schema + versioning.**
@@ -154,6 +170,6 @@ adjacent code — everything after is Linux-side tooling.
 > `crates/kirra-ros2-adapter/` (and a small `kirra-runtime-sdk` record type), gated behind
 > `KIRRA_CAPTURE_ENABLED` (default OFF), mirroring the existing fire-and-forget emit
 > discipline (`audit_writer_tx.try_send` — wait-free, drop-on-full) and the
-> `KIRRA_PERCEPTION_DERATE_ENABLED` default-off precedent. `src/gateway/kinematics_contract.rs`
-> stays byte-identical (`997fb7ae…`); the on-tick push is a bounded, droppable enqueue that
+> `KIRRA_PERCEPTION_DERATE_ENABLED` default-off precedent. The verdict path is unchanged by
+> capture (the reviewed-amended talisman `ed00f4da…`); the on-tick push is a bounded, droppable enqueue that
 > the verdict never waits on.

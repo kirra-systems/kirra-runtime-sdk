@@ -70,13 +70,15 @@ pub enum ClientDenyCode {
     TrajectoryHorizonExceeded,   // 11  (review B10 — over-horizon doer-contract violation)
 }
 
-/// Mirror of core `EnforceAction` — variants in the SAME ORDER.
+/// Mirror of core `EnforceAction` — variants in the SAME ORDER. `ClampBoth` is
+/// appended LAST (tag 4) so the existing wire tags 0–3 are unchanged (review H1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientEnforceAction {
-    Allow,                      // 0
-    ClampLinear(f64),           // 1
-    ClampSteering(f64),         // 2
-    DenyBreach(ClientDenyCode), // 3
+    Allow,                                  // 0
+    ClampLinear(f64),                       // 1
+    ClampSteering(f64),                     // 2
+    DenyBreach(ClientDenyCode),             // 3
+    ClampBoth { linear: f64, steering: f64 }, // 4
 }
 
 /// Mirror of the governor's `Verdict` (governor → car). The governor's

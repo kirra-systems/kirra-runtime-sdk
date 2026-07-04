@@ -43,7 +43,7 @@ this TARA makes explicit (§4).
 
 | Surface | What it is | Reference (consume) |
 |---|---|---|
-| Verdict path | The frozen kinematic enforcement contract; the last line before actuation | `src/gateway/kinematics_contract.rs` (talisman blob `997fb7ae…`) |
+| Verdict path | The frozen kinematic enforcement contract; the last line before actuation | `kirra_core::kinematics_contract` (re-exported via `src/gateway/kinematics_contract.rs`; talisman blob `ed00f4da…`, reviewed-amended H1/M1) |
 | Audit chain + signing keys | Tamper-evident hash-chained, Ed25519-signed ledger + key-trust map | `src/audit_chain.rs`, `src/verifier_store.rs` |
 | Attestation | Node identity / trust establishment (challenge-response) | `src/attestation.rs`, `src/verifier.rs` |
 | Admin / mutation gate | Privileged-route authentication | `src/security.rs`, `SECURITY_BOUNDARIES.md` (SG-015 + handshake carve-out) |
@@ -155,7 +155,7 @@ stale findings (#147 nonce, #245 DNP3) — see notes.
 | T# | Risk (prov.) | Treatment | Cybersecurity goal → control | Status |
 |---|---|---|---|---|
 | T1 | Med | reduce | Verifier authors the clamp; never trusts a client magnitude (#86/#235, #85) → `fabric::governor::evaluate_command` re-derives via `validate_vehicle_command`; returns the enforced `command`; non-finite enforced value → `ENFORCED_COMMAND_UNPRODUCIBLE` deny; `FABRIC_COMMAND_CLAMPED`/`_DENIED` audited (`fabric_command_authoritative_tests`) | **IMPLEMENTED** |
-| T2 | Med | reduce | Verdict path is a frozen, WCET-bounded, allocation-free contract; P0 NaN/Inf → P2 ceiling → P6 lateral-accel always run; not loaded from external state (talisman `997fb7ae…`) | **IMPLEMENTED** (integrity rests on host/boot — see T2-residual) |
+| T2 | Med | reduce | Verdict path is a frozen, WCET-bounded, allocation-free contract; P0 NaN/Inf → P2 ceiling → P6 lateral-accel always run; not loaded from external state (talisman `ed00f4da…`, reviewed-amended H1/M1) | **IMPLEMENTED** (integrity rests on host/boot — see T2-residual) |
 | T3 | Med | reduce | Hash-chain + signed anchor-head truncation detection (#77) + hash-v2 domain separation; `verify_audit_chain_full` checks `chain_intact` ∧ `signature_valid` ∧ head match; CERT-006 divergences durably recorded (#247) | **IMPLEMENTED** (UL 4600 SPI-G06 surfaces a break; node-local parko chain, `COMPARATOR_DIVERSITY.md` §7a) |
 | T4 | Low | reduce | Durable key-trust map (#165): pinned `audit_trust_anchor`, self-attested `audit_key_ledger`, consent-gated adoption; `KeyAdmission` fail-closed on retired/unadopted/reversion keys | **IMPLEMENTED** |
 | T5 | Low | reduce | Ed25519 challenge-response: node signs `(node_id, nonce)`, verified vs registered `ak_public_pem` with `verify_strict` + domain separation; **nonce from OS CSPRNG** `getrandom` (#147), single-use burn + `CHALLENGE_TTL_MS`; constant-time compares | **IMPLEMENTED** — *(agent's "wall-clock nonce" was stale `d88d2ba`; `verifier::generate_challenge_nonce` uses `getrandom`)* |

@@ -19,9 +19,12 @@
 
 ## The sibling rule (the held line)
 
-The frozen instance `src/gateway/kinematics_contract.rs`
-(`nominal_reference_profile` / `mrc_fallback_profile`, talisman blob
-`997fb7ae15ce3e11adec9218044c7c84b049ad3b`) is **NOT edited**. Per-class profiles
+The frozen instance `kirra_core::kinematics_contract`
+(`nominal_reference_profile` / `mrc_fallback_profile`; re-exported via
+`src/gateway/kinematics_contract.rs`; re-pinned to logic blob
+`ed00f4da30afe8f3f83ff10a0d31103737526622` after the reviewed stop-gate H1/M1
+amendment — see `CAPTURE_PIPELINE_SPEC.md` §0) is **NOT edited** by the profile
+work. Per-class profiles
 are **siblings**: new constructors that *return the existing public
 `VehicleKinematicsContract` struct*, exactly the idiom the two canonical
 constructors already establish. The **robotaxi** class member **IS** the frozen
