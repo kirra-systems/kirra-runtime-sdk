@@ -74,6 +74,155 @@ pub fn admin_token_ok(provided: Option<&str>, configured: Option<&str>) -> bool 
     constant_time_compare(provided.as_bytes(), configured.as_bytes())
 }
 
+/// Env var naming the per-principal admin tokens (#G7).
+pub const PRINCIPAL_TOKENS_ENV: &str = "KIRRA_PRINCIPAL_TOKENS";
+
+/// The authenticated caller identity resolved by the admin gate (#G7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminPrincipal {
+    /// Authenticated with the root `KIRRA_ADMIN_TOKEN`.
+    Root,
+    /// Authenticated with a registered per-principal token (carries its id, for
+    /// audit attribution).
+    Named(String),
+}
+
+impl AdminPrincipal {
+    /// A short, log/audit-safe label for the principal (never the token).
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            AdminPrincipal::Root => "root",
+            AdminPrincipal::Named(id) => id.as_str(),
+        }
+    }
+}
+
+/// A registry of per-principal admin-equivalent tokens (#G7 — key/identity
+/// lifecycle). It lets an operator issue, ROTATE, and REVOKE a token per
+/// principal — and attribute each mutation to a named identity — WITHOUT sharing
+/// the single root `KIRRA_ADMIN_TOKEN`, whose compromise otherwise exposes the
+/// whole admin+actuator surface.
+///
+/// **Purely additive & fail-closed.** The root token still authorizes exactly as
+/// before (INVARIANT #1/#6 unchanged), and a principal token NEVER authorizes
+/// unless a non-empty root token is also configured — [`authorize_admin`] denies
+/// before the registry is consulted when the root token is absent/empty, so this
+/// extension cannot fail open. v1 grants every principal the SAME capability as
+/// the root token (admin-equivalent); per-route RBAC scoping is a tracked
+/// follow-up.
+#[derive(Debug, Default, Clone)]
+pub struct PrincipalRegistry {
+    /// `(principal_id, token)` pairs. A `Vec` (not a map) so [`resolve`] compares
+    /// against EVERY entry with no early-out that could leak set membership by
+    /// timing. [`resolve`]: PrincipalRegistry::resolve
+    principals: Vec<(String, String)>,
+}
+
+impl PrincipalRegistry {
+    /// Load from `KIRRA_PRINCIPAL_TOKENS` (the process environment).
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(PRINCIPAL_TOKENS_ENV).ok().as_deref())
+    }
+
+    /// Pure parser (the testable core of [`from_env`]). Entries are
+    /// `principal_id=token`, separated by commas, semicolons, or newlines and
+    /// trimmed of surrounding whitespace. An entry with no `=`, an empty id, or an
+    /// empty token is IGNORED — never a usable credential (fail-closed against
+    /// malformed config). Duplicate ids are allowed (each token is independently
+    /// valid, which supports overlapping-window rotation).
+    #[must_use]
+    pub fn parse(spec: Option<&str>) -> Self {
+        let mut principals = Vec::new();
+        if let Some(spec) = spec {
+            for entry in spec.split([',', ';', '\n']) {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                // Split on the FIRST '=' only — tokens may themselves contain '='.
+                let Some((id, token)) = entry.split_once('=') else {
+                    continue; // no '=' → not a principal=token pair
+                };
+                let id = id.trim();
+                let token = token.trim();
+                if id.is_empty() || token.is_empty() {
+                    continue; // empty id or token is never a credential
+                }
+                principals.push((id.to_string(), token.to_string()));
+            }
+        }
+        Self { principals }
+    }
+
+    /// Number of registered principals.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.principals.len()
+    }
+
+    /// Is the registry empty (no per-principal tokens configured)?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.principals.is_empty()
+    }
+
+    /// Constant-time resolve: return the principal id whose token matches
+    /// `provided`, comparing against EVERY entry via [`constant_time_compare`]
+    /// with NO early-out (so a match does not leak its position by timing).
+    /// `None` if nothing matches. Parse forbids empty tokens, so an empty
+    /// `provided` can never match.
+    #[must_use]
+    pub fn resolve(&self, provided: &str) -> Option<&str> {
+        let mut matched: Option<&str> = None;
+        for (id, token) in &self.principals {
+            // Deliberately no `break` — evaluate all entries in constant work.
+            if constant_time_compare(provided.as_bytes(), token.as_bytes()) {
+                matched = Some(id.as_str());
+            }
+        }
+        matched
+    }
+}
+
+/// Fail-closed admin authorization (#G7) — the single decision the
+/// `require_admin_token` middleware gates on, extending [`admin_token_ok`] with
+/// the per-principal [`PrincipalRegistry`].
+///
+/// Returns `Some(principal)` (allow, with attribution) ONLY when a non-empty root
+/// admin token is configured AND the provided bearer either matches the root
+/// token OR a registered principal token. Every other case denies (`None`):
+///   - configured root token absent/empty → `None` (caller → HTTP 503; INV #1/#6),
+///   - provided absent                    → `None` (401),
+///   - no match in root or registry       → `None` (401).
+///
+/// The root token is authorized via `admin_token_ok` FIRST; the registry is only
+/// consulted when a non-empty root token IS configured, so a principal token can
+/// never authorize without a root token — this extension cannot fail open.
+//
+// Verifies: SG-015 (extended)
+#[must_use]
+pub fn authorize_admin(
+    provided: Option<&str>,
+    configured_admin: Option<&str>,
+    registry: &PrincipalRegistry,
+) -> Option<AdminPrincipal> {
+    // Root token path — the exact fail-closed predicate (INV #1/#2/#6).
+    if admin_token_ok(provided, configured_admin) {
+        return Some(AdminPrincipal::Root);
+    }
+    // Principal tokens are additive and ONLY valid when a non-empty root token is
+    // configured. If the root token is absent/empty, deny here — never fall
+    // through to the registry (that would be a fail-open with no root configured).
+    match configured_admin {
+        Some(c) if !c.is_empty() => {}
+        _ => return None,
+    }
+    let provided = provided?;
+    registry.resolve(provided).map(|id| AdminPrincipal::Named(id.to_string()))
+}
+
 pub struct AdministrativeKeyContainer {
     private_auth_key: Vec<u8>,
 }
@@ -169,5 +318,88 @@ mod sg_015_admin_token_tests {
             "tokens differing only past byte 64 must NOT compare equal");
         assert!(constant_time_compare(a.as_bytes(), a.as_bytes()),
             "an identical >64-byte token must still compare equal");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #G7 — per-principal admin tokens (rotation / revocation / attribution)
+// ---------------------------------------------------------------------------
+//
+// The registry and `authorize_admin` are pure (INVARIANT #13 — no env in the
+// multithreaded test runner; env is read only by the thin `from_env` wrapper).
+// The LOAD-BEARING invariant these pin: a per-principal token can NEVER authorize
+// when the root KIRRA_ADMIN_TOKEN is absent/empty (INV #1/#6 preserved — no
+// fail-open), and the root token still authorizes exactly as before.
+#[cfg(test)]
+mod g7_principal_token_tests {
+    use super::{authorize_admin, AdminPrincipal, PrincipalRegistry};
+
+    fn registry() -> PrincipalRegistry {
+        PrincipalRegistry::parse(Some("alice=alice-token, bob = bob-token ;carol=carol=eq"))
+    }
+
+    #[test]
+    fn parse_keeps_wellformed_drops_malformed() {
+        let r = registry();
+        assert_eq!(r.len(), 3, "alice, bob, carol are well-formed");
+        assert_eq!(r.resolve("alice-token"), Some("alice"));
+        assert_eq!(r.resolve("bob-token"), Some("bob"), "surrounding whitespace trimmed");
+        assert_eq!(r.resolve("carol=eq"), Some("carol"), "only the FIRST '=' splits id from token");
+        assert_eq!(r.resolve("nope"), None);
+
+        // Malformed entries are dropped (never a usable credential).
+        let bad = PrincipalRegistry::parse(Some("no-equals, =empty-id, empty-token=, ,  "));
+        assert!(bad.is_empty(), "no '=', empty id, and empty token are all dropped");
+        assert_eq!(PrincipalRegistry::parse(None).len(), 0);
+    }
+
+    #[test]
+    fn resolve_empty_provided_never_matches() {
+        assert_eq!(registry().resolve(""), None, "parse forbids empty tokens, so '' matches nothing");
+    }
+
+    #[test]
+    fn authorize_root_token_is_root_principal() {
+        let r = registry();
+        assert_eq!(
+            authorize_admin(Some("root-secret"), Some("root-secret"), &r),
+            Some(AdminPrincipal::Root)
+        );
+    }
+
+    #[test]
+    fn authorize_principal_token_is_named_and_attributed() {
+        let r = registry();
+        assert_eq!(
+            authorize_admin(Some("bob-token"), Some("root-secret"), &r),
+            Some(AdminPrincipal::Named("bob".to_string())),
+            "a registered principal token authorizes and is attributed to its id"
+        );
+        assert_eq!(
+            authorize_admin(Some("unknown-token"), Some("root-secret"), &r),
+            None,
+            "an unregistered token denies"
+        );
+        assert_eq!(authorize_admin(None, Some("root-secret"), &r), None, "no bearer denies");
+    }
+
+    /// THE load-bearing #G7 invariant (INV #1/#6): with NO root admin token
+    /// configured, a valid PRINCIPAL token must STILL be denied — the whole admin
+    /// surface is 503 without the root token, and the registry can never fail open.
+    #[test]
+    fn principal_token_denied_when_root_token_absent_or_empty() {
+        let r = registry();
+        assert_eq!(
+            authorize_admin(Some("bob-token"), None, &r),
+            None,
+            "no root token configured → a principal token must NOT authorize (INV #6)"
+        );
+        assert_eq!(
+            authorize_admin(Some("bob-token"), Some(""), &r),
+            None,
+            "empty root token → a principal token must NOT authorize (INV #6)"
+        );
+        // And the root token itself is still denied when unconfigured.
+        assert_eq!(authorize_admin(Some("anything"), None, &r), None);
     }
 }
