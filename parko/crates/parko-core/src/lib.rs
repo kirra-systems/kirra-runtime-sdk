@@ -27,6 +27,9 @@ pub mod detector;
 pub mod impact;
 // SG2/SG5 — localization-integrity gate over the map-anchored checks (#123).
 pub mod localization;
+// #G16 — model-integrity allow-list: SHA-256 the model file and reject a
+// substituted artifact against the operator allow-list before it can run.
+pub mod model_integrity;
 pub mod rss;
 pub mod runtime;
 // SG4 — WATER_UNTRAVERSABLE governor veto (depth-free, bounded-worst-case, #98).
@@ -57,6 +60,11 @@ pub use backend::{
     PrecisionMode,
     TensorBatch,
     TensorStorage,
+};
+
+pub use model_integrity::{
+    sha256_file, verify_model_file, ModelAllowList, VerifiedModel, MODEL_ALLOWLIST_ENV,
+    MODEL_ALLOWLIST_STRICT_ENV,
 };
 
 pub use backend_selector::{

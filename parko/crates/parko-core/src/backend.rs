@@ -27,6 +27,12 @@ pub enum BackendError {
     #[error("I/O error: {0}")]
     Io(String),
 
+    /// Model-integrity allow-list rejection (#G16): the loaded model's SHA-256
+    /// digest is not in the operator's allow-list (or strict mode is on and no
+    /// entry matches). Fail-closed — the model MUST NOT run.
+    #[error("model integrity rejected: {path} has sha256 {sha256} (not in the allow-list)")]
+    IntegrityRejected { path: String, sha256: String },
+
     #[error("Operation not supported by this backend")]
     Unsupported,
 }
