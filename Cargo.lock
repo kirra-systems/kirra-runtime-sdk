@@ -2244,6 +2244,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-core",
  "parko-core",
+ "proptest",
  "smallvec",
  "tracing",
 ]

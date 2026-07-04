@@ -41,3 +41,8 @@ parko-core = { path = "../../parko/crates/parko-core" }
 smallvec = { version = "1", features = ["const_generics"] }
 # `config` logs a one-time warning when no ODD speed cap is configured.
 tracing = "0.1"
+
+[dev-dependencies]
+# Property-based cross-check of the VRU bound (#789): the F9-hoisted
+# `pedestrian_breach` vs an independent per-pair reference (vru.rs tests).
+proptest = "1"
