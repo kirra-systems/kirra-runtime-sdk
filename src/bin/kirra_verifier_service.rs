@@ -27,7 +27,7 @@ use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
-use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::security::{authorize_admin, constant_time_compare, PrincipalRegistry};
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
     evaluate_unified_industrial_request, UnifiedIndustrialRequest,
@@ -100,32 +100,58 @@ use startup::*;
 
 // --- Auth middleware ---------------------------------------------------------
 
-async fn require_admin_token(request: Request, next: Next) -> Result<Response, StatusCode> {
+/// Process-wide per-principal admin token registry (#G7), loaded once from
+/// `KIRRA_PRINCIPAL_TOKENS`. Lazy `OnceLock` (env is fixed at process start);
+/// malformed entries are dropped by the parser, so a bad config degrades to
+/// fewer principals, never a fail-open.
+fn principal_registry() -> &'static PrincipalRegistry {
+    static REGISTRY: std::sync::OnceLock<PrincipalRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let reg = PrincipalRegistry::from_env();
+        if !reg.is_empty() {
+            tracing::info!(principal_tokens = reg.len(), "loaded per-principal admin tokens (#G7)");
+        }
+        reg
+    })
+}
+
+async fn require_admin_token(mut request: Request, next: Next) -> Result<Response, StatusCode> {
     let expected = std::env::var("KIRRA_ADMIN_TOKEN")
         .unwrap_or_default();
 
     // Fail-closed: absent or empty admin token → 503 (CRITICAL INVARIANT #1/#6).
     // Kept distinct from the 401 below so an unconfigured server is never
-    // mistaken for a bad credential.
+    // mistaken for a bad credential. This gate stays FIRST, so a per-principal
+    // token can never authorize without a configured root token (no fail-open).
     if expected.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    // Own the token before the mutable borrow below (attaching the principal to
+    // the request extensions). The extra allocation on the admin path is trivial.
     let provided = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_owned)
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Single constant-time authorization decision (SG-015). `expected` is
-    // non-empty here, so this reduces to a constant_time_compare of the two
-    // tokens — behavior identical to the prior inline check, never `==`.
-    if !admin_token_ok(Some(provided), Some(&expected)) {
-        return Err(StatusCode::UNAUTHORIZED);
+    // Fail-closed authorization (#G7): the root KIRRA_ADMIN_TOKEN (constant-time,
+    // SG-015) OR a registered per-principal token. `expected` is non-empty here,
+    // so `authorize_admin` reduces to the prior admin_token_ok decision plus the
+    // additive principal-registry lookup; a `None` denies (401). The resolved
+    // principal is attached to the request extensions for audit attribution.
+    match authorize_admin(Some(&provided), Some(&expected), principal_registry()) {
+        Some(principal) => {
+            // Attribution (#G7): make the authenticated identity visible now (logs)
+            // and available to downstream handlers/audit via the request extension.
+            tracing::debug!(principal = principal.label(), "admin request authorized (#G7)");
+            request.extensions_mut().insert(principal);
+            Ok(next.run(request).await)
+        }
+        None => Err(StatusCode::UNAUTHORIZED),
     }
-
-    Ok(next.run(request).await)
 }
 
 // SG-008 (ASIL D) process fail-closed startup sentinel — `StartupContext`,
