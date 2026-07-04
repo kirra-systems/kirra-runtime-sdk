@@ -29,6 +29,10 @@ backend-amd      = []
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros"] }
+# Model-integrity allow-list (#G16): SHA-256 the model file and compare against
+# the operator allow-list. Same versions parko-tensorrt already depends on.
+sha2 = "0.11"
+hex = "0.4"
 
 [dev-dependencies]
 parko-kirra = { path = "../parko-kirra" }

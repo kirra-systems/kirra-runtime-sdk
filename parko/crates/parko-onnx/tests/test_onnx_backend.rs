@@ -38,6 +38,36 @@ fn ort_available() -> Option<()> {
     Some(())
 }
 
+/// #G16 — the model-integrity allow-list rejects a SUBSTITUTED model and accepts
+/// the pinned one, exercised against the REAL mnist artifact. No ORT and no env
+/// mutation: `verify_model_file` (which `OrtRunCore::load_model` now calls for both
+/// the CPU and TensorRT backends) is driven directly with explicit policies.
+#[test]
+fn model_integrity_allowlist_gates_the_real_mnist_artifact() {
+    use parko_core::model_integrity::{sha256_file, verify_model_file, ModelAllowList};
+    let model_path = "tests/data/mnist-12.onnx";
+
+    let real_digest = sha256_file(std::path::Path::new(model_path)).expect("hash mnist");
+
+    // (a) Enforcing with a WRONG digest → the real model is rejected (fail-closed).
+    let wrong = ModelAllowList::from_parts(["0".repeat(64)], false);
+    let err = verify_model_file(model_path, &wrong).unwrap_err();
+    assert!(
+        matches!(err, parko_core::backend::BackendError::IntegrityRejected { .. }),
+        "an unlisted (substituted) model must be rejected, got {err:?}"
+    );
+
+    // (b) Enforcing with the CORRECT digest → accepted and marked verified.
+    let right = ModelAllowList::from_parts([real_digest.clone()], false);
+    let v = verify_model_file(model_path, &right).expect("pinned model accepted");
+    assert!(v.verified && v.sha256_hex == real_digest);
+
+    // (c) No allow-list configured → accepted but unverified (byte-identical to
+    //     the pre-#G16 behaviour; the digest is still computed for audit).
+    let off = ModelAllowList::from_parts(Vec::<String>::new(), false);
+    assert!(!verify_model_file(model_path, &off).unwrap().verified);
+}
+
 #[test]
 fn mnist_end_to_end_inference() {
     if ort_available().is_none() {

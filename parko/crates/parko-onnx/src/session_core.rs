@@ -47,8 +47,23 @@ impl OrtRunCore {
     }
 
     /// Read input/output shapes off the session into a `ModelHandle`. Relocated
-    /// verbatim from `OrtBackend::load_model`.
+    /// verbatim from `OrtBackend::load_model`, plus the #G16 integrity gate below.
     pub fn load_model(&self, path: &str) -> Result<ModelHandle, BackendError> {
+        // #G16 — model-integrity allow-list: SHA-256 the model file and reject a
+        // substituted / corrupt artifact BEFORE handing back a runnable handle.
+        // Enforcement is opt-in (KIRRA_MODEL_ALLOWLIST); when off this only
+        // computes+logs the digest and acceptance is byte-identical to before.
+        let integrity = parko_core::model_integrity::verify_model_file(
+            path,
+            &parko_core::model_integrity::ModelAllowList::from_env(),
+        )?;
+        tracing::info!(
+            model_path = path,
+            sha256 = integrity.sha256_hex,
+            verified = integrity.verified,
+            "ort load_model integrity check"
+        );
+
         let session = self.session.lock()
             .map_err(|e| BackendError::InitializationError(format!("session lock poisoned: {}", e)))?;
 
