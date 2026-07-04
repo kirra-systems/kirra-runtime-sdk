@@ -177,11 +177,13 @@ impl std::fmt::Display for MitigationCode {
 mod mitigation_code_tests {
     use super::MitigationCode;
 
-    /// `Display` must reproduce the EXACT prior narrative strings — these are
-    /// recorded into the audit/governor-verdict narrative, so a change here is a
-    /// content change. Numeric detail formats lazily (and only when recorded).
+    /// `Display` PINS the exact narrative strings — they are recorded into the
+    /// audit / governor-verdict narrative (e.g. the gateway `kirra_replay.json`),
+    /// so any change to one is a deliberate recorded-content change and MUST be made
+    /// here on purpose (as the unit-neutral `RateClampEnforced` change was). Numeric
+    /// detail formats lazily (and only when recorded).
     #[test]
-    fn display_reproduces_the_exact_prior_narratives() {
+    fn display_pins_the_recorded_narratives() {
         assert_eq!(
             MitigationCode::NonfiniteInputRejectedFailsafe.to_string(),
             "NONFINITE_INPUT_REJECTED_FAILSAFE"
