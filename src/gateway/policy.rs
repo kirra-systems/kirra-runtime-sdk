@@ -97,6 +97,8 @@ fn is_write_state_path(path: &str) -> bool {
         || path.starts_with("/fabric/command/")
         // WS-1 (#G7) — `/system/principals/{principal_id}/revoke`.
         || path.starts_with("/system/principals/")
+        // WS-1 (#G7) Track 1.2 — `/system/cert-principals/{principal_id}/revoke`.
+        || path.starts_with("/system/cert-principals/")
     {
         return true;
     }
@@ -122,6 +124,9 @@ fn is_write_state_path(path: &str) -> bool {
             // WS-1 (#G7) — mint an API principal (POST). The parameterised revoke
             // is matched by the `/system/principals/` prefix above.
             | "/system/principals"
+            // WS-1 (#G7) Track 1.2 — register a cert principal (POST). The revoke is
+            // matched by the `/system/cert-principals/` prefix above.
+            | "/system/cert-principals"
     )
 }
 
@@ -201,6 +206,25 @@ mod tests {
         );
         // The GET list is a read.
         assert_eq!(classify_http_command("GET", "/system/principals"), OperationalCommand::ReadTelemetry);
+    }
+
+    #[test]
+    fn test_classifies_cert_principal_writes() {
+        // WS-1 (#G7) Track 1.2: mTLS cert-principal register (exact) + parameterised
+        // revoke are WriteState; the list GET is a read. The `/system/principals`
+        // classifier must NOT accidentally swallow `/system/cert-principals`.
+        assert_eq!(
+            classify_http_command("POST", "/system/cert-principals"),
+            OperationalCommand::WriteState
+        );
+        assert_eq!(
+            classify_http_command("POST", "/system/cert-principals/svc-a/revoke"),
+            OperationalCommand::WriteState
+        );
+        assert_eq!(
+            classify_http_command("GET", "/system/cert-principals"),
+            OperationalCommand::ReadTelemetry
+        );
     }
 
     #[test]

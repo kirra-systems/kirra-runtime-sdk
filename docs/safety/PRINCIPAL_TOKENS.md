@@ -85,13 +85,16 @@ matrix there is the maintained copy.
 
 ## 5. Tracked remainders (rest of G7 / WS-1)
 
-1. **TPM-bind the governor release-token signing key** — no production
-   provisioning path exists yet (the only signers are the l3-e2e demo harness
-   and tests); the plan is a fail-closed key-provisioning seam with a
-   TPM-unseal source when tss2 libs + hardware land.
-2. **In-process TLS termination + mTLS client-cert → principal identity**
-   (`TRANSPORT_SECURITY.md` §4) — the mesh-enforcement gate is live; terminating
-   TLS on the verifier removes the trusted-proxy AoU.
+1. **TPM-bind the governor release-token signing key** — the fail-closed
+   key-provisioning seam LANDED (file / dev-fixed sources,
+   `docs/safety/GOVERNOR_KEY_PROVISIONING.md`); the **TPM-unseal source** remains
+   the hardware-gated follow-up (tss2 libs + hardware).
+2. **In-process TLS termination + mTLS client-cert → principal identity** —
+   ✅ **LANDED** (Track 1.2, `TRANSPORT_SECURITY.md` §4). Opt-in server-side TLS
+   (`KIRRA_TLS_CERT_PATH`/`KEY_PATH`) plus mTLS (`KIRRA_TLS_CLIENT_CA_PATH`): a
+   CA-verified client cert's SHA-256 fingerprint pins to a `cert_principals`
+   principal, feeding the same `ResolvedPrincipal` as the bearer path (no-bearer
+   only). Admin registry `POST/GET /system/cert-principals` + `.../{id}/revoke`.
 3. **Promoting scoped-principal ALLOW decisions into the audit chain**
    (rate-limited) — currently allows are traced, mutations are chained.
 
@@ -107,3 +110,7 @@ matrix there is the maintained copy.
 | Attribution: only successful mutations recorded | `auth::g7_admin_action_attribution_tests` (binary) |
 | Transport gate wired, outermost, off-by-default; attestation + auditor groups gated | `auth::g7_transport_security_router_tests` (binary) |
 | Principal routes classify as WriteState (posture gate) | `gateway::policy::tests::test_classifies_api_principal_writes` |
+| mTLS cert principal: register/rotate/revoke/resolve-by-fingerprint | `verifier_store::cert_principals` tests |
+| mTLS identity: cert principal authorizes WITHOUT a bearer (no-bearer path, 503/403/401 fail-closed) | `authz::tests` (`cert_principal_*`) |
+| mTLS transport: CA-verified handshake injects the leaf fingerprint; no-cert client rejected | `tls::tests` (`live_mtls_handshake_injects_client_cert_fingerprint`, `mtls_rejects_a_client_with_no_certificate`) |
+| Cert-principal routes classify as WriteState (posture gate) | `gateway::policy::tests::test_classifies_cert_principal_writes` |

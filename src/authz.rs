@@ -144,13 +144,16 @@ impl AuthzDecision {
 /// Precedence (each step denies unless it can positively authorize):
 /// 1. `admin_configured` absent/empty → `Unconfigured` (503), regardless of
 ///    everything else — the admin token is the gate's root (INVARIANT #1/#6).
-/// 2. no bearer token → `Unauthenticated` (401).
+/// 2. neither a bearer token nor a resolved `principal` → `Unauthenticated` (401).
+///    The `principal` may be resolved by the caller from a bearer token hash OR,
+///    with no bearer present, from a CA-verified mTLS client-cert fingerprint
+///    (Track 1.2) — both feed the same [`ResolvedPrincipal`].
 /// 3. bearer equals the root admin token (constant-time) → `Allow` as
 ///    [`ApiRole::Admin`] (break-glass; back-compat: an admin-token-only deployment
-///    is byte-identical).
-/// 4. otherwise the `principal` (resolved by token hash) decides:
+///    is byte-identical). A client cert never satisfies the root.
+/// 4. otherwise the `principal` (token-hash OR cert-fingerprint resolved) decides:
 ///    revoked → 401; role holds `required_scope` → `Allow`; role lacks it → 403
-///    (Forbidden); unknown token / corrupt role → 401.
+///    (Forbidden); unknown credential / corrupt role → 401.
 #[must_use]
 pub fn authorize_request(
     required_scope: &str,
@@ -164,20 +167,24 @@ pub fn authorize_request(
         _ => return AuthzDecision::deny(AuthzOutcome::Unconfigured, "none"),
     };
 
-    // 2. A configured server with no presented credential → 401.
-    let provided = match provided_token {
-        Some(p) => p,
-        None => return AuthzDecision::deny(AuthzOutcome::Unauthenticated, "none"),
-    };
+    // 2. A configured server with NEITHER a bearer token NOR a resolved principal
+    //    (the mTLS client-cert path resolves one without a bearer) → 401.
+    if provided_token.is_none() && principal.is_none() {
+        return AuthzDecision::deny(AuthzOutcome::Unauthenticated, "none");
+    }
 
-    // 3. Break-glass root admin token → Admin (all scopes). Constant-time (#2).
-    if admin_token_ok(Some(provided), Some(admin)) {
-        return AuthzDecision {
-            outcome: AuthzOutcome::Allow,
-            auth_method: "admin-token",
-            principal_id: None,
-            role: Some(ApiRole::Admin),
-        };
+    // 3. Break-glass root admin token → Admin (all scopes) — ONLY when a bearer
+    //    token is actually presented (a client cert never satisfies the root).
+    //    Constant-time (#2).
+    if let Some(provided) = provided_token {
+        if admin_token_ok(Some(provided), Some(admin)) {
+            return AuthzDecision {
+                outcome: AuthzOutcome::Allow,
+                auth_method: "admin-token",
+                principal_id: None,
+                role: Some(ApiRole::Admin),
+            };
+        }
     }
 
     // 4. Scoped per-principal token (looked up by hash by the caller).
@@ -311,6 +318,40 @@ mod tests {
         let d = authorize_request(SCOPE_ADMIN, Some("root"), None, None);
         assert_eq!(d.outcome, AuthzOutcome::Unauthenticated);
         assert_eq!(d.auth_method, "none");
+    }
+
+    // --- mTLS client-cert identity (Track 1.2): principal WITHOUT a bearer -----
+
+    #[test]
+    fn cert_principal_without_bearer_is_authorized_by_role() {
+        // No bearer token, but a cert-resolved principal whose role holds the scope
+        // → Allow. This is the mTLS path (provided_token None, principal Some).
+        let p = principal("mtls-svc", ApiRole::Integrator, false);
+        let d = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), None, Some(&p));
+        assert_eq!(d.outcome, AuthzOutcome::Allow);
+        assert_eq!(d.principal_id.as_deref(), Some("mtls-svc"));
+    }
+
+    #[test]
+    fn cert_principal_under_scope_is_403_not_401() {
+        let p = principal("mtls-svc", ApiRole::Auditor, false);
+        let d = authorize_request(SCOPE_ADMIN, Some("root"), None, Some(&p));
+        assert_eq!(d.outcome, AuthzOutcome::Forbidden, "authenticated cert, wrong scope");
+    }
+
+    #[test]
+    fn revoked_cert_principal_without_bearer_is_401() {
+        let p = principal("mtls-svc", ApiRole::Integrator, true);
+        let d = authorize_request(SCOPE_INTEGRATION_EVALUATE, Some("root"), None, Some(&p));
+        assert_eq!(d.outcome, AuthzOutcome::Unauthenticated);
+    }
+
+    #[test]
+    fn cert_principal_still_503_when_root_unconfigured() {
+        // The mTLS path never bypasses the fail-closed root gate (INVARIANT #1/#6).
+        let p = principal("mtls-svc", ApiRole::Admin, false);
+        let d = authorize_request(SCOPE_ADMIN, None, None, Some(&p));
+        assert_eq!(d.outcome, AuthzOutcome::Unconfigured);
     }
 
     #[test]
