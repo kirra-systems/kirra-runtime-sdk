@@ -27,8 +27,11 @@ use kirra_verifier::posture_cache::{now_ms, ServiceState, POSTURE_CACHE_TTL_MS};
 use kirra_verifier::posture_engine_v2::{
     resolve_posture_snapshot_silent, resolve_posture_with_reason, LockoutReason,
 };
-use kirra_verifier::security::{
-    admin_rbac_allows, authorize_admin, constant_time_compare, AdminPrincipal, PrincipalRegistry,
+use kirra_verifier::security::{admin_token_ok, constant_time_compare};
+use kirra_verifier::authz::{
+    authorize_request, generate_api_token, token_fingerprint, token_sha256_hex, ApiRole,
+    AuthzOutcome, ResolvedPrincipal, SCOPE_ACTUATOR_COMMAND, SCOPE_ADMIN, SCOPE_AUDIT_READ,
+    SCOPE_INTEGRATION_EVALUATE,
 };
 use kirra_verifier::action_filter::{evaluate_action_claim, ActionClaim};
 use kirra_verifier::protocol_adapter::{
@@ -83,6 +86,8 @@ mod fabric;
 mod console;
 #[path = "kirra_verifier_service/operators.rs"]
 mod operators;
+#[path = "kirra_verifier_service/principals.rs"]
+mod principals;
 // SG-008 (ASIL D) startup sentinel — pure invariant predicate + its CERT-003
 // RTM coverage tests; extracted from this file to keep the entry point lean.
 #[path = "kirra_verifier_service/startup.rs"]
@@ -101,6 +106,7 @@ use actuator::*;
 use fabric::*;
 use console::*;
 use operators::*;
+use principals::*;
 use startup::*;
 use auth::*;
 
@@ -1494,7 +1500,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
         .route("/industrial/dnp3/evaluate", post(evaluate_dnp3_adapter))
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_client_identity))
-        .layer(middleware::from_fn(require_admin_token))
+        // WS-1 (#G7): SCOPE_INTEGRATION_EVALUATE — the admin token (break-glass) OR
+        // an `integrator`-role principal. Previously admin-token-only.
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_integration_scope))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
@@ -1506,10 +1514,11 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fleet/assets/register", post(handle_register_av_asset))
         .route("/fleet/av-subsystems", get(list_av_subsystems))
         .route("/system/backup/export", post(export_backup))
-        .route("/system/audit/verify", get(verify_audit_chain))
-        .route("/system/audit/causal/verify", get(verify_causal_chain))
-        .route("/system/audit/export", get(handle_audit_export))
         .route("/system/audit/rotate-signing-key", post(handle_audit_rotate_key))
+        // WS-1 (#G7) — API principal registry. SCOPE_ADMIN (admin-only); the mint
+        // returns the plaintext token exactly once.
+        .route("/system/principals", post(register_api_principal_handler).get(list_api_principals_handler))
+        .route("/system/principals/{principal_id}/revoke", post(revoke_api_principal_handler))
         .route("/federation/controllers/register", post(register_federation_controller))
         .route("/attestation/identity/register", post(register_node_identity))
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the
@@ -1524,14 +1533,28 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fabric/command/{asset_id}", post(handle_fabric_command))
         .route("/fabric/causal-log", get(handle_fabric_causal_log))
         .route("/fabric/causal-log/{entry_id}", get(handle_fabric_causal_chain))
-        // #G7 slice 3 — attribution runs INNER of require_admin_token (which sets
-        // the AdminPrincipal extension). Scoped to these admin state-mutation routes
-        // only: NOT the actuator (high-rate control) nor the self-auditing
-        // identity-gated evaluations.
+        // #G7 slice 3 — attribution runs INNER of require_admin_token (which
+        // authenticates and records the resolved principal in the request
+        // extensions). Scoped to these admin state-mutation routes only: NOT the
+        // actuator (high-rate control) nor the self-auditing identity-gated
+        // evaluations.
         .layer(middleware::from_fn_with_state(svc_state.clone(), record_admin_action_audit))
-        .layer(middleware::from_fn(require_admin_token))
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_admin_token))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
+
+    // WS-1 (#G7) — read-only audit-chain verification/export, carved out of the
+    // admin group so an `auditor`-role principal (least privilege — NO mutation
+    // rights) can reach them. SCOPE_AUDIT_READ; the admin token still qualifies
+    // (Admin holds every scope). The full-state `/system/backup/export` and the
+    // `rotate-signing-key` mutation stay admin-only above.
+    let auditor_routes = Router::new()
+        .route("/system/audit/verify", get(verify_audit_chain))
+        .route("/system/audit/causal/verify", get(verify_causal_chain))
+        .route("/system/audit/export", get(handle_audit_export))
+        .layer(middleware::from_fn_with_state(svc_state.clone(), require_audit_scope))
+        // #G7 — same transport-security boundary as every other gated group.
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
 
     let actuator_routes = Router::new()
@@ -1540,7 +1563,9 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
             Arc::clone(&svc_state),
             enforce_actuator_safety_envelope,
         ))
-        .layer(middleware::from_fn(require_admin_token))
+        // WS-1 (#G7): SCOPE_ACTUATOR_COMMAND — the admin token OR an `operator`-role
+        // principal. Auth runs before the envelope; the transport gate runs first of all.
+        .layer(middleware::from_fn_with_state(Arc::clone(&svc_state), require_actuator_scope))
         // #G7 — OUTERMOST: reject an insecure-transport request before auth even
         // reads the credential (no-op unless KIRRA_REQUIRE_SECURE_TRANSPORT is on).
         .layer(middleware::from_fn_with_state(svc_state.clone(), require_secure_transport));
@@ -1646,6 +1671,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .merge(probe_routes)
         .merge(identity_gated_routes)
         .merge(admin_routes)
+        .merge(auditor_routes)
         .merge(actuator_routes)
         .merge(attestation_routes)
         .merge(read_routes)
@@ -1875,6 +1901,40 @@ mod posture_gate_real_router_tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "LockedOut must still 503 at the posture gate even authenticated; got {locked}"
         );
+    }
+
+    /// WS-1 (#G7) — the new/rewired scope-gated groups are WIRED behind the authz
+    /// gate on the REAL assembled router and fail closed WITHOUT a credential. Under
+    /// Nominal the outer posture gate lets each request through to the scope layer,
+    /// which denies (503 when `KIRRA_ADMIN_TOKEN` is unset — INV-13 forbids setting
+    /// it here — or 401 if the CI env happens to configure one). Either way the
+    /// invariant is the same: NEVER 2xx without a valid credential. The positive
+    /// RBAC paths (integrator/auditor/operator reach exactly their surface) are
+    /// proven by `authz::tests` (pure truth table) + `tests/authz_rbac.rs`
+    /// (store↔authz composition), which need neither env nor router.
+    #[tokio::test]
+    async fn ws1_scope_gated_routes_fail_closed_on_real_router() {
+        // (method, path) for one route in each newly scope-gated group.
+        let cases = [
+            // admin group — the new principal-mint route (SCOPE_ADMIN).
+            ("POST", "/system/principals"),
+            // carved auditor group (SCOPE_AUDIT_READ) — must NOT be accidentally open.
+            ("GET", "/system/audit/verify"),
+            // integration group, switched admin-token → SCOPE_INTEGRATION_EVALUATE.
+            ("POST", "/action_filter/evaluate"),
+        ];
+        for (method, path) in cases {
+            let status =
+                status_through_real_app(state_with(FleetPosture::Nominal), method, path).await;
+            assert!(
+                status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+                "{method} {path} must fail closed (503/401) without a credential; got {status}"
+            );
+            assert!(
+                !status.is_success(),
+                "{method} {path} must never reach the handler unauthenticated; got {status}"
+            );
+        }
     }
 
     /// WS-0.5 DoD — "Prometheus scrape returns fleet-safety series", proven

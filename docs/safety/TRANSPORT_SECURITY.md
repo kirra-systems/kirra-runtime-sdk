@@ -25,9 +25,9 @@ plaintext leg.
 - `request_transport_is_secure(require, header, headers)` — the **pure**, unit-
   tested decision.
 - `require_secure_transport` middleware — layered **OUTERMOST** on the sensitive
-  route groups (admin, actuator, identity-gated, **and attestation** — the
-  challenge/verify nonce flow, even though it is otherwise unauthenticated), so it
-  runs before auth.
+  route groups (admin, the WS-1 auditor read group, actuator, identity-gated,
+  **and attestation** — the challenge/verify nonce flow, even though it is
+  otherwise unauthenticated), so it runs before auth.
 
 ### Env vars
 

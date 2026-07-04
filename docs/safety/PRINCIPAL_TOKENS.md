@@ -1,138 +1,109 @@
-# Per-Principal Admin Tokens + RBAC + Attribution (#G7, slices 1–3)
+# Per-Principal API Tokens, Scoped RBAC & Attribution (#G7 / WS-1)
 
-**Status:** LIVE. Gap **G7 — key/identity lifecycle**
-(`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md`). Slice 1 = per-principal tokens
-(rotation / revocation); slice 2 = coarse method-based **RBAC** (`readonly`
-scope); slice 3 = **audit-chain attribution** (successful admin mutations recorded
-in the signed hash chain, naming the principal). Finer per-endpoint capabilities,
-per-domain-event attribution, TPM key-binding, and TLS/mTLS are tracked
-remainders (§4).
+**Status:** LIVE (unified). Gap **G7 — key/identity lifecycle**
+(`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md`), workstream **WS-1**
+(`docs/roadmap/PRODUCT_EXECUTION_PLAN.md`). TPM-bound signing-key rotation and
+in-process TLS/mTLS are the tracked remainders (§5).
+
+> **History / unification.** WS-1 was implemented twice in parallel: an
+> env-configured registry (`KIRRA_PRINCIPAL_TOKENS`, PRs #802/#803) and a
+> DB-backed scoped-authz engine (the advisor branch). The **unification kept the
+> DB-backed engine** — one token system, one RBAC model — and **removed** the env
+> registry (see CHANGELOG). The #804 attribution middleware and the #805
+> transport-security gate carried over and compose with it. Migration: mint a
+> principal per env entry; `readonly` maps to the `auditor` role.
 
 ## 1. The gap
 
 The admin+actuator surface was gated by a **single shared bearer token**
 (`KIRRA_ADMIN_TOKEN`). Its compromise exposes the whole surface, it cannot be
 rotated or revoked per-holder, and every mutation is attributed to the same
-anonymous credential. (`INDUSTRY_BENCHMARK_GAP_ANALYSIS.md` G7.)
+anonymous credential.
 
-## 2. What this slice adds
+## 2. The unified model
 
-An operator can issue a **named token per principal** — rotate or revoke one
-without disturbing the others, and attribute each admin mutation to a named
-identity — **without sharing** the root `KIRRA_ADMIN_TOKEN`.
+One fail-closed authorization engine (`src/authz.rs`) gates every protected route
+group by **scope**, satisfied by EITHER the break-glass root `KIRRA_ADMIN_TOKEN`
+(all scopes) OR a **DB-backed API principal** whose role holds the scope:
 
-- `parko`-free, pure primitives in `src/security.rs`:
-  - `PrincipalRegistry` — the `(principal_id, role, token)` set, `from_env()` / `parse()`.
-  - `authorize_admin(provided, configured_admin, registry) -> Option<AdminPrincipal>`
-    — the single fail-closed **authentication** decision.
-  - `admin_rbac_allows(role, method) -> bool` — the pure **RBAC** decision the
-    middleware applies after authentication (slice 2).
-  - `AdminPrincipal::{Root, Named{id, role}}` — the resolved identity + scope,
-    attached to the request extensions and logged for attribution.
-  - `Role::{Admin, ReadOnly}` — the RBAC scope.
-
-### Env vars
-
-| Var | Meaning |
-|---|---|
-| `KIRRA_ADMIN_TOKEN` | **Unchanged.** The root admin token (always `Admin` role). Absent/empty → **HTTP 503** for every admin route (INVARIANT #1/#6). |
-| `KIRRA_PRINCIPAL_TOKENS` | Optional. `principal_id[:role]=token` entries, separated by `,` `;` or newlines. Only the FIRST `=` splits the id/role part from the token (tokens may contain `=`); the id part's FIRST `:` splits id from role. `role` ∈ {`admin`, `readonly`} (case-insensitive; omitted → `admin`). Whitespace-trimmed; an entry with no `=`, an empty id, an empty token, OR an **explicit-but-unrecognized role** is **ignored** (never a credential — a typo'd role can't silently become `admin`). |
-
-### RBAC (slice 2)
-
-Coarse and **method-based**, so it is enforced in the single admin middleware
-with no router changes:
-
-| Role | May do | Denied |
+| Role | Scope(s) | Surface |
 |---|---|---|
-| `Admin` (and the root token) | everything | — |
-| `ReadOnly` | nullipotent methods only (`GET`/`HEAD`/`OPTIONS`) — the admin reads: audit-verify, fabric state/telemetry, subsystem lists | **every mutation (all POST admin routes) AND the actuator** → `403 Forbidden` |
+| `admin` | every scope | full mutation surface (`admin_routes`) + everything below |
+| `integrator` | `integration:evaluate` | identity-gated evaluations (action-filter / industrial / federation-submit / posture-stream) |
+| `operator` | `actuator:command` | `POST /actuator/motion/command` |
+| `auditor` | `audit:read` | read-only audit verify / causal-verify / export (`auditor_routes`, carved out of the admin group) |
 
-A `readonly` token is therefore a safe least-privilege **monitoring / audit**
-credential that can never register a node, export a backup, rotate a key, or
-command an actuator.
-
-### Attribution audit (slice 3)
-
-After a **successful** admin **mutation** (a 2xx response on a non-safe method), a
-dedicated `record_admin_action_audit` middleware appends an `ADMIN_ACTION` event to
-the **signed, hash-chained audit ledger** (`save_posture_event_chained` →
-`append_audit_event_tx`) with `{ principal, role, method, path }`. So the
-tamper-evident record names **who changed what, and when** — the accountability the
-single shared token could never provide.
-
-- **Scoped to the admin state-mutation routes only** (register / backup /
-  rotate-key / dependencies / operators / federation / fabric-command). The
-  attribution middleware is layered INNER of `require_admin_token` (which
-  authenticates and sets the `AdminPrincipal` extension). It is **deliberately NOT**
-  applied to the actuator route (a high-rate control path — a per-command signed
-  row would be prohibitive) nor the identity-gated evaluation routes (which already
-  self-audit).
-- Only successful mutations are recorded (`should_record_admin_action`): reads
-  (`GET`) and failed requests (non-2xx) are not, so the ledger names who actually
-  CHANGED state, not every authorized touch.
-- Because the only latency-sensitive path (the actuator) is excluded, the audit
-  write is **awaited** so the attribution is durably committed to the chain BEFORE
-  the (rare, sensitive) mutation is acknowledged — the stronger accountability
-  guarantee. A write failure is logged and never fails the already-completed
-  mutation (mirrors the `action_filter` audit path).
-- The `ADMIN_ACTION` row is a distinct, correlated attribution row; embedding the
-  actor into each domain event (the node-registration row itself) is a §4 refinement.
+- **Lifecycle:** mint / list / revoke via the **admin-scoped**
+  `POST/GET /system/principals` and `POST /system/principals/{id}/revoke`.
+  The server generates a 256-bit token from the OS CSPRNG and returns the
+  plaintext **exactly once**; the store holds only its **SHA-256** (lookup is by
+  hash — plaintext never persisted). Re-minting a principal rotates its token
+  and clears any revocation.
+- **Pure decision core:** `authz::authorize_request(scope, admin, bearer,
+  principal)` reads no env and no store (INVARIANT #13); the middleware
+  (`authorize_scope`, `src/bin/kirra_verifier_service/auth.rs`) lifts env + the
+  hashed store lookup in, and fail-closes to "no principal" on any store error.
+- **Attribution (slice 3, #804):** on Allow the resolved identity
+  (`AuthenticatedPrincipal { label, role }` — the principal id, or `root` for
+  the break-glass token) is attached to the request extensions; after a
+  **successful admin mutation** the `record_admin_action_audit` middleware
+  appends an `ADMIN_ACTION` event to the signed hash-chained ledger naming who
+  changed what. Reads and failures are not recorded; the actuator route and the
+  self-auditing evaluations are deliberately excluded.
+- **Transport security (#805):** `KIRRA_REQUIRE_SECURE_TRANSPORT` layers
+  `require_secure_transport` OUTERMOST on every gated group (admin, auditor,
+  actuator, identity-gated, attestation) — a credential or nonce is never
+  processed off a leg not asserted as TLS by the trusted proxy/mesh
+  (`docs/safety/TRANSPORT_SECURITY.md`, AOU-TRANSPORT-TLS-001).
 
 ## 3. Fail-closed & invariant preservation
 
-The extension is **purely additive** and **cannot fail open**:
+1. **INVARIANT #1/#6 verbatim.** `KIRRA_ADMIN_TOKEN` absent/empty → **503** for
+   every gated route, unconditionally — a per-principal token never authorizes
+   without a configured root (an API principal only ADDS least privilege on top).
+   `require_admin_token` is preserved by name as the `SCOPE_ADMIN`
+   specialization.
+2. **INVARIANT #2.** The root token is compared via `admin_token_ok` /
+   `constant_time_compare`; principal tokens are resolved by **SHA-256 hash
+   lookup** — no `==` ever touches a raw secret.
+3. **Fail-closed everywhere:** unknown token → 401; revoked → 401; authenticated
+   but under-scoped → 403 (distinct, so "wrong token" ≠ "insufficient
+   privilege"); corrupt stored role → 401; store error → treated as no
+   principal (401); denials are logged, not chained (an unauthenticated caller
+   must not append to the audit ledger — denial-flood DoS).
+4. **INVARIANT #13.** The decision truth table (`authz::tests`), the store↔authz
+   composition (`tests/authz_rbac.rs`), and the router ordering
+   (`auth::g7_transport_security_router_tests`) are all tested without
+   `set_var`.
+5. **Back-compat:** an admin-token-only deployment (no principals minted) is
+   byte-compatible with the pre-WS-1 behavior.
 
-1. **INVARIANT #1/#6 unchanged.** `require_admin_token` still returns **503**
-   when `KIRRA_ADMIN_TOKEN` is absent/empty, as the FIRST check — before the
-   registry is ever consulted. A per-principal token therefore **never**
-   authorizes without a configured root token
-   (`principal_token_denied_when_root_token_absent_or_empty`).
-2. **INVARIANT #2.** Every token comparison — root and per-principal — goes
-   through `constant_time_compare`. `PrincipalRegistry::resolve` compares against
-   **every** entry with no early-out, so a match does not leak its position by
-   timing. A token that matches the same id twice (overlapping-window rotation)
-   resolves to that id; a token that matches **multiple distinct** ids is an
-   ambiguous misconfiguration and **denies** (fail-closed — never a
-   non-deterministic audit identity).
-3. **Root path unchanged.** With `KIRRA_PRINCIPAL_TOKENS` unset the registry is
-   empty and behavior is byte-identical to before (root-token-only).
-4. **INVARIANT #13.** The decision logic is pure and unit-tested without touching
-   process env (env is read only by the thin `from_env` wrapper), exactly like
-   the sibling `admin_token_ok` (SG-015).
+## 4. Route authorization matrix
 
-5. **INVARIANT #2 (RBAC too).** A token that resolves to multiple **distinct
-   (id, role)** pairs is ambiguous — attribution OR privilege would be
-   non-deterministic — so it **denies** (never silently picks a scope).
+See `CLAUDE.md` → "Route Authorization Matrix" (updated for scopes) — the
+matrix there is the maintained copy.
 
-## 4. Tracked remainders (rest of G7)
+## 5. Tracked remainders (rest of G7 / WS-1)
 
-1. **Finer per-endpoint capabilities.** Slice 2's RBAC is coarse (read vs
-   mutate). A capability model (e.g. distinguishing node-registration from
-   backup-export from actuator) is a follow-up — `AdminPrincipal` carries the
-   identity + role to scope on.
-2. **Per-domain-event attribution.** Slice 3 records a correlated `ADMIN_ACTION`
-   row per successful mutation; embedding the actor INTO each domain event's own
-   audit row (so the node-registration row itself names the principal) is a
-   finer follow-up.
-3. **TPM-bind the governor release-token signing key** (`tpm.rs` exists at the
-   fleet layer) — remove the in-process signing key.
-4. **TLS / mTLS on the verifier.** The **mesh-enforcement** option (fail-closed
-   `KIRRA_REQUIRE_SECURE_TRANSPORT` gate) is LIVE — see
-   `docs/safety/TRANSPORT_SECURITY.md`. **In-process TLS termination** on the
-   verifier and **mTLS client-certificate identity** (mapping a client cert to a
-   principal + role) remain tracked there.
+1. **TPM-bind the governor release-token signing key** — no production
+   provisioning path exists yet (the only signers are the l3-e2e demo harness
+   and tests); the plan is a fail-closed key-provisioning seam with a
+   TPM-unseal source when tss2 libs + hardware land.
+2. **In-process TLS termination + mTLS client-cert → principal identity**
+   (`TRANSPORT_SECURITY.md` §4) — the mesh-enforcement gate is live; terminating
+   TLS on the verifier removes the trusted-proxy AoU.
+3. **Promoting scoped-principal ALLOW decisions into the audit chain**
+   (rate-limited) — currently allows are traced, mutations are chained.
 
-## 5. Test traceability
+## 6. Test traceability
 
-| Property | Test (`security::g7_principal_token_tests`) |
+| Property | Test |
 |---|---|
-| Parse forms; malformed dropped | `parse_keeps_wellformed_drops_malformed` |
-| Role parse/scope; unrecognized role dropped | `parse_roles_and_scope` |
-| Empty provided never matches | `resolve_empty_provided_never_matches` |
-| Rotation resolves; distinct id **or role** collision denies | `same_id_rotation_resolves_but_distinct_id_collision_denies` |
-| Root token → `Root` (Admin) | `authorize_root_token_is_root_principal` |
-| Principal token → `Named{id, role}`; unknown denies | `authorize_principal_token_is_named_and_attributed` |
-| **Principal denied when root token absent/empty (no fail-open)** | `principal_token_denied_when_root_token_absent_or_empty` |
-| **RBAC: `ReadOnly` allowed only on safe methods** | `admin_rbac_allows_read_only_only_on_safe_methods` |
-| **Attribution: only successful mutations recorded** | `g7_admin_action_attribution_tests::admin_action_recorded_only_on_successful_mutation` (binary) |
+| RBAC matrix (roles × scopes, least privilege) | `authz::tests` (`admin_holds_every_scope`, `non_admin_roles_are_least_privilege`, role parse round-trip) |
+| Decision truth table (503/401/403/Allow; revoked; corrupt role) | `authz::tests` |
+| Store↔authz composition (mint → resolve-by-hash → authorize) | `tests/authz_rbac.rs` |
+| Principal mint/revoke/rotate persistence | `verifier_store::principals` tests |
+| **No fail-open without root token** | `authz::tests` (Unconfigured precedence) + `tests/authz_rbac.rs` |
+| Attribution: only successful mutations recorded | `auth::g7_admin_action_attribution_tests` (binary) |
+| Transport gate wired, outermost, off-by-default; attestation + auditor groups gated | `auth::g7_transport_security_router_tests` (binary) |
+| Principal routes classify as WriteState (posture gate) | `gateway::policy::tests::test_classifies_api_principal_writes` |
