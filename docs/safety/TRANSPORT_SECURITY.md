@@ -83,10 +83,28 @@ Clause 3's mesh-first default is unchanged — this only ADDS TLS as an option.
   (`tls::tests`) exercises a real client TLS handshake + HTTP round-trip against the
   terminator through the same production config-loader.
 
-**Tracked follow-up — mTLS client-certificate identity.** Mapping a verified client
-certificate to a principal (feeding the same `ResolvedPrincipal` the bearer path
-produces, tying into `PRINCIPAL_TOKENS.md` RBAC) is the natural next slice; deferred
-so the server-side serve-path change lands and bakes first.
+**mTLS client-certificate identity — LIVE (opt-in; WS-1 Track 1.2).** With server
+TLS on, set `KIRRA_TLS_CLIENT_CA_PATH` (PEM) to REQUIRE + verify client certificates:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `KIRRA_TLS_CLIENT_CA_PATH` | — | PEM client-CA. Set (server TLS must also be on) → client certs required and CA-verified. Set without server TLS → fail-closed startup abort. |
+
+- rustls's **audited `WebPkiClientVerifier`** does the cryptographic verification
+  (chain to the configured CA + proof of possession) — no hand-rolled cert
+  verification in the safety path. `ring` provider, as with the server side.
+- The verified leaf's **SHA-256 fingerprint** is injected into request extensions
+  (`ClientCertFingerprint`). When a request carries **no bearer token**, the auth
+  layer resolves that fingerprint to a **cert principal** (`cert_principals` table),
+  feeding the SAME `ResolvedPrincipal` the bearer path produces — one RBAC model
+  (`PRINCIPAL_TOKENS.md`). A presented bearer is the explicit credential and is NOT
+  silently rescued by a cert.
+- **Pin, don't trust-the-CA-alone:** CA verification proves authenticity; the
+  fingerprint pin (`POST /system/cert-principals`, admin-scoped) authorizes the
+  SPECIFIC cert to a role. An unpinned (even CA-valid) cert resolves no principal →
+  fail-closed 401. The server never sees the client's private key.
+- Live tests (`tls::tests`): a CA-verified client cert handshake injects the correct
+  fingerprint; a client presenting no cert is rejected at the handshake.
 
 ## 5. Test traceability
 

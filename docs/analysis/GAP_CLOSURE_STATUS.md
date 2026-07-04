@@ -47,8 +47,11 @@ registry — see the CHANGELOG Unification note.
    config, rustls pinned to `ring` (no aws-lc-rs), per-connection handshake tasks,
    live-handshake test. Discharges `AOU-TRANSPORT-TLS-001` when enabled; ADR-0006
    mesh default unchanged. `docs/safety/TRANSPORT_SECURITY.md` §4.
-   **Remaining:** mTLS client-cert-subject → principal mapping (feeds the same
-   `ResolvedPrincipal` as the bearer path). Effort S–M.
+   ✅ **mTLS client-cert → principal ALSO landed:** `KIRRA_TLS_CLIENT_CA_PATH`
+   requires + CA-verifies client certs (rustls `WebPkiClientVerifier`); the verified
+   leaf fingerprint pins to a `cert_principals` principal, feeding the same
+   `ResolvedPrincipal` as the bearer path (no-bearer only). Admin registry
+   `POST/GET /system/cert-principals`. **Track 1.2 complete.**
 
 ### Track 2 — WS-2 P1 surface remainders (Stage 1, blocks Gate B)
 3. **G15 learning-loop capture** — §3 capture-point decision still OPEN in

@@ -506,6 +506,7 @@ mod posture;
 mod audit;
 mod operators;
 mod principals;
+mod cert_principals;
 mod federation;
 mod attestation;
 mod av_subsystem;
@@ -657,6 +658,22 @@ impl VerifierStore {
             "CREATE TABLE IF NOT EXISTS api_principals (
                 principal_id   TEXT    PRIMARY KEY,
                 token_sha256   TEXT    NOT NULL UNIQUE,
+                role           TEXT    NOT NULL,
+                created_at_ms  INTEGER NOT NULL,
+                revoked_at_ms  INTEGER
+            )",
+            [],
+        )?;
+
+        // WS-1 (#G7) Track 1.2 — mTLS cert principals: a client X.509 certificate,
+        // already CA-verified by rustls at the TLS layer, is pinned to a principal by
+        // the SHA-256 hex of its leaf DER (UNIQUE, looked up by fingerprint). Same
+        // role/revocation shape as `api_principals` — a cert is just another
+        // least-privilege sub-credential on top of the `KIRRA_ADMIN_TOKEN` root.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS cert_principals (
+                principal_id   TEXT    PRIMARY KEY,
+                cert_sha256    TEXT    NOT NULL UNIQUE,
                 role           TEXT    NOT NULL,
                 created_at_ms  INTEGER NOT NULL,
                 revoked_at_ms  INTEGER

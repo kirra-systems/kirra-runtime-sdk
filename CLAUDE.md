@@ -161,6 +161,7 @@ src/
 | `federation_report_nonces` | Burned nonces (replay prevention) |
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
+| `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
 
 ---
 
@@ -255,6 +256,7 @@ Admin token or an `integrator`-role principal.
 - `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
 - `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
+- `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role)
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
 
@@ -438,6 +440,7 @@ proptest = "1"  # dev-dependency
 | `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` | No | — | Governor release-signing key source (`kirra_release_token::provisioning`, ADR-0031 Clause E): `file:<path>` (permission-checked, zeroized 32-byte Ed25519 seed) \| `dev-fixed` (well-known harness key, needs the ALLOW_DEV flag) \| `tpm:<handle>` (deferred → `TpmUnsealUnsupported`). **Unset/empty → refuse** (fail-closed; never mints an unpinnable key). See `docs/safety/GOVERNOR_KEY_PROVISIONING.md` |
 | `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV` | No | `false` | `1`/`true` → admit the `dev-fixed` governor key source. Absent → `dev-fixed` is refused (`DevKeyNotAllowed`) — a non-production key never loads by default |
 | `KIRRA_TLS_CERT_PATH` / `KIRRA_TLS_KEY_PATH` | No | — | Opt-in in-process TLS termination (WS-1 Track 1.2, `src/bin/kirra_verifier_service/tls.rs`): PEM cert-chain + private-key paths. **Both set** → verifier terminates TLS in-process (rustls, `ring` provider only — no `aws-lc-rs`). **Exactly one set** → fail-closed startup abort (a half-configured TLS listener must not fall back to plaintext). **Neither** → plaintext (default, byte-identical; mesh terminates TLS per ADR-0006 Clause 3). Cert/key validated before bind. See `docs/safety/TRANSPORT_SECURITY.md` §4 |
+| `KIRRA_TLS_CLIENT_CA_PATH` | No | — | Opt-in **mTLS** (WS-1 Track 1.2). Set (server TLS must ALSO be on) → client certs are REQUIRED and CA-verified by rustls's `WebPkiClientVerifier`; the verified leaf's SHA-256 fingerprint resolves to a `cert_principals` principal when no bearer token is presented (same RBAC). Set WITHOUT server TLS → fail-closed startup abort. Unset → no client auth. See `docs/safety/TRANSPORT_SECURITY.md` §4 |
 
 **`kirra-ros2-adapter` slow-loop env gates** (consumed in `node.rs`, opt-in, default off →
 byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),

@@ -1253,11 +1253,12 @@ async fn main() {
     // Default (neither env var) is Plaintext → byte-identical to before.
     let tls_config = match tls::resolve_tls_from_env() {
         Ok(tls::TlsResolution::Plaintext) => None,
-        Ok(tls::TlsResolution::Tls { cert_path, key_path }) => {
-            match tls::load_server_config(&cert_path, &key_path) {
+        Ok(tls::TlsResolution::Tls { cert_path, key_path, client_ca_path }) => {
+            match tls::load_server_config(&cert_path, &key_path, client_ca_path.as_deref()) {
                 Ok(cfg) => {
                     tracing::info!(
                         cert = %cert_path.display(),
+                        mtls = client_ca_path.is_some(),
                         "TLS termination enabled (in-process, ring provider)"
                     );
                     Some(cfg)
@@ -1556,6 +1557,10 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // returns the plaintext token exactly once.
         .route("/system/principals", post(register_api_principal_handler).get(list_api_principals_handler))
         .route("/system/principals/{principal_id}/revoke", post(revoke_api_principal_handler))
+        // WS-1 (#G7) Track 1.2 — mTLS cert-principal registry. SCOPE_ADMIN; pins a
+        // CA-verified client cert (by SHA-256 fingerprint) to a scoped principal.
+        .route("/system/cert-principals", post(register_cert_principal_handler).get(list_cert_principals_handler))
+        .route("/system/cert-principals/{principal_id}/revoke", post(revoke_cert_principal_handler))
         .route("/federation/controllers/register", post(register_federation_controller))
         .route("/attestation/identity/register", post(register_node_identity))
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the

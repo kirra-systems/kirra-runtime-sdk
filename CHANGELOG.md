@@ -111,6 +111,20 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
   client TLS handshake + HTTP round-trip through the production config-loader. mTLS
   client-cert → principal identity is the tracked follow-up.
   Docs: `docs/safety/TRANSPORT_SECURITY.md` §4.
+- **WS-1 (#G7) — mTLS client-certificate → principal (Track 1.2, completing the
+  transport track).** With server TLS on, `KIRRA_TLS_CLIENT_CA_PATH` REQUIRES +
+  CA-verifies client certificates via rustls's audited `WebPkiClientVerifier` (no
+  hand-rolled verification in the safety path; `ring` provider). The verified leaf's
+  SHA-256 fingerprint is pinned to a principal in a new `cert_principals` registry
+  (`POST/GET /system/cert-principals` + `.../{id}/revoke`, admin-scoped); when a
+  request carries no bearer token, that fingerprint resolves the SAME
+  `ResolvedPrincipal` the token path produces — one RBAC model. CA validity proves
+  authenticity; the fingerprint pin authorizes the specific cert to a role (an
+  unpinned CA-valid cert → fail-closed 401). The server never sees the client's
+  private key; a bearer token is never silently rescued by a cert. Live mTLS tests
+  cover the handshake + fingerprint injection and no-cert rejection. This closes the
+  non-hardware remainder of WS-1's transport track (TPM-unseal key custody stays the
+  hardware-gated follow-up). Docs: `docs/safety/TRANSPORT_SECURITY.md` §4.
 
 ### Changed
 

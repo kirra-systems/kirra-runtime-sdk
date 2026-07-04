@@ -135,6 +135,39 @@ async fn authorize_scope(
         _ => None,
     };
 
+    // mTLS fallback (Track 1.2): with NO bearer token presented, a CA-verified client
+    // certificate whose SHA-256 leaf fingerprint is pinned to a cert-principal resolves
+    // an identity. A presented bearer is the explicit credential and is NOT silently
+    // rescued by a cert — only the no-bearer case consults the cert. Admin must be
+    // configured (the predicate 503s otherwise regardless).
+    let principal = match principal {
+        Some(p) => Some(p),
+        None if bearer.is_none() && !admin_env.is_empty() => {
+            match request.extensions().get::<super::tls::ClientCertFingerprint>() {
+                Some(fp) => {
+                    let fp = fp.0.clone();
+                    match svc
+                        .app
+                        .store
+                        .call_read(move |s| s.load_cert_principal_by_fingerprint(&fp))
+                        .await
+                    {
+                        Ok(Ok(Some(rec))) => Some(ResolvedPrincipal {
+                            role: ApiRole::parse_role(&rec.role),
+                            revoked: rec.revoked_at_ms.is_some(),
+                            principal_id: rec.principal_id,
+                        }),
+                        // Unpinned fingerprint OR store/read failure → no principal
+                        // (fail-closed; the predicate then denies).
+                        _ => None,
+                    }
+                }
+                None => None,
+            }
+        }
+        None => None,
+    };
+
     let decision = authorize_request(
         required_scope,
         Some(admin_env.as_str()),
