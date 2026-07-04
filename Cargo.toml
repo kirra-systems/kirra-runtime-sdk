@@ -134,6 +134,17 @@ getrandom = "0.3"
 base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# Opt-in in-process TLS termination for the verifier serve path (WS-1 Track 1.2,
+# docs/safety/TRANSPORT_SECURITY.md §4). ALL pinned to the `ring` provider with
+# default-features disabled so `aws-lc-rs` (a heavy C/asm dep, and a rustc-1.94.1
+# toolchain risk) never enters the tree — rustls 0.23 + ring are already resolved
+# transitively via reqwest, so this adds no new rustls major. hyper/hyper-util are
+# already in the tree via axum; declared directly for the manual TLS accept loop.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 
 [dev-dependencies]
 rand = "0.8"

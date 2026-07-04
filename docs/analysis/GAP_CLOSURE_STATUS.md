@@ -42,8 +42,13 @@ registry — see the CHANGELOG Unification note.
    **Remaining:** the TPM-unseal source itself (Phase-II; named external
    dependency: tss2 libs + hardware — additive at one call site).
 2. **In-process TLS termination + mTLS client-cert → principal identity.**
-   Mesh-enforcement gate is live (#805); this removes its trusted-proxy AoU.
-   Serve-path change + rustls provider selection + live-handshake test. Effort M.
+   ✅ **Server-side TLS landed** (opt-in, default-OFF): `KIRRA_TLS_CERT_PATH` +
+   `KIRRA_TLS_KEY_PATH` terminate TLS in-process (`tls.rs`), fail-closed on partial
+   config, rustls pinned to `ring` (no aws-lc-rs), per-connection handshake tasks,
+   live-handshake test. Discharges `AOU-TRANSPORT-TLS-001` when enabled; ADR-0006
+   mesh default unchanged. `docs/safety/TRANSPORT_SECURITY.md` §4.
+   **Remaining:** mTLS client-cert-subject → principal mapping (feeds the same
+   `ResolvedPrincipal` as the bearer path). Effort S–M.
 
 ### Track 2 — WS-2 P1 surface remainders (Stage 1, blocks Gate B)
 3. **G15 learning-loop capture** — §3 capture-point decision still OPEN in

@@ -1116,9 +1116,14 @@ TLS in production to prevent token interception."*)
 - **TLS Ingress — PROVIDED.** `helm/kirra/templates/ingress.yaml` (opt-in,
   `ingress.enabled` + `ingress.tls`) is the supported termination point;
   cert/issuer (e.g. cert-manager) is integrator-supplied.
-- **In-process TLS (rustls) — NOT provided** (deliberate, ADR-0006 Clause 3). If a
-  deployment cannot terminate TLS in front of the process, that is a separate
-  request, not this AoU.
+- **In-process TLS (rustls) — available, opt-in, default-OFF** (WS-1 Track 1.2;
+  ADR-0006 Clause 3's mesh-first default is unchanged). By default the verifier
+  binds plaintext and this AoU stands: terminate TLS in front of the process (mesh /
+  sidecar / reverse proxy). A deployment that cannot may instead set
+  `KIRRA_TLS_CERT_PATH` + `KIRRA_TLS_KEY_PATH` to terminate TLS in-process
+  (fail-closed on partial config; `docs/safety/TRANSPORT_SECURITY.md` §4), which
+  discharges this AoU for that deployment. mTLS client-cert → principal identity is
+  the tracked follow-up.
 
 ### Consequence if violated
 A cleartext-exposed verifier leaks `KIRRA_ADMIN_TOKEN` to any on-path observer →

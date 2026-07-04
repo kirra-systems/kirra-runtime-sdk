@@ -96,6 +96,10 @@ mod startup;
 // attribution) — the CRITICAL auth path, extracted to keep the entry point lean.
 #[path = "kirra_verifier_service/auth.rs"]
 mod auth;
+// Opt-in in-process TLS termination (WS-1 Track 1.2). Default OFF → plaintext
+// serve path unchanged; fail-closed on partial config; ring provider only.
+#[path = "kirra_verifier_service/tls.rs"]
+mod tls;
 use attestation::*;
 use fleet::*;
 use audit::*;
@@ -1243,6 +1247,33 @@ async fn main() {
     }
     tracing::info!("SG-008: startup invariants satisfied; binding listener");
 
+    // WS-1 Track 1.2: resolve the opt-in TLS serve mode and LOAD/validate the
+    // rustls config BEFORE binding — a partial or invalid TLS config aborts here
+    // (fail-closed), never after we have claimed the port or told systemd READY.
+    // Default (neither env var) is Plaintext → byte-identical to before.
+    let tls_config = match tls::resolve_tls_from_env() {
+        Ok(tls::TlsResolution::Plaintext) => None,
+        Ok(tls::TlsResolution::Tls { cert_path, key_path }) => {
+            match tls::load_server_config(&cert_path, &key_path) {
+                Ok(cfg) => {
+                    tracing::info!(
+                        cert = %cert_path.display(),
+                        "TLS termination enabled (in-process, ring provider)"
+                    );
+                    Some(cfg)
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "TLS config invalid — aborting before bind (fail-closed)");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "TLS config invalid — aborting before bind (fail-closed)");
+            std::process::exit(1);
+        }
+    };
+
     println!("Kirra Verifier Service listening on {listen_addr} (db: {db_path})");
     let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
         Ok(listener) => listener,
@@ -1280,10 +1311,16 @@ async fn main() {
         }
     };
 
-    if let Err(err) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-    {
+    let serve_result = match tls_config {
+        // Opt-in in-process TLS (WS-1 Track 1.2). Per-connection handshake tasks;
+        // the mesh-mTLS transport gate (#805) still composes on top when enabled.
+        Some(cfg) => tls::serve_tls(listener, app, cfg, shutdown).await,
+        // Default plaintext path — unchanged (`axum::serve` graceful shutdown).
+        None => axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await,
+    };
+    if let Err(err) = serve_result {
         tracing::error!(error = %err, "server exited with error");
         std::process::exit(1);
     }
