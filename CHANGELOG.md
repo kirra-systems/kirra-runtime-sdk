@@ -84,6 +84,19 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
   the #805 `KIRRA_REQUIRE_SECURE_TRANSPORT` transport-security gate carry
   over unchanged and compose with the scope layers (transport gate
   outermost; attribution names the resolved API principal or `root`).
+- **WS-1 (#G7) — governor release-signing key provisioning seam
+  (ADR-0031 Clause E, Track 1.1).** `kirra_release_token::provisioning` is the
+  single fail-closed decision point for **where** the governor's Ed25519 release
+  key comes from. `KIRRA_GOVERNOR_SIGNING_KEY_SOURCE` selects `file:<path>` (a
+  permission-checked — Unix `mode & 0o077 == 0` — zeroized 32-byte seed) or
+  `dev-fixed` (the well-known harness key, admitted ONLY under
+  `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV`); an unset/misconfigured source
+  **refuses** rather than minting an unpinnable key that would silently break the
+  trust chain. `tpm:<handle>` is wired to a single deferred refusal
+  (`TpmUnsealUnsupported`) — the Phase-II TPM-unseal custody path (tss2 libs +
+  hardware) lands additively at that one call site. The `kirra-l3-e2e`
+  measurement harness now draws its fixed key through the seam (proving a live
+  caller). Docs: `docs/safety/GOVERNOR_KEY_PROVISIONING.md`.
 
 ### Changed
 

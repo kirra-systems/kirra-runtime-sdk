@@ -1121,6 +1121,7 @@ dependencies = [
  "ed25519-dalek",
  "kirra-contract-channel",
  "sha2 0.11.0",
+ "zeroize",
 ]
 
 [[package]]

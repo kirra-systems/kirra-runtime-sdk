@@ -27,14 +27,20 @@ use kirra_contract_channel::{
 use kirra_core::contract_consumer::{decide_cycle, GovernorOutcome};
 use kirra_core::kinematics_contract::VehicleKinematicsContract;
 use kirra_hv_carrier::{PosixShmReader, PosixShmRegion};
+use kirra_release_token::provisioning::{provision_signing_key, SigningKeySource};
 use kirra_release_token::{issue_release_token, verify_release, ReleaseDenied};
 
 const FUTURE_DEADLINE: u64 = u64::MAX / 2;
 
-/// The harness governor signing key — a FIXED TEST key (deterministic, no RNG on
-/// target). Provenance is this harness; never a production identity.
+/// The harness governor signing key — the FIXED dev key (deterministic, no RNG on
+/// target), obtained THROUGH the fail-closed provisioning seam (ADR-0031 Clause E)
+/// with the explicit dev opt-in. Byte-identical to the old `from_bytes(&[7u8;32])`,
+/// but exercising the seam on the standing measurement harness proves the dev key
+/// is admitted ONLY under `allow_dev = true` — never a production identity, never a
+/// silent fallback. Provenance is this harness; never a production identity.
 fn governor_key() -> SigningKey {
-    SigningKey::from_bytes(&[7u8; 32])
+    provision_signing_key(&SigningKeySource::DevFixed, /* allow_dev = */ true)
+        .expect("dev-fixed source with allow_dev is infallible")
 }
 
 fn payload(linear: f64) -> VehicleCommandPayload {

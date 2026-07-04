@@ -45,6 +45,11 @@ use sha2::{Digest, Sha256};
 
 use kirra_contract_channel::GovernorContractView;
 
+/// Fail-closed provisioning of the governor signing key (ADR-0031 Clause E) — the
+/// ONE place that decides *where* the key `issue_release_token` signs with comes
+/// from (file / dev-fixed; TPM-unseal deferred). See [`provisioning`].
+pub mod provisioning;
+
 /// Domain tag for the contract digest (step 5). Distinct from every audit-chain
 /// / causal tag so the two hash spaces never collide.
 const DIGEST_DOMAIN: &[u8] = b"KIRRA-GOVERNOR-CONTRACT-DIGEST-V1";
