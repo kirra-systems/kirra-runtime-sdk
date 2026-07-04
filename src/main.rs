@@ -22,10 +22,13 @@ fn main() {
 
     // G18: announce the effective config's schema version + content digest at boot
     // — the "which config is this process running?" fingerprint for audit/attestation.
+    // Fail-closed: a digest failure halts boot rather than running unfingerprinted.
+    let config_digest = runtime_config
+        .effective_digest()
+        .expect("BOOT_HALTED_CONFIG_DIGEST");
     println!(
         "[CONFIG] schema v{} · sha256:{}",
-        runtime_config.config_version,
-        runtime_config.effective_digest()
+        runtime_config.config_version, config_digest
     );
 
     let raw_key_string = env::var("KIRRA_SUPERVISOR_RESET_KEY").expect("SECURITY_FAILURE_ENV_KEY_MISSING");

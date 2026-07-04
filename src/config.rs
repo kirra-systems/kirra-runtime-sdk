@@ -54,15 +54,20 @@ impl KirraRuntimeConfig {
     /// SHA-256 (hex) of the canonical serialization of the effective config — a
     /// stable fingerprint for audit/attestation ("which config is this process
     /// running?"). Structs serialize in declaration order, so the encoding is
-    /// deterministic; a serialization failure (never expected for this struct)
-    /// yields the digest of the empty string rather than panicking.
-    #[must_use]
-    pub fn effective_digest(&self) -> String {
+    /// deterministic.
+    ///
+    /// **Fail-closed:** a serialization failure returns `Err` rather than a
+    /// valid-looking-but-wrong digest. `serde_json` refuses non-finite floats
+    /// (`NaN`/`Inf`), so this can only fire on a config that never passed
+    /// [`validate_safety_invariants`](Self::validate_safety_invariants) (which now
+    /// rejects non-finite contract fields) — the caller treats it as a boot halt.
+    pub fn effective_digest(&self) -> Result<String, String> {
         use sha2::{Digest, Sha256};
-        let canonical = serde_json::to_string(self).unwrap_or_default();
+        let canonical = serde_json::to_string(self)
+            .map_err(|e| format!("CONFIG_DIGEST_SERIALIZE_FAILED: {e}"))?;
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
-        hex::encode(hasher.finalize())
+        Ok(hex::encode(hasher.finalize()))
     }
 
     pub fn validate_safety_invariants(&self) -> Result<(), &'static str> {
@@ -77,6 +82,20 @@ impl KirraRuntimeConfig {
 
         let n = &self.network;
         let c = &self.contract;
+
+        // Non-finite (NaN/Inf) safety bounds are meaningless AND slip past the
+        // ordering checks below (every comparison with NaN is false), so reject them
+        // explicitly. This also guarantees the config is JSON-serializable, so
+        // `effective_digest` cannot fail on a validated config.
+        let finite = [
+            c.min_permissible_ceiling, c.max_permissible_ceiling,
+            c.max_angular_velocity_ceiling, c.max_rate_of_change_dt,
+            c.fallback_safe_setpoint, c.constraint_cap_min, c.constraint_cap_max,
+            c.engineering_scale_factor,
+        ];
+        if finite.iter().any(|v| !v.is_finite()) {
+            return Err("CONFIG_INVALID: contract safety bounds must all be finite (no NaN/Inf).");
+        }
 
         let ports = [n.proxy_listen_port, n.plc_target_port, n.admin_reset_port, n.metrics_http_port];
         for i in 0..ports.len() {
@@ -166,8 +185,9 @@ mod tests {
 
     #[test]
     fn explicit_current_version_is_accepted() {
-        let cfg = parse(&valid_json(r#""config_version": 1,"#));
-        assert_eq!(cfg.config_version, 1);
+        // Track CONFIG_SCHEMA_VERSION so this keeps testing "current version" after a bump.
+        let cfg = parse(&valid_json(&format!(r#""config_version": {CONFIG_SCHEMA_VERSION},"#)));
+        assert_eq!(cfg.config_version, CONFIG_SCHEMA_VERSION);
         assert!(cfg.validate_safety_invariants().is_ok());
     }
 
@@ -189,12 +209,24 @@ mod tests {
     fn digest_is_deterministic_and_change_sensitive() {
         let a = parse(&valid_json(r#""config_version": 1,"#));
         let b = parse(&valid_json(r#""config_version": 1,"#));
-        assert_eq!(a.effective_digest(), b.effective_digest(), "same config → same digest");
-        assert_eq!(a.effective_digest().len(), 64, "sha-256 hex is 64 chars");
+        let da = a.effective_digest().expect("digest");
+        assert_eq!(da, b.effective_digest().expect("digest"), "same config → same digest");
+        assert_eq!(da.len(), 64, "sha-256 hex is 64 chars");
 
         // A changed safety bound changes the digest — the fingerprint tracks content.
         let mut c = a.clone();
         c.contract.max_permissible_ceiling = 3001.0;
-        assert_ne!(a.effective_digest(), c.effective_digest());
+        assert_ne!(da, c.effective_digest().expect("digest"));
+    }
+
+    #[test]
+    fn non_finite_contract_bound_is_refused() {
+        // A NaN safety bound is meaningless and slips past ordering checks (NaN
+        // comparisons are all false) — validation must reject it explicitly, which
+        // also keeps effective_digest serializable.
+        let mut cfg = parse(&valid_json(r#""config_version": 1,"#));
+        cfg.contract.max_permissible_ceiling = f64::NAN;
+        let err = cfg.validate_safety_invariants().unwrap_err();
+        assert!(err.contains("finite"), "got: {err}");
     }
 }
