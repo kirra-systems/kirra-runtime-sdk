@@ -31,9 +31,51 @@
 //! perception fault → breach (MRC), mirroring the vehicle-object rule.
 //! Absent input (`None` scene) is a no-op — the Nominal path without a VRU
 //! channel is byte-identical (the derate-only invariant).
+//!
+//! **Go-live hardening (#789).** Before any producer feeds live
+//! `PerceivedPedestrian`s the bound also (F4) refuses to trust a doer-declared
+//! `velocity_mps` alone — the stop-epsilon skip uses the MAX of the declared and
+//! the displacement-implied speed of the adjacent pose pair, so a planner emitting
+//! translating poses that DECLARE `v = 0` cannot bypass the check; (F5) sanitizes
+//! the caller-supplied [`VruRssParams`] at the single choke point so a loose param
+//! set can never WEAKEN the bound (`v_ped_max` floored at [`V_PED_MAX_FLOOR_MPS`],
+//! `stop_epsilon` clamped to the kernel [`VRU_STOP_EPSILON_CEILING_MPS`]); (F8)
+//! grows the reachable disc by `v_ped_max · age` for a stale measurement
+//! ([`PerceivedPedestrian::age_s`], fail-closed on negative/non-finite age); and
+//! (F9) bounds the pedestrian count at [`MAX_PEDESTRIANS`] (fail-closed above it)
+//! and hoists the per-pose `required` out of the pedestrian loop.
+//!
+//! **WCET (F9).** With `T` poses (`T ≤ MAX_TRAJECTORY_HORIZON`) and `P`
+//! pedestrians (`P ≤ MAX_PEDESTRIANS`), [`pedestrian_breach`] is `O(T·P)`
+//! comparisons with exactly ONE `required` evaluation per pose (the heavy term is
+//! pose-only, not per-pedestrian) — a bounded, allocation-free per-tick cost.
 
 use kirra_core::corridor::Point;
+use kirra_core::kinematics_contract::STOP_EPSILON_MPS;
 use kirra_core::trajectory::TrajectoryPoint;
+
+/// Fail-closed input bound on pedestrians per scene (#789 F9, WCET). Mirrors
+/// `MAX_TRAJECTORY_HORIZON`'s role for the trajectory: a scene carrying more
+/// than this is a malformed / over-bound perception input → breach, never an
+/// unbounded loop on the slow-loop path.
+pub const MAX_PEDESTRIANS: usize = 64;
+
+/// Floor on the assumed max pedestrian speed (#789 F5), the validated 2.0 m/s
+/// brisk walk. A caller cannot supply a smaller `v_ped_max` — that would silently
+/// SHRINK the reachable-disc growth. ODDs may only RAISE it (doc §5.1).
+pub const V_PED_MAX_FLOOR_MPS: f64 = 2.0;
+
+/// Ceiling on the VRU stop-epsilon (#789 F5): the kernel stop-and-hold epsilon
+/// (`STOP_EPSILON_MPS`). A larger VRU `stop_epsilon` would let a still-rolling ego
+/// (up to the looser value) SKIP the bound; clamping to the kernel epsilon keeps
+/// one stop semantics across the checker.
+pub const VRU_STOP_EPSILON_CEILING_MPS: f64 = STOP_EPSILON_MPS;
+
+/// Displacement below which a zero/negative-`dt` segment is treated as a
+/// stationary dwell rather than a malformed teleport (#789 F4). A nonzero
+/// displacement over a non-positive/non-finite `dt` is a time-inconsistent
+/// trajectory and fails closed.
+const SEG_DEGENERATE_EPS_M: f64 = 1e-9;
 
 /// A perceived pedestrian / VRU. Deliberately minimal for v0: the
 /// omnidirectional model needs only a position (velocity is accepted for
@@ -47,6 +89,14 @@ pub struct PerceivedPedestrian {
     /// Tracked velocity vector, m/s (informational in v0 — the reachable
     /// disc assumes `v_ped_max` in every direction regardless).
     pub vel: Point,
+    /// Age of this measurement at evaluation time, s (#789 F8): how long ago the
+    /// pedestrian was observed. The reachable disc has ALREADY been growing for
+    /// `age_s` before the trajectory's `t = 0`, so the bound adds `v_ped_max ·
+    /// age_s` to the required clearance. Frozen into the wire shape NOW, before a
+    /// producer exists, so the age term never has to be retrofitted. A fresh
+    /// synchronous measurement passes `0.0`; a negative or non-finite age is a
+    /// perception fault and fails closed (breach).
+    pub age_s: f64,
 }
 
 /// Parameters of the VRU bound. Every default is CONSERVATIVE-FIRST and
@@ -82,6 +132,36 @@ impl Default for VruRssParams {
     }
 }
 
+impl VruRssParams {
+    /// Safety sanitization (#789 F5), applied at the single choke point
+    /// ([`pedestrian_breach`]) so a caller-supplied param set can never WEAKEN the
+    /// bound however it was constructed: `v_ped_max` is floored at
+    /// [`V_PED_MAX_FLOOR_MPS`] and `stop_epsilon` is clamped to
+    /// [`VRU_STOP_EPSILON_CEILING_MPS`] (the kernel stop-and-hold epsilon). Both
+    /// clamps are MONOTONE-TIGHTENING — a caller may raise `v_ped_max` or lower
+    /// `stop_epsilon`, never the reverse. Non-finite fields are left untouched for
+    /// [`params_valid`] to fail closed (an infinite requirement), never clamped
+    /// into a finite value that would admit a trajectory. (A full per-ODD
+    /// derivation of `v_ped_max` — runners, children, cyclists-as-VRUs — remains a
+    /// deployment tuning obligation on top of this floor; doc §5.)
+    #[must_use]
+    pub fn sanitized(&self) -> VruRssParams {
+        VruRssParams {
+            v_ped_max_mps: if self.v_ped_max_mps.is_finite() {
+                self.v_ped_max_mps.max(V_PED_MAX_FLOOR_MPS)
+            } else {
+                self.v_ped_max_mps
+            },
+            stop_epsilon_mps: if self.stop_epsilon_mps.is_finite() {
+                self.stop_epsilon_mps.min(VRU_STOP_EPSILON_CEILING_MPS)
+            } else {
+                self.stop_epsilon_mps
+            },
+            ..*self
+        }
+    }
+}
+
 /// The pedestrian input to the slow checker: the perceived VRUs plus the
 /// bound's parameters, carried together so the checker call site stays a
 /// single optional argument (absent → no-op).
@@ -95,8 +175,32 @@ fn finite_point(p: &Point) -> bool {
     p.x_m.is_finite() && p.y_m.is_finite()
 }
 
-fn pedestrian_fields_finite(p: &PerceivedPedestrian) -> bool {
-    finite_point(&p.pos) && finite_point(&p.vel)
+/// A pedestrian is usable iff its position/velocity are finite AND its
+/// measurement age is finite and non-negative (#789 F8). A negative or non-finite
+/// age is a perception fault → fail closed (the caller treats `false` as breach).
+fn pedestrian_fields_valid(p: &PerceivedPedestrian) -> bool {
+    finite_point(&p.pos) && finite_point(&p.vel) && p.age_s.is_finite() && p.age_s >= 0.0
+}
+
+/// Displacement-implied speed of a trajectory segment (#789 F4). `Ok(v)` is the
+/// segment's average speed for a well-formed segment (`dt` finite and positive);
+/// a stationary dwell (`dt ≤ 0` with no displacement) is `Ok(0.0)`; a MALFORMED
+/// segment — nonzero displacement over a non-positive/non-finite `dt` (a teleport
+/// or a time reversal) — is `Err(())`, which the caller fails closed on. The point
+/// is that a doer cannot DECLARE `v = 0` while its poses translate: the geometry
+/// betrays the motion regardless of the declared scalar.
+fn segment_implied_speed(a: &TrajectoryPoint, b: &TrajectoryPoint) -> Result<f64, ()> {
+    let dt = b.time_from_start_s - a.time_from_start_s;
+    let dx = b.pose.x_m - a.pose.x_m;
+    let dy = b.pose.y_m - a.pose.y_m;
+    let disp = (dx * dx + dy * dy).sqrt();
+    if dt.is_finite() && dt > 0.0 {
+        Ok(disp / dt)
+    } else if disp > SEG_DEGENERATE_EPS_M {
+        Err(()) // teleport / time reversal → fail closed
+    } else {
+        Ok(0.0) // coincident-time dwell, no motion
+    }
 }
 
 /// Params are usable iff every field is finite and non-negative. A corrupt
@@ -208,14 +312,21 @@ pub fn required_pedestrian_clearance_m(
 /// **The WS-2 primitive**: does `trajectory` breach the omnidirectional
 /// pedestrian bound for any (pose, pedestrian) pair?
 ///
-/// Per pose with `|v| > stop_epsilon`, per pedestrian: breach if the
-/// euclidean pose→pedestrian distance is below
-/// [`required_pedestrian_clearance_m`]. No lateral filter and no
-/// behind-ego filter — omnidirectionality is the point (a VRU beside or
-/// behind the path can enter it; distance + the disc's time growth keep
-/// far pedestrians from binding). A non-finite pedestrian or a non-finite
-/// pose time/speed is a breach (fail closed).
-// SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: pedestrian_ahead_within_stopping_envelope_breaches,pedestrian_far_ahead_is_clear,safe_stop_next_to_pedestrian_is_admitted,kerbside_pedestrian_outside_lateral_band_still_binds,non_finite_pedestrian_breaches,empty_scene_is_noop
+/// Per pose with effective speed `> stop_epsilon`, per pedestrian: breach if the
+/// euclidean pose→pedestrian distance is below the pose's
+/// [`required_pedestrian_clearance_m`] plus the pedestrian's measurement-age disc
+/// growth (`v_ped_max · age_s`, #789 F8). No lateral filter and no behind-ego
+/// filter — omnidirectionality is the point (a VRU beside or behind the path can
+/// enter it; distance + the disc's time growth keep far pedestrians from binding).
+///
+/// **Effective speed (#789 F4).** The stop-epsilon skip and the `d_stop` term use
+/// `max(|v_declared|, displacement-implied speed of the adjacent pose pair)`, so a
+/// doer emitting translating poses that DECLARE `v = 0` cannot skip the bound.
+/// **Params (#789 F5)** are sanitized once here; **the pedestrian count (#789 F9)**
+/// is bounded at [`MAX_PEDESTRIANS`] and the per-pose `required` is hoisted out of
+/// the pedestrian loop. A non-finite pedestrian / pose, a negative-or-non-finite
+/// age, an over-bound scene, or a malformed segment is a breach (fail closed).
+// SAFETY: SG1 | REQ: vru-pedestrian-reachable-set-bound | TEST: pedestrian_ahead_within_stopping_envelope_breaches,pedestrian_far_ahead_is_clear,safe_stop_next_to_pedestrian_is_admitted,kerbside_pedestrian_outside_lateral_band_still_binds,non_finite_pedestrian_breaches,empty_scene_is_noop,declared_zero_velocity_but_translating_pose_still_binds,loose_params_cannot_weaken_the_bound,measurement_age_grows_the_reachable_disc,too_many_pedestrians_fails_closed
 #[must_use]
 pub fn pedestrian_breach(
     trajectory: &[TrajectoryPoint],
@@ -224,30 +335,74 @@ pub fn pedestrian_breach(
     a_max_mps2: f64,
     ego_reach_m: f64,
 ) -> bool {
+    // Absent pedestrians → no-op (byte-identical to the empty double-loop).
+    if scene.pedestrians.is_empty() {
+        return false;
+    }
+    // F9 — fail-closed input bound: an over-bound scene is a malformed perception
+    // input, never an unbounded per-tick loop.
+    if scene.pedestrians.len() > MAX_PEDESTRIANS {
+        return true;
+    }
+    // F5 — sanitize the caller-supplied params ONCE, at this single choke point, so
+    // a loose param set can never weaken the bound regardless of how it was built.
+    let params = scene.params.sanitized();
+    // Validate every pedestrian up front (fail closed on non-finite fields or a
+    // negative / non-finite measurement age, #789 F8).
     for ped in scene.pedestrians {
-        if !pedestrian_fields_finite(ped) {
+        if !pedestrian_fields_valid(ped) {
             return true;
         }
-        for tp in trajectory {
-            let v = tp.velocity_mps;
-            let t = tp.time_from_start_s;
-            // Self-contained fail-closed: a non-finite pose would NaN the
-            // distance and fail OPEN in the comparison below. The validator's
-            // containment pass rejects such poses first, but this helper is
-            // public and must not depend on that ordering.
-            if !(v.is_finite()
-                && t.is_finite()
-                && tp.pose.x_m.is_finite()
-                && tp.pose.y_m.is_finite()
-                && tp.pose.heading_rad.is_finite())
-            {
-                return true;
+    }
+    // F9 hoist — `required_base` depends only on the POSE (effective speed, time),
+    // not on the pedestrian, so evaluate it ONCE per pose in the outer loop; the
+    // inner pedestrian loop is a distance comparison plus the cheap per-pedestrian
+    // age term. One `required` evaluation per pose, not per (pose, pedestrian).
+    for (i, tp) in trajectory.iter().enumerate() {
+        // Self-contained fail-closed: a non-finite pose would NaN the distance and
+        // fail OPEN below. The validator's containment pass rejects such poses
+        // first, but this helper is public and must not depend on that ordering.
+        if !(tp.velocity_mps.is_finite()
+            && tp.time_from_start_s.is_finite()
+            && tp.pose.x_m.is_finite()
+            && tp.pose.y_m.is_finite()
+            && tp.pose.heading_rad.is_finite())
+        {
+            return true;
+        }
+        // F4 — the EFFECTIVE speed: the max of the declared speed and the
+        // displacement-implied speed of the adjacent segments. A malformed segment
+        // (teleport / time reversal) fails closed. This is used for BOTH the
+        // stop-epsilon skip and the `d_stop` term, so a translating pose that
+        // declares `v = 0` neither skips the bound nor understates the stop distance.
+        let mut v_eff = tp.velocity_mps.abs();
+        if i > 0 {
+            match segment_implied_speed(&trajectory[i - 1], tp) {
+                Ok(s) => v_eff = v_eff.max(s),
+                Err(()) => return true,
             }
-            if v.abs() <= scene.params.stop_epsilon_mps {
-                continue;
+        }
+        if i + 1 < trajectory.len() {
+            match segment_implied_speed(tp, &trajectory[i + 1]) {
+                Ok(s) => v_eff = v_eff.max(s),
+                Err(()) => return true,
             }
-            let required =
-                required_pedestrian_clearance_m(v, t, a_brake_mps2, a_max_mps2, ego_reach_m, &scene.params);
+        }
+        if v_eff <= params.stop_epsilon_mps {
+            continue;
+        }
+        let required_base = required_pedestrian_clearance_m(
+            v_eff,
+            tp.time_from_start_s,
+            a_brake_mps2,
+            a_max_mps2,
+            ego_reach_m,
+            &params,
+        );
+        for ped in scene.pedestrians {
+            // F8 — the disc has already been growing for `age_s` since the
+            // measurement was taken; extend the required clearance accordingly.
+            let required = required_base + params.v_ped_max_mps * ped.age_s;
             let dx = ped.pos.x_m - tp.pose.x_m;
             let dy = ped.pos.y_m - tp.pose.y_m;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -279,7 +434,16 @@ mod tests {
     }
 
     fn ped(x: f64, y: f64) -> PerceivedPedestrian {
-        PerceivedPedestrian { id: 1, pos: Point { x_m: x, y_m: y }, vel: Point { x_m: 0.0, y_m: 0.0 } }
+        ped_age(x, y, 0.0)
+    }
+
+    fn ped_age(x: f64, y: f64, age_s: f64) -> PerceivedPedestrian {
+        PerceivedPedestrian {
+            id: 1,
+            pos: Point { x_m: x, y_m: y },
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+            age_s,
+        }
     }
 
     const BRAKE: f64 = 4.5; // default_urban service brake (Nominal)
@@ -508,5 +672,180 @@ mod tests {
         let early = required(3.0, 0.5, &p);
         let late = required(3.0, 4.0, &p);
         assert!(late > early, "a later pose faces a larger reachable disc");
+    }
+
+    /// #789 F4 — the stop-epsilon skip must NOT trust the declared `velocity_mps`.
+    /// A trajectory whose poses TRANSLATE (x: 0 → 2 → 4 over t 0,1,2) while
+    /// declaring `v = 0` is really moving at 2 m/s; pre-fix every pose was
+    /// stop-epsilon-skipped and a pedestrian in the path was missed. The
+    /// displacement-implied speed must bind it.
+    #[test]
+    fn declared_zero_velocity_but_translating_pose_still_binds() {
+        let traj = [pt(0.0, 0.0, 0.0), pt(2.0, 0.0, 1.0), pt(4.0, 0.0, 2.0)];
+        assert!(
+            breaches(&traj, &scene(&[ped(3.0, 0.0)])),
+            "a translating trajectory declaring v=0 must not bypass the VRU bound (F4)"
+        );
+        // Control: a genuinely stationary trajectory (no translation, v=0) is still
+        // admitted next to the same pedestrian — the stop-proposal invariant holds.
+        let stopped = [pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 1.0)];
+        assert!(!breaches(&stopped, &scene(&[ped(3.0, 0.0)])));
+    }
+
+    /// #789 F4 — a teleport / time-reversal (nonzero displacement over a
+    /// non-positive `dt`) is a malformed trajectory and fails closed.
+    #[test]
+    fn malformed_segment_fails_closed() {
+        // Two poses at the SAME time but different positions → instantaneous
+        // translation. No finite implied speed is definable → breach.
+        let teleport = [pt(0.0, 0.0, 0.0), pt(5.0, 0.0, 0.0)];
+        assert!(breaches(&teleport, &scene(&[ped(1000.0, 0.0)])));
+    }
+
+    /// #789 F5 — caller-supplied params cannot WEAKEN the bound. A params set with
+    /// `stop_epsilon = 5.0` (would skip a 2 m/s pose) and `v_ped_max = 0.0` (would
+    /// zero the disc growth) is sanitized: the epsilon is clamped to the kernel
+    /// stop-and-hold value and `v_ped_max` is floored at 2.0, so the pedestrian
+    /// still binds. Pre-fix the loose epsilon skipped the pose and it admitted.
+    #[test]
+    fn loose_params_cannot_weaken_the_bound() {
+        let loose =
+            VruRssParams { v_ped_max_mps: 0.0, stop_epsilon_mps: 5.0, ..VruRssParams::default() };
+        // The sanitizer floors/clamps both fields (monotone-tightening).
+        let s = loose.sanitized();
+        assert_eq!(s.v_ped_max_mps, V_PED_MAX_FLOOR_MPS);
+        assert!(s.stop_epsilon_mps <= VRU_STOP_EPSILON_CEILING_MPS);
+        // And through the predicate: the 2 m/s pose is NOT skipped despite eps=5.0.
+        let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
+        let sc = PedestrianScene { pedestrians: &[ped(3.0, 0.0)], params: loose };
+        assert!(
+            pedestrian_breach(&traj, &sc, BRAKE, A_MAX, ego_reach()),
+            "a loose stop_epsilon must be clamped so the pose is not skipped (F5)"
+        );
+    }
+
+    /// #789 F8 — a stale measurement grows the reachable disc by `v_ped_max · age`.
+    /// A pedestrian just OUTSIDE the fresh (age 0) requirement is admitted; the same
+    /// pedestrian measured 2 s ago (disc grown by 2·2 = 4 m) now binds. A negative
+    /// or non-finite age fails closed.
+    #[test]
+    fn measurement_age_grows_the_reachable_disc() {
+        let p = VruRssParams::default();
+        // Single distinct pose (duplicated at t=0 so the implied speed is 0 and the
+        // required is the age-free base at v=2).
+        let traj = [pt(0.0, 2.0, 0.0), pt(0.0, 2.0, 0.0)];
+        let req = required(2.0, 0.0, &p);
+        assert!(!breaches(&traj, &scene(&[ped_age(req + 1.0, 0.0, 0.0)])), "fresh: admits");
+        assert!(
+            breaches(&traj, &scene(&[ped_age(req + 1.0, 0.0, 2.0)])),
+            "a 2 s stale measurement grows the disc by v_ped_max·age = 4 m → binds (F8)"
+        );
+        // Fail-closed on a bad age even for a distant pedestrian.
+        assert!(breaches(&traj, &scene(&[ped_age(1000.0, 0.0, -0.1)])));
+        assert!(breaches(&traj, &scene(&[ped_age(1000.0, 0.0, f64::NAN)])));
+    }
+
+    /// #789 F9 — the pedestrian count is a fail-closed input bound: a scene AT the
+    /// bound with all pedestrians far is admitted; one OVER the bound breaches
+    /// regardless of placement (a malformed / over-bound perception input).
+    #[test]
+    fn too_many_pedestrians_fails_closed() {
+        let traj = [pt(0.0, 2.0, 0.0), pt(2.0, 2.0, 1.0)];
+        let ok: Vec<_> = (0..MAX_PEDESTRIANS).map(|i| ped(1000.0 + i as f64, 0.0)).collect();
+        assert!(!breaches(&traj, &scene(&ok)), "a scene at the bound with far VRUs admits");
+        let over: Vec<_> = (0..=MAX_PEDESTRIANS).map(|i| ped(1000.0 + i as f64, 0.0)).collect();
+        assert!(breaches(&traj, &scene(&over)), "an over-bound scene must fail closed (F9)");
+    }
+
+    /// An INDEPENDENT reference for the breach predicate: pedestrian-outer /
+    /// pose-inner, recomputing `required` per (pedestrian, pose) pair — the
+    /// structure the F9 hoist replaced. Used by the proptest to prove the hoisted
+    /// implementation is verdict-identical to the per-pair spec.
+    fn naive_reference_breach(
+        traj: &[TrajectoryPoint],
+        scene: &PedestrianScene<'_>,
+        brake: f64,
+        amax: f64,
+        reach: f64,
+    ) -> bool {
+        if scene.pedestrians.is_empty() {
+            return false;
+        }
+        if scene.pedestrians.len() > MAX_PEDESTRIANS {
+            return true;
+        }
+        let params = scene.params.sanitized();
+        for ped in scene.pedestrians {
+            if !pedestrian_fields_valid(ped) {
+                return true;
+            }
+        }
+        for ped in scene.pedestrians {
+            for (i, tp) in traj.iter().enumerate() {
+                if !(tp.velocity_mps.is_finite()
+                    && tp.time_from_start_s.is_finite()
+                    && tp.pose.x_m.is_finite()
+                    && tp.pose.y_m.is_finite()
+                    && tp.pose.heading_rad.is_finite())
+                {
+                    return true;
+                }
+                let mut v_eff = tp.velocity_mps.abs();
+                if i > 0 {
+                    match segment_implied_speed(&traj[i - 1], tp) {
+                        Ok(s) => v_eff = v_eff.max(s),
+                        Err(()) => return true,
+                    }
+                }
+                if i + 1 < traj.len() {
+                    match segment_implied_speed(tp, &traj[i + 1]) {
+                        Ok(s) => v_eff = v_eff.max(s),
+                        Err(()) => return true,
+                    }
+                }
+                if v_eff <= params.stop_epsilon_mps {
+                    continue;
+                }
+                let required = required_pedestrian_clearance_m(
+                    v_eff,
+                    tp.time_from_start_s,
+                    brake,
+                    amax,
+                    reach,
+                    &params,
+                ) + params.v_ped_max_mps * ped.age_s;
+                let dx = ped.pos.x_m - tp.pose.x_m;
+                let dy = ped.pos.y_m - tp.pose.y_m;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < required {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    proptest::proptest! {
+        /// #789 — the F9-hoisted [`pedestrian_breach`] is verdict-identical to the
+        /// independent per-pair reference over random finite trajectories and
+        /// scenes (the review-recommended `breach ⟺ disc/envelope overlap` cross
+        /// check, phrased as hoisted-vs-naive equivalence so it also guards F4/F8).
+        #[test]
+        fn hoisted_breach_matches_naive_reference(
+            xs in proptest::collection::vec(-5.0f64..50.0, 2..6),
+            vs in proptest::collection::vec(0.0f64..12.0, 2..6),
+            pxs in proptest::collection::vec(-5.0f64..60.0, 0..5),
+            pys in proptest::collection::vec(-5.0f64..5.0, 0..5),
+            ages in proptest::collection::vec(0.0f64..3.0, 0..5),
+        ) {
+            let n = xs.len().min(vs.len());
+            let traj: Vec<_> = (0..n).map(|i| pt(xs[i], vs[i], i as f64)).collect();
+            let m = pxs.len().min(pys.len()).min(ages.len());
+            let peds: Vec<_> = (0..m).map(|i| ped_age(pxs[i], pys[i], ages[i])).collect();
+            let sc = scene(&peds);
+            let got = pedestrian_breach(&traj, &sc, BRAKE, A_MAX, ego_reach());
+            let want = naive_reference_breach(&traj, &sc, BRAKE, A_MAX, ego_reach());
+            proptest::prop_assert_eq!(got, want);
+        }
     }
 }

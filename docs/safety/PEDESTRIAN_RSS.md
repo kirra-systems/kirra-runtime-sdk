@@ -50,14 +50,24 @@ stopping envelope meeting the disc as it grows over the whole stopping
 interval:
 
 ```text
-v_after  = v + a_max · ρ                          — worst-case speed AFTER the response phase (F2)
+v_eff    = max(|v_declared|, displacement / dt)   — effective ego speed (F4, #789): the
+                                                    declared scalar is NOT trusted alone
+v_after  = v_eff + a_max · ρ                       — worst-case speed AFTER the response phase (F2)
 t_stop   = ρ + v_after / a_brake                  — time to full stop
-d_stop   = v·ρ + ½·a_max·ρ² + v_after² / (2·a_brake)   — RSS stopping distance
-required = d_stop + r_ped + v_ped_max · (t + t_stop) + clearance + ego_reach
+d_stop   = v_eff·ρ + ½·a_max·ρ² + v_after² / (2·a_brake)   — RSS stopping distance
+required = d_stop + r_ped + v_ped_max · (age + t + t_stop) + clearance + ego_reach
 UNSAFE   ⟺ dist(pose, ped) < required
 ```
 
 where:
+- **`v_eff`** (F4, #789) is `max(|v_declared|, displacement/dt)` over the adjacent
+  pose pair — the checker does not trust a doer-declared `velocity_mps` in isolation,
+  so a planner emitting translating poses that DECLARE `v = 0` cannot skip the bound
+  (or understate `d_stop`). A nonzero displacement over a non-positive/non-finite `dt`
+  (teleport / time reversal) fails closed.
+- **`age`** (F8, #789) is the pedestrian measurement age (`PerceivedPedestrian.age_s`):
+  the reachable disc has already been growing since the observation, so the growth window
+  is `age + t + t_stop`. A negative or non-finite age is a perception fault → breach.
 - **`a_max`** is the ego's max acceleration: during the reaction time ρ the
   plan/actuator may still be executing acceleration, so the ego brakes from
   `v_after`, not `v` (Shalev-Shwartz Def. 1 / Lemma 2; IEEE 2846). This is the
@@ -132,17 +142,31 @@ is exactly the sidewalk-courier posture.
 | Non-positive / non-finite `a_brake`, or non-finite/negative `a_max` / `ego_reach` | `required = ∞` → any moving pose breaches (an unbrakeable ego, or corrupt ego geometry, cannot prove VRU safety) |
 | Non-finite speed/time input or ANY corrupt `VruRssParams` field (non-finite or negative) | `required = ∞` → breach (a NaN would otherwise poison `dist < required` into failing OPEN) |
 | Non-finite trajectory pose field | Breach → MRC (self-contained — not dependent on containment rejecting it first) |
-| Absent VRU channel (`None` scene) | **No-op** — byte-identical path (the derate-only invariant: absent input never relaxes, never fabricates) |
+| Negative / non-finite pedestrian measurement `age_s` (F8, #789) | Breach → MRC (a stale-age fault must not silently reduce the disc growth) |
+| Malformed segment — nonzero displacement over non-positive/non-finite `dt` (F4, #789) | Breach → MRC (teleport / time reversal: no finite implied speed is definable) |
+| More than `MAX_PEDESTRIANS` (64) in a scene (F9, #789) | Breach → MRC (over-bound perception input; bounds the per-tick WCET) |
+| Absent VRU channel (`None` scene) OR empty pedestrian list | **No-op** — byte-identical path (the derate-only invariant: absent input never relaxes, never fabricates) |
 
 ## 5. Parameters (`VruRssParams`, plus the ego brake from `VehicleConfig`) — all VALIDATION-PENDING
 
 | Param | Default | Rationale / tuning obligation |
 |---|---|---|
-| `v_ped_max_mps` | 2.0 | Brisk walk (~1.4 typical walking; 2.0 covers hurried). **ODDs with expected runners, children darting, or cyclists-as-VRUs must raise it** — a raise only tightens the bound. Lowering below 2.0 needs ODD evidence + review. |
+| `v_ped_max_mps` | 2.0 | Brisk walk (~1.4 typical walking; 2.0 covers hurried). **ODDs with expected runners, children darting, or cyclists-as-VRUs must raise it** — a raise only tightens the bound. **Floored at 2.0 (F5, #789): a caller cannot supply a smaller value** — `sanitized()` enforces `max(v_ped_max, V_PED_MAX_FLOOR_MPS)`. |
 | `ped_radius_m` | 0.3 | Body half-width; not a point target. |
 | `clearance_m` | 0.5 | Comfort/robustness margin beyond the geometric envelopes. |
 | `reaction_time_s` | 0.5 | Matches the vehicle-RSS `RSS_REACTION_TIME_S` — one reaction model per checker. |
-| `stop_epsilon_mps` | 0.05 | Matches `STOP_EPSILON_MPS` (the Degraded stop-and-hold epsilon). |
+| `stop_epsilon_mps` | 0.05 | Matches `STOP_EPSILON_MPS` (the Degraded stop-and-hold epsilon). **Clamped ≤ the kernel `STOP_EPSILON_MPS` (F5, #789): a caller cannot loosen it** — a larger value would let a still-rolling ego skip the bound. `sanitized()` enforces `min(stop_epsilon, VRU_STOP_EPSILON_CEILING_MPS)`. |
+
+**Params authority (F5, #789).** `VruRssParams` are caller-supplied per call. The
+`params_valid` finiteness/non-negativity check is not sufficient on its own — a
+`stop_epsilon = 5.0` or `v_ped_max = 0.0` is finite and non-negative yet WEAKENS the
+bound. `VruRssParams::sanitized()`, applied once at the single choke point
+(`pedestrian_breach`), floors `v_ped_max` at `V_PED_MAX_FLOOR_MPS` (2.0) and clamps
+`stop_epsilon` to `VRU_STOP_EPSILON_CEILING_MPS` (the kernel `STOP_EPSILON_MPS`); both
+clamps are monotone-tightening, and non-finite fields are left for `params_valid` to
+fail closed rather than clamped into an admitting value. A full per-ODD derivation of
+`v_ped_max` (mirroring `KIRRA_VEHICLE_CLASS` / `contract_for`) remains a deployment
+tuning obligation ON TOP of this floor.
 | `a_brake_mps2` (not a `VruRssParams` field — the validator passes the **posture-composed** `kinematics.max_brake_mps2`, #779 F3) | per-class contract | The ego's assured braking: the Nominal service brake under Nominal, the weaker MRC brake under Degraded (so a faulted-posture ego is held to its actual stopping power). Derating it further (e.g. wet-surface factor) is a tracked refinement. |
 | `a_max_mps2` (not a `VruRssParams` field — the validator passes `VehicleConfig::max_accel_mps2`, #779 F2) | per-class contract | The ego's max acceleration, for the RSS response-phase term (`v_after = v + a_max·ρ`). |
 | `ego_reach_m` (derived from the footprint by the validator, #779 F1) | per-class geometry | `max(wheelbase+overhang_front, overhang_rear).hypot(half_width)` — the ego body extent from the rear-axle pose. |
@@ -165,7 +189,25 @@ argument (absent → no-op). The WCET-critical per-pose
 `validate_vehicle_command` path is untouched; the Nominal path without a
 VRU channel is byte-identical.
 
+**Go-live soundness hardening (#789), landed — the prerequisites for feeding a
+live producer:**
+- **F4 — velocity-declaration trust.** The stop-epsilon skip and `d_stop` use
+  `v_eff = max(|v_declared|, displacement/dt)`; a translating pose declaring `v = 0`
+  can no longer bypass the bound. Malformed segments fail closed.
+- **F5 — params authority.** `VruRssParams::sanitized()` floors `v_ped_max` and
+  clamps `stop_epsilon` at the single choke point (§5).
+- **F8 — measurement age.** `PerceivedPedestrian.age_s` grows the disc by
+  `v_ped_max · age`; the wire shape is frozen now, before a producer exists.
+- **F9 — WCET.** `MAX_PEDESTRIANS` fail-closed input bound; per-pose `required`
+  hoisted out of the pedestrian loop; `O(T·P)` with one `required` per pose (module
+  doc). Cross-checked by the `hoisted_breach_matches_naive_reference` proptest.
+
 **Follow-ups (in dependency order):**
+0. **Road-structure / right-of-way (F6, #789, availability).** The pure disc makes
+   the robotaxi ODD over-conservative (§5) and can bind a pedestrian behind a receding
+   ego. Corridor-clipped disc growth (a distance-to-path term) and/or per-zone
+   `v_ped_max`, keeping the pure disc for the sidewalk-courier ODD. **Availability,
+   strictly after soundness** — a relaxation, never a silent default; own review.
 1. **Node VRU channel** — a `~/input/pedestrians` subscription on the ros2
    adapter (staleness-budgeted like the object channels: an ARMED but
    silent/stale channel fails closed to `Some(empty…)`→cap, never silently
@@ -195,3 +237,7 @@ VRU channel is byte-identical.
 | Absent-channel byte-identity | `vru_absent_channel_is_byte_identical` |
 | Fail-closed non-finite / unbrakeable / bad geometry | `vru_non_finite_pedestrian_mrcs`, unit `non_positive_brake_and_bad_geometry_fail_closed`, `non_finite_pedestrian_breaches` |
 | Ego-body term (F1) / response-phase term (F2) / posture brake (F3) | unit `ego_footprint_term_binds_the_body_not_the_axle`, `response_phase_accel_term_raises_the_requirement`, `weaker_degraded_brake_demands_more_clearance` |
+| Velocity-declaration trust (F4, #789) | unit `declared_zero_velocity_but_translating_pose_still_binds`, `malformed_segment_fails_closed` |
+| Params authority — loose params cannot weaken (F5, #789) | unit `loose_params_cannot_weaken_the_bound` |
+| Measurement-age disc growth (F8, #789) | unit `measurement_age_grows_the_reachable_disc` |
+| WCET input bound + hoist equivalence (F9, #789) | unit `too_many_pedestrians_fails_closed`, `hoisted_breach_matches_naive_reference` (proptest) |

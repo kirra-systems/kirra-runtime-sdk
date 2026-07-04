@@ -1343,6 +1343,8 @@ fn walker(id: u64, x: f64, y: f64) -> PerceivedPedestrian {
         id,
         pos: Point { x_m: x, y_m: y },
         vel: Point { x_m: 0.0, y_m: 0.0 },
+        // #789 F8 — fresh synchronous measurement (no additional disc growth).
+        age_s: 0.0,
     }
 }
 
