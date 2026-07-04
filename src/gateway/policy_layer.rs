@@ -535,11 +535,12 @@ enum MutationFence {
     DenyStaleEpoch,
 }
 
-/// Pure fence predicate (stop-gate review H3) — no env, no store, exhaustively
-/// unit-tested. A non-Active instance is ALWAYS fenced (independent of the epoch
-/// cache); an Active instance is fenced only when its held epoch is present and
-/// disagrees with the present cached durable epoch (a `0` on either side = cold
-/// start / unclaimed → admit).
+/// Pure fence predicate (stop-gate review H3) — no env, no store, unit-tested
+/// exhaustively over the finite domain {active, standby} × {0,1,2}² (the epoch
+/// class representatives). A non-Active instance is ALWAYS fenced (independent of
+/// the epoch cache); an Active instance is fenced only when its held epoch is
+/// present and disagrees with the present cached durable epoch (a `0` on either
+/// side = cold start / unclaimed → admit).
 fn mutation_fence_verdict(is_active: bool, held_epoch: u64, cached_db_epoch: u64) -> MutationFence {
     if !is_active {
         return MutationFence::DenyNotActive;
@@ -858,30 +859,38 @@ mod actuator_middleware_tests {
     // Stop-gate review H3 — the mutation fence must refuse a non-Active instance
     // INDEPENDENT of the epoch cache (which is frozen == held on a disk-wedge
     // self-demotion), and still self-demote an Active instance whose held epoch is
-    // stale. Exhaustive over (is_active × held × db).
+    // stale. This drives the predicate over the FULL finite domain
+    // {active, standby} × {0,1,2}² (18 cases): `{0,1,2}` spans every distinction
+    // the predicate makes — held==0, db==0, held==db (both nonzero), and
+    // held!=db (both nonzero) — so it is genuinely exhaustive over the class
+    // representatives, not a hand-picked sample.
     #[test]
-    fn mutation_fence_denies_non_active_regardless_of_epoch() {
-        // Not Active → DenyNotActive for every epoch combination, INCLUDING the
-        // frozen-cache case (held == db) that the stale-epoch check cannot catch.
-        for (held, db) in [(0, 0), (1, 1), (1, 2), (2, 1), (5, 0), (0, 5)] {
-            assert_eq!(
-                mutation_fence_verdict(false, held, db),
-                MutationFence::DenyNotActive,
-                "demoted/standby must be fenced (held={held}, db={db})"
-            );
+    fn mutation_fence_exhaustive_over_finite_domain() {
+        for is_active in [false, true] {
+            for held in 0u64..=2 {
+                for db in 0u64..=2 {
+                    // Expected verdict computed independently of the predicate,
+                    // straight from the H3 spec.
+                    let expected = if !is_active {
+                        // Not Active → ALWAYS fenced, including the frozen-cache
+                        // case (held == db) the stale-epoch check cannot catch.
+                        MutationFence::DenyNotActive
+                    } else if db != 0 && held != 0 && held != db {
+                        // Active + both epochs present + disagree → self-demote.
+                        MutationFence::DenyStaleEpoch
+                    } else {
+                        // Active + fresh/uncontested (a 0 on either side = cold
+                        // start / unclaimed, or held == db) → admit.
+                        MutationFence::Admit
+                    };
+                    assert_eq!(
+                        mutation_fence_verdict(is_active, held, db),
+                        expected,
+                        "is_active={is_active}, held={held}, db={db}"
+                    );
+                }
+            }
         }
-    }
-
-    #[test]
-    fn mutation_fence_active_admits_fresh_and_fences_stale_epoch() {
-        // Active + fresh/uncontested epoch → Admit (0 on either side = cold/unclaimed).
-        assert_eq!(mutation_fence_verdict(true, 0, 0), MutationFence::Admit);
-        assert_eq!(mutation_fence_verdict(true, 5, 5), MutationFence::Admit);
-        assert_eq!(mutation_fence_verdict(true, 5, 0), MutationFence::Admit);
-        assert_eq!(mutation_fence_verdict(true, 0, 5), MutationFence::Admit);
-        // Active + held disagrees with the present durable epoch → self-demote fence.
-        assert_eq!(mutation_fence_verdict(true, 1, 2), MutationFence::DenyStaleEpoch);
-        assert_eq!(mutation_fence_verdict(true, 2, 1), MutationFence::DenyStaleEpoch);
     }
 
     fn service_from_store(store: VerifierStore) -> Arc<ServiceState> {
