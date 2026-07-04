@@ -145,7 +145,14 @@ impl std::fmt::Display for MitigationCode {
             }
             MitigationCode::EnvelopeClampTakesPriority => f.write_str("ENVELOPE_CLAMP_TAKES_PRIORITY"),
             MitigationCode::RateClampEnforced { max_rate } => {
-                write!(f, "RATE_CLAMP_ENFORCED: Max {max_rate} GPM/s")
+                // Unit-NEUTRAL: this generic verdict serves every scalar governor —
+                // kinematic (m/s²) AND flow (GPM/s, e.g. the water-flow Modbus
+                // gateway) — so the formatter cannot know the domain's unit. The
+                // contract owns the unit; a record sink that knows its domain adds
+                // it. Every other variant already prints a bare number, so this
+                // matches the prevailing style (was a hardcoded "GPM/s", correct
+                // only for the flow path and wrong for every kinematic caller).
+                write!(f, "RATE_CLAMP_ENFORCED: Max {max_rate}")
             }
             MitigationCode::PassthroughUnrestrictedNormal => {
                 f.write_str("PASSTHROUGH_UNRESTRICTED_NORMAL")
@@ -188,8 +195,10 @@ mod mitigation_code_tests {
             "ENVELOPE_CLAMP_TAKES_PRIORITY"
         );
         assert_eq!(
+            // Unit-neutral: the generic scalar verdict names no domain unit (the
+            // contract owns it) — was "Max 1.5 GPM/s", wrong for kinematic callers.
             MitigationCode::RateClampEnforced { max_rate: 1.5 }.to_string(),
-            "RATE_CLAMP_ENFORCED: Max 1.5 GPM/s"
+            "RATE_CLAMP_ENFORCED: Max 1.5"
         );
         assert_eq!(
             MitigationCode::PassthroughUnrestrictedNormal.to_string(),

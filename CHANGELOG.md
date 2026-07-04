@@ -135,6 +135,12 @@ detail lives in `docs/adr/`, `docs/safety/`, and the PR history:
   (issue #73); the admin-asserted HMAC proof is removed.
 - Per-class kinematic contracts selected by `KIRRA_VEHICLE_CLASS`
   (fail-closed: no default class; #312).
+- `MitigationCode::RateClampEnforced`'s narrative is now **unit-neutral**
+  (`RATE_CLAMP_ENFORCED: Max {max_rate}`, was `… GPM/s`). The generic scalar
+  verdict serves both kinematic (m/s²) and flow (GPM/s) governors, so the
+  formatter cannot assert a domain unit — the contract owns it, matching every
+  other variant's bare-number style. Cosmetic/narrative only (nothing parses it);
+  new gateway `kirra_replay.json` records read without the unit suffix.
 
 ### Security / supply chain
 
