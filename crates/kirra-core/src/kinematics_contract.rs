@@ -195,15 +195,27 @@ pub struct ProposedVehicleCommand {
 /// - `Allow`         → forward to actuator
 /// - `ClampLinear`   → replace linear velocity with provided safe value
 /// - `ClampSteering` → replace steering angle with provided safe value
+/// - `ClampBoth`     → replace BOTH linear velocity AND steering angle (a command
+///                     that breaches the longitudinal accel/brake ceiling AND the
+///                     lateral-accel envelope in the same tick — each axis is
+///                     corrected independently; review H1)
 /// - `DenyBreach`    → drop command, log reason, emit posture event
 ///
-/// Only one action is returned per call. The first-triggered check wins.
+/// One verdict per call. `ClampBoth` is appended LAST so its serde/bincode tag
+/// (4) does not shift the existing wire tags (Allow=0 … DenyBreach=3) the
+/// two-box wire mirror (`kirra_wire_client::ClientEnforceAction`) pins.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum EnforceAction {
     Allow,
     ClampLinear(f64),
     ClampSteering(f64),
     DenyBreach(DenyCode),
+    /// Both axes clamped: `linear` is the accel/brake-bounded speed, `steering`
+    /// the lateral-envelope-bounded angle. `steering` is back-solved for the
+    /// ENFORCED `linear` (the speed the actuator actually applies), so the
+    /// resulting `(linear, steering)` pair honors BOTH the longitudinal ceiling
+    /// and the lateral-accel envelope.
+    ClampBoth { linear: f64, steering: f64 },
 }
 
 /// Reason codes for [`EnforceAction::DenyBreach`].
@@ -525,38 +537,60 @@ pub fn validate_vehicle_command(
     //   - A P5a/P5b steering clamp does not suppress a P6 lateral-accel
     //     violation in the rate-limited result (Bug C).
     //
-    // P6 uses cmd.linear_velocity_mps (original commanded speed): when
-    // ClampSteering is returned the caller applies the clamped steering
-    // with the original velocity, so the safe angle is back-solved for
-    // that speed. This also satisfies the proptest invariant which checks
-    // lateral accel using the original commanded velocity.
+    // P6 runs AFTER P3/P4 and uses the ENFORCED velocity `v` (review H1), so the
+    // steering it back-solves is safe for the speed the actuator actually
+    // applies — correct whether the velocity was clamped up (brake) or down
+    // (accel), and byte-identical to the prior behaviour when velocity is not
+    // clamped (`v == cmd.linear_velocity_mps`).
     //
-    // Return priority: steering corrections take precedence because a
-    // lateral-accel violation is the most acute physical safety concern.
-    // When only velocity needs correction, ClampLinear is returned.
+    // Return verdict: each axis is reported independently (review H1). Only
+    // velocity clamped → ClampLinear; only steering → ClampSteering; BOTH →
+    // ClampBoth (never dropping the velocity correction just because steering
+    // was also clamped); neither → Allow.
     // ------------------------------------------------------------------
     let mut v = cmd.linear_velocity_mps;
     let mut v_clamped = false;
     let mut delta = cmd.steering_angle_deg;
     let mut delta_clamped = false;
 
-    // SAFETY: SG3 | REQ: accel-ceiling | TEST: test_excessive_acceleration_triggers_linear_clamping,prop_clamp_linear_value_within_speed_contract
-    // Priority 3: Implied acceleration ceiling
-    let implied_accel =
-        (cmd.linear_velocity_mps - cmd.current_velocity_mps) / cmd.delta_time_s;
+    // SAFETY: SG3 | REQ: accel-ceiling | TEST: test_excessive_acceleration_triggers_linear_clamping,test_reverse_acceleration_bounded_by_accel_limit,prop_clamp_linear_value_within_speed_contract
+    // Priority 3/4: Implied longitudinal acceleration ceiling.
+    //
+    // The accel vs brake ceiling is selected by whether the command increases
+    // the speed magnitude IN THE CURRENT DIRECTION OF TRAVEL (acceleration) or
+    // reduces it (braking) — NOT by the raw sign of (linear - current) (review
+    // M1). The prior sign-of-delta split assumed forward motion: in reverse gear
+    // a command that speeds UP (current -5 → linear -20) has a NEGATIVE
+    // (linear - current), so it was routed to the brake ceiling (typically the
+    // LARGER limit) instead of the accel ceiling — bounding reverse acceleration
+    // ~1.8× more permissively than intended, the UNSAFE direction.
+    //
+    // "Speeding up" requires SAME direction (or launching from rest) AND a larger
+    // magnitude: a command that CROSSES zero (e.g. +10 → -20) is decelerating
+    // toward zero in the immediate tick, so it is braking (bounded by max_brake)
+    // even though its final magnitude is larger — treating it as acceleration
+    // would over-restrict a legitimate hard stop. The clamp target moves toward
+    // `current` along the sign of the delta in every case.
+    let speed_delta = cmd.linear_velocity_mps - cmd.current_velocity_mps;
+    let implied_rate_abs = speed_delta.abs() / cmd.delta_time_s;
+    let same_direction_or_from_rest = cmd.current_velocity_mps == 0.0
+        || cmd.linear_velocity_mps.signum() == cmd.current_velocity_mps.signum();
+    let speeding_up = same_direction_or_from_rest
+        && cmd.linear_velocity_mps.abs() > cmd.current_velocity_mps.abs();
 
-    if implied_accel > 0.0 && implied_accel > contract.max_accel_mps2 + 1e-9 {
-        v = (cmd.current_velocity_mps + contract.max_accel_mps2 * cmd.delta_time_s)
+    if speeding_up {
+        if implied_rate_abs > contract.max_accel_mps2 + 1e-9 {
+            v = (cmd.current_velocity_mps
+                + contract.max_accel_mps2 * cmd.delta_time_s * speed_delta.signum())
             .clamp(-effective_max_speed, effective_max_speed);
-        v_clamped = true;
-    }
-
-    // SAFETY: SG3 | REQ: brake-ceiling | TEST: test_excessive_braking_triggers_linear_clamping
-    // Priority 4: Implied deceleration ceiling
-    // Asymmetric from acceleration: braking limit is typically higher.
-    if implied_accel < 0.0 && implied_accel.abs() > contract.max_brake_mps2 + 1e-9 {
-        v = (cmd.current_velocity_mps - contract.max_brake_mps2 * cmd.delta_time_s)
-            .clamp(-effective_max_speed, effective_max_speed);
+            v_clamped = true;
+        }
+    } else if implied_rate_abs > contract.max_brake_mps2 + 1e-9 {
+        // Decreasing speed magnitude → braking. Asymmetric from acceleration:
+        // the braking limit is typically higher.
+        v = (cmd.current_velocity_mps
+            + contract.max_brake_mps2 * cmd.delta_time_s * speed_delta.signum())
+        .clamp(-effective_max_speed, effective_max_speed);
         v_clamped = true;
     }
 
@@ -587,8 +621,18 @@ pub fn validate_vehicle_command(
     //
     //   a_lat = (v² × |tan(δ)|) / L
     //
+    // Uses the ENFORCED velocity `v` (post P3/P4 longitudinal clamp), NOT the
+    // original commanded speed (review H1). The actuator moves at the enforced
+    // `v`, so the lateral bound must be solved for `v`. This is byte-identical
+    // when velocity is NOT clamped (`v == cmd.linear_velocity_mps`, e.g. every
+    // ClampSteering-only case), and is REQUIRED for correctness when velocity IS
+    // clamped: a BRAKE clamp leaves the enforced `v` HIGHER than the commanded
+    // speed (braking is rate-limited and cannot reach the low commanded value in
+    // one tick), so solving the steering for the lower commanded speed would
+    // under-clamp it and the enforced (v, δ) pair would breach the envelope.
+    //
     // Guard: skip at near-zero velocity to avoid division by v² ≈ 0.
-    let v2 = cmd.linear_velocity_mps.powi(2);
+    let v2 = v.powi(2);
     if v2 > 1e-6 {
         let delta_rad = delta.to_radians();
         let implied_lat_accel = (v2 * delta_rad.tan().abs()) / contract.wheelbase_m;
@@ -602,7 +646,18 @@ pub fn validate_vehicle_command(
     }
 
     match (v_clamped, delta_clamped) {
-        (_, true) => EnforceAction::ClampSteering(delta),
+        // review H1: a command breaching BOTH the longitudinal ceiling (v_clamped)
+        // AND the lateral envelope (delta_clamped) must carry BOTH corrections.
+        // The prior `(_, true) => ClampSteering(delta)` discarded `v`, so the
+        // actuator received the clamped steering with the ORIGINAL
+        // over-accelerating velocity — the longitudinal ceiling was unenforced
+        // for that tick. `delta` is solved (in P6) for the ENFORCED `v`, so the
+        // returned `(v, delta)` pair honors both envelopes.
+        (true, true) => EnforceAction::ClampBoth {
+            linear: v,
+            steering: delta,
+        },
+        (false, true) => EnforceAction::ClampSteering(delta),
         (true, false) => EnforceAction::ClampLinear(v),
         (false, false) => EnforceAction::Allow,
     }
@@ -777,6 +832,35 @@ mod kinematics_contract_tests {
         }
     }
 
+    // review M1: in REVERSE gear, a command that speeds up (|linear| > |current|)
+    // must be bounded by the ACCEL limit (2.5), not the (larger) brake limit
+    // (4.5). Before the fix `implied_accel = (linear-current)/dt` was NEGATIVE for
+    // a reverse speed-up, routing it to the brake ceiling → reverse acceleration
+    // ~1.8× harder than intended (the unsafe direction).
+    #[test]
+    fn test_reverse_acceleration_bounded_by_accel_limit() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: -20.0, // speeding up in reverse from -5
+            current_velocity_mps: -5.0,
+            delta_time_s: 0.5,
+            steering_angle_deg: 0.0,
+            current_steering_angle_deg: 0.0,
+        };
+        match validate_vehicle_command(&cmd, &contract) {
+            EnforceAction::ClampLinear(clamped) => {
+                // Bounded by max_accel (2.5): -5 - 2.5*0.5 = -6.25.
+                // The pre-fix brake-limit path gave -5 - 4.5*0.5 = -7.25 (unsafe).
+                let expected = -5.0_f64 - (2.5 * 0.5);
+                assert!(
+                    (clamped - expected).abs() < 1e-9,
+                    "reverse accel must be bounded by max_accel: expected {expected}, got {clamped}"
+                );
+            }
+            other => panic!("Expected ClampLinear bounded by max_accel, got {other:?}"),
+        }
+    }
+
     // --- Steering clamping --------------------------------------------------
 
     #[test]
@@ -815,6 +899,78 @@ mod kinematics_contract_tests {
             }
             other => panic!("Expected ClampSteering for lateral accel breach, got {other:?}"),
         }
+    }
+
+    // review H1: a command breaching BOTH the longitudinal ceiling AND the
+    // lateral-accel envelope in the same tick must clamp BOTH axes, and the
+    // enforced (linear, steering) PAIR must honor the lateral envelope at the
+    // ENFORCED speed. Before the fix the verdict was ClampSteering, DISCARDING
+    // the velocity correction (longitudinal ceiling unenforced). The
+    // accel-clamp case (below) plus this BRAKE-clamp case — where the enforced
+    // velocity ends up HIGHER than the commanded speed because braking is
+    // rate-limited — together pin that P6 solves the steering for the ENFORCED
+    // velocity, not the commanded one (the closed-loop over-steer regression).
+    #[test]
+    fn test_accel_and_lateral_breach_clamps_both_axes() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 20.0, // 30 m/s² implied accel from 5 (P3 fires)
+            current_velocity_mps: 5.0,
+            delta_time_s: 0.5,
+            steering_angle_deg: 20.0, // a_lat ≫ envelope (P6 fires)
+            current_steering_angle_deg: 0.0,
+        };
+        match validate_vehicle_command(&cmd, &contract) {
+            EnforceAction::ClampBoth { linear, steering } => {
+                let expected_linear = 5.0_f64 + (2.5 * 0.5); // accel-clamped to 6.25
+                assert!(
+                    (linear - expected_linear).abs() < 1e-9,
+                    "linear must be accel-clamped to {expected_linear}, got {linear} \
+                     (regression: pre-fix dropped this and forwarded the original 20.0)"
+                );
+                assert_lateral_safe(linear, steering, &contract);
+            }
+            other => panic!("Expected ClampBoth for simultaneous P3∧P6 breach, got {other:?}"),
+        }
+    }
+
+    // review H1 (closed-loop over-steer regression): a command that BRAKES from a
+    // high speed toward a low target while over-steering. Braking is rate-limited,
+    // so the enforced velocity stays HIGH — the steering MUST be solved for that
+    // high enforced speed. Solving it for the (low) commanded speed under-clamps
+    // the steering and the enforced pair breaches the lateral envelope (~18 m/s²
+    // in the closed-loop proof).
+    #[test]
+    fn test_brake_and_lateral_breach_clamps_steering_for_enforced_speed() {
+        let contract = VehicleKinematicsContract::nominal_reference_profile();
+        let cmd = ProposedVehicleCommand {
+            linear_velocity_mps: 15.0, // commanded slowdown from 34…
+            current_velocity_mps: 34.0,
+            delta_time_s: 0.05, // …but one tick of braking barely moves it
+            steering_angle_deg: 80.0, // gross over-steer
+            current_steering_angle_deg: 0.0,
+        };
+        match validate_vehicle_command(&cmd, &contract) {
+            EnforceAction::ClampBoth { linear, steering } => {
+                // Enforced velocity is still ~34 (brake-rate-limited), NOT 15.
+                assert!(linear > 30.0, "brake clamp leaves enforced speed high, got {linear}");
+                // The safety property the pre-fix code violated:
+                assert_lateral_safe(linear, steering, &contract);
+            }
+            other => panic!("Expected ClampBoth for simultaneous brake∧P6 breach, got {other:?}"),
+        }
+    }
+
+    /// Asserts the enforced (linear, steering) pair honors the contract's lateral
+    /// accel envelope — the closed-loop invariant `governor_closes_loop_proof`
+    /// enforces at the integration level.
+    fn assert_lateral_safe(linear: f64, steering_deg: f64, contract: &VehicleKinematicsContract) {
+        let lat = (linear.powi(2) * steering_deg.to_radians().tan().abs()) / contract.wheelbase_m;
+        assert!(
+            lat <= contract.max_lateral_accel_mps2 + 1e-6,
+            "enforced pair (v={linear}, δ={steering_deg}) lateral {lat:.4} exceeds envelope {}",
+            contract.max_lateral_accel_mps2
+        );
     }
 
     #[test]

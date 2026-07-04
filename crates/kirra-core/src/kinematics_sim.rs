@@ -238,6 +238,12 @@ pub fn apply_enforce_action(
             ..cmd.clone()
         }),
 
+        EnforceAction::ClampBoth { linear, steering } => Some(ProposedVehicleCommand {
+            linear_velocity_mps: *linear,
+            steering_angle_deg: *steering,
+            ..cmd.clone()
+        }),
+
         EnforceAction::DenyBreach(_) => None,
     }
 }
@@ -324,6 +330,15 @@ pub fn run_simulation(
                 clamp_count += 1;
                 let clamped = ProposedVehicleCommand {
                     steering_angle_deg: safe_delta,
+                    ..cmd_with_current.clone()
+                };
+                state = state.step(&clamped, wb);
+            }
+            EnforceAction::ClampBoth { linear, steering } => {
+                clamp_count += 1;
+                let clamped = ProposedVehicleCommand {
+                    linear_velocity_mps: linear,
+                    steering_angle_deg: steering,
                     ..cmd_with_current.clone()
                 };
                 state = state.step(&clamped, wb);

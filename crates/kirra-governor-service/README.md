@@ -4,10 +4,12 @@ Minimal over-the-wire (UDP) KIRRA governor for the two-box governed-car
 prototype — see `docs/adr/KIRRA_BRINGUP_RUNBOOK.md` (Prompt A), `ADR-0001`, and
 `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`.
 
-It wraps the **existing** verdict core (`src/gateway/kinematics_contract.rs`),
-compiled in **verbatim** via `#[path]` — not forked, not moved (the talisman
-file stays byte-identical, blob `997fb7ae15ce3e11adec9218044c7c84b049ad3b`).
-Because that file imports only `serde` + `std`, this binary's whole dependency
+It wraps the **existing** verdict core (`kirra_core::kinematics_contract`) —
+not forked, not reimplemented. The talisman is amended ONLY under review + a
+re-pin; the stop-gate H1/M1 amendment (ClampBoth + direction-aware accel/brake)
+re-pinned it to logic blob `33b47b564caee20313cfeeffd2c2a0dcc42fb891`
+(superseding the historical `997fb7ae…`; see `docs/CAPTURE_PIPELINE_SPEC.md` §0).
+Because that core imports only `serde` + `std`, this binary's whole dependency
 tree is **serde + bincode + std** — no `tokio`, ROS 2, `r2r`, or DDS, matching
 the minimal-governor thesis of ADR-0001 (and the QNX cert target has none of
 those anyway).

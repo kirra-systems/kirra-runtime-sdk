@@ -4,7 +4,7 @@
 **Status:** Reference procedure
 **Scope:** Cross-compile `kirra-governor-service` (PR #216, now on `main`) for the QNX x86-64 target, deploy it, and validate it with the `kirra-proposal-bench` tool (PR #218). This is the **prototype** stage (QM, regular Rust) — the cert toolchain is a separate decision, flagged below. Companion to `KIRRA_BRINGUP_RUNBOOK.md` (milestones M1 → M2).
 
-This procedure changes nothing in the repo — it's a build/deploy flow. The talisman `src/gateway/kinematics_contract.rs` (`997fb7ae…`) is untouched.
+This procedure changes nothing in the repo — it's a build/deploy flow. The talisman `src/gateway/kinematics_contract.rs` (`33b47b56…`) is untouched.
 
 ---
 

@@ -5,7 +5,7 @@ continuous-improvement loop for the planner/perception **without** Kirra ever le
 
 > **Repo placement / status.** Design record. Cross-refs: ADR-0004 (independent safety
 > channel — the doer/checker boundary this loop is built on), the fixed verdict path
-> (`src/gateway/kinematics_contract.rs`, blob `997fb7ae…`), KIRRA-OCCY-DEPLOY-001 (bench →
+> (`src/gateway/kinematics_contract.rs`, blob `33b47b56…`), KIRRA-OCCY-DEPLOY-001 (bench →
 > vehicle topology), and #189 (QNX 8.0 / nto80, see §6). Open decisions are tracked in §8;
 > **§3 capture location is CONFIRMED — hybrid (3)** (owner 2026-07-04), and is the shape the
 > repo already implements (Phase 1 #191 / Phase 1.5 #192, default-OFF). See the as-built
@@ -29,7 +29,7 @@ consequences. The governor is the seatbelt that lets the doer experiment.
    SAFETY DOMAIN  (certified, fixed)              AUTONOMY + LEARNING DOMAIN  (Linux)
    ┌─────────────────────────────┐                ┌──────────────────────────────────────┐
    │ Kirra governor (fixed)      │◄── proposal ───│ Occy / Autoware  (DOER — learns)       │
-   │  verdict path 997fb7ae…     │                │   perception → prediction → planning   │
+   │  verdict path 33b47b56…     │                │   perception → prediction → planning   │
    │  pass / clamp / MRC / veto  │── governed ───►│   models served by Parko (TensorRT)    │
    │        │  verdict record     │   command      │   → actuator iface / Dataspeed bridge  │
    └────────┼────────────────────┘ (non-blocking) └───────────────┬────────────────────────┘
@@ -84,7 +84,7 @@ WCET. Three options:
 implements: the fire-and-forget emit is live at both seams (fast-loop command gateway,
 Phase 1 #191; slow-loop trajectory, Phase 1.5 #192), default-OFF behind
 `KIRRA_CAPTURE_ENABLED`, wait-free `try_send` (drop-on-full), verdict path byte-identical
-(`997fb7ae…`). The Linux-side collector (`crates/kirra-collector`, `COLLECTOR_DESIGN.md`
+(`33b47b56…`). The Linux-side collector (`crates/kirra-collector`, `COLLECTOR_DESIGN.md`
 D1–D6) is the offline joiner. The emit records **every** verdict arm (Allow/Clamp/Deny —
 not Deny-only), deliberately, to avoid downstream selection bias
 (`src/gateway/policy_layer.rs`). (§9 grounds the off-hot-path emit primitive this generalized.)
@@ -160,11 +160,14 @@ regardless.)
 Editorial appendix (not part of the original design; records how the design lands on the
 current codebase so a future implementer starts from what exists):
 
-- **The "fixed checker" anchor is real.** `src/gateway/kinematics_contract.rs`
-  (`validate_vehicle_command`, the verdict path) is the hash-pinned reference; its blob is
-  `997fb7ae15ce3e11adec9218044c7c84b049ad3b` on `main` and has been held byte-identical
-  across every change this cycle. §5 invariant #1 ("hash-pinned, no write path") is the
-  discipline already enforced.
+- **The "fixed checker" anchor is real.** `kirra_core::kinematics_contract`
+  (`validate_vehicle_command`, the verdict path; re-exported via
+  `src/gateway/kinematics_contract.rs`) is the hash-pinned reference. It is amended ONLY
+  under explicit review + a re-pin: the stop-gate review H1/M1 amendment (ClampBoth +
+  direction-aware accel/brake) re-pinned it to logic blob
+  `33b47b564caee20313cfeeffd2c2a0dcc42fb891` (superseding the historical
+  `997fb7ae…`; see `CAPTURE_PIPELINE_SPEC.md` §0). §5 invariant #1 ("hash-pinned, no
+  write path") is the discipline enforced.
 - **§3(3) "fire-and-forget verdict record" is a generalization of an existing primitive.**
   The Deny arm of `enforce_actuator_safety_envelope` (`src/gateway/policy_layer.rs`) already
   emits a structured `KinematicViolationPayload` (deny code + values) via

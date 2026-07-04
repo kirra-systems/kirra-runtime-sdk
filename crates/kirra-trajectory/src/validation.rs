@@ -305,7 +305,9 @@ pub fn validate_trajectory_slow_capped(
         };
         match verdict {
             EnforceAction::Allow => {}
-            EnforceAction::ClampLinear(_) | EnforceAction::ClampSteering(_) => {
+            EnforceAction::ClampLinear(_)
+            | EnforceAction::ClampSteering(_)
+            | EnforceAction::ClampBoth { .. } => {
                 clamp_seen = true;
             }
             EnforceAction::DenyBreach(_) => {

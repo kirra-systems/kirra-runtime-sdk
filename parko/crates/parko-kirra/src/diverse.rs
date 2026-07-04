@@ -345,9 +345,31 @@ impl DiverseKirraGovernor {
             return (f64::copysign(ceiling, v), true);
         }
 
-        // Priority 2: rate envelope as an interval.
-        let max_up = current + self.nominal_contract.max_accel_mps2 * dt;
-        let max_down = current - self.nominal_contract.max_brake_mps2 * dt;
+        // Priority 2: rate envelope as an interval, DIRECTION-AWARE (review M1).
+        // The accel limit bounds a speed-magnitude INCREASE in the current
+        // direction of travel; the brake limit bounds a DECREASE (toward/through
+        // zero). For forward travel that is [current - brake·dt, current +
+        // accel·dt]; reverse mirrors it (a more-negative command is reverse
+        // ACCELERATION, bounded by accel, not brake); from rest either direction
+        // is acceleration. The prior direction-blind interval bounded reverse
+        // acceleration by the (larger) brake limit — the same bug the primary
+        // kernel carried, so the two diverse governors agreed on the WRONG value.
+        let (max_up, max_down) = if current > 0.0 {
+            (
+                current + self.nominal_contract.max_accel_mps2 * dt,
+                current - self.nominal_contract.max_brake_mps2 * dt,
+            )
+        } else if current < 0.0 {
+            (
+                current + self.nominal_contract.max_brake_mps2 * dt,
+                current - self.nominal_contract.max_accel_mps2 * dt,
+            )
+        } else {
+            (
+                self.nominal_contract.max_accel_mps2 * dt,
+                -self.nominal_contract.max_accel_mps2 * dt,
+            )
+        };
         // The primary's tolerance is `+1e-9` in acceleration space; in
         // velocity space (over one tick) that is `1e-9 · dt`.
         let band = ACCEL_EPSILON * dt;

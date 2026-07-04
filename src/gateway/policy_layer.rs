@@ -150,17 +150,24 @@ pub enum EnforcementOutcomeKind {
     ClampLinear,
     /// Steering angle was clamped to the envelope limit.
     ClampSteering,
+    /// BOTH linear velocity and steering angle were clamped (review H1): the
+    /// command breached the longitudinal accel/brake ceiling AND the
+    /// lateral-accel envelope in the same tick.
+    ClampBoth,
 }
 
 impl EnforcementOutcomeKind {
     /// Stable wire string. Matches the values the ROS interceptor and the CARLA
-    /// client already switch on.
+    /// client already switch on. `ClampBoth` is a new value (review H1); a reader
+    /// that only knows the prior three should treat an unknown action as "clamped"
+    /// and honor the `enforced_*` fields (which carry the safe command regardless).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "Allow",
             Self::ClampLinear => "ClampLinear",
             Self::ClampSteering => "ClampSteering",
+            Self::ClampBoth => "ClampBoth",
         }
     }
 }
@@ -192,6 +199,16 @@ impl EnforcementOutcome {
             original_linear_velocity_mps: cmd.linear_velocity_mps,
             original_steering_angle_deg: cmd.steering_angle_deg,
             enforced_linear_velocity_mps: cmd.linear_velocity_mps,
+            enforced_steering_angle_deg: safe_angle,
+        }
+    }
+
+    fn clamp_both(cmd: &ProposedVehicleCommand, safe_speed: f64, safe_angle: f64) -> Self {
+        Self {
+            action: EnforcementOutcomeKind::ClampBoth,
+            original_linear_velocity_mps: cmd.linear_velocity_mps,
+            original_steering_angle_deg: cmd.steering_angle_deg,
+            enforced_linear_velocity_mps: safe_speed,
             enforced_steering_angle_deg: safe_angle,
         }
     }
@@ -391,6 +408,30 @@ pub async fn enforce_actuator_safety_envelope(
             parts
                 .extensions
                 .insert(EnforcementOutcome::clamp_steering(&proposed_cmd, safe_angle));
+            let rebuilt = Request::from_parts(parts, Body::from(serialized));
+            Ok(next.run(rebuilt).await)
+        }
+
+        EnforceAction::ClampBoth { linear, steering } => {
+            // review H1: BOTH the longitudinal ceiling and the lateral envelope
+            // were breached; apply BOTH corrections. Before the fix the kernel
+            // returned ClampSteering here and the ORIGINAL over-accelerating
+            // velocity reached the actuator.
+            tracing::warn!(
+                requested_mps = %proposed_cmd.linear_velocity_mps,
+                clamped_mps   = %linear,
+                requested_deg = %proposed_cmd.steering_angle_deg,
+                clamped_deg   = %steering,
+                "Kinematic envelope breach: BOTH linear velocity and steering angle clamped"
+            );
+            let mut clamped_cmd = proposed_cmd.clone();
+            clamped_cmd.linear_velocity_mps = linear;
+            clamped_cmd.steering_angle_deg = steering;
+            let serialized = serde_json::to_vec(&clamped_cmd)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            parts
+                .extensions
+                .insert(EnforcementOutcome::clamp_both(&proposed_cmd, linear, steering));
             let rebuilt = Request::from_parts(parts, Body::from(serialized));
             Ok(next.run(rebuilt).await)
         }

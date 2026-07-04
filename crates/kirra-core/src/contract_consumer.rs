@@ -165,6 +165,12 @@ fn apply(action: EnforceAction, command: ProposedVehicleCommand) -> GovernorOutc
             c.steering_angle_deg = s;
             GovernorOutcome::Actuate(c)
         }
+        EnforceAction::ClampBoth { linear, steering } => {
+            let mut c = command;
+            c.linear_velocity_mps = linear;
+            c.steering_angle_deg = steering;
+            GovernorOutcome::Actuate(c)
+        }
         EnforceAction::DenyBreach(_) => GovernorOutcome::SafeStop,
     }
 }

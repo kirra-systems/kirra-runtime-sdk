@@ -90,7 +90,8 @@ fn reason_code(action: &EnforceAction) -> u32 {
     match action {
         EnforceAction::Allow
         | EnforceAction::ClampLinear(_)
-        | EnforceAction::ClampSteering(_) => 0,
+        | EnforceAction::ClampSteering(_)
+        | EnforceAction::ClampBoth { .. } => 0,
         EnforceAction::DenyBreach(code) => deny_code_num(*code),
     }
 }

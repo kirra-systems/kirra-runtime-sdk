@@ -119,6 +119,17 @@ pub fn record_from_verdict(
         EnforceAction::Allow => (CaptureOutcome::Allow, None, None),
         EnforceAction::ClampLinear(v) => (CaptureOutcome::ClampLinear, None, Some(*v)),
         EnforceAction::ClampSteering(d) => (CaptureOutcome::ClampSteering, None, Some(*d)),
+        // review H1: a both-axes clamp. The single `safe_value` field cannot
+        // carry two corrections, so record it as `ClampLinear(linear)` — this
+        // surfaces the LONGITUDINAL correction the pre-H1 code dropped entirely
+        // (it recorded these as ClampSteering, losing the velocity clamp). The
+        // steering correction stays derivable from the captured proposed command
+        // + contract. Keeping the existing `CaptureOutcome` set avoids a
+        // versioned wire-schema (kirra-capture-schema) bump for an off-by-default
+        // observability path.
+        EnforceAction::ClampBoth { linear, .. } => {
+            (CaptureOutcome::ClampLinear, None, Some(*linear))
+        }
         EnforceAction::DenyBreach(code) => {
             (CaptureOutcome::Deny, Some(code.reason().to_string()), None)
         }
@@ -327,6 +338,20 @@ mod tests {
         assert_eq!(dn.outcome, CaptureOutcome::Deny);
         assert_eq!(dn.deny_code.as_deref(), Some("NAN_INF_LINEAR_VELOCITY"));
         assert_eq!(dn.safe_value, None);
+
+        // review H1: ClampBoth records as ClampLinear carrying the LONGITUDINAL
+        // correction (the axis the pre-H1 code dropped). No wire-schema bump.
+        let cb = record_from_verdict(
+            4,
+            1000,
+            &EnforceAction::ClampBoth { linear: 6.25, steering: 1.5 },
+            FleetPosture::Nominal,
+            &c,
+            false,
+        );
+        assert_eq!(cb.outcome, CaptureOutcome::ClampLinear);
+        assert_eq!(cb.safe_value, Some(6.25));
+        assert_eq!(cb.deny_code, None);
     }
 
     fn traj_ext() -> TrajectoryCaptureExt {
