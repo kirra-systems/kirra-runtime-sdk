@@ -236,12 +236,15 @@ pub fn token_fingerprint(token: &str) -> String {
 }
 
 /// Mint a fresh 256-bit API token, hex-encoded (64 chars), from the OS CSPRNG.
-#[must_use]
-pub fn generate_api_token() -> String {
+///
+/// Fail-closed: a CSPRNG failure returns `Err` so the caller can map it to a 5xx
+/// rather than panicking — a transient entropy failure must not crash the process
+/// (in `panic=abort` builds) or drop the request. A token is NEVER minted from a
+/// degraded randomness source.
+pub fn generate_api_token() -> Result<String, getrandom::Error> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)
-        .expect("OS CSPRNG (getrandom) unavailable — cannot mint a secure API token");
-    hex::encode(bytes)
+    getrandom::fill(&mut bytes)?;
+    Ok(hex::encode(bytes))
 }
 
 #[cfg(test)]
@@ -381,8 +384,8 @@ mod tests {
 
     #[test]
     fn generated_tokens_are_unique_256_bit_hex() {
-        let a = generate_api_token();
-        let b = generate_api_token();
+        let a = generate_api_token().expect("CSPRNG available in test");
+        let b = generate_api_token().expect("CSPRNG available in test");
         assert_eq!(a.len(), 64);
         assert_ne!(a, b, "two mints must not collide");
     }

@@ -45,9 +45,20 @@ pub(crate) async fn register_api_principal_handler(
 
     // Generate the token and derive its stored hash + short fingerprint. The
     // plaintext exists ONLY in this response; the store sees only the hash.
-    let token = generate_api_token();
+    // Fail-closed: a CSPRNG failure is a 500, never a panic and never a token
+    // minted from degraded entropy.
+    let token = match generate_api_token() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "CSPRNG unavailable — refusing to mint API token");
+            return (StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "token generation failed" }))).into_response();
+        }
+    };
     let token_hash = token_sha256_hex(&token);
-    let token_fp = token_fingerprint(&token);
+    // The fingerprint is the first 16 hex chars of the SHA-256 — derive it from the
+    // already-computed hash rather than re-hashing the token.
+    let token_fp = token_hash[..16].to_string();
     let admin_fp = admin_token_fingerprint(&headers);
     let now = now_ms();
 
@@ -73,7 +84,11 @@ pub(crate) async fn register_api_principal_handler(
     }).await;
 
     match persisted {
-        Ok(true) => (StatusCode::CREATED, Json(json!({
+        // `Cache-Control: no-store` — the body carries a one-time plaintext secret;
+        // no intermediary (proxy / client cache) may persist it.
+        Ok(true) => (StatusCode::CREATED,
+                     [(header::CACHE_CONTROL, "no-store")],
+                     Json(json!({
             "principal_id": principal_id,
             "role": role.as_str(),
             // Shown ONCE — store it now; it cannot be retrieved again.
