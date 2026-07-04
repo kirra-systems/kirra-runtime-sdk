@@ -140,6 +140,9 @@ async fn authorize_scope(
     // an identity. A presented bearer is the explicit credential and is NOT silently
     // rescued by a cert — only the no-bearer case consults the cert. Admin must be
     // configured (the predicate 503s otherwise regardless).
+    // `resolved_via_cert` distinguishes the mTLS credential from a token in the
+    // Allow log below (the pure predicate labels both "api-principal").
+    let mut resolved_via_cert = false;
     let principal = match principal {
         Some(p) => Some(p),
         None if bearer.is_none() && !admin_env.is_empty() => {
@@ -152,11 +155,14 @@ async fn authorize_scope(
                         .call_read(move |s| s.load_cert_principal_by_fingerprint(&fp))
                         .await
                     {
-                        Ok(Ok(Some(rec))) => Some(ResolvedPrincipal {
-                            role: ApiRole::parse_role(&rec.role),
-                            revoked: rec.revoked_at_ms.is_some(),
-                            principal_id: rec.principal_id,
-                        }),
+                        Ok(Ok(Some(rec))) => {
+                            resolved_via_cert = true;
+                            Some(ResolvedPrincipal {
+                                role: ApiRole::parse_role(&rec.role),
+                                revoked: rec.revoked_at_ms.is_some(),
+                                principal_id: rec.principal_id,
+                            })
+                        }
                         // Unpinned fingerprint OR store/read failure → no principal
                         // (fail-closed; the predicate then denies).
                         _ => None,
@@ -179,11 +185,15 @@ async fn authorize_scope(
     match decision.outcome {
         AuthzOutcome::Allow => {
             if decision.auth_method == "api-principal" {
+                // Credential type for incident/debug: an mTLS-resolved principal vs a
+                // bearer token (the predicate can't tell — the middleware knows the source).
+                let credential = if resolved_via_cert { "mtls-cert" } else { "api-token" };
                 tracing::info!(
                     scope = required_scope,
                     principal_id = decision.principal_id.as_deref().unwrap_or("?"),
                     role = decision.role.map(ApiRole::as_str).unwrap_or("?"),
-                    "authz allow (api-principal)"
+                    credential,
+                    "authz allow (scoped principal)"
                 );
             } else {
                 tracing::debug!(scope = required_scope, "authz allow (admin-token)");

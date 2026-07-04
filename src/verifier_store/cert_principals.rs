@@ -134,6 +134,20 @@ mod tests {
     }
 
     #[test]
+    fn same_fingerprint_on_a_new_principal_is_a_unique_conflict() {
+        // The UNIQUE(cert_sha256) column means one cert pins to at most one
+        // principal — pinning the same fingerprint under a DIFFERENT id errors
+        // (the handler maps this to 409). `ON CONFLICT(principal_id)` only rotates
+        // the SAME id, so it does not absorb this case.
+        let mut s = store();
+        s.register_cert_principal("svc-a", "shared-fp", "operator", 1_000).unwrap();
+        let err = s.register_cert_principal("svc-b", "shared-fp", "operator", 1_000);
+        assert!(err.is_err(), "a second principal on the same fingerprint must conflict");
+        // Re-pinning the SAME principal with the same fp is fine (idempotent rotate).
+        assert!(s.register_cert_principal("svc-a", "shared-fp", "auditor", 2_000).is_ok());
+    }
+
+    #[test]
     fn distinct_from_token_principals() {
         // A cert principal and a token principal are separate credentials, even with
         // the same principal_id string — different tables, resolved by different keys.

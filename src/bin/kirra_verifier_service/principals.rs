@@ -210,10 +210,12 @@ pub(crate) async fn register_cert_principal_handler(
     let role_str = role.as_str().to_string();
     let fp_store = fingerprint.clone();
     let fp_audit = fingerprint.clone();
+    // Propagate the rusqlite error so a UNIQUE(cert_sha256) conflict — the same
+    // fingerprint already pinned to a DIFFERENT principal (`ON CONFLICT(principal_id)`
+    // only rotates the SAME id) — maps to 409, not a generic 500. cert_sha256 is
+    // operator-supplied, so this collision is a plausible, actionable mistake.
     let persisted = svc.app.store.call(move |store| {
-        if store.register_cert_principal(&id, &fp_store, &role_str, now).is_err() {
-            return false;
-        }
+        store.register_cert_principal(&id, &fp_store, &role_str, now)?;
         let _ = store.append_clearance_audit_event(
             "CertPrincipalRegistered",
             &json!({
@@ -224,20 +226,33 @@ pub(crate) async fn register_cert_principal_handler(
             }).to_string(),
             now,
         );
-        true
+        Ok::<(), rusqlite::Error>(())
     }).await;
 
     match persisted {
-        Ok(true) => (StatusCode::CREATED, Json(json!({
+        Ok(Ok(())) => (StatusCode::CREATED, Json(json!({
             "principal_id": principal_id,
             "role": role.as_str(),
             "cert_sha256": fingerprint,
         }))).into_response(),
-        Ok(false) => (StatusCode::INTERNAL_SERVER_ERROR,
-                      Json(json!({ "error": "persist failed" }))).into_response(),
+        Ok(Err(e)) if is_unique_violation(&e) => (StatusCode::CONFLICT, Json(json!({
+            "error": "cert_sha256 is already pinned to another principal"
+        }))).into_response(),
+        Ok(Err(_)) => (StatusCode::INTERNAL_SERVER_ERROR,
+                       Json(json!({ "error": "persist failed" }))).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
                    Json(json!({ "error": "store task failed" }))).into_response(),
     }
+}
+
+/// A SQLite UNIQUE / constraint violation — used to distinguish a duplicate-pin
+/// conflict (409) from a genuine internal persistence failure (500).
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if f.code == rusqlite::ffi::ErrorCode::ConstraintViolation
+    )
 }
 
 /// GET /system/cert-principals — list pinned cert principals. ADMIN-scoped. Never

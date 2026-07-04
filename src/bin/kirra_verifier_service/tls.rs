@@ -155,9 +155,11 @@ pub fn load_server_config(
     Ok(Arc::new(config))
 }
 
+// Shared by the server cert-chain AND the client-CA path, so the message is
+// path-generic (naming a specific env var would mislabel an mTLS CA failure).
 fn load_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     let file = std::fs::File::open(path)
-        .map_err(|e| format!("{ENV_TLS_CERT_PATH} {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to open certificate file {}: {e}", path.display()))?;
     let mut reader = std::io::BufReader::new(file);
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     let certs =
