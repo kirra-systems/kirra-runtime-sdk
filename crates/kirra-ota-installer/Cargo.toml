@@ -1,0 +1,29 @@
+# crates/kirra-ota-installer/Cargo.toml
+#
+# kirra-ota-installer — the NODE-SIDE dual-slot (A/B) governor-artifact installer
+# with health-gated automatic rollback (WS-4 / Track 3, doer side). This is the
+# DEVICE-AGNOSTIC core: the slot state machine, staged-artifact digest
+# verification, and the health-gate commit/rollback decision, driving a
+# `BootController` trait. The single hardware-coupled seam is that trait — the real
+# bootloader impl (Jetson `nvbootctrl` / EFI / systemd active-slot flip) plugs in
+# behind it, so the safety logic tests without any device. Lean, service-free.
+[package]
+name = "kirra-ota-installer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Node-side dual-slot governor-artifact installer with health-gated rollback (device-agnostic core)."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The vetted SHA-256 — the SAME digest primitive the audit chain, release token,
+# and root crate use — to verify a staged artifact against the campaign's signed
+# digest before it is ever allowed to become a boot target.
+sha2 = "0.11"
+hex = "0.4"
+# State/boot-record (de)serialization for the file-backed controller + the
+# node-facing assignment DTO the installer consumes.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
