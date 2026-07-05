@@ -337,6 +337,18 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
         sweep_ms = kirra_verifier::campaign_monitor::CAMPAIGN_SWEEP_MS,
         "OTA campaign posture-sweep monitor spawned (WS-4 halt-on-regression)"
     );
+
+    // WS-4 / Track 3 — WORM off-box audit shipper. Opt-in: runs only when
+    // KIRRA_AUDIT_SHIP_PATH names an append-only sink file, appending new audit
+    // records off-box each cycle so the tamper-evidence log survives loss of this
+    // box. Active-only (this instance writes the audit records); supervised
+    // non-critical (the local chain stays intact + independently verifiable).
+    if kirra_verifier::audit_shipper::spawn_audit_shipper(Arc::clone(&svc.app)) {
+        tracing::info!(
+            interval_ms = kirra_verifier::audit_shipper::AUDIT_SHIP_INTERVAL_MS,
+            "WORM off-box audit shipper spawned (WS-4 audit survivability)"
+        );
+    }
 }
 
 /// One idempotent push of the cached fleet posture into the local asset.

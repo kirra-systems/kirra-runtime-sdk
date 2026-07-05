@@ -113,7 +113,9 @@ src/
 │                               ShippedAuditRecord, verify_shipped_chain (INDEPENDENT
 │                               off-box hash-chain re-verifier, no source DB),
 │                               AuditSink (InMemory/JsonlFile), ship_and_advance +
-│                               cursor persistence (at-least-once, ship-then-advance)
+│                               cursor persistence (at-least-once, ship-then-advance),
+│                               spawn_audit_shipper (env-gated background scheduler,
+│                               AUDIT_SHIP_INTERVAL_MS; opt-in via KIRRA_AUDIT_SHIP_PATH)
 ├── ota_campaign.rs           — WS-4/Track-3 OTA governor-artifact campaign engine
 │                               (PURE): Campaign, CampaignState machine, HaltReason,
 │                               fail-closed posture_regression_halt (advance HALTS,
@@ -335,6 +337,9 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
 
 // campaign_monitor.rs
 CAMPAIGN_SWEEP_MS            = 1_000      // OTA campaign posture-sweep interval
+
+// audit_shipper.rs
+AUDIT_SHIP_INTERVAL_MS      = 5_000      // WORM off-box audit-ship cycle interval
 ```
 
 ---
@@ -467,6 +472,7 @@ proptest = "1"  # dev-dependency
 | `KIRRA_GOVERNOR_SIGNING_KEY_ALLOW_DEV` | No | `false` | `1`/`true` → admit the `dev-fixed` governor key source. Absent → `dev-fixed` is refused (`DevKeyNotAllowed`) — a non-production key never loads by default |
 | `KIRRA_TLS_CERT_PATH` / `KIRRA_TLS_KEY_PATH` | No | — | Opt-in in-process TLS termination (WS-1 Track 1.2, `src/bin/kirra_verifier_service/tls.rs`): PEM cert-chain + private-key paths. **Both set** → verifier terminates TLS in-process (rustls, `ring` provider only — no `aws-lc-rs`). **Exactly one set** → fail-closed startup abort (a half-configured TLS listener must not fall back to plaintext). **Neither** → plaintext (default, byte-identical; mesh terminates TLS per ADR-0006 Clause 3). Cert/key validated before bind. See `docs/safety/TRANSPORT_SECURITY.md` §4 |
 | `KIRRA_TLS_CLIENT_CA_PATH` | No | — | Opt-in **mTLS** (WS-1 Track 1.2). Set (server TLS must ALSO be on) → client certs are REQUIRED and CA-verified by rustls's `WebPkiClientVerifier`; the verified leaf's SHA-256 fingerprint resolves to a `cert_principals` principal when no bearer token is presented (same RBAC). Set WITHOUT server TLS → fail-closed startup abort. Unset → no client auth. See `docs/safety/TRANSPORT_SECURITY.md` §4 |
+| `KIRRA_AUDIT_SHIP_PATH` | No | — | WS-4 WORM off-box audit shipping (`src/audit_shipper.rs`). Set to an append-only sink FILE path → the Active instance spawns a background shipper (`AUDIT_SHIP_INTERVAL_MS`) that appends each new hash-chained audit record there (a WORM volume / log-shipping agent carries it off-box; the shipped stream re-verifies independently via `verify_shipped_chain`). Ship-then-advance + fsync (at-least-once; consumer dedupes by `sequence`). Unset/empty → shipping OFF (default, byte-identical) |
 
 **`kirra-ros2-adapter` slow-loop env gates** (consumed in `node.rs`, opt-in, default off →
 byte-identical prior behaviour): `KIRRA_PERCEPTION_DERATE_ENABLED` (Track-C perception-derate cap),
