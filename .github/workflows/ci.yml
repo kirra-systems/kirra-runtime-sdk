@@ -151,6 +151,32 @@ jobs:
           path: dist-qnx/
           retention-days: 7
 
+  # M4 — MSRV enforcement. The manifests declare `rust-version = "1.88"`
+  # (docs/VERSIONING_POLICY.md §3; the floor is set by locked deps such as
+  # time-core 0.1.9 / serde_with 3.21 / darling 0.23 — all require 1.88 — not by
+  # our own code). This lane makes that a SELF-VERIFYING gate instead of a
+  # comment: it compiles the whole workspace on the exact MSRV toolchain, so a PR
+  # that reaches for a newer-than-1.88 lang/stdlib feature reds HERE with a clear
+  # message, rather than silently invalidating the published floor. `+1.88.0` is
+  # explicit so it holds regardless of `rust-toolchain.toml` (which pins the far
+  # newer BUILD toolchain). Raising the MSRV is a deliberate MINOR bump (policy
+  # §3): update both `rust-version` fields, the CHANGELOG, and this lane together.
+  msrv:
+    name: MSRV check (rustc 1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.88.0"
+      - name: cargo check on the MSRV floor — root workspace (locked)
+        run: cargo +1.88.0 check --workspace --locked
+      - name: cargo check on the MSRV floor — parko workspace (locked)
+        # parko/ is a SEPARATE workspace with its own committed lockfile; policy
+        # §3 requires BOTH lockfiles be verified on the MSRV floor.
+        run: cargo +1.88.0 check --manifest-path parko/Cargo.toml --workspace --locked
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -203,6 +229,14 @@ jobs:
     # carry 20–50% overhead, so a single 30-min budget could time out on the
     # double run and red the job falsely.
     timeout-minutes: 45
+    # This lane REQUIRES nightly (`-Z coverage-options` for branch/MC-DC
+    # instrumentation). The repo-root `rust-toolchain.toml` pin (1.94.1) would
+    # otherwise override dtolnay's nightly default and every rustc spawn — even
+    # cargo-llvm-cov's inner build-script compiles — would run on stable and
+    # reject `-Z`. `RUSTUP_TOOLCHAIN` (env) outranks `rust-toolchain.toml` and is
+    # inherited by all child processes, so it forces nightly job-wide.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly

@@ -1,0 +1,27 @@
+# Pinned BUILD toolchain (stop-gate review M4).
+#
+# A safety-critical build must be reproducible with a KNOWN compiler, not
+# whatever floating `stable` a developer's machine or a CI runner happens to
+# carry that day. This pins the whole workspace — and the nested `parko/`
+# sub-workspace, since rustup resolves this file from any subdirectory — to the
+# exact version the CI release + QNX-judge lanes already ship
+# (`.github/workflows/ci.yml`: `toolchain: "1.94.1"`). Bump deliberately and in
+# lock-step with those lanes.
+#
+# This is the BUILD toolchain, DISTINCT from the MSRV floor
+# (`rust-version = "1.88"` in Cargo.toml — the minimum a downstream CONSUMER
+# needs). Build on the pin; support down to the MSRV. The `msrv` CI lane
+# enforces that the workspace still compiles on 1.88.
+#
+# SCOPE: this file governs local/dev AND CI builds. `dtolnay/rust-toolchain`
+# only sets rustup's DEFAULT toolchain, and this file outranks the default, so CI
+# lanes build on the pinned version too — unless a lane overrides it with a
+# higher-precedence selector. Two must: the `coverage` lane forces `nightly` via
+# `RUSTUP_TOOLCHAIN` (it needs `-Z` instrumentation) and the `msrv` lane forces
+# `1.88` via an explicit `+1.88.0`. Any new lane needing a different toolchain
+# must likewise override via `RUSTUP_TOOLCHAIN` or `+toolchain`, not a bare
+# `dtolnay` default (which this file supersedes).
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
