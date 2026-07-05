@@ -307,6 +307,76 @@ pub fn ship_and_advance(
     Ok(outcome)
 }
 
+/// Interval between audit-shipping cycles. Shipping is a durability enhancement,
+/// not a latency-critical path, so a relaxed cadence bounds the off-box lag while
+/// keeping the fsync-per-cycle cost low.
+pub const AUDIT_SHIP_INTERVAL_MS: u64 = 5_000;
+
+/// Env var naming the append-only off-box sink FILE. Set → the background shipper
+/// runs, appending new audit records there each cycle (a WORM volume / log-shipping
+/// agent carries the file off-box). Unset/empty → shipping is OFF (default;
+/// byte-identical prior behaviour).
+pub const AUDIT_SHIP_PATH_ENV: &str = "KIRRA_AUDIT_SHIP_PATH";
+
+/// Spawn the background audit shipper IF `KIRRA_AUDIT_SHIP_PATH` names a sink file;
+/// otherwise a no-op (shipping is opt-in, default OFF). Supervised **non-critical**
+/// on a `AUDIT_SHIP_INTERVAL_MS` loop: a wedged shipper cannot make anything unsafe
+/// (the LOCAL audit chain is intact and independently verifiable; off-box shipping
+/// is a survivability enhancement), so a panic restarts it but never forces
+/// `LockedOut`. Each cycle runs `ship_and_advance` off the async thread via
+/// `StoreHandle::call`; the `JsonlFileAuditSink` is cheap (a path; it opens +
+/// fsyncs per append), so a fresh one per cycle is fine.
+///
+/// Returns `true` if the shipper was spawned, `false` if shipping is disabled.
+pub fn spawn_audit_shipper(app: std::sync::Arc<crate::verifier::AppState>) -> bool {
+    let path = match std::env::var(AUDIT_SHIP_PATH_ENV) {
+        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => return false, // shipping off (default)
+    };
+
+    crate::supervisor::spawn_supervised(
+        "audit_shipper",
+        /* critical    */ false,
+        /* run-forever  */ true,
+        /* escalate     */ None,
+        move || {
+            let app = std::sync::Arc::clone(&app);
+            let path = path.clone();
+            async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_millis(AUDIT_SHIP_INTERVAL_MS));
+                // Coalesce missed windows (each cycle is idempotent — the cursor
+                // makes re-runs safe); no catch-up burst after runtime starvation.
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let path = path.clone();
+                    // The whole read-ship-advance runs under one store call so the
+                    // cursor read/write and the ledger read see a consistent store.
+                    match app
+                        .store
+                        .call(move |store| {
+                            let mut sink = JsonlFileAuditSink::new(path);
+                            ship_and_advance(store, &mut sink, DEFAULT_SHIP_BATCH_LIMIT)
+                        })
+                        .await
+                    {
+                        Ok(Ok(outcome)) if outcome.shipped > 0 => tracing::info!(
+                            shipped = outcome.shipped,
+                            next_cursor = outcome.next_cursor,
+                            "audit shipper: appended records to the off-box sink"
+                        ),
+                        Ok(Ok(_)) => {} // nothing new this cycle
+                        Ok(Err(e)) => tracing::error!(error = %e, "audit shipper cycle failed"),
+                        Err(_) => tracing::error!("audit shipper store task failed"),
+                    }
+                }
+            }
+        },
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
