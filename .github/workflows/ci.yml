@@ -748,47 +748,40 @@ jobs:
 
   ros2-adapter-build:
     name: ros2 adapter build (--features ros2)
-    # Jazzy targets Ubuntu 24.04 (Noble), so pin the runner (the rest of the
-    # workflow runs on ubuntu-latest, which is fine for the non-ROS jobs).
+    # DURABLE fix for the flaky ros2 build: run INSIDE the prebuilt
+    # `ros:jazzy-ros-base` image instead of installing ROS via `setup-ros`.
+    # setup-ros resolved the `ros2-apt-source` deb version with an UNAUTHENTICATED
+    # api.github.com call (60/hr per shared runner IP); when it rate-limited the
+    # version came back empty → the deb URL 404'd → `curl --fail` exited 22 → the
+    # job died (and its apt install could also crawl a degraded mirror). The image
+    # ships ROS + colcon + build-essential + git, so there is NO ROS apt install
+    # at all — that whole failure mode simply cannot happen. The only extra
+    # install is libclang for r2r's bindgen. (Jazzy = Ubuntu 24.04 Noble; the
+    # image is Noble-based, so the toolchain matches.)
     runs-on: ubuntu-24.04
-    # 60 (was 40): the 40-min cancellations on this job were setup-ros's apt
-    # install crawling on a degraded mirror, hitting the wall exactly. With the
-    # apt hardening below (bounded per-connection timeouts + IPv4) a slow-but-
-    # progressing install now has headroom instead of timing out.
-    timeout-minutes: 60
+    container:
+      image: ros:jazzy-ros-base
+    timeout-minutes: 45
+    defaults:
+      run:
+        # Force bash: a container's default `run` shell can be `sh`, where the
+        # `source /opt/ros/jazzy/setup.bash` steps below (a bash builtin) fail.
+        shell: bash
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Harden apt for slow/stalling mirrors (flaky ros2 build)
-        # The timeouts on this job were setup-ros's apt install crawling on a
-        # degraded azure.archive.ubuntu.com mirror (kB/s, per-connection stalls) —
-        # NOT the ros2-apt-source rate-limit the retry below covers. Drop an apt
-        # config BEFORE setup-ros so its apt-get honors it: bounded per-connection
-        # timeouts + retries turn a wedged socket into a fast reconnect, and
-        # ForceIPv4 avoids the slow/blackholed IPv6 path that commonly causes slow
-        # apt on GitHub runners. If this still recurs, the durable fix is a
-        # prebuilt ros:jazzy container (avoids the ROS apt install entirely).
+      - name: Install r2r build deps (libclang for bindgen)
+        # ros:jazzy-ros-base already carries ROS, colcon, build-essential and git.
+        # r2r's build script runs bindgen, which needs libclang; add it plus
+        # curl/ca-certificates for the rustup installer the toolchain action uses.
+        # colcon is (re)installed defensively — a no-op if already present. Runs as
+        # root in the container (no sudo); apt hardening inline in case the Ubuntu
+        # mirror is slow (this is the ONLY apt install left on the job).
         run: |
           printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::ForceIPv4 "true";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99-kirra-ci-mirror
-      - id: setup_ros
-        uses: ros-tooling/setup-ros@649ef6bcd696da05bc27ceb3fab69d810c0daeab # v0.7
-        with:
-          required-ros-distributions: jazzy
-        # setup-ros installs the new `ros2-apt-source` deb, resolving its version
-        # via an UNAUTHENTICATED api.github.com call (60/hr, per shared runner IP).
-        # When that rate-limits, the version comes back empty -> the deb URL 404s
-        # -> `curl --fail` exits 22 -> the action fails. It is transient, so the
-        # first attempt is tolerant and we retry once after a short delay; the
-        # retry is authoritative (a persistent failure still reds the job).
-        continue-on-error: true
-      - name: setup-ros delay before retry (transient ros-apt-source rate-limit)
-        if: steps.setup_ros.outcome == 'failure'
-        run: sleep 90
-      - name: setup-ros (retry)
-        if: steps.setup_ros.outcome == 'failure'
-        uses: ros-tooling/setup-ros@649ef6bcd696da05bc27ceb3fab69d810c0daeab # v0.7
-        with:
-          required-ros-distributions: jazzy
+            > /etc/apt/apt.conf.d/99-kirra-ci-mirror
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            clang libclang-dev curl ca-certificates python3-colcon-common-extensions
       - name: Build curated message workspace
         # Build ONLY the curated, integrator-pinned message packages the adapter
         # links against (autoware_perception_msgs + autoware_planning_msgs) — NOT
