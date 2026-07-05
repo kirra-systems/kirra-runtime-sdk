@@ -688,7 +688,7 @@ fn object_fields_finite(obj: &PerceivedObject) -> bool {
         && obj.heading_rad.is_finite()
 }
 
-// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in,predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3,predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3
+// SAFETY: SG1 | REQ: multi-modal-predictive-rss-bound | TEST: predictive_rss_catches_a_predicted_cut_in,predictive_rss_does_not_regress_a_lane_keeping_neighbor,predictive_rss_is_a_no_op_when_no_modes_are_supplied,rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distance,predictive_rss_catches_a_mid_band_lateral_cut_in,predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3,predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3,predictive_rss_fails_closed_per_object_when_one_mode_is_unevaluable
 fn predictive_rss_breach(
     trajectory: &[TrajectoryPoint],
     modes: &[PredictedMode<'_>],
@@ -701,9 +701,19 @@ fn predictive_rss_breach(
     // ("evaluated → not a threat"). If a non-empty mode set produces NOT ONE
     // evaluable window, the cut-in detector checked nothing; see the fail-closed
     // guard after the loop.
-    let mut evaluated_any = false;
+    // Per-MODE evaluability, not just per mode-SET: each object's mode must be
+    // evaluated or fail closed. A single set-level flag let one object's evaluable
+    // mode MASK another object's fully-unevaluable one (e.g. samples whose times
+    // fall outside the ego trajectory's span, so `nearest_in_time` returns `None`
+    // for every window) — a silent per-object fail-open. `any_windows` preserves
+    // the original set-level guard for the "no windows anywhere" case.
+    let mut any_windows = false;
     for mode in modes {
+        let mut mode_evaluated = false;
+        let mut mode_has_windows = false;
         for pair in mode.samples.windows(2) {
+            mode_has_windows = true;
+            any_windows = true;
             let (a, b) = (pair[0], pair[1]);
             // H-2 (fail-closed predictive RSS): a non-finite predicted-mode
             // sample position poisons the closing-rate (`ov*`) and gap math the
@@ -730,7 +740,7 @@ fn predictive_rss_breach(
             };
             // Past both unevaluable gates: this window WAS evaluated (whatever the
             // geometric verdict below).
-            evaluated_any = true;
+            mode_evaluated = true;
             let dx = a.pos.x_m - ego.pose.x_m;
             let dy = a.pos.y_m - ego.pose.y_m;
             let cos_h = ego.pose.heading_rad.cos();
@@ -800,21 +810,25 @@ fn predictive_rss_breach(
                 }
             }
         }
+        // Per-mode fail-closed: a mode that HAS inter-sample windows but evaluated
+        // NONE of them — every window non-monotonic in time, or none within the ego
+        // trajectory's span — means THIS object's predicted threat was checked
+        // against nothing. Fail closed here rather than let another object's
+        // evaluable mode mask it (the per-object fail-open the set-level flag had).
+        if mode_has_windows && !mode_evaluated {
+            return true;
+        }
     }
 
-    // B3 (fail-closed): the caller already treats `predicted_modes == None` /
-    // an EMPTY slice as the legitimate "no prediction supplied" no-op. But a
-    // NON-EMPTY mode set that produced ZERO evaluable windows — every sample
-    // non-monotonic in time, or none within the ego trajectory's time span, or
-    // no inter-sample window at all (a sub-`dt` horizon) — means the multi-modal
-    // predictive pass, the ONLY layer catching a mid-band cut-in the snapshot
-    // filters out, evaluated nothing. Returning `false` here would be a SILENT
-    // FAIL-OPEN that a producer can trigger with equal timestamps or a too-short
-    // horizon. Fail closed instead: derate to the MRC floor (the caller maps
-    // `true` → `TrajectoryVerdict::MRCFallback`). Well-formed modes always have
-    // at least one evaluable window (the t≈0 sample matches the ego start pose),
-    // so the Nominal path is unaffected.
-    if !modes.is_empty() && !evaluated_any {
+    // B3 (fail-closed, set level): a NON-EMPTY mode set that produced NOT ONE
+    // inter-sample window at all (every mode one-sample / a sub-`dt` horizon)
+    // evaluated nothing — the multi-modal pass, the only layer catching a mid-band
+    // cut-in the snapshot filters out, ran on nothing. Returning `false` would be a
+    // SILENT FAIL-OPEN a producer triggers with a too-short horizon. Fail closed;
+    // the caller maps `true` → `TrajectoryVerdict::MRCFallback`. Well-formed modes
+    // always have ≥1 window (the t≈0 sample matches the ego start pose), so the
+    // Nominal path is unaffected.
+    if !modes.is_empty() && !any_windows {
         return true;
     }
 
