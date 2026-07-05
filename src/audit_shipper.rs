@@ -161,8 +161,8 @@ impl AuditSink for InMemoryAuditSink {
 
 /// Append-only JSON-Lines file sink: one JSON object per line, opened in append
 /// mode. A WORM-mounted volume or a log-shipping agent tailing the file carries
-/// it off-box. Each `append` is flushed before returning, so a shipped batch is
-/// durable on the file before the high-water mark advances.
+/// it off-box. Each `append` is written then `sync_all`-fsync'd before returning,
+/// so a shipped batch is durable on stable storage before the cursor advances.
 pub struct JsonlFileAuditSink {
     path: std::path::PathBuf,
 }
@@ -189,7 +189,12 @@ impl AuditSink for JsonlFileAuditSink {
             buf.push('\n');
         }
         file.write_all(buf.as_bytes())?;
+        // `flush` only drains userspace buffers; `sync_all` (fsync) forces the
+        // batch to stable storage. The cursor advances only after this returns, so
+        // ship-then-advance must be durable HERE — a power loss must not lose a
+        // batch the cursor already considers shipped.
         file.flush()?;
+        file.sync_all()?;
         Ok(())
     }
 }
@@ -272,6 +277,11 @@ pub fn load_ship_cursor(
     Ok(store
         .load_engine_state(AUDIT_SHIP_CURSOR_KEY)?
         .and_then(|s| s.parse::<u64>().ok())
+        // The cursor is later bound as a SQLite INTEGER (i64). A persisted value
+        // beyond i64::MAX is corruption — treat it as "unset" and restart from the
+        // genesis row (at-least-once re-ship, never a wrapped bind) rather than
+        // trusting a poisoned cursor.
+        .filter(|&v| v <= i64::MAX as u64)
         .unwrap_or(0))
 }
 
@@ -530,6 +540,39 @@ mod tests {
         assert!(
             !verify_shipped_chain(&sink.records).is_ok(),
             "a mutated off-box record must fail re-verification"
+        );
+    }
+
+    #[test]
+    fn corrupt_persisted_cursor_restarts_from_genesis() {
+        // A poisoned cursor beyond the SQLite INTEGER domain must not be trusted
+        // (it would wrap to a negative bind and re-ship everything from a wrong
+        // point / desync). It is treated as unset → restart from 0.
+        let store = store_with_events(2);
+        store
+            .save_engine_state(AUDIT_SHIP_CURSOR_KEY, &(i64::MAX as u64 + 1).to_string())
+            .unwrap();
+        assert_eq!(
+            load_ship_cursor(&store).unwrap(),
+            0,
+            "out-of-domain cursor → 0"
+        );
+        // And an in-domain cursor round-trips.
+        store.save_engine_state(AUDIT_SHIP_CURSOR_KEY, "1").unwrap();
+        assert_eq!(load_ship_cursor(&store).unwrap(), 1);
+    }
+
+    #[test]
+    fn out_of_range_from_sequence_ships_nothing() {
+        // A `from_sequence` beyond i64::MAX saturates the bind rather than wrapping
+        // negative — it must return no rows (fail-closed), never the whole ledger.
+        let store = store_with_events(3);
+        let recs = store
+            .load_shippable_audit_records(u64::MAX, DEFAULT_SHIP_BATCH_LIMIT)
+            .unwrap();
+        assert!(
+            recs.is_empty(),
+            "a beyond-range cursor must ship nothing, not wrap to match all"
         );
     }
 
