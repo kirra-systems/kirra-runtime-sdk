@@ -244,6 +244,39 @@ mod reset_clock_tests {
         assert_eq!(engine.reset_cooldown_end_ms, 0, "one failure must not re-arm the cooldown");
     }
 
+    /// A restart must NOT bypass the throttle (Copilot #819). The gateway persists
+    /// `failed_reset_attempts` but NOT the in-memory `reset_cooldown_end_ms`, so a
+    /// reboot presents `failed == threshold` with `cooldown_end == 0`. That state
+    /// must ARM a fresh cooldown and reject — not clear the counter and grant an
+    /// immediate fresh window — otherwise an attacker who can force restarts skips
+    /// the wait. Recovery is still possible once the armed window is served.
+    #[test]
+    fn restart_persisted_lockout_arms_cooldown_not_bypass() {
+        let mut engine = RuntimeTrustEngine::new();
+        let key = b"supervisor-key";
+        let t: u64 = 1_700_000_000_000;
+
+        // Simulate the post-restart load: counter restored from disk, cooldown lost.
+        engine.failed_reset_attempts = 5;
+        engine.reset_cooldown_end_ms = 0;
+
+        // Correct token immediately after restart: throttle must NOT be skipped.
+        assert_eq!(reset_engine_at(&mut engine, key, key, t), 0);
+        assert_eq!(
+            engine.reset_cooldown_end_ms,
+            t + 60_000,
+            "a restart at threshold must ARM a cooldown, not clear the counter"
+        );
+        assert_eq!(engine.failed_reset_attempts, 5, "counter held until the cooldown is served");
+
+        // Within the window: still blocked.
+        assert_eq!(reset_engine_at(&mut engine, key, key, t + 59_999), 0);
+
+        // Once served: the correct token recovers (no permanent lockout).
+        assert_eq!(reset_engine_at(&mut engine, key, key, t + 60_001), 1);
+        assert_eq!(engine.failed_reset_attempts, 0);
+    }
+
     /// The clock the production FFI path supplies is a real current wall clock,
     /// not the old hardcoded `0`.
     #[test]

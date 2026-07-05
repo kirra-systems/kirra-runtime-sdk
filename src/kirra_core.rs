@@ -112,16 +112,27 @@ impl RuntimeTrustEngine {
         if current_time_ms < self.reset_cooldown_end_ms {
             return Err("RESET_REJECTED_COOLDOWN_ACTIVE");
         }
-        // The cooldown (if one was armed) has now been SERVED, so a prior
-        // brute-force lockout grants a FRESH attempt window here. Without this,
-        // `failed_reset_attempts` — cleared only on a successful compare below —
-        // would stay ≥ threshold forever: every post-cooldown attempt would
-        // re-hit this guard, re-arm a new cooldown, and reject even the CORRECT
-        // token, permanently locking out a legitimate supervisor (the counter is
-        // persisted across restarts, so the lockout survived a reboot too).
+        // At the threshold, the counter is cleared ONLY once a cooldown has been
+        // armed and SERVED. Clearing it unconditionally would let a legitimate
+        // supervisor recover (the counter is cleared only on a successful compare
+        // below, which the `>= threshold` guard returns before ever reaching — the
+        // permanent-lockout bug), BUT it would also let a restart bypass the
+        // throttle: the gateway persists `failed_reset_attempts` and NOT the
+        // (in-memory) `reset_cooldown_end_ms`, so after a reboot the counter is at
+        // threshold with `reset_cooldown_end_ms == 0` and no wait has been served.
         if self.failed_reset_attempts >= RESET_MAX_FAILED_ATTEMPTS {
+            if self.reset_cooldown_end_ms == 0 {
+                // Threshold reached with NO cooldown on record — the cross-restart /
+                // pre-fix-persisted signature. Arm a cooldown and reject so a
+                // restart cannot skip the wait; it becomes SERVED (and recoverable)
+                // once this window elapses.
+                self.reset_cooldown_end_ms = current_time_ms + RESET_BRUTE_FORCE_COOLDOWN_MS;
+                return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+            }
+            // A cooldown was armed and (per the guard above) has now elapsed —
+            // reopen a fresh attempt window so the correct token recovers.
             self.failed_reset_attempts = 0;
-            self.reset_cooldown_end_ms = 0; // served — clear the stale (past) window
+            self.reset_cooldown_end_ms = 0;
         }
         if !constant_time_compare(raw_token, system_auth_key) {
             self.failed_reset_attempts = self.failed_reset_attempts.saturating_add(1);
