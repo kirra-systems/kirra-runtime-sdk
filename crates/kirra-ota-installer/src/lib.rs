@@ -386,8 +386,15 @@ pub struct BootRecord {
 /// A file-backed [`BootController`] — persists the A/B boot record to a JSON file.
 /// This is a real, platform-neutral controller for an **app-level** A/B scheme
 /// (two governor install dirs + a launcher/systemd unit that reads the record and
-/// runs `active`, honouring a one-shot `try_boot`). The Jetson `nvbootctrl` / EFI
-/// rootfs-level controller is the hardware follow-up; it implements the same trait.
+/// runs `active`). It PERSISTS the intent (`active` + an armed `try_boot`); it does
+/// NOT itself implement the one-shot semantics. The CONSUMER that reads the record
+/// (the launcher / systemd / bootloader) MUST honour `set_try_boot`'s one-shot
+/// contract: on seeing an armed `try_boot`, boot that slot but CLEAR the flag
+/// before/at that boot so a target that fails to boot at all falls back to `active`
+/// on the next attempt — exactly as a real bootloader's boot-count does. This
+/// controller only records + durably persists the decision; it never self-clears.
+/// The Jetson `nvbootctrl` / EFI rootfs-level controller is the hardware follow-up
+/// (the bootloader enforces one-shot natively); it implements the same trait.
 pub struct FileBootController {
     path: std::path::PathBuf,
 }
@@ -449,14 +456,35 @@ fn read_record(path: &Path) -> std::io::Result<BootRecord> {
 }
 
 fn write_record(path: &Path, rec: &BootRecord) -> std::io::Result<()> {
+    use std::io::Write as _;
     let text = serde_json::to_string(rec)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    // Write + fsync so the boot record survives a power loss (the bootloader must
-    // read a consistent active/try_boot across a crash mid-install).
-    use std::io::Write as _;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(text.as_bytes())?;
-    f.sync_all()?;
+
+    // ATOMIC replace, not truncate-in-place: a launcher/bootloader reading the boot
+    // record mid-write (or after a power loss during it) must NEVER observe a
+    // torn/empty file — that would leave the node unable to decide which slot to
+    // run. Write a sibling temp, fsync it, then `rename` over the target (atomic on
+    // POSIX same-filesystem), then fsync the parent directory so the rename itself
+    // is durable across power loss. The reader only ever sees the old record or the
+    // complete new one.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+
+    // Best-effort directory fsync so the rename is durable (Unix); harmless where a
+    // directory handle can't be synced.
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if let Ok(dirf) = std::fs::File::open(dir) {
+            let _ = dirf.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -695,5 +723,39 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_and_record_stays_valid_across_rewrites() {
+        // Each write is a temp+rename; after any number of writes the record is a
+        // single complete file with no lingering ".tmp" sibling (the reader can
+        // never see a torn/empty boot record).
+        let path =
+            std::env::temp_dir().join(format!("kirra_ota_atomic_{}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let mut boot = FileBootController::open(&path, Slot::A).unwrap();
+        for _ in 0..5 {
+            boot.set_try_boot(Slot::B).unwrap();
+            boot.commit(Slot::B).unwrap();
+            boot.rollback(Slot::A).unwrap();
+            // The record parses to a complete, valid BootRecord every time.
+            assert_eq!(
+                boot.record().unwrap(),
+                BootRecord {
+                    active: Slot::A,
+                    try_boot: None
+                }
+            );
+        }
+        let tmp = {
+            let mut t = path.as_os_str().to_owned();
+            t.push(".tmp");
+            std::path::PathBuf::from(t)
+        };
+        assert!(
+            !tmp.exists(),
+            "the temp file must be consumed by the rename"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }
