@@ -107,7 +107,10 @@ impl VerifierStore {
     pub(crate) fn audit_keyring_seed(
         &self,
         fallback_vk: Option<&ed25519_dalek::VerifyingKey>,
-    ) -> Result<(std::collections::HashMap<String, ed25519_dalek::VerifyingKey>, Option<String>)> {
+    ) -> Result<(
+        std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+        Option<String>,
+    )> {
         let mut keyring = std::collections::HashMap::new();
 
         let durable_genesis = self.audit_genesis_vk()?;
@@ -225,7 +228,8 @@ impl VerifierStore {
 
         // Optional operator-pinned genesis check (only meaningful once an anchor
         // exists; on first boot the pin is established by the backfill below).
-        if let (Some(pin), Some(genesis)) = (pinned_genesis, self.audit_trust_anchor_genesis_id()?) {
+        if let (Some(pin), Some(genesis)) = (pinned_genesis, self.audit_trust_anchor_genesis_id()?)
+        {
             if pin != genesis {
                 return Ok(KeyAdmission::GenesisPinMismatch);
             }
@@ -255,7 +259,16 @@ impl VerifierStore {
 
                 let genesis_sig = b64e.encode(
                     env_key
-                        .sign(ledger_signing_payload(&k_env, None, "genesis", &env_pub_b64, now_ms as i64).as_bytes())
+                        .sign(
+                            ledger_signing_payload(
+                                &k_env,
+                                None,
+                                "genesis",
+                                &env_pub_b64,
+                                now_ms as i64,
+                            )
+                            .as_bytes(),
+                        )
                         .to_bytes(),
                 );
                 let tx = self.durable_mut().transaction()?;
@@ -311,7 +324,13 @@ impl VerifierStore {
                         "INSERT INTO audit_key_ledger \
                          (key_id, prev_key_id, role, pubkey_b64, signature_b64, created_at_ms) \
                          VALUES (?1, ?2, 'reanchor', ?3, ?4, ?5)",
-                        params![k_env, chain_latest, env_pub_b64, reanchor_sig, now_ms as i64],
+                        params![
+                            k_env,
+                            chain_latest,
+                            env_pub_b64,
+                            reanchor_sig,
+                            now_ms as i64
+                        ],
                     )?;
                 }
                 tx.commit()?; // FULL → fsync
@@ -380,11 +399,64 @@ impl VerifierStore {
     /// #395 console runtime — total rows in the tamper-evident audit chain.
     /// Read-only `COUNT(*)`; surfaces the ledger depth for the live console.
     pub fn audit_chain_len(&self) -> Result<u64> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain",
-            [],
-            |row| row.get(0),
-        )
+        self.conn
+            .query_row("SELECT COUNT(*) FROM audit_log_chain", [], |row| row.get(0))
+    }
+
+    /// Load audit records with `sequence >= from_sequence` in ASCENDING sequence
+    /// order (up to `limit`) as [`ShippedAuditRecord`](crate::audit_shipper::ShippedAuditRecord)s — the WORM off-box shipper
+    /// source (`crate::audit_shipper`). `from_sequence` is the INCLUSIVE next
+    /// sequence to ship (the chain is 0-based — the genesis row is sequence 0 — so
+    /// an inclusive lower bound is required to ship it). Rows without a `sequence`
+    /// (pre-v2 legacy, NULL) are skipped: they carry no ordering key.
+    pub fn load_shippable_audit_records(
+        &self,
+        from_sequence: u64,
+        limit: u64,
+    ) -> Result<Vec<crate::audit_shipper::ShippedAuditRecord>> {
+        // CHECKED domain conversions to the SQLite INTEGER (i64) space. A
+        // `from_sequence`/`limit` beyond `i64::MAX` (only reachable from a
+        // corrupted persisted cursor) SATURATES to `i64::MAX` rather than wrapping
+        // to a negative bind that would match every row and re-ship the whole
+        // ledger: `sequence >= i64::MAX` matches nothing (sequences are small), so
+        // an out-of-range cursor fail-closes to "nothing to ship".
+        let from_bind = i64::try_from(from_sequence).unwrap_or(i64::MAX);
+        let limit_bind = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, event_type, event_json, previous_hash_hex, record_hash_hex, \
+                    created_at_ms, hash_version, signature_b64, key_id \
+             FROM audit_log_chain \
+             WHERE sequence IS NOT NULL AND sequence >= ?1 \
+             ORDER BY sequence ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![from_bind, limit_bind], |row| {
+            // A negative stored `sequence` is corruption (sequences are 0-based,
+            // monotone non-negative) — fail-closed rather than wrapping to a huge
+            // u64 that would desync the off-box verifier's contiguity check.
+            let seq_raw: i64 = row.get(0)?;
+            let sequence = u64::try_from(seq_raw).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("audit_log_chain.sequence negative/corrupt: {seq_raw}"),
+                    )),
+                )
+            })?;
+            Ok(crate::audit_shipper::ShippedAuditRecord {
+                sequence,
+                event_type: row.get(1)?,
+                event_json: row.get(2)?,
+                previous_hash_hex: row.get(3)?,
+                record_hash_hex: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                hash_version: row.get(6)?,
+                signature_b64: row.get(7)?,
+                key_id: row.get(8)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub(crate) fn init_audit_chain_schema(conn: &Connection) -> Result<()> {
@@ -401,7 +473,10 @@ impl VerifierStore {
             [],
         )?;
         // Ignore "duplicate column name" error — column may already exist on upgraded databases
-        if let Err(e) = conn.execute("ALTER TABLE audit_log_chain ADD COLUMN signature_b64 TEXT", []) {
+        if let Err(e) = conn.execute(
+            "ALTER TABLE audit_log_chain ADD COLUMN signature_b64 TEXT",
+            [],
+        ) {
             let msg = e.to_string();
             if !msg.contains("duplicate column name") {
                 return Err(e);
@@ -431,10 +506,7 @@ impl VerifierStore {
         // Key-rotation support (#76): content-addressed id of the signing key
         // per row. NULL on pre-upgrade rows (all signed under the genesis key);
         // backfilled by ensure_key_id_backfill_migration.
-        if let Err(e) = conn.execute(
-            "ALTER TABLE audit_log_chain ADD COLUMN key_id TEXT",
-            [],
-        ) {
+        if let Err(e) = conn.execute("ALTER TABLE audit_log_chain ADD COLUMN key_id TEXT", []) {
             let msg = e.to_string();
             if !msg.contains("duplicate column name") {
                 return Err(e);
@@ -562,7 +634,9 @@ impl VerifierStore {
             // The rotation must be signed by a key already trusted (the prior
             // key). A NULL key_id means a legacy/genesis-signed row.
             let signer_id = key_id.unwrap_or_else(|| genesis_id.clone());
-            let Some(signer_vk) = keyring.get(&signer_id).copied() else { continue };
+            let Some(signer_vk) = keyring.get(&signer_id).copied() else {
+                continue;
+            };
             let Some(ref sig) = sig_b64 else { continue };
             let payload = audit_signing_payload(hash_version, &prev, &rec, "KEY_ROTATION", ts, seq);
             if !audit_verify_sig(&signer_vk, &payload, sig) {
@@ -690,8 +764,12 @@ impl VerifierStore {
                         let ok = match keyring.get(&signer_id) {
                             Some(vk) => {
                                 let payload = audit_signing_payload(
-                                    hash_version, &previous_hash_hex, &record_hash_hex,
-                                    &event_type, created_at_ms, sequence_opt,
+                                    hash_version,
+                                    &previous_hash_hex,
+                                    &record_hash_hex,
+                                    &event_type,
+                                    created_at_ms,
+                                    sequence_opt,
                                 );
                                 audit_verify_sig(vk, &payload, s)
                             }
@@ -714,9 +792,7 @@ impl VerifierStore {
         }
 
         let signing_enabled = verifying_key.is_some();
-        let public_key_b64 = verifying_key.map(|vk| {
-            b64e.encode(vk.as_bytes())
-        });
+        let public_key_b64 = verifying_key.map(|vk| b64e.encode(vk.as_bytes()));
 
         // #77: anchor-HEAD high-water check — detects tail TRUNCATION/DELETION
         // (which the per-row chain walk above cannot see: deleting the last rows
@@ -734,12 +810,14 @@ impl VerifierStore {
                 "SELECT sequence, record_hash_hex, signature_b64, key_id \
                  FROM audit_anchor_head WHERE id = 1",
                 [],
-                |r| Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
             );
             match head {
                 Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -758,7 +836,11 @@ impl VerifierStore {
                             Some(t) => t < h_seq,
                             None => true,
                         };
-                        let status = if truncated { "TRUNCATION_DETECTED" } else { "HEAD_TAIL_MISMATCH" };
+                        let status = if truncated {
+                            "TRUNCATION_DETECTED"
+                        } else {
+                            "HEAD_TAIL_MISMATCH"
+                        };
                         (false, status.to_string())
                     } else if signing_enabled {
                         // Signed chain ⇒ the head must carry a valid signature
@@ -766,16 +848,16 @@ impl VerifierStore {
                         match h_sig {
                             None => (false, "HEAD_UNSIGNED".to_string()),
                             Some(sig) => {
-                                let signer_id = h_key_id
-                                    .or_else(|| genesis_id.clone())
-                                    .unwrap_or_default();
+                                let signer_id =
+                                    h_key_id.or_else(|| genesis_id.clone()).unwrap_or_default();
                                 match keyring.get(&signer_id) {
                                     None => (false, "HEAD_KEY_UNKNOWN".to_string()),
                                     Some(vk) => {
-                                        let payload = crate::audit_chain::canonical_anchor_head_payload(
-                                            h_seq.max(0) as u64,
-                                            &h_hash,
-                                        );
+                                        let payload =
+                                            crate::audit_chain::canonical_anchor_head_payload(
+                                                h_seq.max(0) as u64,
+                                                &h_hash,
+                                            );
                                         if audit_verify_sig(vk, &payload, &sig) {
                                             (true, "OK".to_string())
                                         } else {
@@ -816,11 +898,12 @@ impl VerifierStore {
         offset: u64,
         verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<AuditExportPage> {
-        let total: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log_chain",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).map(|n| n as u64)?;
+        let total: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM audit_log_chain", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)?;
 
         // Reconstruct the full keyring once (the page is DESC/paginated, so we
         // can't replay rotations within a page) — then annotate each row's
@@ -851,14 +934,34 @@ impl VerifierStore {
             let sequence_opt: Option<i64> = row.get(8)?;
             let key_id: Option<String> = row.get(9)?;
 
-            Ok((id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
-                sig_b64, hash_version, sequence_opt, key_id))
+            Ok((
+                id,
+                event_type,
+                event_json,
+                prev_hash,
+                entry_hash,
+                timestamp_ms,
+                sig_b64,
+                hash_version,
+                sequence_opt,
+                key_id,
+            ))
         })?;
 
         let mut entries = Vec::new();
         for row_result in rows {
-            let (id, event_type, event_json, prev_hash, entry_hash, timestamp_ms,
-                 sig_b64, hash_version, sequence_opt, key_id) = row_result?;
+            let (
+                id,
+                event_type,
+                event_json,
+                prev_hash,
+                entry_hash,
+                timestamp_ms,
+                sig_b64,
+                hash_version,
+                sequence_opt,
+                key_id,
+            ) = row_result?;
 
             let signature_status = match &sig_b64 {
                 None => "unsigned".to_string(),
@@ -872,14 +975,22 @@ impl VerifierStore {
                         let verified = match keyring.get(&signer_id) {
                             Some(vk) => {
                                 let payload = audit_signing_payload(
-                                    hash_version, &prev_hash, &entry_hash,
-                                    &event_type, timestamp_ms, sequence_opt,
+                                    hash_version,
+                                    &prev_hash,
+                                    &entry_hash,
+                                    &event_type,
+                                    timestamp_ms,
+                                    sequence_opt,
                                 );
                                 audit_verify_sig(vk, &payload, s)
                             }
                             None => false, // unknown key_id → fail-closed
                         };
-                        if verified { "valid".to_string() } else { "invalid".to_string() }
+                        if verified {
+                            "valid".to_string()
+                        } else {
+                            "invalid".to_string()
+                        }
                     } else {
                         "invalid".to_string()
                     }
@@ -989,7 +1100,13 @@ impl VerifierStore {
                 "INSERT INTO audit_key_ledger \
                  (key_id, prev_key_id, role, pubkey_b64, signature_b64, created_at_ms) \
                  VALUES (?1, ?2, 'rotation', ?3, ?4, ?5)",
-                params![new_key_id, old_key_id, new_public_key_b64, ledger_sig, now_ms as i64],
+                params![
+                    new_key_id,
+                    old_key_id,
+                    new_public_key_b64,
+                    ledger_sig,
+                    now_ms as i64
+                ],
             )?;
             tx.commit()?; // FULL → fsync; durable active-key record updated
         }
@@ -1207,7 +1324,8 @@ impl VerifierStore {
             match self.signing_key.as_ref() {
                 Some(key) => {
                     use ed25519_dalek::Signer;
-                    let payload = crate::audit_chain::canonical_anchor_head_payload(seq, &record_hash);
+                    let payload =
+                        crate::audit_chain::canonical_anchor_head_payload(seq, &record_hash);
                     let sig = b64e.encode(key.sign(payload.as_bytes()).to_bytes());
                     let kid = crate::audit_chain::verifying_key_id(&key.verifying_key());
                     (Some(sig), Some(kid))

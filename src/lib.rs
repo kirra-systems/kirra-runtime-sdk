@@ -74,6 +74,7 @@ pub mod telemetry_watchdog;
 pub mod clock;
 pub mod scenario_runner;
 pub mod audit_chain;
+pub mod audit_shipper;
 pub mod audit_writer;
 // Clause 2 release-token binding (ADR-0006 / HVCHAN-001 §3 steps 5-7): digest →
 // Ed25519 release token → actuator verify-before-release, over the
