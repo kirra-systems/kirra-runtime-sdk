@@ -6,7 +6,7 @@
 //!
 //! 1. **Untrusted carrier (the trust rule).** Zenoh is an UNTRUSTED CARRIER.
 //!    Trust derives from **Ed25519 payload signatures** — federation reports via
-//!    [`kirra_verifier::federation_reconciliation::verify_federated_report_signature_v2`],
+//!    [`kirra_fleet_types::federation_reconciliation::verify_federated_report_signature_v2`],
 //!    grants via [`verify_clearance_grant`] — **never** from transport identity, a
 //!    topic name, or Zenoh's own auth. Every ingest **verifies before use**;
 //!    unsigned / bad-signature / malformed payloads are rejected and **counted**
@@ -16,7 +16,7 @@
 //!    depend on it** (ADR-0006 Clause 2's boundary asymmetry is the parent rule).
 //! 3. **Grants terminate at the store (the grant rule).** The remote grant lane
 //!    writes a *verified* grant through the **existing** Phase-A store path
-//!    ([`VerifierStore::save_clearance_grant_chained`]) as a `PENDING` row;
+//!    (`VerifierStore::save_clearance_grant_chained`) as a `PENDING` row;
 //!    Phase-B's one-shot pickup + two-checkpoint delivery proceed UNCHANGED. No
 //!    new store schema, no second release path.
 //!
@@ -270,7 +270,7 @@ pub fn accept_report(
 }
 
 /// Registry-backed [`accept_report`] (#329) — the **fleet-deployment** path. Resolves
-/// the controller's key from the unified [`KeyRegistry`] (grounded in a STORED
+/// the controller's key from the unified `KeyRegistry` (grounded in a STORED
 /// registration, not a caller-supplied `public_key_b64` string), then delegates to
 /// [`accept_report`]. The `&str` variant remains for test/spike callers without a
 /// store. Fail-closed: an unresolvable principal (unknown controller / malformed
@@ -297,7 +297,7 @@ pub fn accept_report_from_registry<S: FleetTrustStore>(
 /// [`ingest_clearance_grant`]. Decode → verify the Ed25519 signature → enforce
 /// FRESHNESS (the report's `issued_at_ms`/`expires_at_ms` window, via
 /// [`evaluate_federated_report_v2`]) → claim the `nonce_hex` in one atomic
-/// verify-AND-consume step ([`VerifierStore::burn_federation_nonce`]). The nonce is
+/// verify-AND-consume step (`VerifierStore::burn_federation_nonce`). The nonce is
 /// burned **only after** the signature and freshness pass, so a stale report never
 /// burns a slot; a nonce already on record means the same report was ingested
 /// before ([`RejectReason::Replayed`]). On the explicitly-untrusted carrier this is
@@ -363,7 +363,7 @@ pub fn ingest_report<S: FleetTrustStore>(
 }
 
 /// Registry-backed [`ingest_report`] (#322/#329) — the **replay-safe fleet-deployment**
-/// report path. Resolves the controller's key from the unified [`KeyRegistry`]
+/// report path. Resolves the controller's key from the unified `KeyRegistry`
 /// (grounded in a STORED registration), then delegates to [`ingest_report`].
 /// Fail-closed: an unresolvable principal is a counted [`RejectReason::BadSignature`].
 pub fn ingest_report_from_registry<S: FleetTrustStore>(
@@ -528,7 +528,7 @@ pub fn verify_clearance_grant(grant: &SignedClearanceGrant, public_key_b64: &str
 ///
 /// **Replay defense (#322).** After the signature verifies, the grant must be both
 /// FRESH (`now_ms < expires_at_ms`, else [`RejectReason::Expired`]) and UNSEEN — the
-/// nonce is burned via [`VerifierStore::burn_federation_nonce`] in one atomic
+/// nonce is burned via `VerifierStore::burn_federation_nonce` in one atomic
 /// verify-AND-consume step; a nonce already on record means the same grant was
 /// ingested before ([`RejectReason::Replayed`]). The burn happens BEFORE the store
 /// write so a replay can never land a duplicate PENDING row.
@@ -602,8 +602,8 @@ pub fn ingest_clearance_grant<S: FleetTrustStore>(
 }
 
 /// Registry-backed [`ingest_clearance_grant`] (#329) — the **fleet-deployment** path.
-/// Resolves the grant signer's key from the unified [`KeyRegistry`] (the
-/// [`KeyRole::FleetGrant`] registry), then delegates to [`ingest_clearance_grant`].
+/// Resolves the grant signer's key from the unified `KeyRegistry` (the
+/// [`FleetKeyRole::FleetGrant`] registry), then delegates to [`ingest_clearance_grant`].
 ///
 /// Takes `principal_id` rather than a `&KeyRegistry` ON PURPOSE: the registry borrows
 /// the store IMMUTABLY but `ingest_clearance_grant` needs it MUTABLY (it burns the
