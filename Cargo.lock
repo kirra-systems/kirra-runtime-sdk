@@ -2193,6 +2193,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-ota-installer"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "kirra-planner"
 version = "0.1.0"
 dependencies = [
