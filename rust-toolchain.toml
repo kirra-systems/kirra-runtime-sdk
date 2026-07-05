@@ -11,8 +11,12 @@
 # This is the BUILD toolchain, DISTINCT from the MSRV floor
 # (`rust-version = "1.88"` in Cargo.toml — the minimum a downstream CONSUMER
 # needs). Build on the pin; support down to the MSRV. The `msrv` CI lane
-# enforces that the workspace still compiles on 1.88; this file governs the
-# toolchain everything else builds with.
+# enforces that the workspace still compiles on 1.88.
+#
+# SCOPE: this file governs LOCAL/dev builds. CI lanes select their toolchain via
+# `dtolnay/rust-toolchain` (which exports `RUSTUP_TOOLCHAIN`, taking precedence
+# over this file) — the general lanes float on `stable`, the release + QNX-judge
+# lanes pin 1.94.1 explicitly, and the `msrv` lane uses an explicit `+1.88.0`.
 [toolchain]
 channel = "1.94.1"
 components = ["rustfmt", "clippy"]

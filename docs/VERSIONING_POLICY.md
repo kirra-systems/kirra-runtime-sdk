@@ -73,11 +73,15 @@ clears the ambiguity permanently (every active version will then be > 1.5).
   update` must not silently raise the effective floor past the pinned MSRV
   — if it would, either pin the dependency back or raise the MSRV by this
   process.
-- The general CI/release build + test lanes run on the pinned BUILD toolchain
-  (`rust-toolchain.toml`, currently 1.94.1) and do NOT themselves prove the
-  MSRV. The MSRV claim is instead ENFORCED on every PR by the dedicated `msrv`
-  CI lane (`.github/workflows/ci.yml`), which runs
-  `cargo +1.88.0 check --workspace --locked` against BOTH committed lockfiles
+- CI selects its toolchain per lane via `dtolnay/rust-toolchain` (which exports
+  `RUSTUP_TOOLCHAIN`, taking precedence over `rust-toolchain.toml`): the general
+  test/build lanes float on `stable`, while the release + QNX-judge lanes pin
+  `1.94.1` explicitly. The `rust-toolchain.toml` BUILD-toolchain pin (1.94.1)
+  therefore governs LOCAL/dev builds, not those CI lanes. None of these lanes
+  *prove* the MSRV. The MSRV claim is instead ENFORCED on every PR by the
+  dedicated `msrv` CI lane (`.github/workflows/ci.yml`), which runs
+  `cargo +1.88.0 check --workspace --locked` (explicit `+1.88.0`, so it holds
+  regardless of the pinned build toolchain) against BOTH committed lockfiles
   (root and `parko/`). A PR that reaches past 1.88 reds that lane with a clear
   message instead of silently invalidating the floor; the same command
   reproduces it locally.
