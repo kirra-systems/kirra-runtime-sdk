@@ -10,10 +10,14 @@
 //!     monotone ids, and `init_generation_from_store()` (`fetch_max`) never lowers
 //!     the counter (`src/posture_engine.rs:57,64`; the "B6: fetch_max not store"
 //!     monotonicity concern).
-//!   * `replace_cache_if_newer` — the generation compare-and-swap under the cache
-//!     write lock never lets a lower generation clobber a higher one
-//!     (`src/posture_engine.rs:462-497`; the #688 "grabbed a higher generation but
-//!     committed later" race).
+//!   * `replace_cache_if_newer` — the GENERATION compare-and-swap under the cache
+//!     write lock never lets a lower (or equal) generation clobber a higher one
+//!     (`src/posture_engine.rs:462-497`). This models the generation-ordering half
+//!     of the #688 defense only. The other half — the sticky-lockout downgrade
+//!     guard (`sticky_lockout && candidate.posture != LockedOut` refuses a
+//!     non-LockedOut candidate) — is enforced by the posture guard in production
+//!     and is NOT modeled here; a faithful adversarial model of its read-vs-trip
+//!     window is tracked follow-up.
 
 // The whole crate is loom-only; keep it out of non-loom builds entirely.
 #![cfg(loom)]
@@ -76,11 +80,13 @@ fn generations_are_unique_and_init_is_monotone() {
     });
 }
 
-/// INV: two concurrent recalcs, each stamping the cache with its own generation
+/// INV: two concurrent writers, each stamping the cache with its own generation
 /// via `replace_cache_if_newer`, leave the HIGHER generation cached regardless of
-/// which one wins the write lock first — the cache never regresses. This is the
-/// #688 "committed later with a lower generation" race, proven closed by the
-/// generation CAS.
+/// which one wins the write lock first — the cache never regresses. This models
+/// the generation-CAS half of the #688 defense (a later-committing but
+/// lower-generation write cannot clobber a higher one); the sticky-lockout
+/// posture guard that #688 also relies on is enforced in production code and is
+/// not modeled here.
 #[test]
 fn cache_holds_highest_generation_under_concurrent_replace() {
     loom::model(|| {
