@@ -502,12 +502,23 @@ pub fn plan_run(rec: &BootRecord) -> (Slot, BootRecord) {
 
 /// Stage a new artifact into the inactive slot: arm `try_boot` on it. Pure record
 /// transition (the caller does the verify + copy first).
-pub fn plan_stage(rec: &BootRecord) -> BootRecord {
-    BootRecord {
+///
+/// FAIL-CLOSED: refuses when a stage or trial is ALREADY in flight (`try_boot` or
+/// `trying` set). Re-arming mid-trial would grant the target extra trial boots and
+/// break the one-shot rollback guarantee — the caller must `commit` or `rollback`
+/// the in-progress cycle first.
+pub fn plan_stage(rec: &BootRecord) -> Result<BootRecord, InstallError> {
+    if rec.try_boot.is_some() || rec.trying.is_some() {
+        return Err(InstallError::InvalidTransition {
+            state: "in-progress",
+            action: "stage",
+        });
+    }
+    Ok(BootRecord {
         active: rec.active,
         try_boot: Some(rec.active.other()),
         trying: None,
-    }
+    })
 }
 
 /// Commit the in-progress trial as the new active. `Err` if no trial is in
@@ -887,7 +898,7 @@ mod tests {
     #[test]
     fn full_app_level_cycle_commit() {
         // stage → run(trial) → commit.
-        let staged = plan_stage(&rec(Slot::A, None, None));
+        let staged = plan_stage(&rec(Slot::A, None, None)).unwrap();
         assert_eq!(staged, rec(Slot::A, Some(Slot::B), None));
         let (slot, trialing) = plan_run(&staged);
         assert_eq!(slot, Slot::B);
@@ -899,12 +910,25 @@ mod tests {
 
     #[test]
     fn full_app_level_cycle_rollback() {
-        let staged = plan_stage(&rec(Slot::A, None, None));
+        let staged = plan_stage(&rec(Slot::A, None, None)).unwrap();
         let (_slot, trialing) = plan_run(&staged); // now trying=Some(B), active A
                                                    // Operator rolls back (or the trial crashed): stay on A.
         let rolled = plan_rollback(&trialing);
         assert_eq!(rolled, rec(Slot::A, None, None));
         assert_eq!(plan_run(&rolled).0, Slot::A);
+    }
+
+    #[test]
+    fn stage_refused_while_a_trial_is_in_flight() {
+        // Re-staging mid-cycle would grant extra trial boots → refused fail-closed.
+        assert!(matches!(
+            plan_stage(&rec(Slot::A, Some(Slot::B), None)), // already staged
+            Err(InstallError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            plan_stage(&rec(Slot::A, None, Some(Slot::B))), // trial in progress
+            Err(InstallError::InvalidTransition { .. })
+        ));
     }
 
     #[test]

@@ -114,9 +114,14 @@ fn cmd_run(passthrough: &[String]) -> Result<(), String> {
 
     let (slot, next) = plan_run(&record);
     // Persist the one-shot consume BEFORE handing off — a crash after exec must
-    // see the already-consumed record so the next run auto-rolls-back.
-    ctrl.write(&next)
-        .map_err(|e| format!("persist boot record: {e}"))?;
+    // see the already-consumed record so the next run auto-rolls-back. Only WRITE
+    // when the record actually changed: in steady state `plan_run` is a no-op, and
+    // the write fsyncs the file + parent dir, so an unconditional write would wear
+    // flash on every governor restart.
+    if next != record {
+        ctrl.write(&next)
+            .map_err(|e| format!("persist boot record: {e}"))?;
+    }
 
     let bin = cfg.governor_path(slot);
     exec_governor(&bin, passthrough).map_err(|e| format!("exec {}: {e}", bin.display()))
@@ -135,9 +140,14 @@ fn cmd_stage(args: &[String]) -> Result<(), String> {
     let record = ctrl
         .record()
         .map_err(|e| format!("read boot record: {e}"))?;
+
+    // FAIL-CLOSED: refuse (before doing any work) if a stage/trial is already in
+    // flight — re-arming would break the one-shot rollback guarantee.
+    let staged_record =
+        plan_stage(&record).map_err(|e| format!("{e}; commit or rollback first"))?;
     let target = record.active.other();
 
-    // FAIL-CLOSED: verify the source artifact BEFORE it is copied into a slot.
+    // Verify the SOURCE artifact BEFORE it is copied into a slot.
     verify_staged_artifact(Path::new(artifact), digest)
         .map_err(|e| format!("artifact verification failed: {e}"))?;
 
@@ -151,7 +161,7 @@ fn cmd_stage(args: &[String]) -> Result<(), String> {
     verify_staged_artifact(&dest, digest)
         .map_err(|e| format!("staged copy verification failed: {e}"))?;
 
-    ctrl.write(&plan_stage(&record))
+    ctrl.write(&staged_record)
         .map_err(|e| format!("persist boot record: {e}"))?;
     println!(
         "staged into slot {} ({}); `systemctl restart` to trial-boot it",
@@ -193,11 +203,20 @@ fn cmd_rollback() -> Result<(), String> {
     Ok(())
 }
 
-/// `status` — print the record + which slot `run` would launch (no side effects).
+/// `status` — print the record + which slot `run` would launch. READ-ONLY: it does
+/// NOT create the record or its directory (unlike the mutating commands), so
+/// querying an uninitialized node has no side effects.
 fn cmd_status() -> Result<(), String> {
     let cfg = Cfg::from_env();
-    let ctrl = cfg
-        .controller()
+    if !cfg.record.exists() {
+        println!(
+            "no boot record at {} (uninitialized; `stage`/`run` will create it, defaulting active=a)",
+            cfg.record.display()
+        );
+        return Ok(());
+    }
+    // The file exists, so `open` reads it without writing a default.
+    let ctrl = FileBootController::open(&cfg.record, Slot::A)
         .map_err(|e| format!("open boot record: {e}"))?;
     let record = ctrl
         .record()
