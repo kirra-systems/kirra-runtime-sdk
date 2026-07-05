@@ -200,14 +200,48 @@ pub fn spawn_telemetry_watchdog_with_clock(
                 let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
                 loop {
                     sweep_interval.tick().await;
-                    watchdog_sweep_once_inner(
-                        &app,
-                        &posture_engine_tx,
-                        Some(&posture_cache),
-                        clock.as_ref(),
-                        &mut node_health,
-                        &mut last_node_refresh_ms,
-                    );
+
+                    // The sweep is SYNCHRONOUS and does blocking work — `std::sync::Mutex`
+                    // acquisition plus SQLite reads/writes. Run it OFF the async worker via
+                    // `spawn_blocking` so a slow disk or a writer-held store lock cannot pin
+                    // a tokio runtime thread (which would stall every other async task,
+                    // including the posture-engine channel this watchdog feeds). The
+                    // loop-owned sweep state (`node_health`, `last_node_refresh_ms`) is moved
+                    // into the blocking task and handed back — the sweep's cross-tick memory.
+                    let app = Arc::clone(&app);
+                    let posture_engine_tx = posture_engine_tx.clone();
+                    let posture_cache = posture_cache.clone();
+                    let clock = Arc::clone(&clock);
+                    let mut nh = std::mem::take(&mut node_health);
+                    let mut last_refresh = last_node_refresh_ms;
+
+                    match tokio::task::spawn_blocking(move || {
+                        watchdog_sweep_once_inner(
+                            &app,
+                            &posture_engine_tx,
+                            Some(&posture_cache),
+                            clock.as_ref(),
+                            &mut nh,
+                            &mut last_refresh,
+                        );
+                        (nh, last_refresh)
+                    })
+                    .await
+                    {
+                        Ok((nh, last_refresh)) => {
+                            node_health = nh;
+                            last_node_refresh_ms = last_refresh;
+                        }
+                        // A panic inside the sweep must NOT be swallowed: the watchdog is
+                        // the ASIL-D dead-man's switch, supervised as CRITICAL. Re-raise it
+                        // so this task's supervisor observes the failure and escalates (the
+                        // C2 fail-closed path forces LockedOut) instead of the loop silently
+                        // spinning on lost sweep state.
+                        Err(join_err) if join_err.is_panic() => {
+                            std::panic::resume_unwind(join_err.into_panic())
+                        }
+                        Err(join_err) => panic!("telemetry watchdog sweep task failed: {join_err}"),
+                    }
                 }
             }
         },
@@ -288,13 +322,13 @@ fn watchdog_sweep_once_inner(
     {
         // SG-003 fail-CLOSED: recover a poisoned store lock rather than
         // `.unwrap()`-panicking. The watchdog is the ASIL-D dead-man's
-        // switch — if a sibling task panics while holding `app.store`,
+        // switch — if a sibling task panics while holding a store lock,
         // this sweep must keep running, because a dead watchdog is
         // fail-OPEN (a silent sensor would never be marked Untrusted and
-        // posture would never recalculate). `StoreHandle::with` recovers a
-        // poisoned lock internally. The handle releases the lock at the end
-        // of the closure — before any per-node re-lock below.
-        let load_result = app.store.with(|store| store.load_all_registered_av_node_ids());
+        // posture would never recalculate). `with_read` recovers a poisoned
+        // lock internally. This is a READ, so it goes through the read-replica
+        // path (off the writer mutex, no contention with a slow write).
+        let load_result = app.store.with_read(|store| store.load_all_registered_av_node_ids());
 
         match load_result {
             Ok(node_ids) => {
@@ -303,10 +337,9 @@ fn watchdog_sweep_once_inner(
                     // Insert new nodes; don't overwrite existing entries
                     // (that would reset their last_seen_ms).
                     node_health.entry(node_id.clone()).or_insert_with(|| {
-                        // Load initial last_seen from persistent store.
-                        // Safe: outer guard already released above.
+                        // Load initial last_seen from persistent store (read-replica).
                         let last_seen = app.store
-                            .with(|store| store.get_last_telemetry_timestamp(node_id))
+                            .with_read(|store| store.get_last_telemetry_timestamp(node_id))
                             .unwrap_or(0);
                         let monitoring_started_ms = if last_seen == 0 {
                             app.nodes
@@ -365,10 +398,10 @@ fn watchdog_sweep_once_inner(
     // on disk; the watchdog snapshot is refreshed at node list refresh time.
     // ----------------------------------------------------------------------
     for entry in node_health.values_mut() {
-        // Sync last_seen_ms from the store on each sweep.
-        // Lightweight in-memory read path; SQLite is only hit on the node
-        // refresh cycle above.
-        if let Ok(ts) = app.store.with(|store| store.get_last_telemetry_timestamp(&entry.node_id)) {
+        // Sync last_seen_ms from the store on each sweep. This per-node read goes
+        // through the read-replica path (`with_read`) so the 100 ms sweep never
+        // serializes behind a writer holding the store mutex.
+        if let Ok(ts) = app.store.with_read(|store| store.get_last_telemetry_timestamp(&entry.node_id)) {
             if ts > entry.last_seen_ms {
                 // Fresh telemetry received since last sweep — reset warn flag.
                 entry.last_seen_ms = ts;
@@ -1194,6 +1227,54 @@ mod watchdog_di_tests {
         // (3) refresh stamp advanced to `now`.
         assert_eq!(observed_last_refresh, now,
             "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
+    }
+
+    /// M3: the PRODUCTION spawned task offloads each sweep to `spawn_blocking`
+    /// (keeping the synchronous SQLite + `std::sync::Mutex` work off the async
+    /// worker) and moves the cross-tick state (`node_health`, `last_node_refresh_ms`)
+    /// into the blocking task and back out. Spawn the REAL watchdog against a
+    /// VirtualClock parked past the timeout and confirm a registered-but-silent node
+    /// is marked Untrusted and a trigger fires — proving the blocking hand-off
+    /// preserves the sweep state and drives the dead-man's switch end to end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_spawned_watchdog_offloads_sweep_and_fires_end_to_end() {
+        use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
+        use crate::verifier::FleetPosture;
+        use std::time::Duration;
+
+        let anchor: u64 = 1_000_000;
+        let now = anchor + AV_TELEMETRY_TIMEOUT_MS + 500;
+        let clock = VirtualClock::starting_at(now);
+
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
+        app.store.with(|s| {
+            s.register_av_subsystem_meta("lidar_front", "LIDAR", "hw-1", 0.7, anchor)
+                .expect("register av meta");
+        });
+        insert_trusted_node(&app, "lidar_front", anchor);
+
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new_with_generation(FleetPosture::Nominal, 0, now),
+        )));
+        let clock_dyn: Arc<dyn Clock> = clock.clone();
+
+        spawn_telemetry_watchdog_with_clock(Arc::clone(&app), tx, cache, clock_dyn);
+
+        // Wait (real time; sweeps run every 100 ms) for the offloaded sweep to fire.
+        let trigger = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("spawned watchdog must fire within a few real sweeps");
+        assert!(
+            matches!(trigger, Some(PostureRecalcTrigger::WatchdogTimeout { .. })),
+            "the offloaded sweep must enqueue a WatchdogTimeout trigger; got {trigger:?}"
+        );
+        assert_eq!(
+            app.nodes.get("lidar_front").unwrap().status,
+            NodeTrustState::Untrusted("TELEMETRY_TIMEOUT".to_string()),
+            "the offloaded sweep must mark the silent node Untrusted"
+        );
     }
 
     /// H-3: a node registered just AFTER a periodic refresh must be picked up on
