@@ -48,6 +48,11 @@ impl SafetyContract for ContractProfile {
     #[inline] fn scale_factor(&self) -> f64 { self.engineering_scale_factor }
 }
 
+/// Consecutive failed supervisor-reset attempts that trip the brute-force cooldown.
+pub const RESET_MAX_FAILED_ATTEMPTS: u32 = 5;
+/// Brute-force cooldown window (ms) armed once the failed-attempt threshold is hit.
+pub const RESET_BRUTE_FORCE_COOLDOWN_MS: u64 = 60_000;
+
 pub struct RuntimeTrustEngine {
     pub current_score: u32,
     pub mode: TrustMode,
@@ -103,13 +108,30 @@ impl RuntimeTrustEngine {
     }
 
     pub fn authenticated_manual_reset(&mut self, raw_token: &[u8], system_auth_key: &[u8], current_time_ms: u64) -> Result<(), &'static str> {
-        if current_time_ms < self.reset_cooldown_end_ms { return Err("RESET_REJECTED_COOLDOWN_ACTIVE"); }
-        if self.failed_reset_attempts >= 5 {
-            self.reset_cooldown_end_ms = current_time_ms + 60000;
-            return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+        // An armed cooldown window blocks every attempt outright.
+        if current_time_ms < self.reset_cooldown_end_ms {
+            return Err("RESET_REJECTED_COOLDOWN_ACTIVE");
+        }
+        // The cooldown (if one was armed) has now been SERVED, so a prior
+        // brute-force lockout grants a FRESH attempt window here. Without this,
+        // `failed_reset_attempts` — cleared only on a successful compare below —
+        // would stay ≥ threshold forever: every post-cooldown attempt would
+        // re-hit this guard, re-arm a new cooldown, and reject even the CORRECT
+        // token, permanently locking out a legitimate supervisor (the counter is
+        // persisted across restarts, so the lockout survived a reboot too).
+        if self.failed_reset_attempts >= RESET_MAX_FAILED_ATTEMPTS {
+            self.failed_reset_attempts = 0;
+            self.reset_cooldown_end_ms = 0; // served — clear the stale (past) window
         }
         if !constant_time_compare(raw_token, system_auth_key) {
             self.failed_reset_attempts = self.failed_reset_attempts.saturating_add(1);
+            // Hitting the threshold arms the cooldown; the window is re-openable
+            // (served → fresh attempts above), so this throttles brute force
+            // without becoming a permanent lockout.
+            if self.failed_reset_attempts >= RESET_MAX_FAILED_ATTEMPTS {
+                self.reset_cooldown_end_ms = current_time_ms + RESET_BRUTE_FORCE_COOLDOWN_MS;
+                return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+            }
             return Err("RESET_REJECTED_INVALID_TOKEN");
         }
         self.current_score = 100;

@@ -162,8 +162,8 @@ fn reset_engine_at(
 mod reset_clock_tests {
     use super::*;
 
-    /// DELTA 1: the injected clock flows into the cooldown computation — after a
-    /// brute-force lockout the cooldown end is set RELATIVE to the real
+    /// DELTA 1: the injected clock flows into the cooldown computation — the
+    /// threshold-th failed attempt arms the cooldown RELATIVE to the real
     /// timestamp (`T + 60_000`), not to a frozen `0`. With the old `now = 0`,
     /// `reset_cooldown_end_ms` would be `60_000` (a 1970 instant) and a probe at
     /// a real timestamp would NOT read as cooldown-active — the timer was inert.
@@ -172,16 +172,13 @@ mod reset_clock_tests {
         let mut engine = RuntimeTrustEngine::new();
         let key = b"supervisor-key";
 
-        // Five wrong tokens arm the brute-force counter.
-        for _ in 0..5 {
-            assert_eq!(reset_engine_at(&mut engine, b"wrong", key, 1_000), 0);
-        }
-        assert_eq!(engine.failed_reset_attempts, 5);
-
         // A real-ish wall-clock timestamp (~2024 in ms).
         let t: u64 = 1_700_000_000_000;
-        // failed >= 5 → brute-force branch arms the cooldown RELATIVE to `t`.
-        assert_eq!(reset_engine_at(&mut engine, key, key, t), 0);
+        // Five wrong tokens at `t`: the threshold-th arms the cooldown at `t + 60s`.
+        for _ in 0..5 {
+            assert_eq!(reset_engine_at(&mut engine, b"wrong", key, t), 0);
+        }
+        assert_eq!(engine.failed_reset_attempts, 5);
         assert_eq!(
             engine.reset_cooldown_end_ms,
             t + 60_000,
@@ -194,6 +191,57 @@ mod reset_clock_tests {
         // and this branch would never be reached.
         assert!(t + 59_999 < engine.reset_cooldown_end_ms);
         assert_eq!(reset_engine_at(&mut engine, key, key, t + 59_999), 0);
+    }
+
+    /// M2 (permanent-lockout fix): once the brute-force cooldown has been SERVED,
+    /// the CORRECT token must succeed. The pre-fix code cleared the failed-attempt
+    /// counter only on a successful compare — which was unreachable, because
+    /// `failed >= threshold` returned BRUTE_FORCE (re-arming the cooldown) before
+    /// the compare, forever. The counter is persisted across restarts, so this was
+    /// an unrecoverable lockout of a legitimate supervisor.
+    #[test]
+    fn served_cooldown_admits_correct_token() {
+        let mut engine = RuntimeTrustEngine::new();
+        let key = b"supervisor-key";
+        let t: u64 = 1_700_000_000_000;
+
+        // Trip the brute-force cooldown.
+        for _ in 0..5 {
+            assert_eq!(reset_engine_at(&mut engine, b"wrong", key, t), 0);
+        }
+        assert_eq!(engine.reset_cooldown_end_ms, t + 60_000);
+
+        // Correct token DURING the window is still blocked (throttle intact).
+        assert_eq!(reset_engine_at(&mut engine, key, key, t + 30_000), 0);
+
+        // Correct token AFTER the window succeeds — the lockout is recoverable.
+        assert_eq!(
+            reset_engine_at(&mut engine, key, key, t + 60_001),
+            1,
+            "a served cooldown must admit the correct token (no permanent lockout)"
+        );
+        assert_eq!(engine.failed_reset_attempts, 0, "success clears the counter");
+        assert_eq!(engine.reset_cooldown_end_ms, 0, "success clears the cooldown");
+        assert_eq!(engine.mode, crate::TrustMode::FullAutonomy);
+    }
+
+    /// A served cooldown grants a FRESH attempt budget, not a single try: after the
+    /// window, wrong tokens count from zero again and only re-arm the cooldown once
+    /// the threshold is hit anew.
+    #[test]
+    fn served_cooldown_grants_fresh_attempt_window() {
+        let mut engine = RuntimeTrustEngine::new();
+        let key = b"supervisor-key";
+        let t: u64 = 1_700_000_000_000;
+
+        for _ in 0..5 {
+            assert_eq!(reset_engine_at(&mut engine, b"wrong", key, t), 0);
+        }
+        let after = t + 60_001;
+        // First wrong attempt after the window: counter restarts at 1, no re-arm.
+        assert_eq!(reset_engine_at(&mut engine, b"wrong", key, after), 0);
+        assert_eq!(engine.failed_reset_attempts, 1);
+        assert_eq!(engine.reset_cooldown_end_ms, 0, "one failure must not re-arm the cooldown");
     }
 
     /// The clock the production FFI path supplies is a real current wall clock,
