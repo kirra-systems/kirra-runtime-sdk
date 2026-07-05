@@ -82,9 +82,13 @@ impl TokenBucket {
 }
 
 /// Two-tier ingest rate limiter: a global backstop bucket plus a bounded map of
-/// per-source buckets. An ingest is allowed iff BOTH the global and the source
-/// bucket have a token; only then is one consumed from each (so a denial charges
-/// neither).
+/// per-source buckets. For a TRACKED source, an ingest is allowed iff BOTH the
+/// global and that source's bucket have a token; only then is one consumed from
+/// each (so a denial charges neither). Once `max_tracked_sources` is reached, a
+/// previously-unseen source is NOT allocated a bucket — it is admitted purely on
+/// the global backstop (the memory bound against a spoofing flood). The global
+/// bucket is checked FIRST and short-circuits: when it is empty nothing can be
+/// admitted, so no per-source bucket is even allocated.
 #[derive(Debug)]
 pub struct IngressRateLimiter {
     global: TokenBucket,
@@ -119,7 +123,14 @@ impl IngressRateLimiter {
     /// Should an ingest from `source` at `now_ms` be admitted? `true` → admit
     /// (tokens consumed); `false` → rate-limit (drop before the expensive verify).
     pub fn allow(&mut self, source: &str, now_ms: u64) -> bool {
-        let global_ok = self.global.available_at(now_ms) >= 1.0;
+        // Global backstop FIRST, short-circuit: if the total-rate bucket is empty
+        // nothing can be admitted, so deny cheaply WITHOUT touching the per-source
+        // map. This stops a global-overload flood from allocating per-source
+        // buckets (poisoning the map / burning CPU) for ingests that can't be
+        // admitted anyway.
+        if self.global.available_at(now_ms) < 1.0 {
+            return false;
+        }
 
         // Per-source bucket: reuse an existing one; else allocate ONLY if under the
         // tracking cap. When the map is full and the source is unknown, fall back to
@@ -141,7 +152,7 @@ impl IngressRateLimiter {
             true
         };
 
-        if global_ok && source_ok {
+        if source_ok {
             self.global.consume_one();
             if let Some(b) = self.per_source.get_mut(source) {
                 b.consume_one();
@@ -227,6 +238,28 @@ mod tests {
         // tokens intact (4 remain).
         assert!(lim.allow("y", 0));
         assert!(lim.allow("z", 0));
+    }
+
+    #[test]
+    fn global_overload_does_not_allocate_per_source_buckets() {
+        // Global capacity 1, no refill: the first source is admitted (and tracked);
+        // once the global bucket is empty, further DISTINCT sources are denied by
+        // the short-circuit WITHOUT being allocated a per-source bucket — a
+        // global-overload flood cannot poison the map.
+        let mut lim = IngressRateLimiter::new(1, 0.0, 10, 0.0, 1_000, 0);
+        assert!(lim.allow("a", 0));
+        assert_eq!(lim.tracked_sources(), 1);
+        for i in 0..100 {
+            assert!(
+                !lim.allow(&format!("flood-{i}"), 0),
+                "global empty → denied"
+            );
+        }
+        assert_eq!(
+            lim.tracked_sources(),
+            1,
+            "no per-source buckets allocated under global overload"
+        );
     }
 
     #[test]
