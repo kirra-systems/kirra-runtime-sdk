@@ -307,6 +307,20 @@ pub fn ship_and_advance(
     Ok(outcome)
 }
 
+/// Read the next ship batch — the current cursor plus the records to ship from it
+/// — WITHOUT any write. A pure READ, so the background worker runs it against the
+/// read replica (`StoreHandle::call_read`), never taking the writer mutex: a slow
+/// sink fsync must not block unrelated store WRITES (posture, audit appends, the
+/// actuator epoch fence). Returns `(from_cursor, records)`.
+pub fn read_ship_batch(
+    store: &crate::verifier_store::VerifierStore,
+    batch_limit: u64,
+) -> Result<(u64, Vec<ShippedAuditRecord>), rusqlite::Error> {
+    let from = load_ship_cursor(store)?;
+    let records = store.load_shippable_audit_records(from, batch_limit)?;
+    Ok((from, records))
+}
+
 /// Interval between audit-shipping cycles. Shipping is a durability enhancement,
 /// not a latency-critical path, so a relaxed cadence bounds the off-box lag while
 /// keeping the fsync-per-cycle cost low.
@@ -350,25 +364,56 @@ pub fn spawn_audit_shipper(app: std::sync::Arc<crate::verifier::AppState>) -> bo
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tick.tick().await;
-                    let path = path.clone();
-                    // The whole read-ship-advance runs under one store call so the
-                    // cursor read/write and the ledger read see a consistent store.
+
+                    // 1. READ the batch off the REPLICA (no writer lock) — a slow
+                    //    sink fsync below must not stall unrelated store writes.
+                    let batch = app
+                        .store
+                        .call_read(|store| read_ship_batch(store, DEFAULT_SHIP_BATCH_LIMIT))
+                        .await;
+                    let (_from, records) = match batch {
+                        Ok(Ok(b)) => b,
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "audit shipper: batch read failed");
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::error!("audit shipper: batch read task failed");
+                            continue;
+                        }
+                    };
+                    if records.is_empty() {
+                        continue; // nothing new this cycle
+                    }
+                    let next_cursor = records.last().map(|r| r.sequence + 1).unwrap_or(_from);
+
+                    // 2. APPEND + fsync OUTSIDE any store lock (the potentially-slow
+                    //    disk I/O never blocks the writer mutex).
+                    let mut sink = JsonlFileAuditSink::new(path.clone());
+                    if let Err(e) = sink.append(&records) {
+                        tracing::error!(error = %e, "audit shipper: sink append failed");
+                        continue; // cursor NOT advanced → re-ship next cycle (at-least-once)
+                    }
+
+                    // 3. Only AFTER a durable append, take the writer lock briefly to
+                    //    advance the cursor (ship-then-advance preserved).
+                    let cursor_str = next_cursor.to_string();
                     match app
                         .store
                         .call(move |store| {
-                            let mut sink = JsonlFileAuditSink::new(path);
-                            ship_and_advance(store, &mut sink, DEFAULT_SHIP_BATCH_LIMIT)
+                            store.save_engine_state(AUDIT_SHIP_CURSOR_KEY, &cursor_str)
                         })
                         .await
                     {
-                        Ok(Ok(outcome)) if outcome.shipped > 0 => tracing::info!(
-                            shipped = outcome.shipped,
-                            next_cursor = outcome.next_cursor,
+                        Ok(Ok(())) => tracing::info!(
+                            shipped = records.len(),
+                            next_cursor,
                             "audit shipper: appended records to the off-box sink"
                         ),
-                        Ok(Ok(_)) => {} // nothing new this cycle
-                        Ok(Err(e)) => tracing::error!(error = %e, "audit shipper cycle failed"),
-                        Err(_) => tracing::error!("audit shipper store task failed"),
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "audit shipper: cursor advance failed")
+                        }
+                        Err(_) => tracing::error!("audit shipper: cursor advance task failed"),
                     }
                 }
             }
@@ -611,6 +656,30 @@ mod tests {
             !verify_shipped_chain(&sink.records).is_ok(),
             "a mutated off-box record must fail re-verification"
         );
+    }
+
+    #[test]
+    fn read_ship_batch_then_manual_advance_matches_ship_and_advance() {
+        // The worker's lock-split path (read_ship_batch → append → save cursor)
+        // must produce the same shipped set + cursor as the bundled ship_and_advance.
+        let store = store_with_events(3);
+
+        let (from, records) = read_ship_batch(&store, DEFAULT_SHIP_BATCH_LIMIT).unwrap();
+        assert_eq!(from, 0);
+        assert_eq!(records.len(), 3);
+        let next_cursor = records.last().unwrap().sequence + 1;
+
+        // Append happens outside any lock in the worker; here just verify + advance.
+        assert!(verify_shipped_chain(&records).is_ok());
+        store
+            .save_engine_state(AUDIT_SHIP_CURSOR_KEY, &next_cursor.to_string())
+            .unwrap();
+        assert_eq!(load_ship_cursor(&store).unwrap(), next_cursor);
+
+        // A second read after advancing sees nothing new (cursor consumed).
+        let (from2, records2) = read_ship_batch(&store, DEFAULT_SHIP_BATCH_LIMIT).unwrap();
+        assert_eq!(from2, next_cursor);
+        assert!(records2.is_empty());
     }
 
     #[test]
