@@ -144,14 +144,33 @@ impl VerifierStore {
             None => None,
         };
 
+        // CHECKED numeric conversions — a tampered row must fail closed, never wrap a
+        // negative/huge INTEGER into a bogus `usize`/`u8` that the engine could later
+        // index out of bounds (`Campaign::advance` -> `stages[stage_index]`). Fail
+        // closed here so a corrupt row never becomes a live, panic-prone `Campaign`.
+        let stage_index_raw: i64 = row.get(5)?;
+        let stage_index = usize::try_from(stage_index_raw)
+            .map_err(|_| corrupt_row_err("stage_index", &stage_index_raw.to_string()))?;
+        // The current stage must index into the schedule — true for every REACHABLE
+        // campaign (Draft/Staged sit at 0 over a non-empty schedule; Rolling/terminal
+        // sit at a real stage), so a value out of range is corruption.
+        if stage_index >= stages.len() {
+            return Err(corrupt_row_err("stage_index", &stage_index_raw.to_string()));
+        }
+        let rollout_raw: i64 = row.get(6)?;
+        let rollout_percent = u8::try_from(rollout_raw)
+            .ok()
+            .filter(|p| *p <= 100)
+            .ok_or_else(|| corrupt_row_err("rollout_percent", &rollout_raw.to_string()))?;
+
         Ok(Campaign {
             campaign_id: row.get(0)?,
             artifact_digest: row.get(1)?,
             artifact_version: row.get(2)?,
             cohorts,
             stages,
-            stage_index: row.get::<_, i64>(5)? as usize,
-            rollout_percent: row.get::<_, i64>(6)? as u8,
+            stage_index,
+            rollout_percent,
             state,
             halt_reason,
             created_at_ms: row.get::<_, i64>(9)? as u64,
@@ -286,6 +305,23 @@ mod tests {
         let loaded = s.load_campaign("camp-1").unwrap().unwrap();
         assert_eq!(loaded.state, CampaignState::Halted);
         assert_eq!(loaded.halt_reason, Some(HaltReason::PostureLockedOut));
+    }
+
+    #[test]
+    fn corrupt_stage_index_row_fails_closed_on_load() {
+        // Simulate a tampered row: a persisted campaign whose `stage_index` is out
+        // of range for its `stages`. `load_campaign` must reject it (fail-closed),
+        // never hand back a `Campaign` the engine could later index out of bounds.
+        let mut s = store();
+        let mut bad = draft(); // stages = [10, 50, 100]
+        bad.state = CampaignState::Rolling;
+        bad.stage_index = 99; // >= stages.len()
+        s.insert_campaign(&bad).unwrap();
+        let err = s.load_campaign("camp-1");
+        assert!(
+            err.is_err(),
+            "an out-of-range stage_index row must fail closed on load"
+        );
     }
 
     #[test]

@@ -306,7 +306,14 @@ impl Campaign {
         // `stages[0]`; from `Rolling` it steps `stage_index` forward.
         let next_index = match self.state {
             CampaignState::Staged => 0,
-            CampaignState::Rolling => self.stage_index + 1,
+            CampaignState::Rolling => {
+                self.stage_index
+                    .checked_add(1)
+                    .ok_or(CampaignError::InvalidTransition {
+                        from: self.state,
+                        action: "advance",
+                    })?
+            }
             // Unreachable: guarded by is_active() above, but stay total.
             other => {
                 return Err(CampaignError::InvalidTransition {
@@ -315,6 +322,19 @@ impl Campaign {
                 })
             }
         };
+
+        // Defense-in-depth: a well-formed campaign always has `next_index` in range
+        // (reaching the final stage transitions to `Completed`, so a `Rolling`
+        // campaign is never parked at the last index), but a corrupt-LOADED
+        // `stage_index` inconsistent with `stages` could push it out of bounds.
+        // Refuse rather than panic on `stages[next_index]` — this keeps `advance`
+        // panic-free for ANY `Campaign` value, not just engine-produced ones.
+        if next_index >= self.stages.len() {
+            return Err(CampaignError::InvalidTransition {
+                from: self.state,
+                action: "advance",
+            });
+        }
 
         self.stage_index = next_index;
         self.rollout_percent = self.stages[next_index];
@@ -448,6 +468,29 @@ mod tests {
         assert!(Campaign::new("c", DIGEST, "v1", vec!["a".into()], vec![], 0).is_err());
         // Valid single-stage 100.
         assert!(Campaign::new("c", DIGEST, "v1", vec!["a".into()], vec![100], 0).is_ok());
+    }
+
+    #[test]
+    fn advance_refuses_out_of_range_stage_index_without_panicking() {
+        // A campaign that could only arise from a corrupt LOAD: state `Rolling`
+        // but `stage_index` already at (indeed past) the last stage. `advance`
+        // must refuse, not panic on `stages[next_index]`.
+        let mut corrupt = campaign();
+        corrupt.state = CampaignState::Rolling;
+        corrupt.stage_index = corrupt.stages.len() - 1; // last valid index → next is OOB
+        assert!(matches!(
+            corrupt.advance(FleetPosture::Nominal, 2_000),
+            Err(CampaignError::InvalidTransition { .. })
+        ));
+
+        // Even a wildly out-of-range index refuses rather than indexing/overflowing.
+        let mut corrupt2 = campaign();
+        corrupt2.state = CampaignState::Rolling;
+        corrupt2.stage_index = usize::MAX;
+        assert!(matches!(
+            corrupt2.advance(FleetPosture::Nominal, 2_000),
+            Err(CampaignError::InvalidTransition { .. })
+        ));
     }
 
     #[test]
