@@ -11,7 +11,8 @@
 //! **Confirmed-regression only.** The monitor halts a campaign ONLY on a
 //! freshly-computed non-`Nominal` posture. An *unavailable* posture
 //! (stale/empty/poisoned cache — the resolver's synthetic `LockedOut` carrying a
-//! [`LockoutReason`]) is NOT treated as a regression: the actuator gate already
+//! [`LockoutReason`](crate::posture_engine_v2::LockoutReason)) is NOT treated as a
+//! regression: the actuator gate already
 //! fail-closes on staleness, and terminally halting a slow rollout on a transient
 //! cache gap (e.g. a startup window before the first recalc) would force an
 //! operator to re-author the campaign. Unknown ≠ regressed — the tick is skipped.
