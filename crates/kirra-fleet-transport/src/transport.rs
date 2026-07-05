@@ -36,8 +36,17 @@ impl FleetPublisher {
     }
 
     /// Publish a posture summary (advisory telemetry; see [`PostureSummary`]).
-    pub async fn publish_posture(&self, node_id: &str, posture: FleetPosture, now_ms: u64) -> Result<(), String> {
-        let summary = PostureSummary { node_id: node_id.to_string(), posture, generated_at_ms: now_ms };
+    pub async fn publish_posture(
+        &self,
+        node_id: &str,
+        posture: FleetPosture,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let summary = PostureSummary {
+            node_id: node_id.to_string(),
+            posture,
+            generated_at_ms: now_ms,
+        };
         let bytes = serde_json::to_vec(&summary).map_err(|e| e.to_string())?;
         self.session
             .put(key_posture(node_id), bytes)
@@ -48,7 +57,10 @@ impl FleetPublisher {
     /// Ops/cloud-side: publish a SIGNED clearance grant DOWN to a vehicle. (In a
     /// real deployment this runs on the ops controller; co-located here for the
     /// spike.) The signature is the trust root — the vehicle verifies before use.
-    pub async fn publish_clearance_grant(&self, grant: &SignedClearanceGrant) -> Result<(), String> {
+    pub async fn publish_clearance_grant(
+        &self,
+        grant: &SignedClearanceGrant,
+    ) -> Result<(), String> {
         let bytes = serde_json::to_vec(grant).map_err(|e| e.to_string())?;
         self.session
             .put(key_clearance_grant(&grant.node_id), bytes)
@@ -67,7 +79,8 @@ impl FleetPublisher {
 /// **verifies the signature before returning** — an unsigned / bad-sig / malformed
 /// payload is rejected and counted, never surfaced.
 pub struct FleetSubscriber {
-    subscriber: zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    subscriber:
+        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
 }
 
 impl FleetSubscriber {
@@ -101,7 +114,8 @@ impl FleetSubscriber {
 /// verifies the signature then writes the grant through the EXISTING Phase-A store
 /// path (a `PENDING` row Phase-B consumes) — never a second release path.
 pub struct GrantIngest {
-    subscriber: zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    subscriber:
+        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
 }
 
 impl GrantIngest {
@@ -129,12 +143,11 @@ impl GrantIngest {
             .await
             .map_err(|e| RejectReason::Decode(format!("recv: {e}")))?;
         let bytes = sample.payload().to_bytes();
-        let grant: SignedClearanceGrant = serde_json::from_slice(&bytes)
-            .map_err(|e| {
-                let r = RejectReason::Decode(e.to_string());
-                counter.record(&r);
-                r
-            })?;
+        let grant: SignedClearanceGrant = serde_json::from_slice(&bytes).map_err(|e| {
+            let r = RejectReason::Decode(e.to_string());
+            counter.record(&r);
+            r
+        })?;
         ingest_clearance_grant(store, &grant, public_key_b64, counter, now_ms)
     }
 }
@@ -144,12 +157,12 @@ mod transport_tests {
     use super::*;
     // R2: reference `FleetTrustStore` impl for the in-process round-trip tests
     // (DEV-dependency only).
-    use kirra_verifier::verifier_store::VerifierStore;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
     use kirra_fleet_types::federation_reconciliation::canonical_federation_payload_v2;
+    use kirra_verifier::verifier_store::VerifierStore;
 
-    use crate::{sign_clearance_grant, key_trust_report};
+    use crate::{key_trust_report, sign_clearance_grant};
 
     fn keypair() -> (SigningKey, String) {
         let mut seed = [0u8; 32];
@@ -189,7 +202,8 @@ mod transport_tests {
     fn peer_config(listen: Option<&str>, connect: Option<&str>) -> zenoh::Config {
         let mut c = zenoh::Config::default();
         c.insert_json5("mode", "\"peer\"").unwrap();
-        c.insert_json5("scouting/multicast/enabled", "false").unwrap();
+        c.insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
         c.insert_json5("scouting/gossip/enabled", "false").unwrap();
         // ALWAYS set listen explicitly — `[]` on the connect-only side — so zenoh
         // never falls back to its default `tcp/[::]:0` (IPv6) listener, which the
@@ -200,7 +214,8 @@ mod transport_tests {
         };
         c.insert_json5("listen/endpoints", &listen_json).unwrap();
         if let Some(cn) = connect {
-            c.insert_json5("connect/endpoints", &format!("[\"{cn}\"]")).unwrap();
+            c.insert_json5("connect/endpoints", &format!("[\"{cn}\"]"))
+                .unwrap();
         }
         c
     }
@@ -220,7 +235,9 @@ mod transport_tests {
 
         // Subscriber session listens; publisher session connects to it.
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let subscriber = FleetSubscriber::declare(&sub_session, "robot-01").await.unwrap();
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-01")
+            .await
+            .unwrap();
 
         let pub_session = zenoh::open(peer_config(None, Some(&ep))).await.unwrap();
         let publisher = FleetPublisher::new(pub_session);
@@ -252,7 +269,9 @@ mod transport_tests {
         let ep = format!("tcp/127.0.0.1:{}", free_port());
 
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let subscriber = FleetSubscriber::declare(&sub_session, "robot-02").await.unwrap();
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-02")
+            .await
+            .unwrap();
         let pub_session = zenoh::open(peer_config(None, Some(&ep))).await.unwrap();
         settle().await;
 
@@ -261,7 +280,10 @@ mod transport_tests {
         let mut bytes = encode_report(&report).unwrap();
         let pos = bytes.windows(8).position(|w| w == b"robot-02").unwrap();
         bytes[pos] ^= 0x01;
-        pub_session.put(key_trust_report("robot-02"), bytes).await.unwrap();
+        pub_session
+            .put(key_trust_report("robot-02"), bytes)
+            .await
+            .unwrap();
 
         let counter = RejectionCounter::new();
         let err = tokio::time::timeout(
@@ -287,7 +309,9 @@ mod transport_tests {
 
         // Vehicle side declares the grant-ingest subscriber + owns the store.
         let veh_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let ingest = GrantIngest::declare(&veh_session, "robot-03").await.unwrap();
+        let ingest = GrantIngest::declare(&veh_session, "robot-03")
+            .await
+            .unwrap();
         let mut store = VerifierStore::new(":memory:").unwrap();
 
         // Ops side connects + publishes the signed grant.
@@ -315,6 +339,9 @@ mod transport_tests {
             .unwrap()
             .expect("relayed grant is the pending row Phase-B picks up");
         assert_eq!(picked.operator_id, "alice");
-        assert!(store.take_pending_clearance_grant("robot-03", 1_600).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-03", 1_600)
+            .unwrap()
+            .is_none());
     }
 }

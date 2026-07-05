@@ -6,7 +6,7 @@
 //!
 //! 1. **Untrusted carrier (the trust rule).** Zenoh is an UNTRUSTED CARRIER.
 //!    Trust derives from **Ed25519 payload signatures** — federation reports via
-//!    [`kirra_verifier::federation_reconciliation::verify_federated_report_signature_v2`],
+//!    [`kirra_fleet_types::federation_reconciliation::verify_federated_report_signature_v2`],
 //!    grants via [`verify_clearance_grant`] — **never** from transport identity, a
 //!    topic name, or Zenoh's own auth. Every ingest **verifies before use**;
 //!    unsigned / bad-signature / malformed payloads are rejected and **counted**
@@ -16,7 +16,7 @@
 //!    depend on it** (ADR-0006 Clause 2's boundary asymmetry is the parent rule).
 //! 3. **Grants terminate at the store (the grant rule).** The remote grant lane
 //!    writes a *verified* grant through the **existing** Phase-A store path
-//!    ([`VerifierStore::save_clearance_grant_chained`]) as a `PENDING` row;
+//!    (`VerifierStore::save_clearance_grant_chained`) as a `PENDING` row;
 //!    Phase-B's one-shot pickup + two-checkpoint delivery proceed UNCHANGED. No
 //!    new store schema, no second release path.
 //!
@@ -41,6 +41,10 @@ use kirra_fleet_types::federation_reconciliation::{
 use kirra_fleet_types::store::{FleetKeyRole, FleetTrustStore};
 
 pub mod transport;
+
+/// Ingest rate limiting — the token-bucket gate applied BEFORE the verify, so a
+/// flood of bogus payloads is dropped cheaply (WS-4 transport hardening).
+pub mod ingress_limit;
 
 // ---------------------------------------------------------------------------
 // Namespace — versioned key expressions
@@ -93,6 +97,10 @@ pub enum RejectReason {
     Replayed,
     /// A verified grant could not be written to the store (fail-closed).
     StoreError(String),
+    /// The ingest was dropped by the rate limiter BEFORE verification — a flood of
+    /// (typically bogus) payloads exceeding the configured token-bucket rate. Cheap
+    /// drop, so a signature-verify DoS cannot be mounted through the carrier.
+    RateLimited,
 }
 
 impl RejectReason {
@@ -107,6 +115,7 @@ impl RejectReason {
             RejectReason::Expired => "expired",
             RejectReason::Replayed => "replayed",
             RejectReason::StoreError(_) => "store_error",
+            RejectReason::RateLimited => "rate_limited",
         }
     }
 }
@@ -122,6 +131,7 @@ pub struct RejectionCounter {
     expired: AtomicU64,
     replayed: AtomicU64,
     store_error: AtomicU64,
+    rate_limited: AtomicU64,
     accepted: AtomicU64,
 }
 
@@ -141,6 +151,7 @@ impl RejectionCounter {
             RejectReason::Expired => &self.expired,
             RejectReason::Replayed => &self.replayed,
             RejectReason::StoreError(_) => &self.store_error,
+            RejectReason::RateLimited => &self.rate_limited,
         };
         slot.fetch_add(1, Ordering::Relaxed);
     }
@@ -160,6 +171,7 @@ impl RejectionCounter {
             expired: self.expired.load(Ordering::Relaxed),
             replayed: self.replayed.load(Ordering::Relaxed),
             store_error: self.store_error.load(Ordering::Relaxed),
+            rate_limited: self.rate_limited.load(Ordering::Relaxed),
             accepted: self.accepted.load(Ordering::Relaxed),
         }
     }
@@ -168,8 +180,14 @@ impl RejectionCounter {
     #[must_use]
     pub fn total_rejected(&self) -> u64 {
         let s = self.snapshot();
-        s.unsigned + s.bad_signature + s.decode_error + s.malformed + s.expired + s.replayed
+        s.unsigned
+            + s.bad_signature
+            + s.decode_error
+            + s.malformed
+            + s.expired
+            + s.replayed
             + s.store_error
+            + s.rate_limited
     }
 }
 
@@ -183,6 +201,7 @@ pub struct RejectionSnapshot {
     pub expired: u64,
     pub replayed: u64,
     pub store_error: u64,
+    pub rate_limited: u64,
     pub accepted: u64,
 }
 
@@ -251,7 +270,7 @@ pub fn accept_report(
 }
 
 /// Registry-backed [`accept_report`] (#329) — the **fleet-deployment** path. Resolves
-/// the controller's key from the unified [`KeyRegistry`] (grounded in a STORED
+/// the controller's key from the unified `KeyRegistry` (grounded in a STORED
 /// registration, not a caller-supplied `public_key_b64` string), then delegates to
 /// [`accept_report`]. The `&str` variant remains for test/spike callers without a
 /// store. Fail-closed: an unresolvable principal (unknown controller / malformed
@@ -263,7 +282,8 @@ pub fn accept_report_from_registry<S: FleetTrustStore>(
     store: &S,
     counter: &RejectionCounter,
 ) -> Result<FederatedTrustReportV2, RejectReason> {
-    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController) {
+    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController)
+    {
         Ok(Some(k)) => B64.encode(k),
         _ => {
             counter.record(&RejectReason::BadSignature);
@@ -277,7 +297,7 @@ pub fn accept_report_from_registry<S: FleetTrustStore>(
 /// [`ingest_clearance_grant`]. Decode → verify the Ed25519 signature → enforce
 /// FRESHNESS (the report's `issued_at_ms`/`expires_at_ms` window, via
 /// [`evaluate_federated_report_v2`]) → claim the `nonce_hex` in one atomic
-/// verify-AND-consume step ([`VerifierStore::burn_federation_nonce`]). The nonce is
+/// verify-AND-consume step (`VerifierStore::burn_federation_nonce`). The nonce is
 /// burned **only after** the signature and freshness pass, so a stale report never
 /// burns a slot; a nonce already on record means the same report was ingested
 /// before ([`RejectReason::Replayed`]). On the explicitly-untrusted carrier this is
@@ -343,7 +363,7 @@ pub fn ingest_report<S: FleetTrustStore>(
 }
 
 /// Registry-backed [`ingest_report`] (#322/#329) — the **replay-safe fleet-deployment**
-/// report path. Resolves the controller's key from the unified [`KeyRegistry`]
+/// report path. Resolves the controller's key from the unified `KeyRegistry`
 /// (grounded in a STORED registration), then delegates to [`ingest_report`].
 /// Fail-closed: an unresolvable principal is a counted [`RejectReason::BadSignature`].
 pub fn ingest_report_from_registry<S: FleetTrustStore>(
@@ -353,7 +373,8 @@ pub fn ingest_report_from_registry<S: FleetTrustStore>(
     counter: &RejectionCounter,
     now_ms: u64,
 ) -> Result<FederatedTrustReportV2, RejectReason> {
-    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController) {
+    let key_b64 = match store.resolve_fleet_pubkey(principal_id, FleetKeyRole::FederationController)
+    {
         Ok(Some(k)) => B64.encode(k),
         _ => {
             let r = RejectReason::BadSignature;
@@ -436,8 +457,13 @@ pub fn sign_clearance_grant(
     rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
     let nonce_hex = hex_encode(&nonce);
     let expires_at_ms = granted_at_ms.saturating_add(FLEET_GRANT_TTL_MS);
-    let payload =
-        canonical_grant_payload(node_id, operator_id, granted_at_ms, expires_at_ms, &nonce_hex);
+    let payload = canonical_grant_payload(
+        node_id,
+        operator_id,
+        granted_at_ms,
+        expires_at_ms,
+        &nonce_hex,
+    );
     let sig: Signature = signing_key.sign(payload.as_bytes());
     SignedClearanceGrant {
         node_id: node_id.to_string(),
@@ -463,11 +489,21 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// on any malformed key / signature.
 #[must_use]
 pub fn verify_clearance_grant(grant: &SignedClearanceGrant, public_key_b64: &str) -> bool {
-    let Ok(pk_bytes) = B64.decode(public_key_b64) else { return false };
-    let Ok(sig_bytes) = B64.decode(grant.signature_b64.as_bytes()) else { return false };
-    let Ok(pk_array) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else { return false };
-    let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else { return false };
-    let Ok(key) = VerifyingKey::from_bytes(&pk_array) else { return false };
+    let Ok(pk_bytes) = B64.decode(public_key_b64) else {
+        return false;
+    };
+    let Ok(sig_bytes) = B64.decode(grant.signature_b64.as_bytes()) else {
+        return false;
+    };
+    let Ok(pk_array) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&pk_array) else {
+        return false;
+    };
     let sig = Signature::from_bytes(&sig_array);
     let payload = canonical_grant_payload(
         &grant.node_id,
@@ -492,7 +528,7 @@ pub fn verify_clearance_grant(grant: &SignedClearanceGrant, public_key_b64: &str
 ///
 /// **Replay defense (#322).** After the signature verifies, the grant must be both
 /// FRESH (`now_ms < expires_at_ms`, else [`RejectReason::Expired`]) and UNSEEN — the
-/// nonce is burned via [`VerifierStore::burn_federation_nonce`] in one atomic
+/// nonce is burned via `VerifierStore::burn_federation_nonce` in one atomic
 /// verify-AND-consume step; a nonce already on record means the same grant was
 /// ingested before ([`RejectReason::Replayed`]). The burn happens BEFORE the store
 /// write so a replay can never land a duplicate PENDING row.
@@ -548,7 +584,11 @@ pub fn ingest_clearance_grant<S: FleetTrustStore>(
     }
     // Verified, fresh, first-use → the existing Phase-A path (writes the PENDING row +
     // signed audit event). Phase-B picks it up unchanged.
-    match store.save_clearance_grant_chained(&grant.node_id, &grant.operator_id, grant.granted_at_ms) {
+    match store.save_clearance_grant_chained(
+        &grant.node_id,
+        &grant.operator_id,
+        grant.granted_at_ms,
+    ) {
         Ok(rowid) => {
             counter.record_accepted();
             Ok(rowid)
@@ -562,8 +602,8 @@ pub fn ingest_clearance_grant<S: FleetTrustStore>(
 }
 
 /// Registry-backed [`ingest_clearance_grant`] (#329) — the **fleet-deployment** path.
-/// Resolves the grant signer's key from the unified [`KeyRegistry`] (the
-/// [`KeyRole::FleetGrant`] registry), then delegates to [`ingest_clearance_grant`].
+/// Resolves the grant signer's key from the unified `KeyRegistry` (the
+/// [`FleetKeyRole::FleetGrant`] registry), then delegates to [`ingest_clearance_grant`].
 ///
 /// Takes `principal_id` rather than a `&KeyRegistry` ON PURPOSE: the registry borrows
 /// the store IMMUTABLY but `ingest_clearance_grant` needs it MUTABLY (it burns the
@@ -597,8 +637,8 @@ mod core_tests {
     use super::*;
     // R2: the reference `FleetTrustStore` impl used to drive the generic ingest
     // functions in tests (a DEV-dependency; not in the production build graph).
-    use kirra_verifier::verifier_store::VerifierStore;
     use ed25519_dalek::SigningKey;
+    use kirra_verifier::verifier_store::VerifierStore;
 
     fn keypair() -> (SigningKey, String) {
         let mut seed = [0u8; 32];
@@ -647,10 +687,17 @@ mod core_tests {
         let mut bytes = encode_report(&report).unwrap();
         // Flip a byte in the asset_id region — the signature no longer matches the
         // canonical payload. (Find the 'r' of "robot-01" and bump it.)
-        let pos = bytes.windows(8).position(|w| w == b"robot-01").expect("asset in json");
+        let pos = bytes
+            .windows(8)
+            .position(|w| w == b"robot-01")
+            .expect("asset in json");
         bytes[pos] ^= 0x01;
         let err = accept_report(&bytes, &pk, &counter).unwrap_err();
-        assert_eq!(err, RejectReason::BadSignature, "tamper must be a bad-signature reject");
+        assert_eq!(
+            err,
+            RejectReason::BadSignature,
+            "tamper must be a bad-signature reject"
+        );
         assert_eq!(counter.snapshot().bad_signature, 1);
         assert_eq!(counter.snapshot().accepted, 0);
     }
@@ -725,7 +772,11 @@ mod core_tests {
         let err = ingest_report(&store, &bytes, &pk, &counter, 1_002).unwrap_err();
         assert_eq!(err, RejectReason::Replayed);
         assert_eq!(counter.snapshot().replayed, 1);
-        assert_eq!(counter.snapshot().accepted, 1, "the replay must NOT count as accepted");
+        assert_eq!(
+            counter.snapshot().accepted,
+            1,
+            "the replay must NOT count as accepted"
+        );
     }
 
     #[test]
@@ -775,7 +826,11 @@ mod core_tests {
         let bytes = encode_report(&report).unwrap();
 
         let err = ingest_report(&store, &bytes, &pk, &counter, 1_001).unwrap_err();
-        assert_eq!(err, RejectReason::BadSignature, "controller-id substitution must break the sig");
+        assert_eq!(
+            err,
+            RejectReason::BadSignature,
+            "controller-id substitution must break the sig"
+        );
         assert_eq!(counter.snapshot().bad_signature, 1);
         assert!(
             store.burn_federation_nonce(&report.nonce_hex).unwrap(),
@@ -798,13 +853,18 @@ mod core_tests {
         assert_eq!(counter.snapshot().accepted, 1);
 
         // Phase-B's EXISTING one-shot pickup finds exactly that PENDING row.
-        let picked = store.take_pending_clearance_grant("robot-01", 1_500).unwrap();
+        let picked = store
+            .take_pending_clearance_grant("robot-01", 1_500)
+            .unwrap();
         let picked = picked.expect("the relayed grant is a pending row Phase-B consumes");
         assert_eq!(picked.node_id, "robot-01");
         assert_eq!(picked.operator_id, "alice");
         assert_eq!(picked.granted_at_ms, 1_000);
         // Exactly once — a second pickup finds nothing.
-        assert!(store.take_pending_clearance_grant("robot-01", 1_600).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-01", 1_600)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -820,7 +880,10 @@ mod core_tests {
         assert_eq!(err, RejectReason::BadSignature);
         assert_eq!(counter.snapshot().bad_signature, 1);
         // Nothing was written — Phase-B finds no pending row.
-        assert!(store.take_pending_clearance_grant("robot-01", 2_000).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-01", 2_000)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -843,11 +906,21 @@ mod core_tests {
         let err = ingest_clearance_grant(&mut store, &grant, &pk, &counter, 1_002).unwrap_err();
         assert_eq!(err, RejectReason::Replayed);
         assert_eq!(counter.snapshot().replayed, 1);
-        assert_eq!(counter.snapshot().accepted, 1, "the replay must NOT count as accepted");
+        assert_eq!(
+            counter.snapshot().accepted,
+            1,
+            "the replay must NOT count as accepted"
+        );
 
         // Exactly one row reached Phase-B — the replay produced no duplicate.
-        assert!(store.take_pending_clearance_grant("robot-07", 1_500).unwrap().is_some());
-        assert!(store.take_pending_clearance_grant("robot-07", 1_600).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-07", 1_500)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .take_pending_clearance_grant("robot-07", 1_600)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -867,7 +940,10 @@ mod core_tests {
         assert_eq!(counter.snapshot().expired, 1);
 
         // Nothing written, and the nonce was never burned (freshness gates before burn).
-        assert!(store.take_pending_clearance_grant("robot-08", stale_now).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-08", stale_now)
+            .unwrap()
+            .is_none());
         assert!(
             store.burn_federation_nonce(&grant.nonce_hex).unwrap(),
             "nonce must still be free → first burn returns true"
@@ -900,11 +976,21 @@ mod core_tests {
         // Re-target the (authentically node-A) grant at node-B AFTER signing.
         grant.node_id = "robot-B".into();
         let err = ingest_clearance_grant(&mut store, &grant, &pk, &counter, 1_001).unwrap_err();
-        assert_eq!(err, RejectReason::BadSignature, "node_id substitution must break the sig");
+        assert_eq!(
+            err,
+            RejectReason::BadSignature,
+            "node_id substitution must break the sig"
+        );
         assert_eq!(counter.snapshot().bad_signature, 1);
         // Neither node sees a pending row — the cross-node grant reached no store.
-        assert!(store.take_pending_clearance_grant("robot-A", 2_000).unwrap().is_none());
-        assert!(store.take_pending_clearance_grant("robot-B", 2_000).unwrap().is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-A", 2_000)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .take_pending_clearance_grant("robot-B", 2_000)
+            .unwrap()
+            .is_none());
     }
 
     /// #329 — THE REGISTRY COMPOSITION PROOF: the fleet-deployment ingest resolves the
@@ -917,13 +1003,20 @@ mod core_tests {
         let counter = RejectionCounter::new();
         let mut store = VerifierStore::new(":memory:").unwrap();
         // Register the fleet-grant signer in the trusted-controller registry.
-        store.save_trusted_federation_controller("ops-controller", &pk_b64, 1).unwrap();
+        store
+            .save_trusted_federation_controller("ops-controller", &pk_b64, 1)
+            .unwrap();
 
         // Sign + ingest THROUGH THE REGISTRY (no caller-supplied key string).
         let grant = sign_clearance_grant(&sk, "robot-77", "alice", 1_000);
-        let rowid =
-            ingest_clearance_grant_from_registry(&mut store, &grant, "ops-controller", &counter, 1_001)
-                .unwrap();
+        let rowid = ingest_clearance_grant_from_registry(
+            &mut store,
+            &grant,
+            "ops-controller",
+            &counter,
+            1_001,
+        )
+        .unwrap();
         assert!(rowid > 0);
         assert_eq!(counter.snapshot().accepted, 1);
 
@@ -936,10 +1029,22 @@ mod core_tests {
 
         // An UNREGISTERED signer principal is fail-closed (BadSignature) — nothing written.
         let grant2 = sign_clearance_grant(&sk, "robot-78", "bob", 2_000);
-        let err =
-            ingest_clearance_grant_from_registry(&mut store, &grant2, "no-such-controller", &counter, 2_001)
-                .unwrap_err();
-        assert_eq!(err, RejectReason::BadSignature, "an unresolvable signer is fail-closed");
-        assert!(store.take_pending_clearance_grant("robot-78", 2_500).unwrap().is_none());
+        let err = ingest_clearance_grant_from_registry(
+            &mut store,
+            &grant2,
+            "no-such-controller",
+            &counter,
+            2_001,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RejectReason::BadSignature,
+            "an unresolvable signer is fail-closed"
+        );
+        assert!(store
+            .take_pending_clearance_grant("robot-78", 2_500)
+            .unwrap()
+            .is_none());
     }
 }
