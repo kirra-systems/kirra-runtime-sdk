@@ -48,6 +48,11 @@ impl SafetyContract for ContractProfile {
     #[inline] fn scale_factor(&self) -> f64 { self.engineering_scale_factor }
 }
 
+/// Consecutive failed supervisor-reset attempts that trip the brute-force cooldown.
+pub const RESET_MAX_FAILED_ATTEMPTS: u32 = 5;
+/// Brute-force cooldown window (ms) armed once the failed-attempt threshold is hit.
+pub const RESET_BRUTE_FORCE_COOLDOWN_MS: u64 = 60_000;
+
 pub struct RuntimeTrustEngine {
     pub current_score: u32,
     pub mode: TrustMode,
@@ -103,13 +108,41 @@ impl RuntimeTrustEngine {
     }
 
     pub fn authenticated_manual_reset(&mut self, raw_token: &[u8], system_auth_key: &[u8], current_time_ms: u64) -> Result<(), &'static str> {
-        if current_time_ms < self.reset_cooldown_end_ms { return Err("RESET_REJECTED_COOLDOWN_ACTIVE"); }
-        if self.failed_reset_attempts >= 5 {
-            self.reset_cooldown_end_ms = current_time_ms + 60000;
-            return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+        // An armed cooldown window blocks every attempt outright.
+        if current_time_ms < self.reset_cooldown_end_ms {
+            return Err("RESET_REJECTED_COOLDOWN_ACTIVE");
+        }
+        // At the threshold, the counter is cleared ONLY once a cooldown has been
+        // armed and SERVED. Clearing it unconditionally would let a legitimate
+        // supervisor recover (the counter is cleared only on a successful compare
+        // below, which the `>= threshold` guard returns before ever reaching — the
+        // permanent-lockout bug), BUT it would also let a restart bypass the
+        // throttle: the gateway persists `failed_reset_attempts` and NOT the
+        // (in-memory) `reset_cooldown_end_ms`, so after a reboot the counter is at
+        // threshold with `reset_cooldown_end_ms == 0` and no wait has been served.
+        if self.failed_reset_attempts >= RESET_MAX_FAILED_ATTEMPTS {
+            if self.reset_cooldown_end_ms == 0 {
+                // Threshold reached with NO cooldown on record — the cross-restart /
+                // pre-fix-persisted signature. Arm a cooldown and reject so a
+                // restart cannot skip the wait; it becomes SERVED (and recoverable)
+                // once this window elapses.
+                self.reset_cooldown_end_ms = current_time_ms + RESET_BRUTE_FORCE_COOLDOWN_MS;
+                return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+            }
+            // A cooldown was armed and (per the guard above) has now elapsed —
+            // reopen a fresh attempt window so the correct token recovers.
+            self.failed_reset_attempts = 0;
+            self.reset_cooldown_end_ms = 0;
         }
         if !constant_time_compare(raw_token, system_auth_key) {
             self.failed_reset_attempts = self.failed_reset_attempts.saturating_add(1);
+            // Hitting the threshold arms the cooldown; the window is re-openable
+            // (served → fresh attempts above), so this throttles brute force
+            // without becoming a permanent lockout.
+            if self.failed_reset_attempts >= RESET_MAX_FAILED_ATTEMPTS {
+                self.reset_cooldown_end_ms = current_time_ms + RESET_BRUTE_FORCE_COOLDOWN_MS;
+                return Err("RESET_DISABLED_BRUTE_FORCE_SUSPECTED");
+            }
             return Err("RESET_REJECTED_INVALID_TOKEN");
         }
         self.current_score = 100;
