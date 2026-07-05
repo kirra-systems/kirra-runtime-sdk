@@ -229,6 +229,14 @@ jobs:
     # carry 20–50% overhead, so a single 30-min budget could time out on the
     # double run and red the job falsely.
     timeout-minutes: 45
+    # This lane REQUIRES nightly (`-Z coverage-options` for branch/MC-DC
+    # instrumentation). The repo-root `rust-toolchain.toml` pin (1.94.1) would
+    # otherwise override dtolnay's nightly default and every rustc spawn — even
+    # cargo-llvm-cov's inner build-script compiles — would run on stable and
+    # reject `-Z`. `RUSTUP_TOOLCHAIN` (env) outranks `rust-toolchain.toml` and is
+    # inherited by all child processes, so it forces nightly job-wide.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly

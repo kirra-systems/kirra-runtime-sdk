@@ -13,10 +13,14 @@
 # needs). Build on the pin; support down to the MSRV. The `msrv` CI lane
 # enforces that the workspace still compiles on 1.88.
 #
-# SCOPE: this file governs LOCAL/dev builds. CI lanes select their toolchain via
-# `dtolnay/rust-toolchain` (which exports `RUSTUP_TOOLCHAIN`, taking precedence
-# over this file) — the general lanes float on `stable`, the release + QNX-judge
-# lanes pin 1.94.1 explicitly, and the `msrv` lane uses an explicit `+1.88.0`.
+# SCOPE: this file governs local/dev AND CI builds. `dtolnay/rust-toolchain`
+# only sets rustup's DEFAULT toolchain, and this file outranks the default, so CI
+# lanes build on the pinned version too — unless a lane overrides it with a
+# higher-precedence selector. Two must: the `coverage` lane forces `nightly` via
+# `RUSTUP_TOOLCHAIN` (it needs `-Z` instrumentation) and the `msrv` lane forces
+# `1.88` via an explicit `+1.88.0`. Any new lane needing a different toolchain
+# must likewise override via `RUSTUP_TOOLCHAIN` or `+toolchain`, not a bare
+# `dtolnay` default (which this file supersedes).
 [toolchain]
 channel = "1.94.1"
 components = ["rustfmt", "clippy"]

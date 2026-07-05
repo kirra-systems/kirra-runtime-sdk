@@ -73,18 +73,18 @@ clears the ambiguity permanently (every active version will then be > 1.5).
   update` must not silently raise the effective floor past the pinned MSRV
   — if it would, either pin the dependency back or raise the MSRV by this
   process.
-- CI selects its toolchain per lane via `dtolnay/rust-toolchain` (which exports
-  `RUSTUP_TOOLCHAIN`, taking precedence over `rust-toolchain.toml`): the general
-  test/build lanes float on `stable`, while the release + QNX-judge lanes pin
-  `1.94.1` explicitly. The `rust-toolchain.toml` BUILD-toolchain pin (1.94.1)
-  therefore governs LOCAL/dev builds, not those CI lanes. None of these lanes
-  *prove* the MSRV. The MSRV claim is instead ENFORCED on every PR by the
-  dedicated `msrv` CI lane (`.github/workflows/ci.yml`), which runs
-  `cargo +1.88.0 check --workspace --locked` (explicit `+1.88.0`, so it holds
-  regardless of the pinned build toolchain) against BOTH committed lockfiles
-  (root and `parko/`). A PR that reaches past 1.88 reds that lane with a clear
-  message instead of silently invalidating the floor; the same command
-  reproduces it locally.
+- `rust-toolchain.toml` pins the BUILD toolchain to 1.94.1 for local/dev AND
+  CI: `dtolnay/rust-toolchain` only sets rustup's *default*, and the file
+  outranks the default, so CI lanes build on 1.94.1 too — EXCEPT lanes that
+  override it with a higher-precedence selector. Two do: the `coverage` lane
+  forces `nightly` via `RUSTUP_TOOLCHAIN` (it needs `-Z` instrumentation) and
+  the `msrv` lane forces `1.88` via an explicit `+1.88.0`. (The release +
+  QNX-judge lanes already request 1.94.1, matching the pin.) None of the build
+  lanes *prove* the MSRV — that is the `msrv` lane's job: it runs
+  `cargo +1.88.0 check --workspace --locked` (the `+1.88.0` outranks the pinned
+  toolchain) against BOTH committed lockfiles (root and `parko/`). A PR that
+  reaches past 1.88 reds that lane with a clear message instead of silently
+  invalidating the floor; the same command reproduces it locally.
 
 ## 4. Release process contract
 
