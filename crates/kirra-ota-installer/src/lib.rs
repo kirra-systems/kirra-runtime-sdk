@@ -30,6 +30,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub mod nvbootctrl;
+pub use nvbootctrl::{NvbootctrlBootController, NvbootctrlRunner, SystemNvbootctrl};
+
 /// One of the two governor-artifact slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
