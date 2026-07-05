@@ -2093,9 +2093,15 @@ mod posture_gate_real_router_tests {
         assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
-    /// Seed a `Rolling` campaign at 100% directly in the store (no admin auth
-    /// needed for a store write in-process), so the public assignment read has
-    /// something to resolve.
+    /// Percentage the seeded campaign is parked at — a REACHABLE mid-rollout stage.
+    const SEED_ROLLOUT_PERCENT: u8 = 50;
+
+    /// Seed a genuinely reachable `Rolling` campaign (arm + one real `advance` to a
+    /// mid-rollout `SEED_ROLLOUT_PERCENT`% stage — NOT a manufactured 100% Rolling
+    /// state, which the engine never produces because the final 100% stage
+    /// transitions to `Completed`). No admin auth needed for an in-process store
+    /// write. Leaves the campaign at `Rolling` / `SEED_ROLLOUT_PERCENT`% so the
+    /// assignment read exercises the PARTIAL-rollout membership path.
     fn seed_rolling_campaign(svc: &Arc<ServiceState>, id: &str, cohort: &str) {
         use kirra_verifier::ota_campaign::{Campaign, CampaignState};
         svc.app
@@ -2106,16 +2112,30 @@ mod posture_gate_real_router_tests {
                     CAMPAIGN_DIGEST,
                     "v1",
                     vec![cohort.to_string()],
-                    vec![100],
+                    vec![SEED_ROLLOUT_PERCENT, 100],
                     1_000,
                 )
                 .unwrap();
                 c.arm(1_100).unwrap();
-                c.state = CampaignState::Rolling;
-                c.rollout_percent = 100; // roll the whole cohort
+                // One real advance under Nominal → Rolling at SEED_ROLLOUT_PERCENT%.
+                c.advance(kirra_verifier::verifier::FleetPosture::Nominal, 1_200)
+                    .unwrap();
+                assert_eq!(c.state, CampaignState::Rolling);
+                assert_eq!(c.rollout_percent, SEED_ROLLOUT_PERCENT);
                 store.insert_campaign(&c)
             })
             .expect("seed campaign");
+    }
+
+    /// A `node-N` id that IS (or is NOT, when `want_rolled` is false) inside
+    /// `campaign_id`'s rolled bucket at `SEED_ROLLOUT_PERCENT`% — chosen
+    /// deterministically so the router test asserts real partial-rollout membership.
+    fn node_rolled_at_seed(campaign_id: &str, want_rolled: bool) -> String {
+        use kirra_verifier::ota_campaign::is_node_rolled;
+        (0..10_000)
+            .map(|i| format!("node-{i}"))
+            .find(|n| is_node_rolled(campaign_id, n, SEED_ROLLOUT_PERCENT) == want_rolled)
+            .expect("a node with the desired rolled status exists")
     }
 
     /// GET the node assignment through the REAL assembled router and return the
@@ -2148,25 +2168,36 @@ mod posture_gate_real_router_tests {
     }
 
     /// The node-facing assignment read is mounted on the real router, is reachable
-    /// WITHOUT auth (public read-only), and resolves the active campaign to a
-    /// signed-artifact assignment.
+    /// WITHOUT auth (public read-only), and resolves a genuinely reachable
+    /// PARTIAL-rollout campaign to a signed-artifact assignment — a node inside the
+    /// rolled bucket gets the artifact, a node in the SAME cohort but OUTSIDE the
+    /// rolled bucket does not, and a node in a different cohort does not.
     #[tokio::test]
     async fn node_assignment_resolves_on_real_router_under_nominal() {
         let svc = state_with(FleetPosture::Nominal);
-        seed_rolling_campaign(&svc, "camp-assign", "canary");
+        seed_rolling_campaign(&svc, "camp-assign", "canary"); // Rolling @ 50%
 
-        // A node in the rolled cohort gets the artifact.
-        let (st, j) = assignment_req(Arc::clone(&svc), "node-1", "canary").await;
+        // A cohort node INSIDE the 50% rolled bucket gets the artifact.
+        let rolled = node_rolled_at_seed("camp-assign", true);
+        let (st, j) = assignment_req(Arc::clone(&svc), &rolled, "canary").await;
         assert_eq!(st, StatusCode::OK, "public assignment read must be reachable; body={j}");
-        assert_eq!(j["rolled"], true);
+        assert_eq!(j["rolled"], true, "{rolled} is inside the 50% bucket");
         assert_eq!(j["artifact_digest"], CAMPAIGN_DIGEST);
         assert_eq!(j["campaign_id"], "camp-assign");
 
-        // A node in a DIFFERENT cohort gets no assignment.
-        let (st, j) = assignment_req(Arc::clone(&svc), "node-1", "other").await;
+        // A cohort node OUTSIDE the 50% rolled bucket gets no assignment (this is
+        // the partial-rollout path the old 100% seed could not exercise).
+        let unrolled = node_rolled_at_seed("camp-assign", false);
+        let (st, j) = assignment_req(Arc::clone(&svc), &unrolled, "canary").await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(j["rolled"], false);
+        assert_eq!(j["rolled"], false, "{unrolled} is outside the 50% bucket");
         assert_eq!(j["artifact_digest"], serde_json::Value::Null);
+
+        // A node in a DIFFERENT cohort gets no assignment even if it would be in
+        // the rolled bucket.
+        let (st, j) = assignment_req(Arc::clone(&svc), &rolled, "other").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(j["rolled"], false, "cohort mismatch → no assignment");
     }
 
     /// The assignment read is posture-gated like the other `/fleet/*` reads: under

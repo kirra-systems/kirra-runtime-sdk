@@ -196,7 +196,7 @@ pub(crate) async fn get_node_campaign_assignment(
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "query failed" })),
+            Json(json!({ "error": "failed to load active campaigns" })),
         )
             .into_response(),
     }
