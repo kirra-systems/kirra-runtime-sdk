@@ -113,6 +113,11 @@ src/
 │                               (PURE): Campaign, CampaignState machine, HaltReason,
 │                               fail-closed posture_regression_halt (advance HALTS,
 │                               never rolls, when fleet posture != Nominal)
+├── campaign_monitor.rs       — WS-4/Track-3 background posture-sweep monitor:
+│                               sweep_active_campaigns_once + spawn_campaign_monitor
+│                               (CAMPAIGN_SWEEP_MS); auto-halts active campaigns on a
+│                               CONFIRMED regression between advances (unavailable/
+│                               stale posture is skipped, never a halt)
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
 ├── kinematics_sim.rs         — re-export shim → kirra_core::kinematics_sim (relocated
 │                               Stage 7; VehicleState, apply_enforcement, run_simulation)
@@ -321,6 +326,9 @@ AV_WATCHDOG_NODE_REFRESH_MS  = 30_000     // node list refresh from SQLite
 // standby_monitor.rs
 HEARTBEAT_INTERVAL_MS        = 2_000      // primary→standby heartbeat
 PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 10s
+
+// campaign_monitor.rs
+CAMPAIGN_SWEEP_MS            = 1_000      // OTA campaign posture-sweep interval
 ```
 
 ---

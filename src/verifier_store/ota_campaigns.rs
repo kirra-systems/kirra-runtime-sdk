@@ -125,6 +125,24 @@ impl VerifierStore {
         rows.collect()
     }
 
+    /// Load only the *active* campaigns (`Staged` / `Rolling`) — the ones the
+    /// background posture-sweep monitor must re-check for halt-on-regression.
+    /// Terminal campaigns (`Halted` / `Completed`) and un-armed `Draft`s are
+    /// excluded at the query, so the sweep never touches them. Oldest first
+    /// (deterministic sweep order).
+    pub fn load_active_campaigns(&self) -> Result<Vec<Campaign>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
+                    stages_json, stage_index, rollout_percent, state, halt_reason,
+                    created_at_ms, updated_at_ms
+             FROM ota_campaigns
+             WHERE state IN ('staged', 'rolling')
+             ORDER BY created_at_ms ASC, campaign_id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::map_campaign_row)?;
+        rows.collect()
+    }
+
     fn map_campaign_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Campaign> {
         let cohorts_json: String = row.get(3)?;
         let stages_json: String = row.get(4)?;
@@ -369,5 +387,58 @@ mod tests {
         assert_eq!(all.len(), 2);
         // Newest first by created_at_ms.
         assert_eq!(all[0].campaign_id, "camp-2");
+    }
+
+    #[test]
+    fn load_active_excludes_draft_and_terminal() {
+        let mut s = store();
+        // Draft (un-armed) — excluded.
+        s.insert_campaign(&draft()).unwrap();
+        // Staged — included.
+        let mut staged = Campaign::new(
+            "camp-staged",
+            DIGEST,
+            "v2",
+            vec!["a".into()],
+            vec![100],
+            2_000,
+        )
+        .unwrap();
+        staged.arm(2_100).unwrap();
+        s.insert_campaign(&staged).unwrap();
+        // Rolling — included.
+        let mut rolling = Campaign::new(
+            "camp-rolling",
+            DIGEST,
+            "v3",
+            vec!["a".into()],
+            vec![50, 100],
+            3_000,
+        )
+        .unwrap();
+        rolling.arm(3_100).unwrap();
+        rolling.advance(FleetPosture::Nominal, 3_200).unwrap();
+        s.insert_campaign(&rolling).unwrap();
+        // Halted (terminal) — excluded.
+        let mut halted = Campaign::new(
+            "camp-halted",
+            DIGEST,
+            "v4",
+            vec!["a".into()],
+            vec![100],
+            4_000,
+        )
+        .unwrap();
+        halted.arm(4_100).unwrap();
+        halted.halt(HaltReason::OperatorHalt, 4_200).unwrap();
+        s.insert_campaign(&halted).unwrap();
+
+        let active = s.load_active_campaigns().unwrap();
+        let ids: Vec<_> = active.iter().map(|c| c.campaign_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["camp-staged", "camp-rolling"],
+            "only Staged/Rolling, oldest first"
+        );
     }
 }

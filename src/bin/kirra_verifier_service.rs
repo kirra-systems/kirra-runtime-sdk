@@ -322,6 +322,21 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     // locally governed asset, so fabric command enforcement reflects real
     // verified trust instead of the interim registration seed.
     spawn_local_asset_posture_feed(Arc::clone(svc));
+
+    // WS-4 / Track 3 — OTA campaign posture-sweep monitor. Between explicit
+    // `advance` calls, auto-halts any active campaign the moment a fleet
+    // regression is CONFIRMED (a fresh non-Nominal posture; an unavailable/stale
+    // posture is NOT a regression and is skipped). Wired here in the Active block
+    // so a promoted standby (H2) also runs it; supervised non-critical (a wedged
+    // monitor cannot make anything unsafe — the actuator gate is the safety spine).
+    kirra_verifier::campaign_monitor::spawn_campaign_monitor(
+        Arc::clone(&svc.app),
+        Arc::clone(&svc.posture_cache),
+    );
+    tracing::info!(
+        sweep_ms = kirra_verifier::campaign_monitor::CAMPAIGN_SWEEP_MS,
+        "OTA campaign posture-sweep monitor spawned (WS-4 halt-on-regression)"
+    );
 }
 
 /// One idempotent push of the cached fleet posture into the local asset.
