@@ -483,6 +483,102 @@ pub fn resolve_node_assignment(
     }
 }
 
+/// A fleet-wide observability summary of every campaign — the operator's at-a-glance
+/// rollout view. Derived PURELY from the campaign records the verifier authoritatively
+/// owns (state, stage schedule, rollout percentage, halt reason). Per-node adoption —
+/// which node is actually running which digest — requires node feedback and is a
+/// separate follow-up; this summary never overstates what the verifier knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignSummary {
+    pub total: usize,
+    pub draft: usize,
+    pub staged: usize,
+    pub rolling: usize,
+    pub completed: usize,
+    pub halted: usize,
+    /// Active (`Staged`/`Rolling`) campaigns with their stage progress. Preserves the
+    /// input order (the store yields newest-first).
+    pub active: Vec<CampaignProgress>,
+    /// Halted campaigns and WHY — surfaces fail-closed auto-halts (a posture
+    /// regression) distinctly from operator halts. Preserves input order.
+    pub halted_campaigns: Vec<HaltedCampaign>,
+}
+
+/// Per-active-campaign rollout progress in the [`CampaignSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignProgress {
+    pub campaign_id: String,
+    pub state: String,
+    pub artifact_version: String,
+    /// 1-based current stage number (`stage_index + 1`) and the total stage count —
+    /// e.g. stage 2 of 4.
+    pub stage: usize,
+    pub stage_count: usize,
+    pub rollout_percent: u8,
+    pub cohorts: Vec<String>,
+}
+
+/// A halted campaign and its reason in the [`CampaignSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HaltedCampaign {
+    pub campaign_id: String,
+    pub artifact_version: String,
+    /// The machine-readable halt reason (`posture_locked_out` / `posture_degraded` /
+    /// `operator_halt`); `"unknown"` only if a persisted `Halted` row somehow lacks
+    /// one (defensive — the engine always sets it).
+    pub halt_reason: String,
+    /// The percentage the rollout had reached when it halted.
+    pub rollout_percent: u8,
+}
+
+/// Summarize a set of campaigns into a [`CampaignSummary`]. Pure and total: it counts
+/// each campaign by state and projects the active + halted ones into progress views,
+/// preserving the input order. No clock, no store.
+pub fn summarize_campaigns(campaigns: &[Campaign]) -> CampaignSummary {
+    let mut s = CampaignSummary {
+        total: campaigns.len(),
+        draft: 0,
+        staged: 0,
+        rolling: 0,
+        completed: 0,
+        halted: 0,
+        active: Vec::new(),
+        halted_campaigns: Vec::new(),
+    };
+    for c in campaigns {
+        match c.state {
+            CampaignState::Draft => s.draft += 1,
+            CampaignState::Staged => s.staged += 1,
+            CampaignState::Rolling => s.rolling += 1,
+            CampaignState::Completed => s.completed += 1,
+            CampaignState::Halted => s.halted += 1,
+        }
+        if c.state.is_active() {
+            s.active.push(CampaignProgress {
+                campaign_id: c.campaign_id.clone(),
+                state: c.state.as_str().to_string(),
+                artifact_version: c.artifact_version.clone(),
+                stage: c.stage_index.saturating_add(1),
+                stage_count: c.stages.len(),
+                rollout_percent: c.rollout_percent,
+                cohorts: c.cohorts.clone(),
+            });
+        }
+        if c.state == CampaignState::Halted {
+            s.halted_campaigns.push(HaltedCampaign {
+                campaign_id: c.campaign_id.clone(),
+                artifact_version: c.artifact_version.clone(),
+                halt_reason: c
+                    .halt_reason
+                    .map(|r| r.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                rollout_percent: c.rollout_percent,
+            });
+        }
+    }
+    s
+}
+
 /// A 64-char lowercase hex SHA-256 digest (the cosign-signed artifact identity).
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
@@ -840,5 +936,70 @@ mod tests {
         assert!(!a.rolled);
         assert_eq!(a.node_id, "node-1");
         assert!(a.campaign_id.is_none());
+    }
+
+    // --- fleet campaign summary (observability) ---------------------------
+
+    #[test]
+    fn summary_of_empty_set_is_all_zero() {
+        let s = summarize_campaigns(&[]);
+        assert_eq!(s.total, 0);
+        assert!(s.active.is_empty() && s.halted_campaigns.is_empty());
+    }
+
+    #[test]
+    fn summary_counts_every_state_and_projects_active_and_halted() {
+        let draft = Campaign::new("c-draft", DIGEST, "v1", vec!["fleet".into()], vec![50, 100], 1)
+            .unwrap();
+        let mut staged = draft.clone();
+        staged.campaign_id = "c-staged".into();
+        staged.state = CampaignState::Staged;
+        let mut rolling = draft.clone();
+        rolling.campaign_id = "c-rolling".into();
+        rolling.artifact_version = "v2".into();
+        rolling.state = CampaignState::Rolling;
+        rolling.stage_index = 0; // stage 1 of 2
+        rolling.rollout_percent = 50;
+        let mut completed = draft.clone();
+        completed.campaign_id = "c-done".into();
+        completed.state = CampaignState::Completed;
+        completed.rollout_percent = 100;
+        let mut halted = draft.clone();
+        halted.campaign_id = "c-halt".into();
+        halted.state = CampaignState::Halted;
+        halted.halt_reason = Some(HaltReason::PostureLockedOut);
+        halted.rollout_percent = 50;
+
+        let s = summarize_campaigns(&[draft, staged, rolling, completed, halted]);
+        assert_eq!(s.total, 5);
+        assert_eq!(
+            (s.draft, s.staged, s.rolling, s.completed, s.halted),
+            (1, 1, 1, 1, 1)
+        );
+
+        // Active = Staged + Rolling (2), in input order.
+        assert_eq!(s.active.len(), 2);
+        assert_eq!(s.active[0].campaign_id, "c-staged");
+        let roll = &s.active[1];
+        assert_eq!(roll.campaign_id, "c-rolling");
+        assert_eq!(roll.state, "rolling");
+        assert_eq!(roll.artifact_version, "v2");
+        assert_eq!((roll.stage, roll.stage_count), (1, 2)); // 1-based stage of 2
+        assert_eq!(roll.rollout_percent, 50);
+
+        // Halted projection carries the reason (auto-halt visibility).
+        assert_eq!(s.halted_campaigns.len(), 1);
+        assert_eq!(s.halted_campaigns[0].campaign_id, "c-halt");
+        assert_eq!(s.halted_campaigns[0].halt_reason, "posture_locked_out");
+        assert_eq!(s.halted_campaigns[0].rollout_percent, 50);
+    }
+
+    #[test]
+    fn summary_distinguishes_operator_halt_from_regression() {
+        let mut op = Campaign::new("c-op", DIGEST, "v1", vec!["fleet".into()], vec![100], 1).unwrap();
+        op.state = CampaignState::Halted;
+        op.halt_reason = Some(HaltReason::OperatorHalt);
+        let s = summarize_campaigns(std::slice::from_ref(&op));
+        assert_eq!(s.halted_campaigns[0].halt_reason, "operator_halt");
     }
 }

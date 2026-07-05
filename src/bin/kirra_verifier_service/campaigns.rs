@@ -144,6 +144,33 @@ pub(crate) async fn list_campaigns_handler(
     }
 }
 
+/// GET /system/campaigns/summary — fleet-wide rollout observability. ADMIN-scoped.
+/// An at-a-glance view: campaign counts by state, active-campaign stage progress, and
+/// halted campaigns WITH their reason (so an operator sees a fail-closed auto-halt).
+/// Read-only over the campaign records the verifier authoritatively owns — off the
+/// read replica, so it never contends the writer. Registered BEFORE the
+/// `{campaign_id}` route so the static segment wins the match.
+pub(crate) async fn campaigns_summary_handler(
+    State(svc): State<Arc<ServiceState>>,
+) -> impl IntoResponse {
+    match svc
+        .app
+        .store
+        .call_read(|store| store.load_campaigns())
+        .await
+    {
+        Ok(Ok(list)) => {
+            let summary = kirra_verifier::ota_campaign::summarize_campaigns(&list);
+            (StatusCode::OK, Json(summary)).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "query failed" })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /system/campaigns/{campaign_id} — fetch one campaign. ADMIN-scoped.
 pub(crate) async fn get_campaign_handler(
     State(svc): State<Arc<ServiceState>>,

@@ -1636,6 +1636,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // plane. SCOPE_ADMIN; each lifecycle mutation writes an R156-shaped audit
         // entry. `advance` is fail-closed on fleet posture (non-Nominal → HALT).
         .route("/system/campaigns", post(create_campaign_handler).get(list_campaigns_handler))
+        .route("/system/campaigns/summary", get(campaigns_summary_handler))
         .route("/system/campaigns/{campaign_id}", get(get_campaign_handler))
         .route("/system/campaigns/{campaign_id}/arm", post(arm_campaign_handler))
         .route("/system/campaigns/{campaign_id}/advance", post(advance_campaign_handler))
@@ -1924,6 +1925,7 @@ mod posture_gate_real_router_tests {
                 "/system/campaigns",
                 post(super::create_campaign_handler).get(super::list_campaigns_handler),
             )
+            .route("/system/campaigns/summary", get(super::campaigns_summary_handler))
             .route("/system/campaigns/{campaign_id}", get(super::get_campaign_handler))
             .route("/system/campaigns/{campaign_id}/arm", post(super::arm_campaign_handler))
             .route(
@@ -1986,6 +1988,7 @@ mod posture_gate_real_router_tests {
         let cases = [
             ("POST", "/system/campaigns"),
             ("GET", "/system/campaigns"),
+            ("GET", "/system/campaigns/summary"),
             ("GET", "/system/campaigns/c1"),
             ("POST", "/system/campaigns/c1/arm"),
             ("POST", "/system/campaigns/c1/advance"),
@@ -2052,6 +2055,67 @@ mod posture_gate_real_router_tests {
         let (st, _) =
             campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
         assert_eq!(st, StatusCode::CONFLICT, "terminal campaign must reject advance");
+    }
+
+    /// The fleet rollout summary reflects real campaign state through the HTTP
+    /// handler: counts by state, active-campaign stage progress, and a halted
+    /// campaign surfaced with its reason.
+    #[tokio::test]
+    async fn campaign_summary_reflects_fleet_state_end_to_end() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        // camp-roll: create → arm → advance → Rolling @ 10% (stage 1 of 3).
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-roll")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/arm", None).await;
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/advance", None).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // camp-draft: left in Draft. camp-halt: armed then operator-halted (halt is
+        // only legal from an active state).
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-draft")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-halt")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/arm", None).await;
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/halt", None).await;
+        assert_eq!(st, StatusCode::OK, "operator halt of an armed campaign");
+
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK, "summary; body={j}");
+        assert_eq!(j["total"], 3);
+        assert_eq!(j["draft"], 1);
+        assert_eq!(j["rolling"], 1);
+        assert_eq!(j["halted"], 1);
+
+        // The active list holds exactly the rolling campaign, with its stage progress
+        // (camp-draft is Draft, camp-halt is Halted — neither is active).
+        assert_eq!(j["active"].as_array().map(|a| a.len()), Some(1));
+        let roll = &j["active"][0];
+        assert_eq!(roll["campaign_id"], "camp-roll");
+        assert_eq!(roll["state"], "rolling");
+        assert_eq!(roll["rollout_percent"], 10);
+        assert_eq!(roll["stage"], 1);
+        assert_eq!(roll["stage_count"], 3);
+
+        // The halted campaign is surfaced WITH its reason.
+        assert_eq!(j["halted_campaigns"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(j["halted_campaigns"][0]["campaign_id"], "camp-halt");
+        assert_eq!(j["halted_campaigns"][0]["halt_reason"], "operator_halt");
+    }
+
+    /// The summary's static path segment wins the match over `{campaign_id}`: a GET
+    /// on `/system/campaigns/summary` returns the summary, never a campaign lookup
+    /// for an id "summary".
+    #[tokio::test]
+    async fn campaign_summary_route_is_not_shadowed_by_id_param() {
+        let svc = state_with(FleetPosture::Nominal);
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK, "summary must resolve, not 404 as a missing id");
+        // A summary body has the count fields; a campaign body would not.
+        assert!(j.get("total").is_some(), "got a summary, not a campaign; body={j}");
     }
 
     /// Fail-closed on posture UNAVAILABILITY: with a cold posture cache

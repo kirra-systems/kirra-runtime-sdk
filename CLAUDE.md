@@ -280,7 +280,7 @@ Admin token or an `integrator`-role principal.
 - `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
 - `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
-- `POST/GET /system/campaigns`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT)
+- `POST/GET /system/campaigns`, `GET /system/campaigns/summary`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT). `summary` = fleet rollout observability (`summarize_campaigns`: counts by state + active-campaign stage progress + halted-with-reason; read-only, static path wins over `{id}`)
 - `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role)
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
