@@ -96,6 +96,27 @@ confirm the slot machinery on your board.
 
 ---
 
+## Hardware confirmation (mapping verified)
+
+Run on a Jetson (Yahboom X3, `nvbootctrl` v0.0.13), 2026-07-06, §0–§1 (safe, no
+reboot). The `NvbootctrlBootController` command mapping matches this board verbatim:
+
+| controller call | board output | result |
+|---|---|---|
+| `get-current-slot` | `0` (unprivileged) | → `Slot::A` (our numeric parse) ✓ |
+| `set-active-boot-slot 1` | `Active bootloader slot: B` | arm B ✓ |
+| `set-active-boot-slot 0` (undo) | `Active bootloader slot: A` | reverted, no reboot ✓ |
+
+Notes for the two-phase driver (§4):
+- `get-current-slot` works unprivileged — good, it's the `active_slot()` read.
+- `dump-slots-info` returns `errno 13 Permission denied` on the per-slot
+  `retry_count` / `boot_successful` fields unless run as **root**. Those fields are
+  how the driver reconstructs "am I in an uncommitted trial?", so Phase 2 must run
+  privileged. (`Current/Active bootloader slot` + `num_slots` print unprivileged.)
+- `nvbootctrl` distinguishes **Current** (the slot that booted) from **Active** (the
+  slot armed for next boot); `set-active-boot-slot` changes only Active, so arming a
+  trial never disturbs the running slot — exactly the one-shot semantics we rely on.
+
 ## What to send back
 
 For §0–§1 (safe): paste `get-number-slots`, `get-current-slot`, `dump-slots-info`, and
