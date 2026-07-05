@@ -386,6 +386,103 @@ impl Campaign {
     }
 }
 
+/// The artifact a node should be running, resolved from the active campaigns for
+/// the node's cohorts at the current staged rollout percentage. This is the
+/// node-facing seam the (future) on-device installer consumes: a node asks "what
+/// signed governor artifact am I assigned?" and gets a stable answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeAssignment {
+    pub node_id: String,
+    /// `true` iff the node falls inside a matching campaign's rolled percentage.
+    pub rolled: bool,
+    /// The campaign that assigned the artifact (`None` when not rolled).
+    pub campaign_id: Option<String>,
+    /// The signed artifact digest the node should run (`None` when not rolled — the
+    /// node stays on its current/baseline artifact).
+    pub artifact_digest: Option<String>,
+    pub artifact_version: Option<String>,
+}
+
+/// Deterministic rollout bucket for a node within a campaign: a stable value in
+/// `0..=99` from `SHA-256(campaign_id ":" node_id)`. Pure — no RNG, no clock — so a
+/// node always lands in the same bucket for a given campaign across queries and
+/// restarts.
+fn node_rollout_bucket(campaign_id: &str, node_id: &str) -> u8 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(campaign_id.as_bytes());
+    h.update(b":");
+    h.update(node_id.as_bytes());
+    let digest = h.finalize();
+    let mut first8 = [0u8; 8];
+    first8.copy_from_slice(&digest[..8]);
+    (u64::from_be_bytes(first8) % 100) as u8
+}
+
+/// Is `node_id` inside `campaign_id`'s rolled cohort at `rollout_percent`?
+///
+/// `bucket < rollout_percent`, so membership is **monotone** in the percentage —
+/// a node rolled at 10% is still rolled at 50% and 100% (a staged rollout only
+/// ever ADDS nodes, never un-rolls one), and at 100% every node is rolled. The
+/// rolled subset is per-campaign (the bucket is salted by `campaign_id`), so the
+/// same node is not always in the early canary of every rollout.
+pub fn is_node_rolled(campaign_id: &str, node_id: &str, rollout_percent: u8) -> bool {
+    node_rollout_bucket(campaign_id, node_id) < rollout_percent
+}
+
+/// Resolve the artifact a node should run from the ACTIVE campaigns.
+///
+/// A campaign assigns its artifact to `node_id` iff it is `Rolling`, one of its
+/// `cohorts` is one of the node's `node_cohorts`, AND the node is inside its rolled
+/// percentage ([`is_node_rolled`]). If several campaigns match, the NEWEST (by
+/// `created_at_ms`) wins — a later rollout supersedes an earlier one for the same
+/// node. No match → not rolled (the node stays on its current/baseline artifact).
+/// Pure and deterministic over `active`.
+pub fn resolve_node_assignment(
+    node_id: &str,
+    node_cohorts: &[String],
+    active: &[Campaign],
+) -> NodeAssignment {
+    let mut best: Option<&Campaign> = None;
+    for c in active {
+        // Only Rolling campaigns have rolled nodes (Staged sits at 0%).
+        if c.state != CampaignState::Rolling {
+            continue;
+        }
+        let cohort_match = c
+            .cohorts
+            .iter()
+            .any(|ch| node_cohorts.iter().any(|nc| nc == ch));
+        if !cohort_match {
+            continue;
+        }
+        if !is_node_rolled(&c.campaign_id, node_id, c.rollout_percent) {
+            continue;
+        }
+        // Newest matching campaign wins (ties keep the incumbent — deterministic).
+        best = match best {
+            Some(b) if b.created_at_ms >= c.created_at_ms => Some(b),
+            _ => Some(c),
+        };
+    }
+    match best {
+        Some(c) => NodeAssignment {
+            node_id: node_id.to_string(),
+            rolled: true,
+            campaign_id: Some(c.campaign_id.clone()),
+            artifact_digest: Some(c.artifact_digest.clone()),
+            artifact_version: Some(c.artifact_version.clone()),
+        },
+        None => NodeAssignment {
+            node_id: node_id.to_string(),
+            rolled: false,
+            campaign_id: None,
+            artifact_digest: None,
+            artifact_version: None,
+        },
+    }
+}
+
 /// A 64-char lowercase hex SHA-256 digest (the cosign-signed artifact identity).
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
@@ -623,5 +720,125 @@ mod tests {
         assert!(!is_sha256_hex(&DIGEST[..63])); // too short
         assert!(!is_sha256_hex(&format!("{DIGEST}0"))); // too long
         assert!(!is_sha256_hex(&DIGEST.to_uppercase())); // uppercase rejected
+    }
+
+    // --- node artifact assignment -----------------------------------------
+
+    #[test]
+    fn is_node_rolled_is_deterministic_and_monotone() {
+        // Same inputs → same answer across calls.
+        assert_eq!(
+            is_node_rolled("camp-1", "node-7", 50),
+            is_node_rolled("camp-1", "node-7", 50)
+        );
+        // Monotone in percent: once a node is rolled it stays rolled as % grows.
+        for node in ["node-a", "node-b", "node-c", "node-xyz", "n42"] {
+            let mut was_rolled = false;
+            for p in 0..=100u8 {
+                let now = is_node_rolled("camp-1", node, p);
+                if was_rolled {
+                    assert!(
+                        now,
+                        "{node} un-rolled at {p}% — membership must be monotone"
+                    );
+                }
+                was_rolled = now;
+            }
+            // Everyone is rolled at 100%.
+            assert!(
+                is_node_rolled("camp-1", node, 100),
+                "{node} must roll at 100%"
+            );
+        }
+    }
+
+    #[test]
+    fn rollout_percent_controls_the_rolled_fraction() {
+        // Over a population, the rolled count grows with the percentage and hits
+        // the whole population at 100% (loose bounds — this checks the mechanism,
+        // not an exact distribution).
+        let nodes: Vec<String> = (0..500).map(|i| format!("node-{i}")).collect();
+        let count = |p: u8| {
+            nodes
+                .iter()
+                .filter(|n| is_node_rolled("camp-x", n, p))
+                .count()
+        };
+        let (c10, c50, c100) = (count(10), count(50), count(100));
+        assert_eq!(c100, nodes.len(), "100% rolls the whole population");
+        assert!(
+            c10 < c50 && c50 < c100,
+            "rolled count grows with percent: {c10} < {c50} < {c100}"
+        );
+        // Roughly proportional (generous tolerance to avoid flakiness).
+        assert!((20..=110).contains(&c10), "≈10% of 500 rolled, got {c10}");
+        assert!((200..=300).contains(&c50), "≈50% of 500 rolled, got {c50}");
+    }
+
+    fn rolling_campaign(id: &str, cohorts: Vec<String>, percent: u8, created: u64) -> Campaign {
+        // Build a Rolling campaign parked at `percent` (fields are pub; this mirrors
+        // a mid-rollout persisted campaign without threading advances). The stage
+        // schedule is irrelevant to assignment resolution (which reads
+        // `rollout_percent`), so a fixed valid `[100]` avoids the schedule rules.
+        let mut c = Campaign::new(id, DIGEST, "v1", cohorts, vec![100], created).unwrap();
+        c.state = CampaignState::Rolling;
+        c.rollout_percent = percent;
+        c
+    }
+
+    #[test]
+    fn assignment_requires_cohort_intersection() {
+        let c = rolling_campaign("camp-1", vec!["canary".into()], 100, 1_000);
+        // Node not in the campaign's cohort → no assignment even at 100%.
+        let a = resolve_node_assignment("node-1", &["fleet".into()], std::slice::from_ref(&c));
+        assert!(!a.rolled);
+        assert!(a.artifact_digest.is_none());
+        // Node in the cohort → assigned (100% rolls everyone).
+        let a = resolve_node_assignment("node-1", &["canary".into()], std::slice::from_ref(&c));
+        assert!(a.rolled);
+        assert_eq!(a.artifact_digest.as_deref(), Some(DIGEST));
+        assert_eq!(a.campaign_id.as_deref(), Some("camp-1"));
+    }
+
+    #[test]
+    fn staged_and_unrolled_nodes_get_no_assignment() {
+        // A Staged campaign (0%) assigns nothing even to its cohort.
+        let mut staged = rolling_campaign("camp-s", vec!["canary".into()], 100, 1_000);
+        staged.state = CampaignState::Staged;
+        staged.rollout_percent = 0;
+        let a =
+            resolve_node_assignment("node-1", &["canary".into()], std::slice::from_ref(&staged));
+        assert!(!a.rolled);
+
+        // A Rolling campaign at a low percent: a node OUTSIDE the rolled bucket
+        // gets nothing. Find such a node deterministically.
+        let low = rolling_campaign("camp-low", vec!["canary".into()], 1, 1_000);
+        let unrolled = (0..1000)
+            .map(|i| format!("node-{i}"))
+            .find(|n| !is_node_rolled("camp-low", n, 1))
+            .expect("some node is outside the 1% bucket");
+        let a = resolve_node_assignment(&unrolled, &["canary".into()], std::slice::from_ref(&low));
+        assert!(!a.rolled, "{unrolled} is outside the 1% rolled bucket");
+    }
+
+    #[test]
+    fn newest_matching_campaign_wins() {
+        // Two Rolling campaigns at 100% target the node's cohort; the newer one
+        // (larger created_at_ms) supersedes.
+        let older = rolling_campaign("camp-old", vec!["fleet".into()], 100, 1_000);
+        let mut newer = rolling_campaign("camp-new", vec!["fleet".into()], 100, 2_000);
+        newer.artifact_version = "v2".into();
+        let active = [older, newer];
+        let a = resolve_node_assignment("node-9", &["fleet".into()], &active);
+        assert_eq!(a.campaign_id.as_deref(), Some("camp-new"));
+        assert_eq!(a.artifact_version.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn no_active_campaigns_means_no_assignment() {
+        let a = resolve_node_assignment("node-1", &["fleet".into()], &[]);
+        assert!(!a.rolled);
+        assert_eq!(a.node_id, "node-1");
+        assert!(a.campaign_id.is_none());
     }
 }
