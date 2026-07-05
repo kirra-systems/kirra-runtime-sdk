@@ -282,6 +282,49 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  # M5 — loom concurrency-model tests. Exhaustively permutes thread interleavings
+  # for the posture-generation protocol (`crates/kirra-loom-models`), proving the
+  # "generations are unique / the cache never regresses" invariants hold under
+  # every schedule. The crate is loom-detached from the workspace and compiles to
+  # nothing without `--cfg loom`, so this is the only lane that exercises it.
+  loom:
+    name: Loom concurrency models (M5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Run loom models (all interleavings)
+        # --locked: build the committed lockfile exactly; fail if it would drift.
+        run: cd crates/kirra-loom-models && RUSTFLAGS="--cfg loom" cargo test --release --locked
+
+  # M5 — fuzz-target BUILD guard. Compiles every cargo-fuzz target in `fuzz/`
+  # against the current decoder APIs so the harnesses cannot bitrot as the
+  # untrusted-input decoders evolve. It does NOT run-to-fuzz here (fuzzing is
+  # non-deterministic and unbounded — that belongs in dedicated/scheduled infra);
+  # this lane just keeps the corpus of targets compiling and linkable. cargo-fuzz
+  # needs nightly, so `RUSTUP_TOOLCHAIN` forces it past the `rust-toolchain.toml`
+  # pin (same pattern as the coverage lane).
+  fuzz-build:
+    name: Fuzz targets build (M5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Verify the fuzz workspace lockfile is up to date
+        # `cargo fuzz build` does not accept `--locked` and would silently update a
+        # stale fuzz/Cargo.lock. This resolves the detached fuzz workspace against
+        # its committed lock WITHOUT building (no libFuzzer link), so a drifted
+        # lockfile reds the lane deterministically before the build step.
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Build all fuzz targets (bitrot guard — not run-to-fuzz)
+        run: cargo fuzz build
+
   wcet-gate:
     name: WCET Gate (non-instrumented timing)
     runs-on: ubuntu-latest

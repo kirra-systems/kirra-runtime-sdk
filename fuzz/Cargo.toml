@@ -1,0 +1,56 @@
+# cargo-fuzz harness crate (stop-gate review M5 hardening).
+#
+# Fuzzes the workspace's UNTRUSTED-INPUT decode seams — the pure `&[u8]` / `&str`
+# parsers that turn attacker-controllable bytes (a governor→car UDP datagram, an
+# industrial-protocol frame, raw LLM JSON) into typed values. Each target's
+# contract is FAIL-CLOSED: malformed input must return `Err`/`None`, never panic
+# and never fabricate a value. libFuzzer treats a panic / abort / UB / timeout as
+# a crash, so these targets assert exactly that safety property.
+#
+# The empty `[workspace]` table detaches this crate from the parent workspace
+# (cargo-fuzz convention): the fuzz crate builds under its own nightly + libFuzzer
+# instrumentation and never joins a normal `cargo build --workspace`.
+[package]
+name = "kirra-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kirra-verifier = { path = ".." }
+kirra-wire-client = { path = "../crates/kirra-wire-client" }
+
+# Prevent this crate's [[bin]] targets from being treated as libtest binaries.
+[[bin]]
+name = "decode_verdict"
+path = "fuzz_targets/decode_verdict.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnp3_analog_setpoint"
+path = "fuzz_targets/dnp3_analog_setpoint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scalar_decode_le"
+path = "fuzz_targets/scalar_decode_le.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "llm_json_intent"
+path = "fuzz_targets/llm_json_intent.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
