@@ -1,0 +1,27 @@
+# kirra-ota-pull.service — fleet-driven install agent (WS-4 / Track 3).
+#
+# Polls the verifier for THIS node's campaign assignment and, if it names a signed
+# artifact digest different from what the node is running, downloads + verifies +
+# stages it into the inactive slot. A `systemctl restart kirra-governor` then
+# trial-boots it and `probe` (kirra-ota-probe.service) gates commit/rollback.
+#
+# Run it on a schedule via kirra-ota-pull.timer. Fail-closed: a LockedOut/5xx
+# assignment is a no-op this cycle; a digest mismatch never arms a slot.
+#
+# Install:
+#   cp kirra-ota-pull.{service,timer} /etc/systemd/system/
+#   # add the pull settings to /etc/kirra/ota.env (see kirra-ota.env.example), then:
+#   systemctl daemon-reload && systemctl enable --now kirra-ota-pull.timer
+[Unit]
+Description=Kirra OTA pull agent (fetch + stage this node's assigned governor artifact)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/kirra/ota.env
+# Reads KIRRA_VERIFIER_URL / KIRRA_NODE_ID / KIRRA_NODE_COHORTS / KIRRA_OTA_ARTIFACT_BASE
+# from the EnvironmentFile; override any with explicit flags here if preferred.
+ExecStart=/usr/local/bin/kirra-ota-ctl pull
+# pull writes the root-owned boot record + slot dirs.
+User=root

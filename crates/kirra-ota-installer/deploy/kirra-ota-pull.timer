@@ -1,0 +1,16 @@
+# kirra-ota-pull.timer — schedule the fleet-driven pull agent (WS-4 / Track 3).
+# Polls the verifier periodically; the agent is idempotent (an already-applied or
+# in-flight assignment is a no-op), so the cadence is just "how fresh should the
+# node's rollout membership be". Tune OnUnitActiveSec per fleet.
+[Unit]
+Description=Schedule the Kirra OTA pull agent
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Spread load across a large fleet so all nodes don't poll on the same tick.
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

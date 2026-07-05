@@ -182,6 +182,44 @@ To make this fully automatic on every trial boot, install the example
 `deploy/kirra-ota-probe.service` oneshot (edit its `--cmd`) and wire it after the
 governor unit — see that file's header.
 
+## 4. Fleet-driven install (`pull`) — the closed loop
+
+`pull` connects this node-side installer to the verifier's campaign control plane
+(#827–#829): it polls `GET /fleet/campaigns/assignment/{node_id}?cohorts=…`, and if
+the node is rolled into a campaign whose signed artifact digest differs from what it's
+running, it downloads that artifact from the content-addressed store, verifies its
+SHA-256, and `stage`s it. Then §1's restart trial-boots it and §3's `probe` commits or
+rolls back — a full campaign → node loop with no manual `stage`.
+
+```sh
+# Point the agent at the verifier + a content-addressed artifact store
+# ({base}/{digest} serves the artifact). These can also come from /etc/kirra/ota.env.
+PULL="--verifier http://<verifier-host>:8090 --node-id robot-01 \
+      --cohorts canary --artifact-base https://<artifact-store>/governor"
+
+sudo kirra-ota-ctl pull $PULL
+# rolled + new digest:  "assigned <digest> ... differs from running — staging"
+#                       "staged assigned artifact into slot b (...)"
+# not rolled / no change: "up to date (...); nothing to stage"
+# fleet LockedOut (403):  "verifier returned HTTP 403 ...; no update this cycle"
+
+kirra-ota-ctl status                       # try_boot=Some(b) when it staged something
+sudo systemctl restart kirra-governor      # trial-boot the pulled slot
+sudo kirra-ota-ctl probe --cmd '<health>'  # auto commit-or-rollback (§3)
+```
+
+**Fail-closed properties** (each validated in-tree; re-checkable on target):
+- A **tampered artifact** (store serves bytes whose SHA-256 ≠ the assigned digest) is
+  rejected at verification — the slot is never armed, the node stays on its good slot.
+- **LockedOut** (assignment 403) → no update this cycle (exit 0); no artifact is
+  adopted while the fleet is locked out. A periodic poll retries.
+- **In-flight** trial or an **already-applied** digest → idempotent no-op, so the
+  `kirra-ota-pull.timer` can poll freely.
+
+Schedule it fleet-wide with `deploy/kirra-ota-pull.{service,timer}` (env in
+`/etc/kirra/ota.env`); the timer's `RandomizedDelaySec` spreads a large fleet's polls.
+The `pull` agent uses `curl` for both the assignment query and the artifact download.
+
 ## Hardware result (GATE C evidence)
 
 Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd

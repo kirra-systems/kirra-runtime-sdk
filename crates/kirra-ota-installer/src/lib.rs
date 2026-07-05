@@ -601,6 +601,78 @@ impl HealthGate {
     }
 }
 
+/// A node's campaign assignment as returned by the verifier's
+/// `GET /fleet/campaigns/assignment/{node_id}` — the SUBSET the installer needs.
+/// Every field defaults, and unknown fields are ignored, so a partial response (or
+/// one the verifier later extends) still deserializes. The installer never depends
+/// on the verifier crate; this is a decoupled wire mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssignmentView {
+    /// `true` iff the node is inside a matching campaign's rolled percentage.
+    #[serde(default)]
+    pub rolled: bool,
+    /// The signed artifact digest the node should run (`None`/absent → stay on the
+    /// current/baseline artifact).
+    #[serde(default)]
+    pub artifact_digest: Option<String>,
+    #[serde(default)]
+    pub artifact_version: Option<String>,
+    #[serde(default)]
+    pub campaign_id: Option<String>,
+}
+
+/// What the pull agent should do after reconciling an [`AssignmentView`] against the
+/// node's current on-disk state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullAction {
+    /// Nothing to stage: not rolled, no assigned digest, already running the assigned
+    /// digest, or a trial is already in flight.
+    UpToDate,
+    /// Fetch this signed artifact, verify its SHA-256, and stage it into the inactive
+    /// slot. `digest` is the content-addressed identity (SHA-256 hex).
+    Stage {
+        digest: String,
+        version: Option<String>,
+        campaign_id: Option<String>,
+    },
+}
+
+/// Reconcile a fetched assignment against the node's current state into a
+/// [`PullAction`]. Pure + idempotent + FAIL-CLOSED:
+///
+/// - a trial already in flight (`trial_in_flight`) → `UpToDate`: never re-stage
+///   mid-cycle (matches [`plan_stage`]'s guard) — let the trial commit or roll back;
+/// - not rolled, or no assigned digest → `UpToDate`: stay on the baseline artifact;
+/// - the assigned digest already equals `current_digest` (the SHA-256 of the running
+///   slot's artifact) → `UpToDate`: idempotent, so a periodic poll never re-stages
+///   an already-applied update;
+/// - otherwise → `Stage` the assigned digest.
+///
+/// Because the assigned digest is content-addressed and compared to a hash of the
+/// running artifact, the agent needs no persisted "last applied" bookkeeping — the
+/// filesystem IS the state.
+pub fn decide_pull(
+    assignment: &AssignmentView,
+    current_digest: Option<&str>,
+    trial_in_flight: bool,
+) -> PullAction {
+    if trial_in_flight {
+        return PullAction::UpToDate;
+    }
+    let digest = match assignment.artifact_digest.as_deref() {
+        Some(d) if assignment.rolled && !d.is_empty() => d,
+        _ => return PullAction::UpToDate,
+    };
+    if current_digest == Some(digest) {
+        return PullAction::UpToDate;
+    }
+    PullAction::Stage {
+        digest: digest.to_string(),
+        version: assignment.artifact_version.clone(),
+        campaign_id: assignment.campaign_id.clone(),
+    }
+}
+
 fn read_record(path: &Path) -> std::io::Result<BootRecord> {
     let text = std::fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -1036,6 +1108,91 @@ mod tests {
             assert_eq!(g.observe(false), None);
         }
         assert_eq!(g.streak(), 0);
+    }
+
+    // --- pull reconciler (HTTP agent) ------------------------------------
+
+    fn assign(rolled: bool, digest: Option<&str>) -> AssignmentView {
+        AssignmentView {
+            rolled,
+            artifact_digest: digest.map(String::from),
+            artifact_version: Some("v2".into()),
+            campaign_id: Some("camp-1".into()),
+        }
+    }
+
+    #[test]
+    fn pull_not_rolled_stays_on_baseline() {
+        assert_eq!(
+            decide_pull(&assign(false, Some(DIGEST_HELLO)), None, false),
+            PullAction::UpToDate,
+            "not rolled → never stage, even with a digest present"
+        );
+    }
+
+    #[test]
+    fn pull_rolled_with_new_digest_stages() {
+        let action = decide_pull(&assign(true, Some(DIGEST_HELLO)), Some("old"), false);
+        assert_eq!(
+            action,
+            PullAction::Stage {
+                digest: DIGEST_HELLO.to_string(),
+                version: Some("v2".into()),
+                campaign_id: Some("camp-1".into()),
+            }
+        );
+        // Also stages when nothing is installed yet (current_digest None).
+        assert!(matches!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), None, false),
+            PullAction::Stage { .. }
+        ));
+    }
+
+    #[test]
+    fn pull_already_running_assigned_digest_is_idempotent() {
+        assert_eq!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), Some(DIGEST_HELLO), false),
+            PullAction::UpToDate,
+            "assigned == running → no re-stage (idempotent poll)"
+        );
+    }
+
+    #[test]
+    fn pull_never_restages_mid_trial() {
+        // Even a genuinely new digest is deferred while a cycle is in flight.
+        assert_eq!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), Some("old"), true),
+            PullAction::UpToDate
+        );
+    }
+
+    #[test]
+    fn pull_rolled_without_digest_is_noop() {
+        assert_eq!(
+            decide_pull(&assign(true, None), Some("old"), false),
+            PullAction::UpToDate
+        );
+        // An empty-string digest is also refused (never a valid content address).
+        assert_eq!(
+            decide_pull(&assign(true, Some("")), Some("old"), false),
+            PullAction::UpToDate
+        );
+    }
+
+    #[test]
+    fn assignment_view_deserializes_full_endpoint_json_and_ignores_extra() {
+        // Mirrors the verifier's NodeAssignment JSON, plus an unknown field.
+        let json = r#"{"node_id":"robot-01","rolled":true,"campaign_id":"camp-1",
+            "artifact_digest":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            "artifact_version":"v2","future_field":123}"#;
+        let a: AssignmentView = serde_json::from_str(json).unwrap();
+        assert!(a.rolled);
+        assert_eq!(a.artifact_digest.as_deref(), Some(DIGEST_HELLO));
+        assert_eq!(a.artifact_version.as_deref(), Some("v2"));
+        // An unrolled response deserializes to a no-op assignment.
+        let none: AssignmentView =
+            serde_json::from_str(r#"{"node_id":"x","rolled":false}"#).unwrap();
+        assert_eq!(decide_pull(&none, None, false), PullAction::UpToDate);
     }
 
     #[test]

@@ -13,6 +13,8 @@
 //! commit                     make the in-progress trial slot the new active
 //! rollback                   abandon any staged/trial state, stay on active
 //! probe --cmd '<health>'     after a trial boot, auto-commit-or-rollback on health
+//! pull --verifier <url> ...  poll the verifier for this node's assigned artifact,
+//!                            download + verify + stage it if it changed
 //! status                     print the boot record + which slot `run` would launch
 //! ```
 //!
@@ -31,8 +33,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use kirra_ota_installer::{
-    plan_commit, plan_rollback, plan_run, plan_stage, verify_staged_artifact, FileBootController,
-    HealthGate, Slot,
+    artifact_sha256_hex, decide_pull, plan_commit, plan_rollback, plan_run, plan_stage,
+    verify_staged_artifact, AssignmentView, BootRecord, FileBootController, HealthGate, PullAction,
+    Slot,
 };
 
 struct Cfg {
@@ -84,6 +87,7 @@ fn main() -> ExitCode {
         "commit" => cmd_commit(),
         "rollback" => cmd_rollback(),
         "probe" => cmd_probe(rest),
+        "pull" => cmd_pull(rest),
         "status" => cmd_status(),
         "" | "-h" | "--help" | "help" => {
             print_usage();
@@ -137,6 +141,20 @@ fn cmd_stage(args: &[String]) -> Result<(), String> {
         return Err("usage: kirra-ota-ctl stage <artifact-path> <sha256-hex>".into());
     };
     let cfg = Cfg::from_env();
+    let target = stage_verified(&cfg, Path::new(artifact), digest)?;
+    println!(
+        "staged into slot {} ({}); `systemctl restart` to trial-boot it",
+        target.as_str(),
+        cfg.governor_path(target).display()
+    );
+    Ok(())
+}
+
+/// Stage a verified artifact into the inactive slot and arm the one-shot `try_boot`.
+/// FAIL-CLOSED: refuses if a stage/trial is already in flight; verifies the SHA-256
+/// of BOTH the source and the landed copy against `digest`. Shared by `stage` and
+/// `pull`. Returns the target slot.
+fn stage_verified(cfg: &Cfg, artifact: &Path, digest: &str) -> Result<Slot, String> {
     let mut ctrl = cfg
         .controller()
         .map_err(|e| format!("open boot record: {e}"))?;
@@ -151,7 +169,7 @@ fn cmd_stage(args: &[String]) -> Result<(), String> {
     let target = record.active.other();
 
     // Verify the SOURCE artifact BEFORE it is copied into a slot.
-    verify_staged_artifact(Path::new(artifact), digest)
+    verify_staged_artifact(artifact, digest)
         .map_err(|e| format!("artifact verification failed: {e}"))?;
 
     let dest = cfg.governor_path(target);
@@ -166,12 +184,7 @@ fn cmd_stage(args: &[String]) -> Result<(), String> {
 
     ctrl.write(&staged_record)
         .map_err(|e| format!("persist boot record: {e}"))?;
-    println!(
-        "staged into slot {} ({}); `systemctl restart` to trial-boot it",
-        target.as_str(),
-        dest.display()
-    );
-    Ok(())
+    Ok(target)
 }
 
 /// `commit` — make the in-progress trial slot the new active (health confirmed).
@@ -403,6 +416,194 @@ fn restart_unit(unit: &str) -> Result<(), String> {
     }
 }
 
+/// Options for `pull` (the fleet-driven install agent).
+struct PullOpts {
+    /// Verifier base URL, e.g. `http://verifier:8090`.
+    verifier: String,
+    /// This node's id (the campaign rollout bucket is salted by it).
+    node_id: String,
+    /// Cohort labels the node belongs to (its deployment ring).
+    cohorts: Vec<String>,
+    /// Content-addressed artifact store base URL; the artifact is fetched from
+    /// `{artifact_base}/{digest}`.
+    artifact_base: String,
+}
+
+impl PullOpts {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut verifier = std::env::var("KIRRA_VERIFIER_URL").ok();
+        let mut node_id = std::env::var("KIRRA_NODE_ID").ok();
+        let mut cohorts = std::env::var("KIRRA_NODE_COHORTS").ok().unwrap_or_default();
+        let mut artifact_base = std::env::var("KIRRA_OTA_ARTIFACT_BASE").ok();
+
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let mut next = |flag: &str| -> Result<String, String> {
+                it.next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value"))
+            };
+            match a.as_str() {
+                "--verifier" => verifier = Some(next("--verifier")?),
+                "--node-id" => node_id = Some(next("--node-id")?),
+                "--cohorts" => cohorts = next("--cohorts")?,
+                "--artifact-base" => artifact_base = Some(next("--artifact-base")?),
+                other => return Err(format!("unknown pull flag {other:?}")),
+            }
+        }
+        let cohorts: Vec<String> = cohorts
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(PullOpts {
+            verifier: verifier
+                .ok_or("pull requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
+            node_id: node_id.ok_or("pull requires --node-id <id> (or KIRRA_NODE_ID)")?,
+            cohorts,
+            artifact_base: artifact_base
+                .ok_or("pull requires --artifact-base <url> (or KIRRA_OTA_ARTIFACT_BASE)")?,
+        })
+    }
+}
+
+/// `pull` — the fleet-driven install agent. Polls the verifier for THIS node's
+/// campaign assignment, and if it names a signed artifact digest different from what
+/// the node is running, downloads it from the content-addressed store, verifies its
+/// SHA-256, and stages it into the inactive slot (a `systemctl restart` then
+/// trial-boots it; `probe` gates commit/rollback). Closes the loop from a campaign
+/// declared in the verifier (#827–#829) to an installed artifact on the node.
+///
+/// FAIL-CLOSED / idempotent: a non-200 assignment (e.g. the fleet is LockedOut, so
+/// the posture gate denies the read) is treated as "no update this cycle" and exits
+/// 0; an in-flight trial is never disturbed; an already-applied digest is a no-op;
+/// and the download is SHA-256-verified against the assigned digest before it can
+/// ever be staged (a mismatch/short download never arms a slot).
+fn cmd_pull(args: &[String]) -> Result<(), String> {
+    let opts = PullOpts::parse(args)?;
+    let cfg = Cfg::from_env();
+
+    // 1. Fetch this node's assignment.
+    let url = format!(
+        "{}/fleet/campaigns/assignment/{}?cohorts={}",
+        opts.verifier.trim_end_matches('/'),
+        opts.node_id,
+        opts.cohorts.join(",")
+    );
+    let (code, body) = http_get(&url)?;
+    if code != 200 {
+        // 403 under LockedOut / 5xx / etc. — transient. A periodic poll retries; no
+        // artifact is ever adopted while the fleet is locked out (by design).
+        println!("verifier returned HTTP {code} for assignment; no update this cycle");
+        return Ok(());
+    }
+    let assignment: AssignmentView = serde_json::from_str(&body)
+        .map_err(|e| format!("parse assignment JSON: {e}; body was: {body}"))?;
+
+    // 2. Current on-disk state: is a cycle in flight, and what digest is running?
+    let record = if cfg.record.exists() {
+        FileBootController::open(&cfg.record, Slot::A)
+            .and_then(|c| c.record())
+            .map_err(|e| format!("read boot record: {e}"))?
+    } else {
+        BootRecord {
+            active: Slot::A,
+            try_boot: None,
+            trying: None,
+        }
+    };
+    let in_flight = record.try_boot.is_some() || record.trying.is_some();
+    let active_path = cfg.governor_path(record.active);
+    let active_digest = if active_path.exists() {
+        Some(
+            artifact_sha256_hex(&active_path)
+                .map_err(|e| format!("hash active slot artifact: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    // 3. Reconcile (pure).
+    match decide_pull(&assignment, active_digest.as_deref(), in_flight) {
+        PullAction::UpToDate => {
+            println!(
+                "up to date (rolled={}, active_digest={}); nothing to stage",
+                assignment.rolled,
+                active_digest.as_deref().unwrap_or("none")
+            );
+            Ok(())
+        }
+        PullAction::Stage {
+            digest,
+            version,
+            campaign_id,
+        } => {
+            println!(
+                "assigned {} (version {}, campaign {}) differs from running — staging",
+                digest,
+                version.as_deref().unwrap_or("?"),
+                campaign_id.as_deref().unwrap_or("?")
+            );
+            // 4. Download the content-addressed artifact to a temp file.
+            let tmp = cfg.record.with_file_name("kirra-ota-pull.tmp");
+            let art_url = format!("{}/{}", opts.artifact_base.trim_end_matches('/'), digest);
+            let dl = http_download(&art_url, &tmp);
+            // 5. Verify + stage (stage_verified re-verifies both source and copy).
+            let result = dl.and_then(|()| stage_verified(&cfg, &tmp, &digest));
+            std::fs::remove_file(&tmp).ok();
+            let target = result?;
+            println!(
+                "staged assigned artifact into slot {} ({}); `systemctl restart` then `probe`",
+                target.as_str(),
+                cfg.governor_path(target).display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// HTTP GET via `curl`; returns `(status_code, body)`. Errors ONLY on transport
+/// failure (curl could not run/connect) — an HTTP status >= 400 is returned as the
+/// code so the caller decides what it means (a LockedOut 403 is not an agent error).
+fn http_get(url: &str) -> Result<(u16, String), String> {
+    let out = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", "20", "-w", "\n%{http_code}", url])
+        .output()
+        .map_err(|e| format!("run curl (is it installed?): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl GET {url} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // `-w "\n%{http_code}"` appends a newline + the status after the body.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text
+        .rsplit_once('\n')
+        .ok_or("curl output missing status line")?;
+    let code: u16 = code
+        .trim()
+        .parse()
+        .map_err(|_| format!("curl returned a non-numeric status: {code:?}"))?;
+    Ok((code, body.to_string()))
+}
+
+/// Download `url` to `dest` via `curl -f` (fails on HTTP >= 400, so a missing
+/// artifact is an error, never a silent empty file).
+fn http_download(url: &str, dest: &Path) -> Result<(), String> {
+    let status = std::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "120", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("run curl (is it installed?): {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("curl download of {url} failed ({status})"))
+    }
+}
+
 /// `status` — print the record + which slot `run` would launch. READ-ONLY: it does
 /// NOT create the record or its directory (unlike the mutating commands), so
 /// querying an uninitialized node has no side effects.
@@ -471,11 +672,14 @@ fn print_usage() {
          \x20 kirra-ota-ctl commit                     commit the trial slot as active\n\
          \x20 kirra-ota-ctl rollback                   abandon the staged/trial state\n\
          \x20 kirra-ota-ctl probe --cmd '<health>'     auto commit-or-rollback on a trial's health\n\
+         \x20 kirra-ota-ctl pull --verifier <url> ...  poll + install this node's assigned artifact\n\
          \x20 kirra-ota-ctl status                     show the boot record\n\
          \n\
          probe flags: --cmd '<sh>' (exit 0 = healthy; required) --window-secs N (30)\n\
          \x20            --interval-secs S (2) --successes K (3) --unit NAME (kirra-governor)\n\
          \x20            --no-restart\n\
+         pull flags:  --verifier <url> --node-id <id> --cohorts a,b --artifact-base <url>\n\
+         \x20            (each also from KIRRA_VERIFIER_URL/KIRRA_NODE_ID/KIRRA_NODE_COHORTS/KIRRA_OTA_ARTIFACT_BASE)\n\
          \n\
          ENV: KIRRA_OTA_SLOT_A KIRRA_OTA_SLOT_B KIRRA_OTA_BOOT_RECORD KIRRA_OTA_GOVERNOR_BIN KIRRA_OTA_UNIT"
     );
