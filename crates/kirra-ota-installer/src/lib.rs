@@ -377,10 +377,19 @@ impl BootController for InMemoryBootController {
 
 /// The persisted record a [`FileBootController`] keeps — the app-level A/B boot
 /// state a systemd unit / launcher reads to pick which governor slot to run.
+///
+/// `trying` is the persisted analogue of [`InstallState::Trying`]'s target: the
+/// slot whose ONE-SHOT trial the launcher is currently in. It lets a per-invocation
+/// launcher/CLI (which has no in-memory `Installer`) both (a) enforce one-shot —
+/// after consuming `try_boot` the launcher records `trying`, so a crash-restart
+/// runs `active` again (auto-rollback) — and (b) know which slot to make active on
+/// `commit`. `#[serde(default)]` keeps older two-field records readable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootRecord {
     pub active: Slot,
     pub try_boot: Option<Slot>,
+    #[serde(default)]
+    pub trying: Option<Slot>,
 }
 
 /// A file-backed [`BootController`] — persists the A/B boot record to a JSON file.
@@ -410,6 +419,7 @@ impl FileBootController {
             let rec = BootRecord {
                 active: default_active,
                 try_boot: None,
+                trying: None,
             };
             write_record(&path, &rec)?;
         }
@@ -418,6 +428,13 @@ impl FileBootController {
 
     pub fn record(&self) -> std::io::Result<BootRecord> {
         read_record(&self.path)
+    }
+
+    /// Atomically persist a full boot record. The app-level launcher/CLI uses this
+    /// to apply the [`plan_run`]/[`plan_commit`]/[`plan_rollback`]/[`plan_stage`]
+    /// transitions, which manage `trying` beyond the trait's active/try_boot ops.
+    pub fn write(&mut self, rec: &BootRecord) -> std::io::Result<()> {
+        write_record(&self.path, rec)
     }
 }
 
@@ -436,6 +453,7 @@ impl BootController for FileBootController {
             &BootRecord {
                 active: slot,
                 try_boot: None,
+                trying: None,
             },
         )
     }
@@ -445,8 +463,75 @@ impl BootController for FileBootController {
             &BootRecord {
                 active: slot,
                 try_boot: None,
+                trying: None,
             },
         )
+    }
+}
+
+/// Which slot the launcher should run for `rec`, and the record it must persist
+/// FIRST (one-shot enforcement). Pure:
+/// - `try_boot = Some(t)` → the first trial boot: run `t`, and consume the flag
+///   into `trying` so a crash-restart runs `active` again (auto-rollback);
+/// - else `trying = Some(_)` → the trial slot already had its one shot and we're
+///   back here → run `active` and clear `trying` (the rollback is complete);
+/// - else → steady state, run `active`.
+pub fn plan_run(rec: &BootRecord) -> (Slot, BootRecord) {
+    if let Some(t) = rec.try_boot {
+        (
+            t,
+            BootRecord {
+                active: rec.active,
+                try_boot: None,
+                trying: Some(t),
+            },
+        )
+    } else if rec.trying.is_some() {
+        (
+            rec.active,
+            BootRecord {
+                active: rec.active,
+                try_boot: None,
+                trying: None,
+            },
+        )
+    } else {
+        (rec.active, rec.clone())
+    }
+}
+
+/// Stage a new artifact into the inactive slot: arm `try_boot` on it. Pure record
+/// transition (the caller does the verify + copy first).
+pub fn plan_stage(rec: &BootRecord) -> BootRecord {
+    BootRecord {
+        active: rec.active,
+        try_boot: Some(rec.active.other()),
+        trying: None,
+    }
+}
+
+/// Commit the in-progress trial as the new active. `Err` if no trial is in
+/// progress (`trying` is `None`) — nothing to commit.
+pub fn plan_commit(rec: &BootRecord) -> Result<BootRecord, InstallError> {
+    match rec.trying {
+        Some(t) => Ok(BootRecord {
+            active: t,
+            try_boot: None,
+            trying: None,
+        }),
+        None => Err(InstallError::InvalidTransition {
+            state: "no-trial",
+            action: "commit",
+        }),
+    }
+}
+
+/// Abandon any staged/trial state and stay on the current active slot.
+pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
+    BootRecord {
+        active: rec.active,
+        try_boot: None,
+        trying: None,
     }
 }
 
@@ -702,7 +787,8 @@ mod tests {
             inst.boot_controller().record().unwrap(),
             BootRecord {
                 active: Slot::A,
-                try_boot: Some(Slot::B)
+                try_boot: Some(Slot::B),
+                trying: None,
             }
         );
         inst.report_health(true).unwrap();
@@ -711,7 +797,8 @@ mod tests {
             inst.boot_controller().record().unwrap(),
             BootRecord {
                 active: Slot::B,
-                try_boot: None
+                try_boot: None,
+                trying: None,
             }
         );
         let reopened = FileBootController::open(&path, Slot::A).unwrap();
@@ -743,7 +830,8 @@ mod tests {
                 boot.record().unwrap(),
                 BootRecord {
                     active: Slot::A,
-                    try_boot: None
+                    try_boot: None,
+                    trying: None,
                 }
             );
         }
@@ -757,5 +845,88 @@ mod tests {
             "the temp file must be consumed by the rename"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    // --- app-level A/B launcher/CLI transitions (plan_*) -------------------
+
+    fn rec(active: Slot, try_boot: Option<Slot>, trying: Option<Slot>) -> BootRecord {
+        BootRecord {
+            active,
+            try_boot,
+            trying,
+        }
+    }
+
+    #[test]
+    fn plan_run_steady_state_runs_active() {
+        let (slot, new) = plan_run(&rec(Slot::A, None, None));
+        assert_eq!(slot, Slot::A);
+        assert_eq!(new, rec(Slot::A, None, None), "no change in steady state");
+    }
+
+    #[test]
+    fn plan_run_first_trial_consumes_try_boot_into_trying() {
+        // stage armed try_boot=B; the first run boots B one-shot and records the trial.
+        let (slot, new) = plan_run(&rec(Slot::A, Some(Slot::B), None));
+        assert_eq!(slot, Slot::B, "the trial slot runs");
+        assert_eq!(
+            new,
+            rec(Slot::A, None, Some(Slot::B)),
+            "one-shot consumed; active still A"
+        );
+    }
+
+    #[test]
+    fn plan_run_after_failed_trial_auto_rolls_back_to_active() {
+        // The trial slot crashed/exited without commit → this run reverts to active.
+        let (slot, new) = plan_run(&rec(Slot::A, None, Some(Slot::B)));
+        assert_eq!(slot, Slot::A, "auto-rollback runs the previous active");
+        assert_eq!(new, rec(Slot::A, None, None), "trial cleared");
+    }
+
+    #[test]
+    fn full_app_level_cycle_commit() {
+        // stage → run(trial) → commit.
+        let staged = plan_stage(&rec(Slot::A, None, None));
+        assert_eq!(staged, rec(Slot::A, Some(Slot::B), None));
+        let (slot, trialing) = plan_run(&staged);
+        assert_eq!(slot, Slot::B);
+        let committed = plan_commit(&trialing).unwrap();
+        assert_eq!(committed, rec(Slot::B, None, None), "B is the new active");
+        // A subsequent run steadily runs B.
+        assert_eq!(plan_run(&committed).0, Slot::B);
+    }
+
+    #[test]
+    fn full_app_level_cycle_rollback() {
+        let staged = plan_stage(&rec(Slot::A, None, None));
+        let (_slot, trialing) = plan_run(&staged); // now trying=Some(B), active A
+                                                   // Operator rolls back (or the trial crashed): stay on A.
+        let rolled = plan_rollback(&trialing);
+        assert_eq!(rolled, rec(Slot::A, None, None));
+        assert_eq!(plan_run(&rolled).0, Slot::A);
+    }
+
+    #[test]
+    fn commit_without_a_trial_is_refused() {
+        assert!(matches!(
+            plan_commit(&rec(Slot::A, None, None)),
+            Err(InstallError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn boot_record_deserializes_legacy_two_field_form() {
+        // A pre-`trying` record (two fields) still parses — `trying` defaults None.
+        let legacy = r#"{"active":"a","try_boot":"b"}"#;
+        let rec: BootRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            rec,
+            BootRecord {
+                active: Slot::A,
+                try_boot: Some(Slot::B),
+                trying: None
+            }
+        );
     }
 }

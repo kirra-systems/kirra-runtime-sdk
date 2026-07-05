@@ -17,6 +17,12 @@ repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
 license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
+# The node-side app-level A/B launcher/CLI (systemd `ExecStart`). Unix-only exec;
+# the pure transition logic it drives lives in the lib and is tested there.
+[[bin]]
+name = "kirra-ota-ctl"
+path = "src/bin/kirra_ota_ctl.rs"
+
 [dependencies]
 # The vetted SHA-256 — the SAME digest primitive the audit chain, release token,
 # and root crate use — to verify a staged artifact against the campaign's signed

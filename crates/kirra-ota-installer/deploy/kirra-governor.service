@@ -1,0 +1,38 @@
+# kirra-governor.service — app-level A/B governor unit (WS-4 / Track 3).
+#
+# systemd supervises `kirra-ota-ctl run`, which exec-replaces itself with the
+# ACTIVE (or one-shot TRIAL) governor slot — so the PID systemd watches IS the
+# governor. Restart=always is what makes rollback automatic: a trial slot that
+# crashes is restarted, and `run` then reverts to the previous active (the
+# one-shot try_boot was consumed on the first trial boot).
+#
+# Install:
+#   cp kirra-ota-ctl            /usr/local/bin/
+#   cp kirra-governor.service   /etc/systemd/system/
+#   cp kirra-ota.env.example    /etc/kirra/ota.env      # edit paths
+#   systemctl daemon-reload && systemctl enable --now kirra-governor
+[Unit]
+Description=Kirra governor (app-level A/B, health-gated rollback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/kirra/ota.env
+ExecStart=/usr/local/bin/kirra-ota-ctl run
+# Automatic rollback: a crashing trial slot is restarted; `run` reverts to the
+# previous active on the next start.
+Restart=always
+RestartSec=2
+# If BOTH slots crash-loop, stop trying (surfaces a hard fault instead of a
+# tight restart loop). Tune per platform.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+# Hardening (adjust to the governor's real needs).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kirra
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
