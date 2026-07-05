@@ -1017,6 +1017,47 @@ fn predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3() {
         "a non-empty mode set with no evaluable window must fail closed; got {verdict:?}");
 }
 
+#[test]
+fn predictive_rss_fails_closed_per_object_when_one_mode_is_unevaluable() {
+    // PER-OBJECT fail-closed: the multi-modal pass must evaluate EVERY object's
+    // mode or fail closed. The B3 guard was set-level — a single "did we evaluate
+    // anything?" flag — so one object's evaluable mode MASKED another object's
+    // fully-unevaluable one, silently letting that object's predicted threat
+    // through (a per-object fail-OPEN reachable via the public `predicted_modes`
+    // arg). Here object 1's mode is evaluable + safe (far to the side, beyond the
+    // lateral-alignment tolerance, so it is evaluated then skipped), while object
+    // 2's mode has proper inter-sample windows but timestamps FAR outside the ego
+    // trajectory's span ([0, 1.9 s]) — so `nearest_in_time` matches nothing and it
+    // is never checked. Pre-fix this returned Accept (object 1 satisfied the
+    // set-level flag); it must now MRC on object 2.
+    let trajectory = straight_trajectory(20, 6.0, 0.1); // ego times [0, 1.9 s], x from 5.0
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    // Object 1 — evaluable and safe (far off to the side; evaluated then skipped
+    // by the lateral-alignment gate). Satisfies the set-level flag on its own.
+    let evaluable_safe = [
+        PredictedSample { pos: Point { x_m: 50.0, y_m: -10.0 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 50.0, y_m: -10.0 }, time_from_start_s: 0.1 },
+    ];
+    // Object 2 — has windows (dt > 0) but every sample's time is outside the ego
+    // span, so no ego pose matches within tolerance: unevaluable.
+    let windowed_unevaluable = [
+        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 100.0 },
+        PredictedSample { pos: Point { x_m: 6.0, y_m: 0.0 }, time_from_start_s: 100.1 },
+    ];
+    let modes = [
+        PredictedMode { object_id: 1, samples: &evaluable_safe },
+        PredictedMode { object_id: 2, samples: &windowed_unevaluable },
+    ];
+
+    let verdict = validate_trajectory_slow_capped(
+        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        "one object's unevaluable mode must fail closed even when another object's mode is evaluable; got {verdict:?}");
+}
+
 // ---------------------------------------------------------------------------
 // RSS conjunction (§4): a safe stationary queue is admitted; genuine danger
 // (driving in, or a lateral cut-in) is still rejected. A deterministic SWEEP —
