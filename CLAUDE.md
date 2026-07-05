@@ -295,6 +295,7 @@ Admin token or an `integrator`-role principal.
 - `GET /attestation/status/:node_id`
 - `GET /fleet/posture`, `GET /fleet/posture/:node_id`
 - `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id`
+- `GET /fleet/campaigns/assignment/:node_id?cohorts=a,b` — WS-4 node-facing OTA artifact assignment (which signed governor digest this node should run under the active campaigns; posture-gated → denied under LockedOut)
 - `GET /federation/reports/:asset_id`
 
 ---

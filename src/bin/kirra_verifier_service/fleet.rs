@@ -11,31 +11,43 @@ pub(crate) async fn system_posture_stream(
     State(svc): State<Arc<ServiceState>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = svc.app.posture_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| {
-        match msg {
-            Ok(event) => serde_json::to_string(&event).ok().map(|data| {
-                Ok(Event::default().data(data))
-            }),
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "posture stream subscriber lagged; frames dropped");
-                None
-            }
+    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
+        Ok(event) => serde_json::to_string(&event)
+            .ok()
+            .map(|data| Ok(Event::default().data(data))),
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+            tracing::warn!(
+                skipped = n,
+                "posture stream subscriber lagged; frames dropped"
+            );
+            None
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 pub(crate) async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok".to_string() })
+    Json(HealthResponse {
+        status: "ok".to_string(),
+    })
 }
 
 pub(crate) async fn ready(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     // SAFETY: SG-HA-3 — lightweight health probe off the worker pool via read replica.
     match svc.app.store.call_read(|store| store.health_check()).await {
-        Ok(Ok(())) => (StatusCode::OK, Json(HealthResponse { status: "ready".to_string() }))
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            Json(HealthResponse {
+                status: "ready".to_string(),
+            }),
+        )
             .into_response(),
-        _ => (StatusCode::SERVICE_UNAVAILABLE,
-                   Json(HealthResponse { status: "db_unavailable".to_string() }))
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                status: "db_unavailable".to_string(),
+            }),
+        )
             .into_response(),
     }
 }
@@ -80,7 +92,10 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         .fleet_metrics
         .format_prometheus(&kirra_verifier::standby_monitor::instance_id(), &snap);
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
 }
@@ -91,19 +106,33 @@ pub(crate) async fn export_backup(State(svc): State<Arc<ServiceState>>) -> impl 
     // heaviest read. `call_read` runs it off the worker pool AND against a
     // read-only replica connection, so a large dump neither pins a tokio worker
     // nor contends the writer mutex (a concurrent write proceeds unblocked).
-    let result = svc.app.store.call_read(move |store| {
-        let nodes = store.load_nodes().ok()?;
-        let dependencies = store.load_dependencies().ok()?;
-        let posture_events = store.load_all_posture_events().ok()?;
-        Some(BackupExport { exported_at_ms, nodes, dependencies, posture_events })
-    })
-    .await;
+    let result = svc
+        .app
+        .store
+        .call_read(move |store| {
+            let nodes = store.load_nodes().ok()?;
+            let dependencies = store.load_dependencies().ok()?;
+            let posture_events = store.load_all_posture_events().ok()?;
+            Some(BackupExport {
+                exported_at_ms,
+                nodes,
+                dependencies,
+                posture_events,
+            })
+        })
+        .await;
     match result {
         Ok(Some(export)) => Json(export).into_response(),
-        Ok(None) => (StatusCode::INTERNAL_SERVER_ERROR,
-                     Json(json!({ "error": "failed to export backup" }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "store lock poisoned" }))).into_response(),
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to export backup" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "store lock poisoned" })),
+        )
+            .into_response(),
     }
 }
 
@@ -123,11 +152,66 @@ pub(crate) async fn get_node_posture(
     Json(posture)
 }
 
+/// Query for the node campaign-assignment lookup. `cohorts` is a comma-separated
+/// list of the cohort labels the node belongs to (the node declares them from its
+/// deployment ring config); empty/absent → the node is in no cohort and is never
+/// assigned an artifact.
+#[derive(Deserialize, Default)]
+pub(crate) struct NodeAssignmentQuery {
+    #[serde(default)]
+    cohorts: String,
+}
+
+/// GET /fleet/campaigns/assignment/{node_id}?cohorts=a,b — WS-4 / Track 3.
+///
+/// The node-facing seam the on-device installer consumes: given a node id and the
+/// cohorts it belongs to, resolve which SIGNED governor artifact it should run from
+/// the currently ACTIVE campaigns at their staged rollout percentages. Public
+/// read-only (posture-gated like the other `/fleet/*` reads): under LockedOut the
+/// gate denies it — and active campaigns are auto-halted then anyway — so no new
+/// artifact is ever adopted while the fleet is locked out. The returned digest is
+/// public (a signed release identity), never a secret.
+pub(crate) async fn get_node_campaign_assignment(
+    State(svc): State<Arc<ServiceState>>,
+    Path(node_id): Path<String>,
+    Query(q): Query<NodeAssignmentQuery>,
+) -> impl IntoResponse {
+    let cohorts: Vec<String> = q
+        .cohorts
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Read the active campaign set off the worker pool (read replica).
+    match svc
+        .app
+        .store
+        .call_read(|store| store.load_active_campaigns())
+        .await
+    {
+        Ok(Ok(active)) => {
+            let assignment =
+                kirra_verifier::ota_campaign::resolve_node_assignment(&node_id, &cohorts, &active);
+            (StatusCode::OK, Json(assignment)).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "query failed" })),
+        )
+            .into_response(),
+    }
+}
+
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,
 /// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
 pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     // SAFETY: SG-HA-3 — read off the worker pool via read replica.
-    match svc.app.store.call_read(|store| store.load_av_subsystems()).await {
+    match svc
+        .app
+        .store
+        .call_read(|store| store.load_av_subsystems())
+        .await
+    {
         Ok(Ok(rows)) => {
             let subsystems: Vec<AvSubsystemView> = rows
                 .into_iter()
@@ -144,8 +228,11 @@ pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> 
             let total = subsystems.len();
             Json(json!({ "subsystems": subsystems, "total": total })).into_response()
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to load av subsystems" }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to load av subsystems" })),
+        )
+            .into_response(),
     }
 }
 
@@ -153,7 +240,12 @@ pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> 
 /// public-key FINGERPRINT (never the PEM), matching the write-side convention. (#385)
 pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
     // SAFETY: SG-HA-3 — read off the worker pool via read replica.
-    match svc.app.store.call_read(|store| store.load_operators()).await {
+    match svc
+        .app
+        .store
+        .call_read(|store| store.load_operators())
+        .await
+    {
         Ok(Ok(rows)) => {
             let operators: Vec<OperatorView> = rows
                 .into_iter()
@@ -173,8 +265,11 @@ pub(crate) async fn list_operators(State(svc): State<Arc<ServiceState>>) -> impl
             let total = operators.len();
             Json(json!({ "operators": operators, "total": total })).into_response()
         }
-        _ => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to load operators" }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to load operators" })),
+        )
+            .into_response(),
     }
 }
 
@@ -183,12 +278,22 @@ pub(crate) async fn register_dependencies(
     Json(req): Json<RegisterDependenciesRequest>,
 ) -> impl IntoResponse {
     if !svc.app.is_active() {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "instance is in passive standby mode" })),
+        )
+            .into_response();
     }
-    if svc.app.persist_and_insert_deps(&req.node_id, req.depends_on).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to persist dependencies" }))).into_response();
+    if svc
+        .app
+        .persist_and_insert_deps(&req.node_id, req.depends_on)
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to persist dependencies" })),
+        )
+            .into_response();
     }
 
     let posture = svc.app.calculate_posture(&req.node_id);
@@ -206,20 +311,38 @@ pub(crate) async fn register_dependencies(
             }
         }).await;
     }
-    emit_posture_event(&svc.app, "DEPENDENCY_GRAPH_MUTATED", Some(req.node_id.clone()));
-    enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged);
+    emit_posture_event(
+        &svc.app,
+        "DEPENDENCY_GRAPH_MUTATED",
+        Some(req.node_id.clone()),
+    );
+    enqueue_recalc(
+        &svc,
+        kirra_verifier::posture_engine_v2::PostureRecalcTrigger::DependencyGraphChanged,
+    );
 
-    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "dependencies_registered": true }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "node_id": req.node_id, "dependencies_registered": true })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn get_node_history(
     State(svc): State<Arc<ServiceState>>,
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
-    match svc.app.store.with_read(|store| store.load_node_history(&node_id)) {
+    match svc
+        .app
+        .store
+        .with_read(|store| store.load_node_history(&node_id))
+    {
         Ok(history) => Json(json!({ "node_id": node_id, "history": history })).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to load history" }))).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to load history" })),
+        )
+            .into_response(),
     }
 }
 
@@ -228,7 +351,11 @@ pub(crate) async fn get_node_flap_status(
     Path(node_id): Path<String>,
 ) -> impl IntoResponse {
     let five_minutes_ago = now_ms().saturating_sub(300_000);
-    match svc.app.store.with_read(|store| store.count_recent_posture_events(&node_id, five_minutes_ago)) {
+    match svc
+        .app
+        .store
+        .with_read(|store| store.count_recent_posture_events(&node_id, five_minutes_ago))
+    {
         Ok(count) => {
             let status = FlapStatus {
                 node_id: node_id.clone(),
@@ -237,8 +364,11 @@ pub(crate) async fn get_node_flap_status(
             };
             Json(status).into_response()
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                   Json(json!({ "error": "failed to query events" }))).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to query events" })),
+        )
+            .into_response(),
     }
 }
 
@@ -247,51 +377,81 @@ pub(crate) async fn handle_sensor_fault_report(
     Json(req): Json<SensorFaultReportRequest>,
 ) -> impl IntoResponse {
     if req.source_node_id.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "source_node_id is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "source_node_id is required" })),
+        )
+            .into_response();
     }
     if !svc.app.nodes.contains_key(&req.source_node_id) {
-        return (StatusCode::NOT_FOUND,
-                Json(json!({ "error": "node not registered" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "node not registered" })),
+        )
+            .into_response();
     }
 
     let now = now_ms();
 
     // SAFETY: SG-HA-3 — read off the worker pool via read replica.
     let node_id_cf = req.source_node_id.clone();
-    let confidence_floor = svc.app.store.call_read(move |store| {
-        store.load_av_confidence_floor(&node_id_cf).unwrap_or(None).unwrap_or(0.70)
-    }).await.unwrap_or(0.70);
+    let confidence_floor = svc
+        .app
+        .store
+        .call_read(move |store| {
+            store
+                .load_av_confidence_floor(&node_id_cf)
+                .unwrap_or(None)
+                .unwrap_or(0.70)
+        })
+        .await
+        .unwrap_or(0.70);
 
     let is_degraded = req.hardware_fault_detected || req.confidence_score < confidence_floor;
 
     if is_degraded {
-        let reason = if req.hardware_fault_detected { "hardware_fault" } else { "low_confidence" };
+        let reason = if req.hardware_fault_detected {
+            "hardware_fault"
+        } else {
+            "low_confidence"
+        };
 
         // SAFETY: SG-HA-3 — durable streak reset off the worker pool.
         let node_id_rs = req.source_node_id.clone();
-        let _ = svc.app.store.call(move |store| {
-            let _ = store.reset_recovery_streak(&node_id_rs, now);
-        }).await;
+        let _ = svc
+            .app
+            .store
+            .call(move |store| {
+                let _ = store.reset_recovery_streak(&node_id_rs, now);
+            })
+            .await;
 
         let updated = match svc.app.nodes.get(&req.source_node_id) {
             Some(n) => RegisteredNode {
-                node_id:              n.node_id.clone(),
-                status:               NodeTrustState::Untrusted(reason.to_string()),
-                registered_at_ms:     n.registered_at_ms,
+                node_id: n.node_id.clone(),
+                status: NodeTrustState::Untrusted(reason.to_string()),
+                registered_at_ms: n.registered_at_ms,
                 last_trust_update_ms: now,
-                ak_public_pem:        n.ak_public_pem.clone(),
+                ak_public_pem: n.ak_public_pem.clone(),
                 expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
-                site:                 n.site.clone(),
-                firmware_version:     n.firmware_version.clone(),
+                site: n.site.clone(),
+                firmware_version: n.firmware_version.clone(),
             },
-            None => return (StatusCode::NOT_FOUND,
-                            Json(json!({ "error": "node not found" }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "node not found" })),
+                )
+                    .into_response()
+            }
         };
 
         if svc.app.persist_and_insert_node(updated).is_err() {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "failed to persist node state" }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to persist node state" })),
+            )
+                .into_response();
         }
 
         let event = json!({
@@ -313,34 +473,56 @@ pub(crate) async fn handle_sensor_fault_report(
             }
         }).await;
 
-        emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
-        enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
-            node_id: req.source_node_id.clone(),
-            reason:  format!("SENSOR_FAULT:{reason}"),
-        });
+        emit_posture_event(
+            &svc.app,
+            "NODE_STATUS_CHANGED",
+            Some(req.source_node_id.clone()),
+        );
+        enqueue_recalc(
+            &svc,
+            kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+                node_id: req.source_node_id.clone(),
+                reason: format!("SENSOR_FAULT:{reason}"),
+            },
+        );
 
-        return (StatusCode::OK, Json(json!({
-            "source_node_id": req.source_node_id,
-            "accepted": true,
-            "fault_recorded": true,
-        }))).into_response();
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "source_node_id": req.source_node_id,
+                "accepted": true,
+                "fault_recorded": true,
+            })),
+        )
+            .into_response();
     }
 
-    let currently_untrusted = svc.app.nodes.get(&req.source_node_id)
+    let currently_untrusted = svc
+        .app
+        .nodes
+        .get(&req.source_node_id)
         .map(|n| matches!(n.status, NodeTrustState::Untrusted(_)))
         .unwrap_or(false);
 
     if !currently_untrusted {
         // SAFETY: SG-HA-3 — durable telemetry timestamp update off the worker pool.
         let node_id_tt = req.source_node_id.clone();
-        let _ = svc.app.store.call(move |store| {
-            let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
-        }).await;
-        return (StatusCode::OK, Json(json!({
-            "source_node_id": req.source_node_id,
-            "accepted": true,
-            "fault_recorded": false,
-        }))).into_response();
+        let _ = svc
+            .app
+            .store
+            .call(move |store| {
+                let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+            })
+            .await;
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "source_node_id": req.source_node_id,
+                "accepted": true,
+                "fault_recorded": false,
+            })),
+        )
+            .into_response();
     }
 
     // SAFETY: SG-HA-3 — recovery-streak read+write off the worker pool.
@@ -348,13 +530,18 @@ pub(crate) async fn handle_sensor_fault_report(
     // it must run on the writer connection (via `call`) to keep the
     // read-then-write atomic under one lock acquisition.
     let node_id_rr = req.source_node_id.clone();
-    let decision = match svc.app.store.call(move |store| {
-        // `&*store` dereferences to `&VerifierStore` so the generic
-        // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
-        // resolves correctly (S3 / #115 — trait seam, behavior unchanged:
-        // the trait impl delegates verbatim).
-        evaluate_recovery_report(&*store, &node_id_rr, now)
-    }).await {
+    let decision = match svc
+        .app
+        .store
+        .call(move |store| {
+            // `&*store` dereferences to `&VerifierStore` so the generic
+            // `S: RecoveryStreakStore` bound on `evaluate_recovery_report`
+            // resolves correctly (S3 / #115 — trait seam, behavior unchanged:
+            // the trait impl delegates verbatim).
+            evaluate_recovery_report(&*store, &node_id_rr, now)
+        })
+        .await
+    {
         Ok(d) => d,
         // Task failure: treat as NotApplicable (fail-closed: no recovery confirmed).
         Err(_) => HysteresisDecision::NotApplicable,
@@ -364,22 +551,30 @@ pub(crate) async fn handle_sensor_fault_report(
         HysteresisDecision::RecoveryConfirmed { streak } => {
             let updated = match svc.app.nodes.get(&req.source_node_id) {
                 Some(n) => RegisteredNode {
-                    node_id:              n.node_id.clone(),
-                    status:               NodeTrustState::Trusted,
-                    registered_at_ms:     n.registered_at_ms,
+                    node_id: n.node_id.clone(),
+                    status: NodeTrustState::Trusted,
+                    registered_at_ms: n.registered_at_ms,
                     last_trust_update_ms: now,
-                    ak_public_pem:        n.ak_public_pem.clone(),
+                    ak_public_pem: n.ak_public_pem.clone(),
                     expected_pcr16_digest_hex: n.expected_pcr16_digest_hex.clone(),
-                    site:                 n.site.clone(),
-                    firmware_version:     n.firmware_version.clone(),
+                    site: n.site.clone(),
+                    firmware_version: n.firmware_version.clone(),
                 },
-                None => return (StatusCode::NOT_FOUND,
-                                Json(json!({ "error": "node not found" }))).into_response(),
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "error": "node not found" })),
+                    )
+                        .into_response()
+                }
             };
 
             if svc.app.persist_and_insert_node(updated).is_err() {
-                return (StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "failed to persist node state" }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to persist node state" })),
+                )
+                    .into_response();
             }
 
             // P1: the recovery-streak reset + its audit write run as ONE off-worker
@@ -401,28 +596,43 @@ pub(crate) async fn handle_sensor_fault_report(
                 }
             }).await;
 
-            emit_posture_event(&svc.app, "NODE_STATUS_CHANGED", Some(req.source_node_id.clone()));
-            enqueue_recalc(&svc, kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
-                node_id: req.source_node_id.clone(),
-                reason:  "SENSOR_RECOVERY_CONFIRMED".to_string(),
-            });
+            emit_posture_event(
+                &svc.app,
+                "NODE_STATUS_CHANGED",
+                Some(req.source_node_id.clone()),
+            );
+            enqueue_recalc(
+                &svc,
+                kirra_verifier::posture_engine_v2::PostureRecalcTrigger::NodeTrustChanged {
+                    node_id: req.source_node_id.clone(),
+                    reason: "SENSOR_RECOVERY_CONFIRMED".to_string(),
+                },
+            );
         }
         HysteresisDecision::StreakBuilding { .. } | HysteresisDecision::WindowExpired { .. } => {}
         HysteresisDecision::NotApplicable => {
             // SAFETY: SG-HA-3 — durable telemetry timestamp update off the worker pool.
             let node_id_tt = req.source_node_id.clone();
-            let _ = svc.app.store.call(move |store| {
-                let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
-            }).await;
+            let _ = svc
+                .app
+                .store
+                .call(move |store| {
+                    let _ = store.touch_av_telemetry_timestamp(&node_id_tt, now);
+                })
+                .await;
         }
     }
 
-    (StatusCode::OK, Json(json!({
-        "source_node_id":      req.source_node_id,
-        "accepted":            true,
-        "fault_recorded":      false,
-        "hysteresis_decision": format!("{:?}", decision),
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({
+            "source_node_id":      req.source_node_id,
+            "accepted":            true,
+            "fault_recorded":      false,
+            "hysteresis_decision": format!("{:?}", decision),
+        })),
+    )
+        .into_response()
 }
 
 pub(crate) async fn handle_register_av_asset(
@@ -430,12 +640,18 @@ pub(crate) async fn handle_register_av_asset(
     Json(req): Json<RegisterAvAssetRequest>,
 ) -> impl IntoResponse {
     if req.node_id.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "node_id is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "node_id is required" })),
+        )
+            .into_response();
     }
     if !svc.app.nodes.contains_key(&req.node_id) {
-        return (StatusCode::NOT_FOUND,
-                Json(json!({ "error": "node not registered" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "node not registered" })),
+        )
+            .into_response();
     }
 
     let now = now_ms();
@@ -479,5 +695,9 @@ pub(crate) async fn handle_register_av_asset(
         .av_registry_dirty
         .store(true, std::sync::atomic::Ordering::Release);
 
-    (StatusCode::OK, Json(json!({ "node_id": req.node_id, "registered": true }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "node_id": req.node_id, "registered": true })),
+    )
+        .into_response()
 }

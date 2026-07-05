@@ -1702,6 +1702,14 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/fleet/posture/{node_id}", get(get_node_posture))
         .route("/fleet/history/{node_id}", get(get_node_history))
         .route("/fleet/flapping/{node_id}", get(get_node_flap_status))
+        // WS-4 / Track 3 — node-facing OTA artifact assignment (which signed
+        // governor artifact this node should run under the active campaigns).
+        // Public read-only + posture-gated: denied under LockedOut (no artifact
+        // adoption while the fleet is locked out).
+        .route(
+            "/fleet/campaigns/assignment/{node_id}",
+            get(get_node_campaign_assignment),
+        )
         .route("/federation/reports/{asset_id}", get(get_federated_reports));
 
     // #696 (HT2): origins are restrictable to a configured allowlist via
@@ -2083,6 +2091,97 @@ mod posture_gate_real_router_tests {
         let (st, _) =
             campaign_req(svc.clone(), "POST", "/system/campaigns/ghost/advance", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    /// Seed a `Rolling` campaign at 100% directly in the store (no admin auth
+    /// needed for a store write in-process), so the public assignment read has
+    /// something to resolve.
+    fn seed_rolling_campaign(svc: &Arc<ServiceState>, id: &str, cohort: &str) {
+        use kirra_verifier::ota_campaign::{Campaign, CampaignState};
+        svc.app
+            .store
+            .with(|store| {
+                let mut c = Campaign::new(
+                    id,
+                    CAMPAIGN_DIGEST,
+                    "v1",
+                    vec![cohort.to_string()],
+                    vec![100],
+                    1_000,
+                )
+                .unwrap();
+                c.arm(1_100).unwrap();
+                c.state = CampaignState::Rolling;
+                c.rollout_percent = 100; // roll the whole cohort
+                store.insert_campaign(&c)
+            })
+            .expect("seed campaign");
+    }
+
+    /// GET the node assignment through the REAL assembled router and return the
+    /// status + parsed JSON body.
+    async fn assignment_req(
+        svc: Arc<ServiceState>,
+        node_id: &str,
+        cohorts: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let uri = format!("/fleet/campaigns/assignment/{node_id}?cohorts={cohorts}");
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build request");
+        let resp = build_app(svc)
+            .oneshot(req)
+            .await
+            .expect("router service should not panic");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    /// The node-facing assignment read is mounted on the real router, is reachable
+    /// WITHOUT auth (public read-only), and resolves the active campaign to a
+    /// signed-artifact assignment.
+    #[tokio::test]
+    async fn node_assignment_resolves_on_real_router_under_nominal() {
+        let svc = state_with(FleetPosture::Nominal);
+        seed_rolling_campaign(&svc, "camp-assign", "canary");
+
+        // A node in the rolled cohort gets the artifact.
+        let (st, j) = assignment_req(Arc::clone(&svc), "node-1", "canary").await;
+        assert_eq!(st, StatusCode::OK, "public assignment read must be reachable; body={j}");
+        assert_eq!(j["rolled"], true);
+        assert_eq!(j["artifact_digest"], CAMPAIGN_DIGEST);
+        assert_eq!(j["campaign_id"], "camp-assign");
+
+        // A node in a DIFFERENT cohort gets no assignment.
+        let (st, j) = assignment_req(Arc::clone(&svc), "node-1", "other").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(j["rolled"], false);
+        assert_eq!(j["artifact_digest"], serde_json::Value::Null);
+    }
+
+    /// The assignment read is posture-gated like the other `/fleet/*` reads: under
+    /// LockedOut it is denied (503) — no artifact is adopted while the fleet is
+    /// locked out.
+    #[tokio::test]
+    async fn node_assignment_is_denied_under_lockedout() {
+        let svc = state_with(FleetPosture::LockedOut);
+        seed_rolling_campaign(&svc, "camp-assign", "canary");
+        let (st, _) = assignment_req(svc, "node-1", "canary").await;
+        assert_eq!(
+            st,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the assignment read must be posture-gated (denied under LockedOut)"
+        );
     }
 
     /// LockedOut blocks a functional READ on the production router — proving
