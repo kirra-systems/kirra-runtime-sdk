@@ -26,9 +26,12 @@ resolver = "2"
 name = "kirra-verifier"
 version = "1.1.2"
 edition = "2021"
-# MSRV (WS-0.7, docs/VERSIONING_POLICY.md §3): floor set by locked deps
-# (time-core 0.1.9 -> rustc 1.88); verified `cargo +1.88.0 check --workspace
-# --locked`. Raising this is a MINOR bump + CHANGELOG entry, per policy.
+# MSRV (WS-0.7, docs/VERSIONING_POLICY.md §3): floor set by locked deps that
+# each require 1.88 (time-core 0.1.9, serde_with 3.21, darling 0.23, home 0.5.12,
+# libloading 0.9, ort) — not by our own code. ENFORCED on every PR by the `msrv`
+# CI lane (`cargo +1.88.0 check --workspace --locked`), not just asserted here.
+# Raising this is a MINOR bump + CHANGELOG entry, per policy — in lock-step with
+# the CI lane and the parko-core `rust-version`.
 rust-version = "1.88"
 description = "Vendor-neutral runtime safety kernel for autonomous vehicles, robots, and drones"
 repository = "https://github.com/kirra-systems/kirra-runtime-sdk"

@@ -73,12 +73,14 @@ clears the ambiguity permanently (every active version will then be > 1.5).
   update` must not silently raise the effective floor past the pinned MSRV
   — if it would, either pin the dependency back or raise the MSRV by this
   process.
-- CI and release builds run on current stable Rust (≥ 1.88 by
-  construction); they do NOT themselves prove the MSRV. The MSRV claim is
-  verified explicitly — and must be re-verified when cutting a release or
-  updating either lockfile — by running
-  `cargo +1.88.0 check --workspace --locked` against both committed
-  lockfiles (root and `parko/`).
+- The general CI/release build + test lanes run on the pinned BUILD toolchain
+  (`rust-toolchain.toml`, currently 1.94.1) and do NOT themselves prove the
+  MSRV. The MSRV claim is instead ENFORCED on every PR by the dedicated `msrv`
+  CI lane (`.github/workflows/ci.yml`), which runs
+  `cargo +1.88.0 check --workspace --locked` against BOTH committed lockfiles
+  (root and `parko/`). A PR that reaches past 1.88 reds that lane with a clear
+  message instead of silently invalidating the floor; the same command
+  reproduces it locally.
 
 ## 4. Release process contract
 
