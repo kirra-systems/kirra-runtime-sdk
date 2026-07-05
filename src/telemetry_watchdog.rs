@@ -1229,15 +1229,16 @@ mod watchdog_di_tests {
             "*last_node_refresh_ms must be set to clock.now_ms() after a refresh");
     }
 
-    /// M3: the PRODUCTION spawned task offloads each sweep to `spawn_blocking`
-    /// (keeping the synchronous SQLite + `std::sync::Mutex` work off the async
-    /// worker) and moves the cross-tick state (`node_health`, `last_node_refresh_ms`)
-    /// into the blocking task and back out. Spawn the REAL watchdog against a
-    /// VirtualClock parked past the timeout and confirm a registered-but-silent node
-    /// is marked Untrusted and a trigger fires — proving the blocking hand-off
-    /// preserves the sweep state and drives the dead-man's switch end to end.
+    /// M3: exercise the PRODUCTION spawned watchdog loop end to end. The loop
+    /// offloads each sweep to `spawn_blocking` and hands the cross-tick state
+    /// (`node_health`, `last_node_refresh_ms`) into the blocking task and back out;
+    /// this test drives the real task against a VirtualClock parked past the timeout
+    /// and asserts the observable end-to-end result — a registered-but-silent node
+    /// marked Untrusted and a `WatchdogTimeout` trigger fired. It does not directly
+    /// assert the sweep ran on a blocking thread, but a broken offload or a dropped
+    /// state hand-off would fail to fire here, so it guards that production path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_spawned_watchdog_offloads_sweep_and_fires_end_to_end() {
+    async fn test_spawned_watchdog_loop_fires_end_to_end() {
         use crate::posture_cache::{CachedFleetPosture, SharedPostureCache};
         use crate::verifier::FleetPosture;
         use std::time::Duration;
