@@ -13,6 +13,13 @@ only be confirmed on the device.
 
 > Everything here uses paths from `/etc/kirra/ota.env`
 > (`crates/kirra-ota-installer/deploy/kirra-ota.env.example`). Adjust to your box.
+>
+> **`sudo` note:** the mutating commands (`stage` / `commit` / `rollback`) write
+> the root-owned slot dirs (`/opt/kirra/...`) and boot record (`/var/lib/kirra/...`),
+> so run them with `sudo`. `run` already runs as root under systemd; `status` is
+> read-only and needs no privilege. A `stage` that can't write its slot fails
+> **closed** — the boot record is left un-armed, so a permission error can never
+> leave a half-staged trial.
 
 ---
 
@@ -57,7 +64,7 @@ trial-boot it, confirm health, commit.
 NEW=/path/to/new/kirra-governor
 DIGEST=$(sha256sum "$NEW" | cut -d' ' -f1)
 
-kirra-ota-ctl stage "$NEW" "$DIGEST"
+sudo kirra-ota-ctl stage "$NEW" "$DIGEST"
 # staged into slot b (/opt/kirra/slots/b/kirra-governor); `systemctl restart` to trial-boot it
 kirra-ota-ctl status
 # active=a try_boot=Some("b") trying=None -> run would launch slot b ...
@@ -71,7 +78,7 @@ kirra-ota-ctl status
 curl -fsS http://127.0.0.1:8090/health && echo OK
 
 # Healthy → commit. B becomes the permanent active.
-kirra-ota-ctl commit
+sudo kirra-ota-ctl commit
 # committed: active slot is now b
 kirra-ota-ctl status
 # active=b try_boot=None trying=None -> run would launch slot b ...
@@ -93,7 +100,7 @@ printf '{"active":"a","try_boot":null,"trying":null}' | sudo tee /var/lib/kirra/
 
 BAD=/path/to/broken/kirra-governor      # crashes / exits immediately
 DIGEST=$(sha256sum "$BAD" | cut -d' ' -f1)
-kirra-ota-ctl stage "$BAD" "$DIGEST"
+sudo kirra-ota-ctl stage "$BAD" "$DIGEST"
 
 sudo systemctl restart kirra-governor    # trial-boots slot B → it crashes
 # systemd (Restart=always) restarts the unit; `run` now sees the consumed
@@ -116,6 +123,29 @@ For each path, paste: the `kirra-ota-ctl status` lines, the `systemctl status`
 one-liner, and the relevant `journalctl` excerpt. If anything diverges (paths,
 systemd `Type=exec` vs your systemd version, the health probe), tell me and I'll
 adjust the unit / CLI.
+
+## Hardware result (GATE C evidence)
+
+Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd
+`Type=exec`**, 2026-07-06, with stand-in governor scripts (a healthy `exec sleep
+infinity`, a broken `exit 1`):
+
+- **Healthy → commit:** `stage` (SHA-256 verified) → `systemctl restart` consumed
+  the one-shot `try_boot`, boot record went to `{"active":"a","try_boot":null,
+  "trying":"b"}` (in trial, still fenced by A), the new slot ran (`Main PID` was the
+  slot binary, not `kirra-ota-ctl` — confirming the `exec` handoff), `commit` →
+  `{"active":"b",...}`. ✓
+- **Unhealthy → automatic rollback:** staged a governor that exits 1 into the
+  inactive slot, `systemctl restart` trial-booted it; the journal shows the broken
+  trial `status=1/FAILURE`, `Restart=always` relaunched, and `run` reverted to the
+  good active slot with **no operator action** — boot record settled back to
+  `{"active":"b","try_boot":null,"trying":null}`. ✓
+
+Two things the hardware surfaced, both fixed in the shipped artifacts:
+- `stage`/`commit`/`rollback` need `sudo` (root-owned slot + record dirs) — noted above.
+- `StartLimitIntervalSec` / `StartLimitBurst` must live in `[Unit]`, not `[Service]`
+  (systemd v230+ ignored them under `[Service]` with an "Unknown key name" warning,
+  silently disabling the crash-loop backstop) — moved in `deploy/kirra-governor.service`.
 
 ## Follow-ups (after this drill passes)
 
