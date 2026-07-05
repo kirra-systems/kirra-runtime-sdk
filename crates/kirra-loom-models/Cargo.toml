@@ -1,0 +1,28 @@
+# Loom concurrency-model tests (stop-gate review M5 hardening).
+#
+# Loom exhaustively permutes thread interleavings + memory-ordering outcomes for a
+# small model, proving a concurrency invariant holds under ALL of them (not just
+# the schedules a stress test happens to hit). These models MIRROR the workspace's
+# safety-critical atomic protocols (cited by file:line in each test) using loom's
+# instrumented sync types.
+#
+# Loom requires `--cfg loom` (it replaces std's atomics/locks with its model-
+# checking versions), so the models + the loom dependency are BOTH gated on it:
+# a normal `cargo build`/`cargo test` here compiles an empty crate with 0 tests,
+# and the models run only under:
+#
+#     RUSTFLAGS="--cfg loom" cargo test -p kirra-loom-models --release
+#
+# The empty `[workspace]` table detaches this crate from the parent workspace
+# (like `fuzz/`): loom never enters the root Cargo.lock, the MSRV lane, or a
+# normal `cargo build --workspace`.
+[package]
+name = "kirra-loom-models"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[workspace]
