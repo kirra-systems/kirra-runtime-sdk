@@ -17,35 +17,17 @@ For the full task-level roadmap (PARK-001 through PARK-040), see
 
 ## Current Execution Order
 
-**Now (actively in progress — see /work/active.md):**
-- [~] PARK-001 — Attach `SafetyGovernor` to `ControlLoop` (GitHub Issue #6)
-- [~] PARK-002 — Add `set_state_for_test` test seam (GitHub Issue #7)
-- [~] PARK-003 — Posture divergence proptest (GitHub Issue #16)
-
-**Increment 1 completion (v0.1):**
-- PARK-004 NaN/Inf guard, PARK-005 Clock abstraction, PARK-006 release tag
-
-**TIME-SENSITIVE parallel tracks:**
-- PARK-020–023 TensorRT spike (Jetson arriving — highest leverage)
-- PARK-024–026 QNX deployment (30-day license — do not let this expire)
-
-**Increment 2 — HAL (v0.2):**
-- PARK-007 through PARK-012 (backend trait, CPU ONNX validation, MockBackend, stubs)
-
-**Increment 3 — Behavioral Safety / IEEE 2846 (v0.3):**
-- PARK-013–019: RSS safe-distance, posture engine wiring, audit chain, 10k-scenario sim
-- RSS_KIRRA_INTEGRATION.md is the detailed specification for this increment
-
-**Increment 4 — Silicon Matrix Expansion (v0.4):**
-- QNN, TIDL, OpenVINO, AMD backends (most blocked on hardware)
-
-**Increment 5 — Packaging (v1.2):**
-- PARK-031–035 Docker/Helm/installer/systemd/QNX artifact
-
-**Increment 6 — Robot Stack + Certification (v2.0):**
-- PARK-036–038 ROS2 + Hiwonder (BLOCKED on hardware delivery)
-- PARK-039–040 IEC 61508 SIL 3 / ASTM F3269 mappings
-- Apollo integration (APOLLO_KIRRA_INTEGRATION.md) follows ROS2 demo
+> **Live status is not tracked in this file.** This directory holds pre-execution
+> architecture sketches (the Documents table above) — those don't go stale. The
+> authoritative, current task-level roadmap + work-in-progress status lives in
+> [`/work/roadmap.md`](/work/roadmap.md) and [`/work/active.md`](/work/active.md),
+> with GitHub issue state as the other source of truth. An increment snapshot used
+> to be duplicated here and had drifted badly (it listed long-completed
+> Increment-1 tasks — attach-governor, test seam, divergence proptest — as
+> "in progress," while the tree is well past that: parko backends, the RSS/IEEE-2846
+> behavioral-safety layer, and the QNX governor-judge harness all exist). It was
+> removed in favor of the single source above. The stable design constraints that
+> govern any sequencing are kept below.
 
 ## Sequencing Rules
 

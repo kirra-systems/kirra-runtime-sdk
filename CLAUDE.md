@@ -8,6 +8,8 @@
 - **Primary binary**: `kirra_verifier_service` (`src/bin/kirra_verifier_service.rs`)
 - **Secondary binary**: `kirra_carla_client` (`src/bin/kirra_carla_client.rs`)
 - **Test suite**: `cargo test` (root). For a scoped crate use `cargo test -p <crate>`. `parko/` is its own workspace: `cd parko && cargo test`. The `kirra-ros2-adapter` `node.rs` is `#[cfg(feature = "ros2")]` and needs a sourced ROS 2 toolchain (`r2r`) — it is built ONLY by CI's `ros2 adapter build (--features ros2)` job, never by a default build.
+- **Build toolchain**: pinned to **1.94.1** via `rust-toolchain.toml` (reproducible builds); **MSRV is 1.88**, enforced on every PR by the `msrv` CI lane (`cargo +1.88.0 check --workspace --locked` on both lockfiles). Build on the pin; support down to the MSRV. See `docs/VERSIONING_POLICY.md` §3.
+- **Hardening harnesses** (workspace-detached, own CI lanes): **loom** concurrency models — `crates/kirra-loom-models`, run `RUSTFLAGS="--cfg loom" cargo test -p kirra-loom-models --release` (models the posture-generation + #688 sticky-lockout protocols). **cargo-fuzz** targets — `fuzz/`, run `cargo +nightly fuzz run <target>` (decoders: `decode_verdict`, `dnp3_analog_setpoint`, `scalar_decode_le`, `llm_json_intent`). Both compile to nothing in a normal build.
 - **Remote**: `kirra-systems/kirra-runtime-sdk`
 - **Repo root in prompts**: use `~/kirra-runtime-sdk` (not `/home/user/...` or `/home/user/aegis`)
 
@@ -197,6 +199,9 @@ CURRENT position; the predictive pass rolls each `PredictedMode` forward in TIME
 time-matched ego pose — catching a cut-in / turn-in the snapshot filtered as laterally clear.
 Worst-case over modes (one dangerous hypothesis refuses). Producer: `predicted_modes_from_objects`
 (CV always; CTRV when the tracker yaw feed is fresh — stale yaw degrades to CV-only, not a fault).
+Fail-closed is **per mode**, not per mode-SET: a mode with inter-sample windows that evaluates
+none of them (samples out of the ego trajectory's time span, all non-monotonic, …) → MRC, so one
+object's evaluable mode can never mask another object's unevaluable one (#824).
 
 **Perception-divergence monitor** (gap #2b, True-Redundancy, LIVE): `cross_check` requires two
 independent perception channels to AGREE; a divergence (phantom / miss / speed mismatch) OR a
