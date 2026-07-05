@@ -109,6 +109,11 @@ src/
 ├── federation_reconciliation.rs — FederatedTrustReportV2, reconcile_reports,
 │                               ReconciliationOutcome, authoritative_posture
 ├── audit_chain.rs            — SHA-256 hash-chained audit log
+├── audit_shipper.rs          — WS-4/Track-3 WORM off-box audit shipping:
+│                               ShippedAuditRecord, verify_shipped_chain (INDEPENDENT
+│                               off-box hash-chain re-verifier, no source DB),
+│                               AuditSink (InMemory/JsonlFile), ship_and_advance +
+│                               cursor persistence (at-least-once, ship-then-advance)
 ├── ota_campaign.rs           — WS-4/Track-3 OTA governor-artifact campaign engine
 │                               (PURE): Campaign, CampaignState machine, HaltReason,
 │                               fail-closed posture_regression_halt (advance HALTS,

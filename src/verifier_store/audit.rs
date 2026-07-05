@@ -387,6 +387,40 @@ impl VerifierStore {
         )
     }
 
+    /// Load audit records with `sequence >= from_sequence` in ASCENDING sequence
+    /// order (up to `limit`) as [`ShippedAuditRecord`](crate::audit_shipper::ShippedAuditRecord)s — the WORM off-box shipper
+    /// source (`crate::audit_shipper`). `from_sequence` is the INCLUSIVE next
+    /// sequence to ship (the chain is 0-based — the genesis row is sequence 0 — so
+    /// an inclusive lower bound is required to ship it). Rows without a `sequence`
+    /// (pre-v2 legacy, NULL) are skipped: they carry no ordering key.
+    pub fn load_shippable_audit_records(
+        &self,
+        from_sequence: u64,
+        limit: u64,
+    ) -> Result<Vec<crate::audit_shipper::ShippedAuditRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, event_type, event_json, previous_hash_hex, record_hash_hex, \
+                    created_at_ms, hash_version, signature_b64, key_id \
+             FROM audit_log_chain \
+             WHERE sequence IS NOT NULL AND sequence >= ?1 \
+             ORDER BY sequence ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![from_sequence as i64, limit as i64], |row| {
+            Ok(crate::audit_shipper::ShippedAuditRecord {
+                sequence: row.get::<_, i64>(0)? as u64,
+                event_type: row.get(1)?,
+                event_json: row.get(2)?,
+                previous_hash_hex: row.get(3)?,
+                record_hash_hex: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                hash_version: row.get(6)?,
+                signature_b64: row.get(7)?,
+                key_id: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub(crate) fn init_audit_chain_schema(conn: &Connection) -> Result<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log_chain (
