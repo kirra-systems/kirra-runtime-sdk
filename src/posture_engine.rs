@@ -384,9 +384,13 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // Two recalcs can race (promotion path + Step-C worker), and a SLOWER
     // one carrying a LOWER generation must not clobber a newer posture.
     let new_cached = CachedFleetPosture::new_with_generation(new_posture, generation, ts);
-    // #688: read the sticky-lockout flags HERE (after the generation grab, just
-    // before the write) so a recalc that predates a supervisor/frame trip cannot
-    // clobber the forced LockedOut — see `replace_cache_if_newer`.
+    // #688: read the sticky-lockout flags HERE (after the generation grab at
+    // `next_generation()` above, just before the write) so a recalc that predates a
+    // supervisor/frame trip cannot clobber the forced LockedOut — see
+    // `replace_cache_if_newer`. This ordering is LOAD-BEARING and proven so: the
+    // loom model `sticky_lockout_never_downgraded_under_recalc_race`
+    // (`crates/kirra-loom-models`) fails (finds a downgrade interleaving) if this
+    // read is moved BEFORE the generation grab. Do not reorder.
     let sticky_lockout = app
         .supervisor_tripped
         .load(std::sync::atomic::Ordering::SeqCst)
