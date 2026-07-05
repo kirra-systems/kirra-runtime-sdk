@@ -64,6 +64,7 @@ pub mod verifier_store;
 pub mod store_handle;
 pub mod key_registry;
 pub mod posture_cache;
+pub mod ota_campaign;
 pub mod posture_engine;
 pub mod posture_engine_v2;
 pub mod posture_tracker;

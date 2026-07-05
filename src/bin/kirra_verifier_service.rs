@@ -88,6 +88,10 @@ mod console;
 mod operators;
 #[path = "kirra_verifier_service/principals.rs"]
 mod principals;
+// WS-4 / Track 3 (Fleet Plane) — OTA governor-artifact campaign handlers
+// (create / list / get / arm / advance / halt). ADMIN-scoped at the router layer.
+#[path = "kirra_verifier_service/campaigns.rs"]
+mod campaigns;
 // SG-008 (ASIL D) startup sentinel — pure invariant predicate + its CERT-003
 // RTM coverage tests; extracted from this file to keep the entry point lean.
 #[path = "kirra_verifier_service/startup.rs"]
@@ -111,6 +115,7 @@ use fabric::*;
 use console::*;
 use operators::*;
 use principals::*;
+use campaigns::*;
 use startup::*;
 use auth::*;
 
@@ -1600,6 +1605,14 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // CA-verified client cert (by SHA-256 fingerprint) to a scoped principal.
         .route("/system/cert-principals", post(register_cert_principal_handler).get(list_cert_principals_handler))
         .route("/system/cert-principals/{principal_id}/revoke", post(revoke_cert_principal_handler))
+        // WS-4 / Track 3 (Fleet Plane) — OTA governor-artifact campaign control
+        // plane. SCOPE_ADMIN; each lifecycle mutation writes an R156-shaped audit
+        // entry. `advance` is fail-closed on fleet posture (non-Nominal → HALT).
+        .route("/system/campaigns", post(create_campaign_handler).get(list_campaigns_handler))
+        .route("/system/campaigns/{campaign_id}", get(get_campaign_handler))
+        .route("/system/campaigns/{campaign_id}/arm", post(arm_campaign_handler))
+        .route("/system/campaigns/{campaign_id}/advance", post(advance_campaign_handler))
+        .route("/system/campaigns/{campaign_id}/halt", post(halt_campaign_handler))
         .route("/federation/controllers/register", post(register_federation_controller))
         .route("/attestation/identity/register", post(register_node_identity))
         // #314 Phase 1 — operator registry. ADMIN-gated (separate power from the
@@ -1858,6 +1871,203 @@ mod posture_gate_real_router_tests {
             .await
             .expect("router service should not panic")
             .status()
+    }
+
+    // --- OTA campaign control-plane (WS-4 / Track 3 · Fleet Plane) ---------
+
+    const CAMPAIGN_DIGEST: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A router mounting ONLY the real campaign handlers, WITHOUT the admin-scope
+    /// layer — the INV-13-compliant way to exercise the authenticated lifecycle
+    /// end-to-end (the auth composition itself is covered by `authz::tests` +
+    /// `tests/authz_rbac.rs`, and the gating is proven on the real router below).
+    fn campaign_router(svc: Arc<ServiceState>) -> axum::Router {
+        use axum::routing::{get, post};
+        axum::Router::new()
+            .route(
+                "/system/campaigns",
+                post(super::create_campaign_handler).get(super::list_campaigns_handler),
+            )
+            .route("/system/campaigns/{campaign_id}", get(super::get_campaign_handler))
+            .route("/system/campaigns/{campaign_id}/arm", post(super::arm_campaign_handler))
+            .route(
+                "/system/campaigns/{campaign_id}/advance",
+                post(super::advance_campaign_handler),
+            )
+            .route("/system/campaigns/{campaign_id}/halt", post(super::halt_campaign_handler))
+            .with_state(svc)
+    }
+
+    /// Fire one request at a fresh clone of the campaign router (oneshot consumes
+    /// it) and return the status + parsed JSON body.
+    async fn campaign_req(
+        svc: Arc<ServiceState>,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let rb = Request::builder().method(method).uri(path);
+        let req = match body {
+            Some(b) => rb
+                .header("content-type", "application/json")
+                .body(Body::from(b.to_string())),
+            None => rb.body(Body::empty()),
+        }
+        .expect("build request");
+        let resp = campaign_router(svc)
+            .oneshot(req)
+            .await
+            .expect("router service should not panic");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    fn create_body(id: &str) -> String {
+        serde_json::json!({
+            "campaign_id": id,
+            "artifact_digest": CAMPAIGN_DIGEST,
+            "artifact_version": "v1.2.3",
+            "cohorts": ["canary", "fleet"],
+            "stages": [10, 50, 100],
+        })
+        .to_string()
+    }
+
+    /// The campaign routes are mounted on the REAL assembled router behind the
+    /// admin-scope gate and fail closed WITHOUT a credential (503 when
+    /// `KIRRA_ADMIN_TOKEN` is unset — INV-13 forbids setting it here — or 401 if CI
+    /// configures one). Never 2xx unauthenticated.
+    #[tokio::test]
+    async fn campaign_routes_fail_closed_without_credential() {
+        let cases = [
+            ("POST", "/system/campaigns"),
+            ("GET", "/system/campaigns"),
+            ("GET", "/system/campaigns/c1"),
+            ("POST", "/system/campaigns/c1/arm"),
+            ("POST", "/system/campaigns/c1/advance"),
+            ("POST", "/system/campaigns/c1/halt"),
+        ];
+        for (method, path) in cases {
+            let status =
+                status_through_real_app(state_with(FleetPosture::Nominal), method, path).await;
+            assert!(
+                status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
+                "{method} {path} must fail closed (503/401) without a credential; got {status}"
+            );
+            assert!(
+                !status.is_success(),
+                "{method} {path} must never reach the handler unauthenticated; got {status}"
+            );
+        }
+    }
+
+    /// End-to-end lifecycle on the real handlers: create → arm → advance (Nominal)
+    /// → the fleet regresses → advance now HALTS fail-closed instead of rolling
+    /// further → the halted campaign is terminal (a further advance is 409). Proves
+    /// the posture-bound halt fires through the actual HTTP handler, not just the
+    /// pure engine.
+    #[tokio::test]
+    async fn campaign_lifecycle_and_fail_closed_posture_halt_end_to_end() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        let (st, j) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-e2e")))
+                .await;
+        assert_eq!(st, StatusCode::CREATED, "create; body={j}");
+        assert_eq!(j["state"], "draft");
+        assert_eq!(j["rollout_percent"], 0);
+
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/arm", None).await;
+        assert_eq!(st, StatusCode::OK, "arm");
+
+        // Advance under Nominal → first stage (10%).
+        let (st, j) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
+        assert_eq!(st, StatusCode::OK, "advance; body={j}");
+        assert_eq!(j["outcome"]["advanced"], true);
+        assert_eq!(j["outcome"]["rollout_percent"], 10);
+        assert_eq!(j["campaign"]["state"], "rolling");
+
+        // The fleet regresses to LockedOut — flip the posture cache on the SAME svc
+        // (store, and therefore the campaign, intact).
+        *svc.posture_cache.write().expect("posture cache") =
+            Some(CachedFleetPosture::new(FleetPosture::LockedOut));
+
+        // The next advance HALTS fail-closed rather than rolling to 50%.
+        let (st, j) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
+        assert_eq!(st, StatusCode::OK, "halt-advance; body={j}");
+        assert_eq!(j["outcome"]["halted"], true);
+        assert_eq!(j["outcome"]["halt_reason"], "posture_locked_out");
+        assert_eq!(j["campaign"]["state"], "halted");
+        // Rollout never advanced past the last safe stage.
+        assert_eq!(j["campaign"]["rollout_percent"], 10);
+
+        // Terminal: a further advance is a 409 conflict (the engine authors no resume).
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "terminal campaign must reject advance");
+    }
+
+    /// Fail-closed on posture UNAVAILABILITY: with a cold posture cache
+    /// (`gate_posture` resolves empty/stale → LockedOut), the very first advance
+    /// halts — a rollout never proceeds when fleet posture cannot be confirmed.
+    #[tokio::test]
+    async fn campaign_advance_fails_closed_when_posture_unavailable() {
+        let svc = build_state(None); // cold cache
+
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-cold")))
+                .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-cold/arm", None).await;
+        assert_eq!(st, StatusCode::OK);
+
+        let (st, j) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-cold/advance", None).await;
+        assert_eq!(st, StatusCode::OK, "advance; body={j}");
+        assert_eq!(j["outcome"]["halted"], true, "cold posture must halt, not roll");
+        assert_eq!(j["campaign"]["state"], "halted");
+    }
+
+    /// Route-level validation + error mapping through the real handlers: bad digest
+    /// → 422, duplicate id → 409, unknown campaign → 404.
+    #[tokio::test]
+    async fn campaign_route_validation_and_error_mapping() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        // Malformed artifact digest → 422.
+        let bad = serde_json::json!({
+            "campaign_id": "camp-bad", "artifact_digest": "not-hex",
+            "artifact_version": "v1", "cohorts": ["a"], "stages": [100],
+        })
+        .to_string();
+        let (st, _) = campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&bad)).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // First create OK, duplicate id → 409.
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("dup"))).await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("dup"))).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // Advancing an unknown campaign → 404.
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/ghost/advance", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
     /// LockedOut blocks a functional READ on the production router — proving

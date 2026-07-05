@@ -507,6 +507,7 @@ mod audit;
 mod operators;
 mod principals;
 mod cert_principals;
+mod ota_campaigns;
 mod federation;
 mod attestation;
 mod av_subsystem;
@@ -677,6 +678,29 @@ impl VerifierStore {
                 role           TEXT    NOT NULL,
                 created_at_ms  INTEGER NOT NULL,
                 revoked_at_ms  INTEGER
+            )",
+            [],
+        )?;
+
+        // WS-4 / Track 3 (Fleet Plane) — OTA governor-artifact campaigns. One row
+        // per campaign; the control-plane state machine + fail-closed
+        // halt-on-regression rule live in `crate::ota_campaign`, this table just
+        // persists the campaign so a `Halted` verdict survives a restart (a halted
+        // rollout must never silently resume). `cohorts_json` / `stages_json` are
+        // JSON arrays; `state` is the lowercase `CampaignState` wire string.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ota_campaigns (
+                campaign_id       TEXT    PRIMARY KEY,
+                artifact_digest   TEXT    NOT NULL,
+                artifact_version  TEXT    NOT NULL,
+                cohorts_json      TEXT    NOT NULL,
+                stages_json       TEXT    NOT NULL,
+                stage_index       INTEGER NOT NULL DEFAULT 0,
+                rollout_percent   INTEGER NOT NULL DEFAULT 0,
+                state             TEXT    NOT NULL,
+                halt_reason       TEXT,
+                created_at_ms     INTEGER NOT NULL,
+                updated_at_ms     INTEGER NOT NULL
             )",
             [],
         )?;

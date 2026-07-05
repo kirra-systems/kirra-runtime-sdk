@@ -83,6 +83,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `VirtualClock` / `SystemClock` | `src/clock.rs` | Clock abstraction for deterministic testing |
 | `ScenarioRunner` | `src/scenario_runner.rs` | Deterministic temporal test harness |
 | `KinematicContract` | `src/kinematics_contract.rs` | Scalar clamping contract for kinematics |
+| `Campaign` / `CampaignState` | `src/ota_campaign.rs` | WS-4 OTA rollout campaign + lifecycle state machine (Draft→Staged→Rolling→{Completed\|Halted}); `advance` fail-closed on posture |
 
 ### Module Map
 
@@ -108,6 +109,10 @@ src/
 ├── federation_reconciliation.rs — FederatedTrustReportV2, reconcile_reports,
 │                               ReconciliationOutcome, authoritative_posture
 ├── audit_chain.rs            — SHA-256 hash-chained audit log
+├── ota_campaign.rs           — WS-4/Track-3 OTA governor-artifact campaign engine
+│                               (PURE): Campaign, CampaignState machine, HaltReason,
+│                               fail-closed posture_regression_halt (advance HALTS,
+│                               never rolls, when fleet posture != Nominal)
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
 ├── kinematics_sim.rs         — re-export shim → kirra_core::kinematics_sim (relocated
 │                               Stage 7; VehicleState, apply_enforcement, run_simulation)
@@ -164,6 +169,7 @@ src/
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
 | `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
+| `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
 
 ---
 
@@ -261,6 +267,7 @@ Admin token or an `integrator`-role principal.
 - `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
 - `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
+- `POST/GET /system/campaigns`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT)
 - `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role)
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
