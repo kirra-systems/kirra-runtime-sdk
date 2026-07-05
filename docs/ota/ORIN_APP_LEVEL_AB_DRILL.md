@@ -124,6 +124,64 @@ one-liner, and the relevant `journalctl` excerpt. If anything diverges (paths,
 systemd `Type=exec` vs your systemd version, the health probe), tell me and I'll
 adjust the unit / CLI.
 
+## 3. Automatic health gate (`probe`) — hands-off commit/rollback
+
+Drills 1–2 gated health by hand (`curl … && commit`). The `probe` subcommand
+automates the decision: after a trial boot it samples a health command and either
+commits (a `--successes` streak of healthy samples within `--window-secs`) or rolls
+back and restarts onto the good slot. It is a **no-op unless the node is in a trial**
+(`trying` set), so it is safe to run on every start.
+
+### 3a. Healthy trial → probe auto-commits
+
+```sh
+# baseline: active=b (from Drill 1). Stage the healthy v2 again into slot a.
+cat >/tmp/gov-h <<'EOF'
+#!/bin/sh
+echo "governor (v-probe healthy) pid $$"; exec sleep infinity
+EOF
+chmod 0755 /tmp/gov-h
+sudo kirra-ota-ctl stage /tmp/gov-h "$(sha256sum /tmp/gov-h | cut -d' ' -f1)"
+sudo systemctl restart kirra-governor            # trial-boot slot a
+kirra-ota-ctl status                             # trying=Some("a")
+
+# The health check here is just "the unit is running" — swap in a real endpoint probe.
+sudo kirra-ota-ctl probe --cmd 'systemctl is-active --quiet kirra-governor' \
+  --window-secs 12 --interval-secs 2 --successes 3
+# ... sample healthy=true streak=1/3 / 2/3 / healthy (3/3) -> committed: active slot is now a
+kirra-ota-ctl status                             # active=a try_boot=None trying=None
+```
+
+### 3b. Unhealthy trial → probe auto-rolls-back
+
+```sh
+# Stage a governor that STAYS UP but is UNHEALTHY (running, but the probe fails).
+cat >/tmp/gov-sick <<'EOF'
+#!/bin/sh
+echo "governor (v-probe SICK: up but unhealthy) pid $$"; exec sleep infinity
+EOF
+chmod 0755 /tmp/gov-sick
+sudo kirra-ota-ctl stage /tmp/gov-sick "$(sha256sum /tmp/gov-sick | cut -d' ' -f1)"
+sudo systemctl restart kirra-governor            # trial-boot the sick slot
+kirra-ota-ctl status                             # trying=Some(<inactive>)
+
+# A probe that always FAILS (exit 1) simulates "process up, but not actually healthy" —
+# the case the crash-based rollback in Drill 2 can NOT catch. probe rolls back + restarts.
+sudo kirra-ota-ctl probe --cmd 'false' --window-secs 8 --interval-secs 2 --successes 3
+echo "probe exit=$?"                             # non-zero (unhealthy)
+sleep 3
+kirra-ota-ctl status                             # back to the prior active; trying=None
+systemctl status kirra-governor --no-pager -l | head -6
+```
+
+**Expected:** 3a commits with no operator decision; 3b rolls back an *up-but-unhealthy*
+trial (which Drill 2's crash-rollback would have missed) and restarts onto the good
+slot. `probe` needs `sudo` (writes the boot record; restarts the unit on rollback).
+
+To make this fully automatic on every trial boot, install the example
+`deploy/kirra-ota-probe.service` oneshot (edit its `--cmd`) and wire it after the
+governor unit — see that file's header.
+
 ## Hardware result (GATE C evidence)
 
 Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd

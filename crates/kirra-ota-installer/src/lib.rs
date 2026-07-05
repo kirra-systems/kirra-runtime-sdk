@@ -546,6 +546,61 @@ pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
     }
 }
 
+/// A consecutive-success health gate for the app-level probe agent (WS-4). A trial
+/// slot is declared healthy — and thus committable — only after `required_streak`
+/// CONSECUTIVE healthy samples: a single lucky sample never commits, and any failure
+/// resets the streak to zero, so a flapping trial can never accumulate credit toward
+/// a commit. This mirrors the fleet's AV recovery hysteresis (a streak of healthy
+/// reports) applied to the OTA health gate.
+///
+/// Pure and wall-clock-free: the CALLER owns the sampling cadence and the overall
+/// window deadline (commit on a healthy verdict; roll back when the window expires
+/// without one). This type only folds boolean samples into the streak verdict, so it
+/// unit-tests without a clock, a process, or a device — the same doer/checker
+/// discipline as the rest of the installer.
+#[derive(Debug, Clone)]
+pub struct HealthGate {
+    required_streak: u32,
+    streak: u32,
+}
+
+impl HealthGate {
+    /// `required_streak` is clamped to `>= 1` — a zero requirement would "commit"
+    /// before any probe ran, defeating the gate.
+    pub fn new(required_streak: u32) -> Self {
+        Self {
+            required_streak: required_streak.max(1),
+            streak: 0,
+        }
+    }
+
+    /// The current consecutive-healthy streak (for progress logging).
+    pub fn streak(&self) -> u32 {
+        self.streak
+    }
+
+    /// The streak length required to declare healthy.
+    pub fn required_streak(&self) -> u32 {
+        self.required_streak
+    }
+
+    /// Fold one health sample. Returns `Some(true)` once the required consecutive
+    /// streak is reached (the caller should COMMIT the trial); otherwise `None`
+    /// (keep probing until the window expires, then ROLL BACK). A `false` sample
+    /// resets the streak to zero.
+    pub fn observe(&mut self, healthy: bool) -> Option<bool> {
+        if healthy {
+            self.streak = self.streak.saturating_add(1);
+            if self.streak >= self.required_streak {
+                return Some(true);
+            }
+        } else {
+            self.streak = 0;
+        }
+        None
+    }
+}
+
 fn read_record(path: &Path) -> std::io::Result<BootRecord> {
     let text = std::fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -937,6 +992,50 @@ mod tests {
             plan_commit(&rec(Slot::A, None, None)),
             Err(InstallError::InvalidTransition { .. })
         ));
+    }
+
+    // --- health gate (probe agent) ---------------------------------------
+
+    #[test]
+    fn health_gate_clamps_zero_requirement_to_one() {
+        // A zero streak would commit before any probe — clamp to 1.
+        let mut g = HealthGate::new(0);
+        assert_eq!(g.required_streak(), 1);
+        assert_eq!(g.observe(true), Some(true), "one healthy sample commits");
+    }
+
+    #[test]
+    fn health_gate_requires_consecutive_successes() {
+        let mut g = HealthGate::new(3);
+        assert_eq!(g.observe(true), None, "1/3");
+        assert_eq!(g.observe(true), None, "2/3");
+        assert_eq!(g.observe(true), Some(true), "3/3 → healthy");
+    }
+
+    #[test]
+    fn health_gate_failure_resets_the_streak() {
+        let mut g = HealthGate::new(3);
+        g.observe(true);
+        g.observe(true);
+        assert_eq!(g.streak(), 2);
+        // A single failure wipes the accumulated credit.
+        assert_eq!(g.observe(false), None);
+        assert_eq!(g.streak(), 0, "streak reset on failure");
+        // Must earn the full streak again from scratch.
+        assert_eq!(g.observe(true), None);
+        assert_eq!(g.observe(true), None);
+        assert_eq!(g.observe(true), Some(true));
+    }
+
+    #[test]
+    fn health_gate_flapping_never_commits() {
+        // Alternating healthy/unhealthy never reaches a 2-streak → no false commit.
+        let mut g = HealthGate::new(2);
+        for _ in 0..10 {
+            assert_eq!(g.observe(true), None);
+            assert_eq!(g.observe(false), None);
+        }
+        assert_eq!(g.streak(), 0);
     }
 
     #[test]
