@@ -335,8 +335,11 @@ jobs:
       - name: Run WCET gate tests
         # Authoritative WCET measurement. Runs on stable, non-instrumented,
         # without llvm-cov. The coverage job above skips these tests because
-        # instrumentation overhead invalidates wall-clock thresholds.
-        run: cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests
+        # instrumentation overhead invalidates wall-clock thresholds. --release:
+        # WCET is an OPTIMIZED-build property; the heavy containment guard asserts
+        # ONLY when optimized (see wcet_gate.rs — a debug build's jitter-dominated
+        # wall clock is not WCET), so this lane must build release to exercise it.
+        run: cargo test -p kirra-verifier --lib wcet_gate::ci_gate_tests --release
 
   iceoryx2-spike:
     name: iceoryx2 carrier (frozen contract, isolated)
