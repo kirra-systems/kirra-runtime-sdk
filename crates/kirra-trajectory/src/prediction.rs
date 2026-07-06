@@ -59,9 +59,29 @@ impl OwnedPredictedMode {
     }
 }
 
-/// Number of sample steps over `[0, horizon_s]` at `dt_s` (≥ 1).
+/// Hard ceiling on the number of prediction sample steps a single mode may roll out, so the
+/// per-mode `SampleVec` allocation is BOUNDED by a `MAX_*` constant regardless of the
+/// `(horizon_s, dt_s)` a caller supplies — mirroring the verdict path's `MAX_TRAJECTORY_HORIZON`
+/// discipline (`kirra_core::containment`). The live slow-loop config is a 3 s / 0.5 s horizon
+/// (`SLOW_PRED_HORIZON_S` / `SLOW_PRED_DT_S` → 6 steps), so this ceiling has ~85× headroom over
+/// any legitimate use and only ever bites a misconfigured caller (a huge horizon or a
+/// near-zero `dt_s`), where a bounded rollout is strictly better than an unbounded `Vec`. It is
+/// NOT on the pinned per-pose `validate_vehicle_command` path (that stays byte-identical).
+pub const MAX_PREDICTION_STEPS: usize = 512;
+
+/// Number of sample steps over `[0, horizon_s]` at `dt_s` (≥ 1), capped at
+/// [`MAX_PREDICTION_STEPS`] so a pathological `(horizon_s, dt_s)` can never drive an unbounded
+/// allocation. Each `*_samples` producer emits `n + 1` samples (the `0` step plus `n`), so the
+/// realized `SampleVec` length is bounded by `MAX_PREDICTION_STEPS + 1`.
 fn step_count(horizon_s: f64, dt_s: f64) -> usize {
-    (horizon_s.max(0.0) / dt_s).ceil().max(1.0) as usize
+    let raw = (horizon_s.max(0.0) / dt_s).ceil().max(1.0);
+    // `dt_s <= 0` or a non-finite ratio yields NaN/∞; the `as usize` cast of a non-finite or
+    // out-of-range f64 saturates, but clamp explicitly so the bound is obvious and total.
+    if raw.is_finite() {
+        (raw as usize).min(MAX_PREDICTION_STEPS)
+    } else {
+        MAX_PREDICTION_STEPS
+    }
 }
 
 /// Roll `obj` forward on CONSTANT VELOCITY (its reported velocity vector) — a straight-line
@@ -312,5 +332,42 @@ mod tests {
         let path = [Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 10.0, y_m: 0.0 }];
         let modes = predicted_modes_from_objects(&[o], &[], &[(1, &path[..])], 2.0, 0.5);
         assert_eq!(modes.len(), 1, "a stationary object's lane-follow degenerates to CV → omitted");
+    }
+
+    #[test]
+    fn step_count_is_bounded_by_the_max_constant() {
+        // The nominal slow-loop config produces a handful of steps...
+        assert_eq!(step_count(3.0, 0.5), 6, "nominal 3 s / 0.5 s horizon");
+        assert_eq!(step_count(2.0, 1.0), 2);
+        // ...and step_count never drops below 1 for a degenerate-but-finite horizon.
+        assert_eq!(step_count(0.0, 0.5), 1, "a zero horizon still yields the t=0 step");
+        // A pathological caller (huge horizon / near-zero dt) is CLAMPED, not unbounded.
+        assert_eq!(step_count(1.0e9, 1.0e-9), MAX_PREDICTION_STEPS, "huge ratio clamps to the ceiling");
+        assert_eq!(step_count(10.0, 1.0e-6), MAX_PREDICTION_STEPS, "tiny dt clamps to the ceiling");
+        // A non-finite ratio (dt_s <= 0 → division by zero) also clamps, never panics/UB-casts.
+        assert_eq!(step_count(5.0, 0.0), MAX_PREDICTION_STEPS, "dt=0 → +inf ratio clamps");
+        assert_eq!(step_count(5.0, -1.0), 1, "negative dt → negative ratio floors at 1");
+    }
+
+    #[test]
+    fn a_pathological_horizon_produces_a_bounded_sample_run() {
+        // BEFORE the L2 fix this allocated an ~unbounded Vec; now every producer's SampleVec is
+        // capped at MAX_PREDICTION_STEPS + 1 (the +1 is the t=0 sample) no matter the inputs.
+        let o = obj(1, 0.0, 0.0, 3.0, 0.0);
+        let cv = predicted_modes_from_objects(&[o], &[], &[], 1.0e6, 1.0e-6);
+        assert_eq!(cv.len(), 1, "CV mode only");
+        assert!(
+            cv[0].samples.len() <= MAX_PREDICTION_STEPS + 1,
+            "CV rollout bounded, got {}",
+            cv[0].samples.len()
+        );
+        // The CTRV producer (a separate `with_capacity`/push loop) is bounded the same way.
+        let mm = predicted_modes_from_objects(&[o], &[(1, 0.4)], &[], 1.0e6, 1.0e-6);
+        assert_eq!(mm.len(), 2, "CV + CTRV");
+        assert!(
+            mm[1].samples.len() <= MAX_PREDICTION_STEPS + 1,
+            "CTRV rollout bounded, got {}",
+            mm[1].samples.len()
+        );
     }
 }

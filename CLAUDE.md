@@ -67,7 +67,7 @@ These have been blocked or reverted multiple times. Any submission that violates
 | `NodeTrustState` | `src/verifier.rs` | `Trusted` / `Untrusted(String)` / `Unknown` |
 | `OperationalCommand` | `src/posture_cache.rs` | `ReadTelemetry` / `WriteState` / `SystemMutation` / `Unknown` |
 | `VerifierOperationMode` | `src/verifier.rs` | `Active` / `PassiveStandby`; runtime state held in `mode_active: Arc<AtomicBool>` |
-| `VerifierStore` | `src/verifier_store.rs` | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState |
+| `VerifierStore` | `src/verifier_store/` (module dir: `mod.rs` + per-table submodules) | rusqlite WAL-mode SQLite; wrapped in `Arc<Mutex<VerifierStore>>` in AppState |
 | `PostureStreamEvent` | `src/verifier.rs` | Broadcast channel payload for SSE stream |
 | `TransportIdentityConfig` | `src/verifier.rs` | `trusted_ingress_mode` + `client_id_header` from env |
 | `FederatedTrustReport` | `src/federation.rs` | Ed25519-signed cross-controller trust report |
@@ -90,7 +90,9 @@ These have been blocked or reverted multiple times. Any submission that violates
 ```
 src/
 ├── verifier.rs               — AppState, FleetPosture, DAG traversal, TransportIdentityConfig
-├── verifier_store.rs         — SQLite persistence (all tables; WAL mode)
+├── verifier_store/           — SQLite persistence (all tables; WAL mode); module dir:
+│                               mod.rs + per-table submodules (nodes, attestation, audit,
+│                               federation, epoch, principals, ota_campaigns, …)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,
