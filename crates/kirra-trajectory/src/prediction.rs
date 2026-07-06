@@ -75,8 +75,10 @@ pub const MAX_PREDICTION_STEPS: usize = 512;
 /// realized `SampleVec` length is bounded by `MAX_PREDICTION_STEPS + 1`.
 fn step_count(horizon_s: f64, dt_s: f64) -> usize {
     let raw = (horizon_s.max(0.0) / dt_s).ceil().max(1.0);
-    // `dt_s <= 0` or a non-finite ratio yields NaN/∞; the `as usize` cast of a non-finite or
-    // out-of-range f64 saturates, but clamp explicitly so the bound is obvious and total.
+    // Guard the non-finite cases explicitly (rather than lean on `as usize` saturation): `dt_s
+    // == 0.0` makes the ratio ±∞, and a NaN input makes it NaN. A *negative* `dt_s` is NOT
+    // non-finite — it yields a finite negative ratio that `.max(1.0)` already floors to 1 — so
+    // it flows through the finite branch. Clamping here keeps the upper bound obvious and total.
     if raw.is_finite() {
         (raw as usize).min(MAX_PREDICTION_STEPS)
     } else {
@@ -344,9 +346,10 @@ mod tests {
         // A pathological caller (huge horizon / near-zero dt) is CLAMPED, not unbounded.
         assert_eq!(step_count(1.0e9, 1.0e-9), MAX_PREDICTION_STEPS, "huge ratio clamps to the ceiling");
         assert_eq!(step_count(10.0, 1.0e-6), MAX_PREDICTION_STEPS, "tiny dt clamps to the ceiling");
-        // A non-finite ratio (dt_s <= 0 → division by zero) also clamps, never panics/UB-casts.
+        // dt_s == 0 makes the ratio +inf (non-finite) → clamps to the ceiling, never panics/UB-casts.
         assert_eq!(step_count(5.0, 0.0), MAX_PREDICTION_STEPS, "dt=0 → +inf ratio clamps");
-        assert_eq!(step_count(5.0, -1.0), 1, "negative dt → negative ratio floors at 1");
+        // A negative dt_s is FINITE (negative ratio), so it takes the ordinary floor, not the cap.
+        assert_eq!(step_count(5.0, -1.0), 1, "negative dt → finite negative ratio floors at 1");
     }
 
     #[test]
