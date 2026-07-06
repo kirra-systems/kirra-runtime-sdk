@@ -139,8 +139,12 @@ fn walk_fn_dir(dir: &Path, names: &mut BTreeSet<String>) {
 }
 
 /// Extract `fn <ident>` names from a source string. Matches `fn ` at a word
-/// boundary (so `…afn` doesn't match) and reads the following Rust identifier —
-/// covering `fn f(`, `pub fn f(`, `async fn f(`, `pub(crate) fn f<`, etc.
+/// boundary (so `…afn` doesn't match), reads the following Rust identifier, and
+/// requires it to be followed (after optional whitespace) by `(` or `<` — the
+/// shape of a real fn signature (`fn f(`, `pub fn f(`, `async fn f(`,
+/// `pub(crate) fn f<`). That last check rejects PROSE like `... extern "C" fn
+/// that dereferences ...`, whose captured word (`that`) is followed by more prose,
+/// not a signature — so a comment can't seed a false-positive into the universe.
 fn extract_fn_names(content: &str, names: &mut BTreeSet<String>) {
     let bytes = content.as_bytes();
     let mut i = 0;
@@ -153,13 +157,18 @@ fn extract_fn_names(content: &str, names: &mut BTreeSet<String>) {
         }
         if boundary {
             let start = j;
-            while j < bytes.len()
-                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             if j > start {
-                names.insert(content[start..j].to_string());
+                // A real fn signature has `(` or `<` after the name (mod ws).
+                let mut k = j;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if k < bytes.len() && (bytes[k] == b'(' || bytes[k] == b'<') {
+                    names.insert(content[start..j].to_string());
+                }
             }
         }
         i = pos + 3;
@@ -318,16 +327,21 @@ mod ci_gate_tests {
     }
 
     #[test]
-    fn fn_name_extractor_finds_definitions_but_not_calls() {
+    fn fn_name_extractor_finds_definitions_but_not_calls_or_prose() {
         let mut names = BTreeSet::new();
         extract_fn_names(
-            "pub fn alpha() {} \n    async fn beta<T>() {}\n// call: gamma();\nlet x = notfn_delta;",
+            "pub fn alpha() {}\n    async fn beta<T>() {}\nlet x = notfn_delta;\n\
+             /// every extern \"C\" fn that dereferences a raw pointer must be unsafe\n\
+             fn spread_across ()\n{}",
             &mut names,
         );
         assert!(names.contains("alpha"), "plain fn");
         assert!(names.contains("beta"), "async generic fn");
-        assert!(!names.contains("gamma"), "a call is not a definition");
+        assert!(names.contains("spread_across"), "whitespace before `(` still resolves");
         assert!(!names.contains("delta"), "`notfn_` must not match at a word boundary");
+        // The prose `fn that dereferences ...` must NOT seed `that` — it is not
+        // followed by `(` or `<` (Copilot #851): a comment can't create a fn name.
+        assert!(!names.contains("that"), "a `fn` in prose must not be captured");
     }
 
     #[test]
