@@ -95,6 +95,26 @@
   </section>
 
   <section>
+    <h2>Runtime</h2>
+    <div id="runtime"><span class="empty">loading…</span></div>
+  </section>
+
+  <section>
+    <h2>Analytics <span class="badge">24h</span></h2>
+    <div id="analytics"><span class="empty">loading…</span></div>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <div id="sites"><span class="empty">loading…</span></div>
+  </section>
+
+  <section>
+    <h2>Firmware versions</h2>
+    <div id="versions"><span class="empty">loading…</span></div>
+  </section>
+
+  <section>
     <h2>Escalation docket (SG6, open)</h2>
     <div id="escalations"><span class="empty">loading…</span></div>
   </section>
@@ -221,6 +241,76 @@ function renderCampaigns(d){
     counts+'</div>' + (body || '<span class="empty">no active or halted campaigns</span>');
 }
 
+// #395 runtime — mode / uptime / audit depth / HA heartbeat. Compact key-value rows.
+function renderRuntime(d){
+  const el = document.getElementById("runtime");
+  if(!d){ el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+  const kv = (k,v) => '<div class="row"><span class="et">'+esc(k)+'</span> '+v+'</div>';
+  const secs = ms => (Number(ms)/1000).toFixed(0)+'s';
+  el.innerHTML =
+    kv('mode', '<span class="pill '+(d.mode==='Active'?'Trusted':'Unknown')+'">'+esc(d.mode)+'</span>') +
+    kv('uptime', esc(secs(d.uptime_ms))) +
+    kv('nodes', esc(d.total_nodes)) +
+    kv('audit entries', esc(d.audit_entries)) +
+    kv('posture gen', esc(d.posture_generation)) +
+    kv('SSE subscribers', esc(d.broadcast_subscribers)) +
+    kv('fabric assets', esc(d.fabric_assets)) +
+    kv('HA heartbeat age', d.ha_heartbeat_age_ms!=null
+        ? esc(secs(d.ha_heartbeat_age_ms))
+        : '<span class="empty">no primary yet</span>');
+}
+
+// #397 sites — per-site posture rollup (nominal/degraded/lockedout by location).
+function renderSites(d){
+  const el = document.getElementById("sites");
+  const sites = (d && d.sites) || [];
+  if(!sites.length && !(d && d.unassigned)){ el.innerHTML = '<span class="empty">no site data</span>'; return; }
+  el.innerHTML = sites.map(s =>
+    '<div class="row"><span class="et">'+esc(s.site)+'</span> · '+esc(s.total)+' nodes · '+
+    '<span style="color:var(--ok)">'+esc(s.nominal)+'</span> / '+
+    '<span style="color:var(--warn)">'+esc(s.degraded)+'</span> / '+
+    '<span style="color:var(--bad)">'+esc(s.lockedout)+'</span> <span class="note">nom/deg/lock</span></div>').join("") +
+    (d.unassigned ? '<div class="row"><span class="empty">unassigned: '+esc(d.unassigned)+'</span></div>' : '');
+}
+
+// #398 versions — firmware-version distribution across the fleet.
+function renderVersions(d){
+  const el = document.getElementById("versions");
+  const versions = (d && d.versions) || [];
+  if(!versions.length && !(d && d.unknown)){ el.innerHTML = '<span class="empty">no version data</span>'; return; }
+  el.innerHTML = versions.map(v =>
+    '<div class="row"><span class="et">'+esc(v.version)+'</span> · '+esc(v.count)+
+    ' node(s) · '+Number(v.pct).toFixed(0)+'%</div>').join("") +
+    (d.unknown ? '<div class="row"><span class="empty">unknown: '+esc(d.unknown)+'</span></div>' : '');
+}
+
+// #396 analytics — posture-transition rollup, fabric denial rate, top flapping
+// nodes, interventions by asset (all over the window the endpoint returns).
+function renderAnalytics(d){
+  const el = document.getElementById("analytics");
+  if(!d){ el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+  const pt = d.posture_transitions || [];
+  const sum = k => pt.reduce((a,b)=>a+Number(b[k]||0),0);
+  const win = Math.round(Number(d.window_ms||0)/3600000);
+  const dr = (d.denial_rate_series && d.denial_rate_series[0] && d.denial_rate_series[0].denial_rate) || 0;
+  let html = '<div class="row">last '+esc(win)+'h · transitions → '+
+    '<span style="color:var(--ok)">'+sum('to_nominal')+'</span> nominal / '+
+    '<span style="color:var(--warn)">'+sum('to_degraded')+'</span> degraded / '+
+    '<span style="color:var(--bad)">'+sum('to_lockedout')+'</span> lockedout</div>';
+  html += '<div class="row">fabric denial rate: '+esc(Number(dr).toFixed(3))+'</div>';
+  const flap = d.flapping_top || [];
+  if(flap.length){
+    html += '<div class="note" style="margin-top:6px">top flapping nodes</div>' +
+      flap.map(f=>'<div class="row"><span class="et">'+esc(f.node_id)+'</span> · '+esc(f.transitions)+' transitions</div>').join("");
+  }
+  const iv = d.interventions_by_asset || [];
+  if(iv.length){
+    html += '<div class="note" style="margin-top:6px">interventions by asset</div>' +
+      iv.map(a=>'<div class="row"><span class="et">'+esc(a.asset_id)+'</span> · '+esc(a.denies)+' denies</div>').join("");
+  }
+  el.innerHTML = html;
+}
+
 function payloadOf(e){
   // field-tolerant: the page rows carry whatever they carry — show what's there.
   return e.event_json ?? e.payload ?? e.posture_json ?? null;
@@ -295,11 +385,16 @@ async function poll(){
       getJSON("/console/fleet"), getJSON("/console/escalations"), getJSON("/console/audit?limit=50"),
     ]);
     renderFleet(fleet); renderEscalations(esc_); renderAudit(audit); updateGrantCard(fleet);
-    // OTA rollouts degrade INDEPENDENTLY — a campaigns-query hiccup must never blank
-    // the fleet/audit views (nor break the poll's connection status).
-    getJSON("/console/campaigns").then(renderCampaigns).catch(() => {
-      document.getElementById("campaigns").innerHTML = '<span class="empty">unavailable</span>';
+    // The observability panels each degrade INDEPENDENTLY — one view's query hiccup
+    // must never blank the others (nor break the poll's connection status).
+    const panel = (path, fn, id) => getJSON(path).then(fn).catch(() => {
+      document.getElementById(id).innerHTML = '<span class="empty">unavailable</span>';
     });
+    panel("/console/campaigns", renderCampaigns, "campaigns");
+    panel("/console/runtime", renderRuntime, "runtime");
+    panel("/console/analytics", renderAnalytics, "analytics");
+    panel("/console/sites", renderSites, "sites");
+    panel("/console/versions", renderVersions, "versions");
     conn.textContent = "updated " + new Date().toLocaleTimeString(); conn.classList.remove("err");
   } catch(e){ conn.textContent = "poll error: "+e.message; conn.classList.add("err"); }
 }
