@@ -12,7 +12,19 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <inttypes.h>
 #include "kirra.h"
+
+/* Human label for a KIRRA_POSTURE_* code (integrators would branch on the int). */
+static const char *posture_label(int32_t code) {
+    switch (code) {
+        case KIRRA_POSTURE_NOMINAL:     return "nominal";
+        case KIRRA_POSTURE_CONSTRAINED: return "constrained";
+        case KIRRA_POSTURE_SHADOW:      return "shadow";
+        case KIRRA_POSTURE_LOCKED_OUT:  return "locked-out";
+        default:                        return "unknown";
+    }
+}
 
 /* Human label for a KIRRA_VERDICT_* code (integrators would branch on the int). */
 static const char *verdict_label(int32_t code) {
@@ -50,8 +62,9 @@ int main(void) {
             fprintf(stderr, "FATAL: checker emitted a non-finite command\n");
             return 1;
         }
-        printf("%8.2f -> %7.2f   [%-22s] (trust=%u)\n",
-               proposals[i], v.sanitized_value, verdict_label(v.code), trust);
+        printf("%8.2f -> %7.2f   [%-22s] (trust=%" PRIu32 ", posture=%s)\n",
+               proposals[i], v.sanitized_value, verdict_label(v.code),
+               trust, posture_label(kirra_posture()));
     }
 
     return 0;
