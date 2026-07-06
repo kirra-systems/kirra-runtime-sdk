@@ -18,7 +18,7 @@
 # a re-tagged upstream image can't silently change the build. The `:1-alpine` tag
 # is kept for readability; the `@sha256:` digest is authoritative. Bumped by
 # Dependabot (docker ecosystem) — see .github/dependabot.yml.
-FROM rust:1-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS builder
+FROM rust:1-alpine@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS builder
 
 RUN apk add --no-cache musl-dev gcc
 
