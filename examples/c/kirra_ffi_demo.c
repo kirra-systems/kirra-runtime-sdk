@@ -92,8 +92,8 @@ int main(void) {
         0x89, 0xbe, 0x0c, 0x76, 0xb2, 0x92, 0x03, 0x34, 0x03, 0x9b, 0xfa, 0x8b, 0x3d, 0x36, 0x8d, 0x61};
 
     printf("\nrelease-token verify:\n");
-    int ok = kirra_verify_release_token(token, 96, digest, 32, gov_vk, 32);
-    printf("  honest token  -> code %d (%s)\n", ok, ok == KIRRA_RELEASE_OK ? "RELEASE" : "denied");
+    int32_t ok = kirra_verify_release_token(token, 96, digest, 32, gov_vk, 32);
+    printf("  honest token  -> code %" PRId32 " (%s)\n", ok, ok == KIRRA_RELEASE_OK ? "RELEASE" : "denied");
     if (ok != KIRRA_RELEASE_OK) {
         fprintf(stderr, "FATAL: an honest release token failed to verify\n");
         return 1;
@@ -101,8 +101,8 @@ int main(void) {
     uint8_t tampered[96];
     for (size_t i = 0; i < 96; ++i) tampered[i] = token[i];
     tampered[64] ^= 0x01; /* flip a signature byte */
-    int bad = kirra_verify_release_token(tampered, 96, digest, 32, gov_vk, 32);
-    printf("  tampered token -> code %d (%s)\n", bad,
+    int32_t bad = kirra_verify_release_token(tampered, 96, digest, 32, gov_vk, 32);
+    printf("  tampered token -> code %" PRId32 " (%s)\n", bad,
            bad == KIRRA_RELEASE_OK ? "RELEASE" : "denied (fail-closed)");
     if (bad == KIRRA_RELEASE_OK) {
         fprintf(stderr, "FATAL: a tampered release token was accepted\n");

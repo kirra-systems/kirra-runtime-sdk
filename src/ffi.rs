@@ -664,6 +664,7 @@ mod verdict_tests {
 #[cfg(test)]
 mod release_token_ffi_tests {
 
+
     use super::*;
     use crate::governor_release::{contract_digest, issue_release_token};
     use ed25519_dalek::SigningKey;
@@ -757,7 +758,26 @@ mod release_token_ffi_tests {
             unsafe { kirra_verify_release_token(std::ptr::null(), 96, digest.as_ptr(), 32, vk.as_ptr(), 32) },
             KIRRA_RELEASE_BAD_ARGS
         );
+        // A correct-LENGTH but non-decodable Ed25519 key (not a valid curve point)
+        // also fails closed — the key parse rejects it before any verify.
+        let bad_vk = INVALID_ED25519_KEY;
+        assert!(
+            ed25519_dalek::VerifyingKey::from_bytes(&bad_vk).is_err(),
+            "the fixture must be a genuinely invalid Ed25519 key encoding"
+        );
+        assert_eq!(
+            unsafe {
+                kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, bad_vk.as_ptr(), 32)
+            },
+            KIRRA_RELEASE_BAD_ARGS
+        );
     }
+
+    /// A 32-byte value that is NOT a valid compressed Edwards point (its `y` has
+    /// no `x` on the curve), so `VerifyingKey::from_bytes` rejects it. The
+    /// `is_err()` guard in the test above ensures this can never silently become a
+    /// valid key.
+    const INVALID_ED25519_KEY: [u8; 32] = [2u8; 32];
 }
 
 #[cfg(test)]
