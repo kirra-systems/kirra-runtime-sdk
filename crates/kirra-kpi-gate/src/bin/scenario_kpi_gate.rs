@@ -1,18 +1,45 @@
-//! WS-3.1 — the scenario-KPI CI gate binary.
+//! WS-3.1 / WS-3.3 — the scenario-KPI + SOTIF-coverage CI gate binary.
 //!
-//! Loads the reviewed thresholds (`ci/scenario_kpi_thresholds.json`, or the
-//! path given as the first argument), runs the generated corpora through the
-//! existing metric harnesses, prints the scorecard, and exits non-zero on
-//! any KPI breach. Deterministic: a red run is a real KPI regression.
+//! Two gates, one job (so both ride the existing CI step):
+//!
+//! 1. **KPI gate (WS-3.1):** load the reviewed thresholds
+//!    (`ci/scenario_kpi_thresholds.json`, or the path given as the first
+//!    argument), run the generated corpora through the existing metric
+//!    harnesses, print the scorecard, red on any KPI breach.
+//! 2. **SOTIF coverage gate (WS-3.3):** check that every ISO 21448 triggering
+//!    condition in `docs/safety/OCCY_SOTIF.md §3` maps — in the reviewed
+//!    `ci/sotif_trigger_coverage.json` manifest — to a live scenario, a
+//!    documented AoU, or an explicit referenced external/deferred artifact.
+//!    Red on an orphan/spurious TC or a dangling scenario/AoU reference.
+//!
+//! Both are deterministic: a red run is a real regression. The process exits
+//! non-zero if EITHER gate fails.
 
+use kirra_kpi_gate::sotif_coverage::{
+    check_sotif_coverage, live_corpus_scenario_names, parse_aou_ids, parse_trigger_ids,
+    SotifCoverageManifest,
+};
 use kirra_kpi_gate::{run_gate, KpiThresholds};
 
 fn main() {
-    let path = std::env::args()
+    let thresholds_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "ci/scenario_kpi_thresholds.json".to_string());
 
-    let raw = match std::fs::read_to_string(&path) {
+    let kpi_ok = run_kpi_gate(&thresholds_path);
+    println!();
+    let sotif_ok = run_sotif_gate();
+
+    if kpi_ok && sotif_ok {
+        std::process::exit(0);
+    }
+    std::process::exit(1);
+}
+
+/// The WS-3.1 KPI gate. Returns `true` on pass. Exits(2) on an unreadable /
+/// unparseable thresholds file (a configuration error, distinct from a breach).
+fn run_kpi_gate(path: &str) -> bool {
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("scenario_kpi_gate: cannot read thresholds at {path}: {e}");
@@ -54,12 +81,80 @@ fn main() {
 
     if report.passed() {
         println!("KPI gate: PASS");
+        true
     } else {
         eprintln!(
             "KPI gate: FAIL — a fleet-safety KPI regressed past its reviewed threshold. \
              Fix the regression; if the change is intentional and reviewed, update {path} \
              with a justification in the PR."
         );
-        std::process::exit(1);
+        false
+    }
+}
+
+const SOTIF_MD_PATH: &str = "docs/safety/OCCY_SOTIF.md";
+const AOU_MD_PATH: &str = "docs/safety/ASSUMPTIONS_OF_USE.md";
+const SOTIF_MANIFEST_PATH: &str = "ci/sotif_trigger_coverage.json";
+
+/// The WS-3.3 SOTIF trigger-coverage gate. Returns `true` on pass. Exits(2) on a
+/// missing/unparseable input file (a configuration error, distinct from a
+/// coverage failure).
+fn run_sotif_gate() -> bool {
+    let sotif_md = read_or_exit(SOTIF_MD_PATH);
+    let aou_md = read_or_exit(AOU_MD_PATH);
+    let manifest_raw = read_or_exit(SOTIF_MANIFEST_PATH);
+    let manifest: SotifCoverageManifest = match serde_json::from_str(&manifest_raw) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("scenario_kpi_gate: SOTIF manifest at {SOTIF_MANIFEST_PATH} does not parse: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let doc_tcs = parse_trigger_ids(&sotif_md);
+    let aous = parse_aou_ids(&aou_md);
+    let corpus = live_corpus_scenario_names();
+    let report = check_sotif_coverage(&doc_tcs, &manifest, &corpus, &aous);
+
+    println!("=== SOTIF trigger-coverage gate (WS-3.3) ===");
+    println!(
+        "catalog: {} triggering conditions ({} manifest entries)",
+        doc_tcs.len(),
+        manifest.triggers.len()
+    );
+    for row in &report.rows {
+        match &row.reason {
+            None => println!("  [PASS] {:<8} {} — {}", row.tc, row.kind, row.detail),
+            Some(why) => println!("  [FAIL] {:<8} {} — {} ({why})", row.tc, row.kind, row.detail),
+        }
+    }
+    for tc in &report.missing_from_manifest {
+        println!("  [FAIL] {tc:<8} — triggering condition in OCCY_SOTIF.md §3 has NO coverage entry");
+    }
+    for tc in &report.extra_in_manifest {
+        println!("  [FAIL] {tc:<8} — manifest entry for a TC that is NOT in OCCY_SOTIF.md §3");
+    }
+
+    if report.passed() {
+        println!("SOTIF coverage gate: PASS");
+        true
+    } else {
+        eprintln!(
+            "SOTIF coverage gate: FAIL — a triggering condition is unmapped, spuriously mapped, \
+             or references a scenario/AoU that does not exist. Update {SOTIF_MANIFEST_PATH} (and, \
+             if a new TC was added, OCCY_SOTIF.md §3) so every trigger maps to a real artifact."
+        );
+        false
+    }
+}
+
+fn read_or_exit(path: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("scenario_kpi_gate: cannot read {path}: {e}");
+            eprintln!("  (run from the repo root)");
+            std::process::exit(2);
+        }
     }
 }
