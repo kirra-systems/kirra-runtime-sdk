@@ -50,6 +50,12 @@ int main(void) {
     const double proposals[] = {1.0, 1.8, 5.0 /* over-envelope */, NAN /* corrupt */};
     const size_t n = sizeof(proposals) / sizeof(proposals[0]);
 
+    /* Discover the bounds we're being held to, up front. */
+    KirraEnvelope env = kirra_envelope();
+    printf("envelope: linear [%.2f, %.2f] m/s, angular <= %.2f rad/s, accel <= %.2f m/s^2\n\n",
+           env.min_linear_velocity_mps, env.max_linear_velocity_mps,
+           env.max_angular_velocity_radps, env.max_linear_acceleration_mps2);
+
     printf("proposed -> emitted   [reason]                (trust score after tick)\n");
     printf("----------------------------------------------------------------------\n");
     for (size_t i = 0; i < n; ++i) {

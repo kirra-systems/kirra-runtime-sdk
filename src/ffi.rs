@@ -179,6 +179,55 @@ pub extern "C" fn kirra_posture() -> i32 {
         .unwrap_or(KIRRA_POSTURE_LOCKED_OUT)
 }
 
+// --- Envelope config query (WS-2 SDK: envelope config) ---------------------
+//
+// The hard kinematic envelope is COMPILED into the library; a C integrator
+// currently cannot discover the bounds it is being held to. `kirra_envelope`
+// reports them, so a caller can pre-clamp its own proposals (or display the
+// limits) instead of learning them only by getting clamped.
+
+/// The governor's hard kinematic envelope + rate limits, reported to C. All
+/// fields are the SAME bounds `kirra_check_move_velocity` / `_filter_*` enforce.
+/// `#[repr(C)]`, returned by value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KirraEnvelope {
+    /// Max linear velocity (m/s) — the upper envelope bound.
+    pub max_linear_velocity_mps: f64,
+    /// Min linear velocity (m/s) — the lower envelope bound (symmetric: `-max`).
+    pub min_linear_velocity_mps: f64,
+    /// Max angular velocity (rad/s).
+    pub max_angular_velocity_radps: f64,
+    /// Max linear acceleration (m/s²) — the rate-of-change limit.
+    pub max_linear_acceleration_mps2: f64,
+    /// The fail-closed fallback linear velocity (m/s) commanded on a rejection.
+    pub fallback_linear_velocity_mps: f64,
+}
+
+/// Report the governor's compiled hard envelope + rate limits as a
+/// [`KirraEnvelope`]. A poisoned lock fails closed to an ALL-ZERO envelope: a
+/// zero `max_linear_velocity` admits only a stop (0.0), so a consumer that
+/// pre-clamps to this envelope halts rather than proceeds when it is unreadable.
+#[no_mangle]
+pub extern "C" fn kirra_envelope() -> KirraEnvelope {
+    match GLOBAL_GOVERNOR.lock() {
+        Ok(g) => KirraEnvelope {
+            max_linear_velocity_mps: g.contract.max_bound(),
+            min_linear_velocity_mps: g.contract.min_bound(),
+            max_angular_velocity_radps: g.contract.max_angular_rate(),
+            max_linear_acceleration_mps2: g.contract.max_rate(),
+            fallback_linear_velocity_mps: g.contract.fallback(),
+        },
+        Err(_) => KirraEnvelope {
+            max_linear_velocity_mps: 0.0,
+            min_linear_velocity_mps: 0.0,
+            max_angular_velocity_radps: 0.0,
+            max_linear_acceleration_mps2: 0.0,
+            fallback_linear_velocity_mps: 0.0,
+        },
+    }
+}
+
 /// # Safety
 ///
 /// Caller must ensure:
@@ -477,6 +526,57 @@ mod verdict_tests {
         assert!(
             (KIRRA_POSTURE_NOMINAL..=KIRRA_POSTURE_LOCKED_OUT).contains(&p),
             "posture must be a valid KIRRA_POSTURE_* code, got {p}"
+        );
+    }
+
+    /// The envelope query reports the compiled FFI governor's bounds. The contract
+    /// is immutable, so this is deterministic regardless of the shared trust state
+    /// other tests leave `GLOBAL_GOVERNOR` in.
+    #[test]
+    fn envelope_reports_the_compiled_bounds() {
+        let e = kirra_envelope();
+        assert_eq!(e.max_linear_velocity_mps, 2.0, "compiled linear envelope");
+        assert_eq!(e.min_linear_velocity_mps, -2.0, "symmetric lower bound");
+        assert_eq!(e.max_angular_velocity_radps, 1.0);
+        assert_eq!(e.max_linear_acceleration_mps2, 10.0);
+        assert_eq!(e.fallback_linear_velocity_mps, 0.0);
+    }
+
+    /// Structural invariants that hold for ANY reported envelope — including the
+    /// all-zero fail-closed envelope on a poisoned lock: all finite, symmetric
+    /// (`min == -max`), and non-negative bounds. (The stronger "positive/usable"
+    /// accel limit is a success-path property, asserted in
+    /// `envelope_reports_the_compiled_bounds`, not a universal API guarantee.)
+    #[test]
+    fn envelope_is_finite_and_symmetric() {
+        let e = kirra_envelope();
+        for v in [
+            e.max_linear_velocity_mps,
+            e.min_linear_velocity_mps,
+            e.max_angular_velocity_radps,
+            e.max_linear_acceleration_mps2,
+            e.fallback_linear_velocity_mps,
+        ] {
+            assert!(v.is_finite(), "every envelope field must be finite");
+        }
+        assert_eq!(e.min_linear_velocity_mps, -e.max_linear_velocity_mps, "symmetric envelope");
+        assert!(e.max_linear_velocity_mps >= 0.0, "max velocity is non-negative");
+        assert!(e.max_angular_velocity_radps >= 0.0, "max angular rate is non-negative");
+        assert!(e.max_linear_acceleration_mps2 >= 0.0, "accel limit is non-negative (0 in the fail-closed envelope)");
+    }
+
+    /// The reported envelope agrees with what the checker enforces: a demand well
+    /// ABOVE `max_linear_velocity_mps` comes back at or below it (envelope-clamped),
+    /// never above the reported bound.
+    #[test]
+    fn reported_envelope_bounds_the_actual_verdict() {
+        let e = kirra_envelope();
+        let v = kirra_check_move_velocity(e.max_linear_velocity_mps + 100.0, 1.0);
+        assert!(
+            v.sanitized_value <= e.max_linear_velocity_mps + 1e-9,
+            "the checker must not emit above the reported envelope ({} > {})",
+            v.sanitized_value,
+            e.max_linear_velocity_mps
         );
     }
 }
