@@ -717,7 +717,8 @@ impl VerifierStore {
                 applied_digest   TEXT    NOT NULL,
                 campaign_id      TEXT,
                 artifact_version TEXT,
-                reported_at_ms   INTEGER NOT NULL
+                reported_at_ms   INTEGER NOT NULL,
+                attested         INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;

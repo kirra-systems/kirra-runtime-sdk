@@ -2964,6 +2964,77 @@ mod attestation_nonce_handler_tests {
         verify_attestation(State(svc), Json(req)).await.into_response().status()
     }
 
+    /// WS-4: an attestation-SIGNED adoption report is verified against the node's
+    /// registered AK — a valid signature marks the stored report `attested`, a
+    /// tampered one is rejected fail-closed (401), and an unsigned report is accepted
+    /// but unattested.
+    #[tokio::test]
+    async fn signed_adoption_report_is_attested_and_forgery_rejected() {
+        use super::{report_node_artifact, NodeArtifactReport};
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = svc_with_registered_node(public_key_to_pem(&sk.verifying_key()));
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ts: u64 = 5_000;
+        let good_sig = B64.encode(
+            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
+                NODE, digest, ts,
+            ))
+            .to_bytes(),
+        );
+
+        let report = |body: serde_json::Value| {
+            let req: NodeArtifactReport = serde_json::from_value(body).expect("build report");
+            report_node_artifact(State(svc.clone()), Json(req))
+        };
+        let attested_of = |svc: Arc<ServiceState>| async move {
+            svc.app
+                .store
+                .call_read(|s| s.load_node_artifact_statuses())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.node_id == NODE)
+                .map(|r| r.attested)
+        };
+
+        // Valid signature → 200 and stored attested=true.
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": good_sig, "reported_at_ms": ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::OK, "valid signed report accepted");
+        assert_eq!(attested_of(svc.clone()).await, Some(true), "stored as attested");
+
+        // Tampered signature (flip a byte) → 401, fail-closed.
+        let mut bad = B64.decode(&good_sig).unwrap();
+        bad[0] ^= 0x01;
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": B64.encode(&bad), "reported_at_ms": ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "forged signature rejected");
+
+        // Unsigned report → accepted but unattested (a LATER timestamp so the
+        // monotonic store upsert lets it replace the attested row).
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::OK, "unsigned report still accepted (identity-gated)");
+        assert_eq!(attested_of(svc.clone()).await, Some(false), "unsigned → not attested");
+    }
+
     // ---- PCR16 measured-boot binding (attestation follow-up) --------------
 
     /// `svc_with_registered_node`, but the node is enrolled with an expected
@@ -3743,6 +3814,7 @@ mod console_phase_a_tests {
                         campaign_id: Some("c-live".into()),
                         artifact_version: Some("v2".into()),
                         reported_at_ms: 4,
+                        attested: false,
                     })?;
                 }
                 Ok::<_, rusqlite::Error>(())

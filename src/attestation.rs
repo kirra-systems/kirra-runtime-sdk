@@ -260,6 +260,37 @@ pub fn operator_stop_signing_payload(operator_id: &str, node_id: &str, nonce: &s
     payload
 }
 
+/// Domain tag for a node OTA-adoption report (WS-4). Distinct from the node
+/// attestation and operator domains so an adoption signature can never be
+/// cross-replayed as an attestation proof or a clearance/stop, nor vice versa.
+pub const ADOPTION_REPORT_DOMAIN: &[u8] = b"KIRRA-ADOPTION-REPORT-v1";
+
+/// The exact byte payload a node signs (with its attestation key) and the verifier
+/// reconstructs, to make an OTA-adoption report unforgeable: it binds the reporting
+/// `node_id`, the `applied_digest` it claims to run, and the `reported_at_ms`
+/// timestamp. Domain-separated + length-prefixed on the two string fields (u64 LE
+/// length, then bytes), with `reported_at_ms` appended as a fixed u64 LE — the same
+/// anti-collision discipline as [`operator_grant_signing_payload`]. Binding the
+/// timestamp lets the store reject a replayed OLD report (monotonic upsert).
+#[must_use]
+pub fn adoption_report_signing_payload(
+    node_id: &str,
+    applied_digest: &str,
+    reported_at_ms: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(
+        ADOPTION_REPORT_DOMAIN.len() + 16 + node_id.len() + applied_digest.len() + 8,
+    );
+    payload.extend_from_slice(ADOPTION_REPORT_DOMAIN);
+    for field in [node_id, applied_digest] {
+        let b = field.as_bytes();
+        payload.extend_from_slice(&(b.len() as u64).to_le_bytes());
+        payload.extend_from_slice(b);
+    }
+    payload.extend_from_slice(&reported_at_ms.to_le_bytes());
+    payload
+}
+
 /// Verify an Ed25519 signature over `payload` against a PEM-encoded public key.
 /// Fail-closed: a malformed key, a non-64-byte signature, or a bad signature all
 /// return `false`. Uses `verify_strict` (the same path as node attestation).

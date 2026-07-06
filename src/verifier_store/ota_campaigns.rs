@@ -148,21 +148,28 @@ impl VerifierStore {
     /// observability: a plain upsert, NOT audit-chained (these are high-volume
     /// telemetry, not security mutations, and never gate any actuator decision).
     pub fn upsert_node_artifact_status(&mut self, st: &NodeArtifactStatus) -> Result<()> {
+        // MONOTONIC upsert: a report only replaces the stored one when its
+        // `reported_at_ms` is NOT older (the `WHERE` on the DO UPDATE). This makes a
+        // replayed OLD report (signed or not) a no-op — it can never move a node's
+        // recorded adoption backward in time.
         self.conn.execute(
             "INSERT INTO node_artifact_status
-                 (node_id, applied_digest, campaign_id, artifact_version, reported_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                 (node_id, applied_digest, campaign_id, artifact_version, reported_at_ms, attested)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(node_id) DO UPDATE SET
                  applied_digest   = excluded.applied_digest,
                  campaign_id      = excluded.campaign_id,
                  artifact_version = excluded.artifact_version,
-                 reported_at_ms   = excluded.reported_at_ms",
+                 reported_at_ms   = excluded.reported_at_ms,
+                 attested         = excluded.attested
+               WHERE excluded.reported_at_ms >= node_artifact_status.reported_at_ms",
             params![
                 st.node_id,
                 st.applied_digest,
                 st.campaign_id,
                 st.artifact_version,
                 st.reported_at_ms as i64,
+                st.attested as i64,
             ],
         )?;
         Ok(())
@@ -172,7 +179,7 @@ impl VerifierStore {
     /// join). Newest report first.
     pub fn load_node_artifact_statuses(&self) -> Result<Vec<NodeArtifactStatus>> {
         let mut stmt = self.conn.prepare(
-            "SELECT node_id, applied_digest, campaign_id, artifact_version, reported_at_ms
+            "SELECT node_id, applied_digest, campaign_id, artifact_version, reported_at_ms, attested
              FROM node_artifact_status ORDER BY reported_at_ms DESC, node_id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -182,6 +189,7 @@ impl VerifierStore {
                 campaign_id: row.get(2)?,
                 artifact_version: row.get(3)?,
                 reported_at_ms: row.get::<_, i64>(4)? as u64,
+                attested: row.get::<_, i64>(5)? != 0,
             })
         })?;
         rows.collect()
@@ -443,6 +451,7 @@ mod tests {
             campaign_id: Some("camp-1".into()),
             artifact_version: Some("v2".into()),
             reported_at_ms: at,
+            attested: false,
         };
         s.upsert_node_artifact_status(&st(DIGEST, 1_000)).unwrap();
         // A second node on a different digest.
@@ -453,6 +462,7 @@ mod tests {
             campaign_id: None,
             artifact_version: None,
             reported_at_ms: 1_001,
+            attested: true,
         })
         .unwrap();
         // robot-01 re-reports a newer digest → the row is REPLACED, not duplicated.
@@ -463,6 +473,20 @@ mod tests {
         let r01 = all.iter().find(|r| r.node_id == "robot-01").unwrap();
         assert_eq!(r01.applied_digest, other, "latest report wins");
         assert_eq!(r01.reported_at_ms, 2_000);
+        let r02 = all.iter().find(|r| r.node_id == "robot-02").unwrap();
+        assert!(r02.attested, "attested flag round-trips");
+
+        // MONOTONIC guard: a STALE report (older timestamp) is a no-op, never
+        // overwriting the newer stored one.
+        s.upsert_node_artifact_status(&st(DIGEST, 500)).unwrap();
+        let r01 = s
+            .load_node_artifact_statuses()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.node_id == "robot-01")
+            .unwrap();
+        assert_eq!(r01.reported_at_ms, 2_000, "stale report must not overwrite");
+        assert_eq!(r01.applied_digest, other, "stale digest must not win");
     }
 
     #[test]

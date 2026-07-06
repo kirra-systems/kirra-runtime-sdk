@@ -498,6 +498,12 @@ pub struct NodeArtifactStatus {
     pub campaign_id: Option<String>,
     pub artifact_version: Option<String>,
     pub reported_at_ms: u64,
+    /// `true` iff the report carried a valid Ed25519 signature over
+    /// [`crate::attestation::adoption_report_signing_payload`] against the node's
+    /// registered attestation key — unforgeable attribution. An unsigned (merely
+    /// identity-gated) report is `false`.
+    #[serde(default)]
+    pub attested: bool,
 }
 
 /// A fleet-wide observability summary of every campaign — the operator's at-a-glance
@@ -538,6 +544,9 @@ pub struct CampaignProgress {
     /// Distinct nodes that have REPORTED running this campaign's `artifact_digest`
     /// (the adoption numerator). `0` until nodes report; needs no cohort data.
     pub applied_nodes: usize,
+    /// Of `applied_nodes`, how many carried a valid attestation signature —
+    /// unforgeable adoption. `attested_nodes <= applied_nodes` always.
+    pub attested_nodes: usize,
 }
 
 /// A halted campaign and its reason in the [`CampaignSummary`].
@@ -582,10 +591,16 @@ pub fn summarize_campaigns(
         if c.state.is_active() {
             // Adoption numerator: distinct nodes reporting this campaign's digest.
             // node_id is the store PK, so each node contributes at most one status.
-            let applied_nodes = statuses
+            let on_digest = statuses
                 .iter()
-                .filter(|st| st.applied_digest == c.artifact_digest)
-                .count();
+                .filter(|st| st.applied_digest == c.artifact_digest);
+            let (mut applied_nodes, mut attested_nodes) = (0usize, 0usize);
+            for st in on_digest {
+                applied_nodes += 1;
+                if st.attested {
+                    attested_nodes += 1;
+                }
+            }
             s.active.push(CampaignProgress {
                 campaign_id: c.campaign_id.clone(),
                 state: c.state.as_str().to_string(),
@@ -595,6 +610,7 @@ pub fn summarize_campaigns(
                 rollout_percent: c.rollout_percent,
                 cohorts: c.cohorts.clone(),
                 applied_nodes,
+                attested_nodes,
             });
         }
         if c.state == CampaignState::Halted {
@@ -673,6 +689,19 @@ pub fn campaign_metrics_prometheus(summary: &CampaignSummary) -> String {
             "kirra_ota_campaign_applied_nodes{{campaign_id=\"{}\"}} {}",
             escape_prom_label(&c.campaign_id),
             c.applied_nodes
+        );
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_attested_nodes Attested (Ed25519-signed) subset of an active campaign's adopting nodes."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_attested_nodes gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_attested_nodes{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.attested_nodes
         );
     }
     s
@@ -1047,12 +1076,16 @@ mod tests {
     }
 
     fn status(node: &str, digest: &str) -> NodeArtifactStatus {
+        status_att(node, digest, false)
+    }
+    fn status_att(node: &str, digest: &str, attested: bool) -> NodeArtifactStatus {
         NodeArtifactStatus {
             node_id: node.into(),
             applied_digest: digest.into(),
             campaign_id: None,
             artifact_version: None,
             reported_at_ms: 1,
+            attested,
         }
     }
 
@@ -1065,15 +1098,19 @@ mod tests {
         rolling.rollout_percent = 50;
         let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let statuses = [
-            status("node-a", DIGEST),
-            status("node-b", DIGEST),
-            status("node-c", other), // still on the old artifact
+            status_att("node-a", DIGEST, true), // attested
+            status("node-b", DIGEST),           // unattested
+            status("node-c", other),            // still on the old artifact
         ];
         let s = summarize_campaigns(std::slice::from_ref(&rolling), &statuses);
         assert_eq!(s.active.len(), 1);
         assert_eq!(
             s.active[0].applied_nodes, 2,
             "only the two nodes on the campaign's digest count"
+        );
+        assert_eq!(
+            s.active[0].attested_nodes, 1,
+            "only the attested node counts toward attested adoption"
         );
         // No reports → zero adoption, never a fabricated number.
         let s0 = summarize_campaigns(std::slice::from_ref(&rolling), &[]);

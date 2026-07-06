@@ -209,8 +209,9 @@ function renderCampaigns(d){
   const active = (d.active||[]).map(c =>
     '<div class="row"><span class="et">'+esc(c.campaign_id)+'</span> '+
     '<span class="pill Trusted">'+esc(c.state)+'</span> · stage '+esc(c.stage)+'/'+esc(c.stage_count)+
-    ' · '+esc(c.rollout_percent)+'% · <b>'+esc(c.applied_nodes)+'</b> nodes adopted · v'+
-    esc(c.artifact_version)+'</div>').join("");
+    ' · '+esc(c.rollout_percent)+'% · <b>'+esc(c.applied_nodes)+'</b> nodes adopted'+
+    (c.attested_nodes!=null ? ' ('+esc(c.attested_nodes)+' attested)' : '')+
+    ' · v'+esc(c.artifact_version)+'</div>').join("");
   const halted = (d.halted_campaigns||[]).map(c =>
     '<div class="row"><span class="et">'+esc(c.campaign_id)+'</span> '+
     '<span class="pill Untrusted">halted</span> · '+esc(c.halt_reason)+' · '+

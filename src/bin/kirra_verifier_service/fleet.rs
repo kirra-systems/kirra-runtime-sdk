@@ -221,6 +221,7 @@ pub(crate) async fn get_node_campaign_assignment(
 }
 
 /// Body of a node adoption report: the node id and the digest it is now running.
+/// Optionally attestation-SIGNED for unforgeable attribution.
 #[derive(Deserialize)]
 pub(crate) struct NodeArtifactReport {
     node_id: String,
@@ -230,6 +231,15 @@ pub(crate) struct NodeArtifactReport {
     campaign_id: Option<String>,
     #[serde(default)]
     artifact_version: Option<String>,
+    /// Optional base64 Ed25519 signature over
+    /// `attestation::adoption_report_signing_payload(node_id, applied_digest,
+    /// reported_at_ms)`, verified against the node's registered `ak_public_pem`.
+    #[serde(default)]
+    signature: Option<String>,
+    /// The node's claimed report timestamp. REQUIRED when `signature` is present (the
+    /// signature covers it); ignored (server stamps `now_ms`) when unsigned.
+    #[serde(default)]
+    reported_at_ms: Option<u64>,
 }
 
 /// POST /fleet/campaigns/report — WS-4 / Track 3. A node reports the governor
@@ -261,6 +271,51 @@ pub(crate) async fn report_node_artifact(
             .into_response();
     }
 
+    // Optional attestation signature → unforgeable attribution. Present + valid →
+    // attested (using the node-signed timestamp); present + invalid / no registered
+    // AK / bad base64 → fail-closed reject; absent → an unattested (identity-gated
+    // only) report stamped with the server clock.
+    let (attested, reported_at_ms) = if let Some(sig_b64) = req.signature.as_deref() {
+        let Some(ts) = req.reported_at_ms else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "a signed report requires reported_at_ms" })),
+            )
+                .into_response();
+        };
+        let ak = svc.app.nodes.get(&node_id).and_then(|n| n.ak_public_pem.clone());
+        let Some(ak) = ak else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "no registered attestation key for node" })),
+            )
+                .into_response();
+        };
+        use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+        let Ok(sig) = b64e.decode(sig_b64.trim()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "signature is not valid base64" })),
+            )
+                .into_response();
+        };
+        let payload = kirra_verifier::attestation::adoption_report_signing_payload(
+            &node_id,
+            &applied_digest,
+            ts,
+        );
+        if !kirra_verifier::attestation::verify_ed25519_pem_signature(&ak, &payload, &sig) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "adoption report signature invalid" })),
+            )
+                .into_response();
+        }
+        (true, ts)
+    } else {
+        (false, now_ms())
+    };
+
     let status = kirra_verifier::ota_campaign::NodeArtifactStatus {
         node_id,
         applied_digest,
@@ -269,7 +324,8 @@ pub(crate) async fn report_node_artifact(
             .artifact_version
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
-        reported_at_ms: now_ms(),
+        reported_at_ms,
+        attested,
     };
 
     match svc

@@ -182,7 +182,7 @@ src/
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
 | `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
 | `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
-| `node_artifact_status` | WS-4 (Track 3) per-node adoption reports (node_id PK + applied_digest + campaign_id + version + reported_at_ms; upsert-latest-wins, non-audit-chained observability; the fleet summary's `applied_nodes` join source) |
+| `node_artifact_status` | WS-4 (Track 3) per-node adoption reports (node_id PK + applied_digest + campaign_id + version + reported_at_ms + `attested`; upsert monotonic on reported_at_ms, non-audit-chained observability; the fleet summary's `applied_nodes`/`attested_nodes` join source) |
 
 ---
 
@@ -273,7 +273,7 @@ Admin token or an `integrator`-role principal.
 - `GET  /system/posture/stream` — SSE broadcast of posture events
 - `POST /federation/reports/submit` — Submit signed federated trust report
 - `POST /action_filter/evaluate` — Evaluate action claim against posture
-- `POST /fleet/campaigns/report` — WS-4 node adoption report (a node reports the governor digest it is now running → the fleet summary's `applied_nodes`; a write, so identity-gated, unlike the open read-only assignment GET; upsert by node_id, not audit-chained)
+- `POST /fleet/campaigns/report` — WS-4 node adoption report (a node reports the governor digest it is now running → the fleet summary's `applied_nodes`; a write, so identity-gated, unlike the open read-only assignment GET; upsert by node_id, monotonic on `reported_at_ms`, not audit-chained). Optionally attestation-SIGNED: a base64 Ed25519 signature over `attestation::adoption_report_signing_payload(node_id, applied_digest, reported_at_ms)` verified against the node's registered `ak_public_pem` → `attested=true` (unforgeable attribution; `summary.attested_nodes`); invalid sig / no AK → 401 fail-closed; unsigned → accepted but `attested=false`
 - `POST /industrial/evaluate` — Evaluate Modbus/OPC-UA industrial event
 
 ### Tier 2 — Admin (`SCOPE_ADMIN`; Bearer `KIRRA_ADMIN_TOKEN` or `admin`-role principal)
