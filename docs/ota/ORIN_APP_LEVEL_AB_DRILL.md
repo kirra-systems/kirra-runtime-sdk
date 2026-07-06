@@ -239,6 +239,19 @@ The report route is **identity-gated** (a node write needs a credential, unlike 
 open read-only assignment GET); a non-200 is a best-effort warning that retries next
 cycle. `--token`/`--client-id` also come from `KIRRA_API_TOKEN`/`KIRRA_CLIENT_ID`.
 
+**Unforgeable attribution (optional):** add `--ak-key <pkcs8.pem>` (or
+`KIRRA_OTA_AK_KEY`) to SIGN the report with the node's Ed25519 attestation key. The
+verifier checks the signature against the node's registered `ak_public_pem` and marks
+the stored report **attested** (surfaced as `attested_nodes` in the summary /
+`kirra_ota_campaign_attested_nodes` metric / the console's "(N attested)"). An
+invalid signature is rejected 401 — so a rogue integrator token can't fake adoption
+for a node it doesn't hold the key for.
+
+```sh
+sudo kirra-ota-ctl report --verifier http://<verifier>:8090 --node-id robot-01 \
+     --token "$KIRRA_API_TOKEN" --client-id robot-01 --ak-key /etc/kirra/ak.pem
+```
+
 ## Hardware result (GATE C evidence)
 
 Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd

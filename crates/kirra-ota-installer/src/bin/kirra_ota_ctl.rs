@@ -35,9 +35,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use kirra_ota_installer::{
-    artifact_sha256_hex, decide_pull, plan_commit, plan_rollback, plan_run, plan_stage,
-    verify_staged_artifact, AssignmentView, BootRecord, FileBootController, HealthGate, PullAction,
-    Slot,
+    adoption_report_payload, artifact_sha256_hex, decide_pull, plan_commit, plan_rollback,
+    plan_run, plan_stage, verify_staged_artifact, AssignmentView, BootRecord, FileBootController,
+    HealthGate, PullAction, Slot,
 };
 
 struct Cfg {
@@ -617,6 +617,9 @@ struct ReportOpts {
     client_id: Option<String>,
     campaign_id: Option<String>,
     artifact_version: Option<String>,
+    /// Optional PKCS#8 PEM of the node's Ed25519 attestation key — when set, the
+    /// report is SIGNED (unforgeable attribution).
+    ak_key: Option<PathBuf>,
 }
 
 impl ReportOpts {
@@ -627,6 +630,7 @@ impl ReportOpts {
         let mut client_id = std::env::var("KIRRA_CLIENT_ID").ok();
         let mut campaign_id = None;
         let mut artifact_version = None;
+        let mut ak_key = std::env::var("KIRRA_OTA_AK_KEY").ok().map(PathBuf::from);
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -642,6 +646,7 @@ impl ReportOpts {
                 "--client-id" => client_id = Some(next("--client-id")?),
                 "--campaign-id" => campaign_id = Some(next("--campaign-id")?),
                 "--artifact-version" => artifact_version = Some(next("--artifact-version")?),
+                "--ak-key" => ak_key = Some(PathBuf::from(next("--ak-key")?)),
                 other => return Err(format!("unknown report flag {other:?}")),
             }
         }
@@ -653,6 +658,7 @@ impl ReportOpts {
             client_id,
             campaign_id,
             artifact_version,
+            ak_key,
         })
     }
 }
@@ -699,6 +705,14 @@ fn cmd_report(args: &[String]) -> Result<(), String> {
     }
     if let Some(v) = &opts.artifact_version {
         body["artifact_version"] = serde_json::Value::String(v.clone());
+    }
+    // Optional attestation signature → unforgeable attribution. Sign the SAME payload
+    // the verifier reconstructs (node_id, digest, reported_at_ms) with the node's AK.
+    if let Some(key_path) = &opts.ak_key {
+        let ts = now_ms();
+        let sig_b64 = sign_report(key_path, &opts.node_id, &digest, ts)?;
+        body["signature"] = serde_json::Value::String(sig_b64);
+        body["reported_at_ms"] = serde_json::json!(ts);
     }
     let body = body.to_string();
 
@@ -761,6 +775,29 @@ fn http_post_json(
         .parse()
         .map_err(|_| format!("curl returned a non-numeric status: {code:?}"))?;
     Ok((code, resp.to_string()))
+}
+
+/// Milliseconds since the Unix epoch (the report timestamp the signature covers).
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Sign an adoption report with the node's Ed25519 attestation key (PKCS#8 PEM),
+/// over the SAME payload the verifier reconstructs. Returns the base64 signature.
+fn sign_report(key_path: &Path, node_id: &str, digest: &str, ts: u64) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+    use ed25519_dalek::pkcs8::DecodePrivateKey as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    let pem = std::fs::read_to_string(key_path)
+        .map_err(|e| format!("read AK key {}: {e}", key_path.display()))?;
+    let sk = SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|e| format!("parse AK key (expect a PKCS#8 Ed25519 PEM): {e}"))?;
+    let payload = adoption_report_payload(node_id, digest, ts);
+    Ok(b64e.encode(sk.sign(&payload).to_bytes()))
 }
 
 /// `status` — print the record + which slot `run` would launch. READ-ONLY: it does
@@ -840,6 +877,9 @@ fn print_usage() {
          \x20            --no-restart\n\
          pull flags:  --verifier <url> --node-id <id> --cohorts a,b --artifact-base <url>\n\
          \x20            (each also from KIRRA_VERIFIER_URL/KIRRA_NODE_ID/KIRRA_NODE_COHORTS/KIRRA_OTA_ARTIFACT_BASE)\n\
+         report flags: --verifier <url> --node-id <id> [--token T --client-id C]\n\
+         \x20            [--campaign-id X --artifact-version V] [--ak-key <pkcs8.pem>]\n\
+         \x20            (--ak-key signs the report → unforgeable; also KIRRA_OTA_AK_KEY)\n\
          \n\
          ENV: KIRRA_OTA_SLOT_A KIRRA_OTA_SLOT_B KIRRA_OTA_BOOT_RECORD KIRRA_OTA_GOVERNOR_BIN KIRRA_OTA_UNIT"
     );

@@ -549,6 +549,25 @@ pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
     }
 }
 
+/// The exact byte payload a node signs (with its attestation key) to make an OTA
+/// adoption report unforgeable — **byte-identical** to the verifier's
+/// `kirra_verifier::attestation::adoption_report_signing_payload`. Domain-separated,
+/// length-prefixed on the two string fields (u64 LE length then bytes), with
+/// `reported_at_ms` appended as a fixed u64 LE. A drift from the server is caught by
+/// the byte-pinned `adoption_report_payload_is_byte_stable` test.
+pub fn adoption_report_payload(node_id: &str, applied_digest: &str, reported_at_ms: u64) -> Vec<u8> {
+    const DOMAIN: &[u8] = b"KIRRA-ADOPTION-REPORT-v1";
+    let mut p =
+        Vec::with_capacity(DOMAIN.len() + 16 + node_id.len() + applied_digest.len() + 8);
+    p.extend_from_slice(DOMAIN);
+    for field in [node_id, applied_digest] {
+        p.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        p.extend_from_slice(field.as_bytes());
+    }
+    p.extend_from_slice(&reported_at_ms.to_le_bytes());
+    p
+}
+
 /// A consecutive-success health gate for the app-level probe agent (WS-4). A trial
 /// slot is declared healthy — and thus committable — only after `required_streak`
 /// CONSECUTIVE healthy samples: a single lucky sample never commits, and any failure
@@ -1067,6 +1086,24 @@ mod tests {
             plan_commit(&rec(Slot::A, None, None)),
             Err(InstallError::InvalidTransition { .. })
         ));
+    }
+
+    // --- adoption report signing payload ---------------------------------
+
+    #[test]
+    fn adoption_report_payload_is_byte_stable() {
+        // PIN the exact bytes so any drift from the server's
+        // attestation::adoption_report_signing_payload is caught here. Layout:
+        // domain || u64_le(len(node)) || node || u64_le(len(digest)) || digest || u64_le(ts).
+        let p = adoption_report_payload("n1", "ab", 1);
+        let mut want = Vec::new();
+        want.extend_from_slice(b"KIRRA-ADOPTION-REPORT-v1");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(b"n1");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(b"ab");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        assert_eq!(p, want);
     }
 
     // --- health gate (probe agent) ---------------------------------------
