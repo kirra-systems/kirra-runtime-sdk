@@ -1,5 +1,5 @@
 {
-  "_comment": "WS-3.3 SPI registry — the machine-checked transcription of UL4600_SAFETY_CASE.md §5.2. Gated by kirra_verifier::spi_ledger (a root-crate test): every `emitted`/`derived` SPI's event_type literals must be actually emitted in src/ (scanned), a `parko`-scope SPI's verifier-side denominator must resolve, and the registry IDs must equal the §5.2 catalogue IDs. `threshold` is null where the §5 alarm limit is field-calibration TBD (the SPI is computed/reported but not alarm-gated); SPI-G06 (audit-chain integrity) is the hard 0-required precondition. Renaming/removing an audit event_type reds this gate. Reconciled to reality: SPI-L04 uses the real DETECTION_RANGE_UNTRUSTED (the catalogue's PERCEPTION_SNAPSHOT_UNHEALTHY / DETECTION_RANGE_DEGRADED were never emitted).",
+  "_comment": "WS-3.3 SPI registry — the machine-checked transcription of UL4600_SAFETY_CASE.md §5.2. Gated by kirra_verifier::spi_ledger (a root-crate test): every `emitted`/`derived` SPI's event_type literals must be actually emitted in the workspace's NON-TEST code (root src/ + crates/*/src, scanned — some event_types are DerateCode reason tokens defined in kirra-core, not the verifier src/), a `parko`-scope SPI's verifier-side denominator must resolve, and the registry IDs must equal the §5.2 catalogue IDs. `threshold` is null where the §5 alarm limit is field-calibration TBD (the SPI is computed/reported but not alarm-gated); SPI-G06 (audit-chain integrity) is the hard 0-required precondition. Renaming/removing an audit event_type reds this gate.",
   "spis": [
     {
       "id": "SPI-L01",
@@ -39,11 +39,11 @@
       "name": "Perception-derate rate",
       "kind": "leading",
       "source": "emitted",
-      "event_types": ["DETECTION_RANGE_UNTRUSTED"],
+      "event_types": ["PERCEPTION_SNAPSHOT_UNHEALTHY", "DETECTION_RANGE_DEGRADED"],
       "denominator": null,
       "direction": "lower_better",
       "threshold": null,
-      "note": "Validated detection range below the assured-clear floor (perception_monitor). Reconciled to the real emitted literal; a discrete snapshot-health event is not emitted today (§5.3 gap)."
+      "note": "Detection range / snapshot health below floor. Both are real perception DerateCode reasons (kirra_core::gateway::perception_monitor::DerateCode), emitted as the derate event's reason token — hence the scan spans crates/*/src, not just the verifier src/."
     },
     {
       "id": "SPI-L05",

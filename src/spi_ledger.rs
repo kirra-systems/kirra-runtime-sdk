@@ -11,11 +11,13 @@
 //! transcribes §5.2, and two pure functions gate + evaluate it —
 //!
 //! - [`check_resolution`] — every `emitted` / `derived` SPI's `event_type`
-//!   literals MUST be in the set actually emitted in `src/` (scanned by
-//!   [`scan_emitted_literals`]); a `parko`-scope SPI is emitted in the node-local
-//!   chain (its numerator is external, its verifier-side denominator still
-//!   resolves); the `integrity` SPI (SPI-G06) is the chain-verify precondition,
-//!   not a tally. A dangling literal (a rename the catalogue missed) reds the gate.
+//!   literals MUST be in the set actually emitted in the workspace's NON-TEST code
+//!   (the root `src/` plus `crates/*/src` — some `event_type`s are `DerateCode`
+//!   reason tokens defined in `kirra-core`, scanned by [`scan_emitted_literals`]);
+//!   a `parko`-scope SPI is emitted in the node-local chain (its numerator is
+//!   external, its verifier-side denominator still resolves); the `integrity` SPI
+//!   (SPI-G06) is the chain-verify precondition, not a tally. A dangling literal
+//!   (a rename the catalogue missed) reds the gate.
 //! - [`evaluate`] — the runtime rollup: given a window's `event_type` tallies and
 //!   the chain-verify result, compute each SPI value (count or ratio) and its
 //!   threshold breach. Per §5.1 the integrity precondition is load-bearing: a
@@ -38,6 +40,19 @@ use serde::{Deserialize, Serialize};
 pub enum SpiKind {
     Leading,
     Lagging,
+}
+
+/// Which way is better for an SPI — a validated enum, NOT a free-form string, so a
+/// typo in the reviewed registry (`lower_beter`) fails to deserialize and reds the
+/// gate rather than silently defaulting to lower-better and changing breach
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Over the threshold breaches (every §5.2 SPI).
+    LowerBetter,
+    /// Under the threshold breaches.
+    HigherBetter,
 }
 
 /// The data-source reality of an SPI (the §5 honesty tags, machine-enforced).
@@ -71,9 +86,9 @@ pub struct SpiDef {
     /// Optional ratio denominator `event_type` (a rate = numerator / denominator).
     #[serde(default)]
     pub denominator: Option<String>,
-    /// Which way is better — `"lower_better"` (the default for every §5.2 SPI) or
-    /// `"higher_better"`. Selects the breach direction against `threshold`.
-    pub direction: String,
+    /// Which way is better — selects the breach direction against `threshold`.
+    /// A validated enum: an unknown value fails to parse (reds the gate).
+    pub direction: Direction,
     /// A placeholder alarm limit (field-calibration TBD per §5); `None` → the SPI
     /// is monitored/reported but not alarm-gated yet.
     #[serde(default)]
@@ -188,12 +203,19 @@ fn resolve_one(spi: &SpiDef, emitted: &BTreeSet<String>) -> (bool, Option<String
     }
 }
 
-/// Scan `.rs` files under `root` for double-quoted `UPPER_SNAKE_CASE` string
-/// literals (len ≥ 6) — the universe of emitted audit `event_type` values. An
-/// over-approximation (it also picks up other upper-snake constants), which is
-/// safe for the gate: a *removed/renamed* event literal disappears from this set,
-/// so a dangling registry reference is still caught; the extra tokens only ever
-/// admit a reference, never wrongly reject one.
+/// Scan the NON-TEST `.rs` code under `root` for double-quoted `UPPER_SNAKE_CASE`
+/// string literals (len ≥ 6) — an approximation of the emitted audit `event_type`
+/// universe.
+///
+/// To keep the gate meaningful, test code is excluded: dedicated test files
+/// (`tests.rs` or anything under a `tests/` directory) are skipped, and each file
+/// is truncated at its first `#[cfg(test)]` (the conventional trailing test
+/// module). So a literal that appears ONLY in a test/assert no longer resolves —
+/// a removed/renamed audit event whose old name lingers only in a test is caught.
+/// This is still a slight over-approximation of *non-test* literals (it does not
+/// prove the token is passed to an audit-write call), erring toward admitting a
+/// reference rather than falsely rejecting one; strengthening it to per-call-site
+/// emission matching is future work.
 #[must_use]
 pub fn scan_emitted_literals(root: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -202,6 +224,10 @@ pub fn scan_emitted_literals(root: &Path) -> BTreeSet<String> {
 }
 
 fn scan_dir(dir: &Path, out: &mut BTreeSet<String>) {
+    // Skip dedicated test trees and build output entirely.
+    if dir.file_name().is_some_and(|n| n == "tests" || n == "target") {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -210,15 +236,23 @@ fn scan_dir(dir: &Path, out: &mut BTreeSet<String>) {
         if path.is_dir() {
             scan_dir(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs")
-            // Exclude this gate's own source: it is meta (its tests + the
-            // reconciliation note mention literals it does not emit), so scanning
-            // it would let a dangling reference resolve against itself.
-            && path.file_name().is_none_or(|n| n != "spi_ledger.rs")
+            // Exclude this gate's own source (meta: its tests + the reconciliation
+            // note mention literals it does not emit) and dedicated test files.
+            && path.file_name().is_none_or(|n| n != "spi_ledger.rs" && n != "tests.rs")
         {
             if let Ok(src) = std::fs::read_to_string(&path) {
-                extract_upper_snake_literals(&src, out);
+                extract_upper_snake_literals(non_test_prefix(&src), out);
             }
         }
+    }
+}
+
+/// The file content up to (not including) the first `#[cfg(test)]` — the
+/// conventional trailing test module. Drops test literals from the scan.
+fn non_test_prefix(src: &str) -> &str {
+    match src.find("#[cfg(test)]") {
+        Some(i) => &src[..i],
+        None => src,
     }
 }
 
@@ -260,10 +294,14 @@ fn is_upper_snake(s: &str) -> bool {
 pub struct SpiValue {
     pub id: String,
     /// The computed value: a rate (numerator/denominator) when a denominator is
-    /// set, else a raw count.
+    /// set, else a raw count. Meaningful only when `evaluated`.
     pub value: f64,
-    /// Whether `value` breached `threshold` in the SPI's `direction` (false when
-    /// no threshold is set).
+    /// Whether the SPI could be evaluated over the window. A RATE SPI whose
+    /// denominator event did not occur (0 traffic) is **undefined** for the
+    /// window — it is not evaluated, so it never manufactures a false alarm.
+    pub evaluated: bool,
+    /// Whether `value` breached `threshold` in the SPI's `direction`. Always
+    /// false when there is no threshold or the SPI was not evaluated.
     pub breached: bool,
 }
 
@@ -293,34 +331,45 @@ pub fn evaluate(reg: &SpiRegistry, tallies: &BTreeMap<String, u64>, chain_ok: bo
 
     let mut values = Vec::new();
     for spi in &reg.spis {
-        let (value, breached) = match spi.source {
+        let (value, evaluated, breached) = match spi.source {
             SpiSource::Integrity => {
                 // SPI-G06: 0 when the chain verified, 1 (breach) when it did not.
                 let v = if chain_ok { 0.0 } else { 1.0 };
-                (v, !chain_ok)
+                (v, true, !chain_ok)
             }
             _ => {
                 let numerator = count(&spi.event_types) as f64;
-                let value = match &spi.denominator {
-                    // Rate = numerator / max(denominator, 1) — a 0-denominator
-                    // window can't manufacture a divide-by-zero spike.
-                    Some(d) => numerator / (tallies.get(d).copied().unwrap_or(0).max(1) as f64),
-                    None => numerator,
-                };
-                let breached = spi.threshold.is_some_and(|t| breaches(value, t, &spi.direction));
-                (value, breached)
+                match &spi.denominator {
+                    Some(d) => {
+                        let denom = tallies.get(d).copied().unwrap_or(0);
+                        if denom == 0 {
+                            // A RATE over a window with no denominator traffic is
+                            // undefined — do NOT clamp-and-manufacture a rate (a
+                            // false alarm); mark it unevaluated, never breached.
+                            (0.0, false, false)
+                        } else {
+                            let value = numerator / denom as f64;
+                            let breached = spi.threshold.is_some_and(|t| breaches(value, t, spi.direction));
+                            (value, true, breached)
+                        }
+                    }
+                    // A raw count is always evaluable.
+                    None => {
+                        let breached = spi.threshold.is_some_and(|t| breaches(numerator, t, spi.direction));
+                        (numerator, true, breached)
+                    }
+                }
             }
         };
-        values.push(SpiValue { id: spi.id.clone(), value, breached });
+        values.push(SpiValue { id: spi.id.clone(), value, evaluated, breached });
     }
     SpiRollup { chain_ok, values }
 }
 
-fn breaches(value: f64, threshold: f64, direction: &str) -> bool {
+fn breaches(value: f64, threshold: f64, direction: Direction) -> bool {
     match direction {
-        "higher_better" => value < threshold,
-        // Default (and every §5.2 SPI): lower is better → over the limit breaches.
-        _ => value > threshold,
+        Direction::HigherBetter => value < threshold,
+        Direction::LowerBetter => value > threshold,
     }
 }
 
@@ -352,6 +401,18 @@ mod tests {
     const SAFETY_CASE_MD: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/docs/safety/UL4600_SAFETY_CASE.md");
     const SRC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    const CRATES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/crates");
+
+    /// The workspace emitted-literal universe for a `verifier`-scope SPI: the root
+    /// crate `src/` plus the sibling `crates/*/src` (the audit event_types are
+    /// defined/emitted across the verifier + its lean deps — e.g. the perception
+    /// `DerateCode` strings live in `kirra-core`). `parko/` is a separate workspace
+    /// (node-local chain), deliberately not scanned — hence SPI-L01 is parko-scope.
+    fn workspace_emitted() -> BTreeSet<String> {
+        let mut set = scan_emitted_literals(Path::new(SRC_DIR));
+        set.extend(scan_emitted_literals(Path::new(CRATES_DIR)));
+        set
+    }
 
     fn committed_registry() -> SpiRegistry {
         let raw = std::fs::read_to_string(REGISTRY_JSON).expect("registry exists");
@@ -368,7 +429,7 @@ mod tests {
     #[test]
     fn committed_registry_resolves_and_matches_the_catalogue() {
         let reg = committed_registry();
-        let emitted = scan_emitted_literals(Path::new(SRC_DIR));
+        let emitted = workspace_emitted();
         let report = check_resolution(&reg, &emitted);
         assert!(report.passed(), "committed SPI registry must resolve: {report:#?}");
 
@@ -386,12 +447,27 @@ mod tests {
     /// green resolution isn't vacuous because the set came back empty).
     #[test]
     fn scanner_finds_known_emitted_literals() {
-        let emitted = scan_emitted_literals(Path::new(SRC_DIR));
+        let emitted = workspace_emitted();
         for lit in ["MOTION_COMMAND_ADMITTED", "RSS_VIOLATION", "SYSTEM_POSTURE_TRANSITION", "DETECTION_RANGE_UNTRUSTED"] {
             assert!(emitted.contains(lit), "scanner must find {lit}");
         }
-        // And it does NOT invent the catalogue's drifted names (which don't exist).
-        assert!(!emitted.contains("DETECTION_RANGE_DEGRADED"), "the drifted name must not resolve");
+        // And it does NOT invent an event that no non-test code emits — a
+        // removed/renamed literal would vanish from this set and fail to resolve.
+        assert!(!emitted.contains("TOTALLY_ABSENT_EVENT_XYZ"), "an unemitted token must not resolve");
+    }
+
+    /// A typo in the reviewed `direction` fails to deserialize — it can no longer
+    /// silently default to lower-better and flip breach semantics.
+    #[test]
+    fn typo_in_direction_fails_to_parse() {
+        let json = r#"{"_comment":"","spis":[{"id":"SPI-X","name":"n","kind":"leading","source":"integrity","direction":"lower_beter","note":"n"}]}"#;
+        assert!(
+            serde_json::from_str::<SpiRegistry>(json).is_err(),
+            "an unknown direction value must fail to parse (reds the gate)"
+        );
+        // The correct spelling parses.
+        let ok = json.replace("lower_beter", "lower_better");
+        assert!(serde_json::from_str::<SpiRegistry>(&ok).is_ok());
     }
 
     /// A dangling `event_type` (a rename the catalogue missed) reds the gate.
@@ -406,7 +482,7 @@ mod tests {
                 source: SpiSource::Emitted,
                 event_types: vec!["THIS_EVENT_DOES_NOT_EXIST".into()],
                 denominator: None,
-                direction: "lower_better".into(),
+                direction: Direction::LowerBetter,
                 threshold: None,
                 note: "n".into(),
             }],
@@ -428,7 +504,7 @@ mod tests {
             source: SpiSource::Integrity,
             event_types: vec![],
             denominator: None,
-            direction: "lower_better".into(),
+            direction: Direction::LowerBetter,
             threshold: None,
             note: "n".into(),
         };
@@ -450,7 +526,7 @@ mod tests {
                 source: SpiSource::Emitted,
                 event_types: vec!["RSS_VIOLATION".into()],
                 denominator: Some("MOTION_COMMAND_ADMITTED".into()),
-                direction: "lower_better".into(),
+                direction: Direction::LowerBetter,
                 threshold: Some(0.01),
                 note: "n".into(),
             }],
@@ -485,7 +561,7 @@ mod tests {
                 source: SpiSource::Integrity,
                 event_types: vec![],
                 denominator: None,
-                direction: "lower_better".into(),
+                direction: Direction::LowerBetter,
                 threshold: Some(0.0),
                 note: "n".into(),
             }],
@@ -498,9 +574,11 @@ mod tests {
         assert!(ok.all_clear(), "a verified chain with no events is all-clear");
     }
 
-    /// A ratio with a zero denominator does not manufacture a divide-by-zero spike.
+    /// A RATE over a window with no denominator traffic is undefined — it is NOT
+    /// evaluated and NEVER breaches (no clamped-denominator false alarm), even with
+    /// a nonzero numerator.
     #[test]
-    fn zero_denominator_does_not_spike() {
+    fn zero_denominator_is_unevaluated_not_a_false_breach() {
         let reg = SpiRegistry {
             comment: String::new(),
             spis: vec![SpiDef {
@@ -510,15 +588,24 @@ mod tests {
                 source: SpiSource::Emitted,
                 event_types: vec!["FABRIC_COMMAND_DENIED".into()],
                 denominator: Some("MOTION_COMMAND_ADMITTED".into()),
-                direction: "lower_better".into(),
+                direction: Direction::LowerBetter,
                 threshold: Some(0.5),
                 note: "n".into(),
             }],
         };
+        // 2 denials, 0 admits: a former max(1) clamp would compute 2.0 and FALSE-
+        // breach the 0.5 limit. Now the window is unevaluated for this rate SPI.
         let mut t = BTreeMap::new();
         t.insert("FABRIC_COMMAND_DENIED".to_string(), 2);
-        // No admits in the window → denominator clamped to 1, value = 2.0 (finite).
         let r = evaluate(&reg, &t, true);
-        assert!(r.values[0].value.is_finite(), "value must be finite with a zero denominator");
+        assert!(!r.values[0].evaluated, "a zero-denominator rate window is not evaluated");
+        assert!(!r.values[0].breached, "an unevaluated rate must not manufacture a breach");
+        assert!(r.values[0].value.is_finite());
+        assert!(r.all_clear(), "an empty-denominator window is not an alarm");
+
+        // With traffic, the same SPI evaluates and can breach.
+        t.insert("MOTION_COMMAND_ADMITTED".to_string(), 2); // 2/2 = 1.0 > 0.5
+        let r = evaluate(&reg, &t, true);
+        assert!(r.values[0].evaluated && r.values[0].breached, "a real 1.0 rate breaches 0.5");
     }
 }

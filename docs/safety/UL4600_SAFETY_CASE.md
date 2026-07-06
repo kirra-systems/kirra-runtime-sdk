@@ -186,20 +186,20 @@ Type = (L)eading / (G) lagging. Source = EMITTED / DERIVED / GAP.
 **This catalogue is machine-gated (WS-3.3).** The reviewed registry
 `ci/spi_registry.json` transcribes every row below, and a root-crate test
 (`kirra_verifier::spi_ledger`) asserts each `EMITTED`/`DERIVED` SPI's
-`event_type` literals are actually emitted in `src/` (scanned), that the registry
-IDs equal this table's IDs, and provides a tested pure rollup evaluator (count /
+`event_type` literals are actually emitted in the workspace's non-test code (the
+root `src/` **plus** `crates/*/src` — some `event_type`s are `DerateCode` reason
+tokens defined in `kirra-core`, not the verifier crate), that the registry IDs
+equal this table's IDs, and provides a tested pure rollup evaluator (count /
 ratio + threshold breach, with the §5.1 chain-verify precondition as SPI-G06).
 Renaming or removing an audit `event_type` reds the gate — the catalogue can no
-longer silently drift from the code. (This gate is what reconciled SPI-L04 below:
-its former `PERCEPTION_SNAPSHOT_UNHEALTHY` / `DETECTION_RANGE_DEGRADED` were never
-emitted; the real literal is `DETECTION_RANGE_UNTRUSTED`.)
+longer silently drift from the code.
 
 | SPI ID | Name | Type | Indicates | Audit-chain source (`event_type`) | Direction | Source |
 |---|---|---|---|---|---|---|
 | SPI-L01 | Comparator divergence rate | L | Latent systematic fault or state drift between primary & diverse governors | `ComparatorDivergence` ÷ `MOTION_COMMAND_ADMITTED` | ↓ lower better; any sustained non-zero ⇒ investigate | EMITTED (parko-kirra; node-local chain) |
 | SPI-L02 | RSS near-miss rate | L | Closing on the minimum safe distance (IEEE 2846 / RSS) | `RSS_VIOLATION` ÷ `MOTION_COMMAND_ADMITTED` | ↓ | EMITTED (`append_rss_violation`) |
 | SPI-L03 | Sensor-health fault rate | L | Perception/sensor channel degrading toward trust loss | `SENSOR_HEALTH_REPORT_FAULT` per node·hour | ↓ | EMITTED |
-| SPI-L04 | Perception-derate rate | L | Detection range below the assured-clear floor | `DETECTION_RANGE_UNTRUSTED` | ↓ | EMITTED (`perception_monitor`); a discrete snapshot-health event is a §5.3 gap |
+| SPI-L04 | Perception-derate rate | L | Detection range / snapshot health below floor | `PERCEPTION_SNAPSHOT_UNHEALTHY`, `DETECTION_RANGE_DEGRADED` | ↓ | EMITTED (`perception_monitor`; `DerateCode` reason tokens in `kirra-core`) |
 | SPI-L05 | Degraded-entry frequency | L | ODD/operational stress forcing reduced-capability posture | `SYSTEM_POSTURE_TRANSITION` (→ Degraded) | ↓ | EMITTED (`posture_engine`) |
 | SPI-L06 | Posture-flap / recovery-reset rate | L | Instability: repeated fault↔recover cycling (hysteresis resets) | `SYSTEM_POSTURE_TRANSITION` paired w/ `SENSOR_RECOVERY_CONFIRMED` | ↓ | DERIVED |
 | SPI-L07 | Federation rejection rate | L | Trust-boundary pressure (misconfig or adversarial peers) | `FEDERATION_REJECTED` | ↓ | EMITTED |
