@@ -61,7 +61,7 @@ The gap analysis found a fail-closed codebase with a handful of fail-open or cla
 - **DoD:** compromise of any single credential no longer grants the full admin+actuator surface; keys never live as raw env seeds in production mode.
 
 ### WS-2 · P1 Product Surface (Stage 1 — closes G20, G16, G18, G12, parts of G15/G17)
-- **SDK:** Rust quickstart + examples (governed cmd_vel loop, action-filter integration, typed-intent planner); C example against an expanded `kirra.h` (envelope config, verdict struct, posture query, release-token verify); Python client polish; published rustdoc + `deny(missing_docs)` on public crates.
+- **SDK:** Rust quickstart + examples (governed cmd_vel loop, action-filter integration, typed-intent planner); C example against an expanded `kirra.h` (verdict struct LANDED — `KirraVerdict` + `kirra_check_move_velocity` returns the bounded scalar + a stable `KIRRA_VERDICT_*` reason code, exercised by the CI C example; still to add: envelope config, posture query, release-token verify); Python client polish; published rustdoc + `deny(missing_docs)` on public crates.
 - **Pedestrian RSS** primitive (VRU longitudinal/lateral bounds + crossing model) wired into `validate_trajectory_slow` — the courier/sidewalk persona is P1's flagship, this is a launch blocker, not an AV-track item.
 - **Model integrity:** SHA allow-list verification at backend load (fingerprint exists, verify it); accelerator health watchdog; measured (not hardcoded) HW capabilities.
 - **Config governance:** one versioned, JSON-Schema'd config surface (`KirraRuntimeConfig` absorbs the env sprawl; env vars become overrides); migration story; startup prints effective config digest to audit chain.
