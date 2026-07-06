@@ -15,6 +15,8 @@
 //! probe --cmd '<health>'     after a trial boot, auto-commit-or-rollback on health
 //! pull --verifier <url> ...  poll the verifier for this node's assigned artifact,
 //!                            download + verify + stage it if it changed
+//! report --verifier <url>    report the ACTIVE slot's digest to the verifier's fleet
+//!                            adoption summary (run after a commit)
 //! status                     print the boot record + which slot `run` would launch
 //! ```
 //!
@@ -88,6 +90,7 @@ fn main() -> ExitCode {
         "rollback" => cmd_rollback(),
         "probe" => cmd_probe(rest),
         "pull" => cmd_pull(rest),
+        "report" => cmd_report(rest),
         "status" => cmd_status(),
         "" | "-h" | "--help" | "help" => {
             print_usage();
@@ -604,6 +607,162 @@ fn http_download(url: &str, dest: &Path) -> Result<(), String> {
     }
 }
 
+/// Options for `report` (the fleet adoption report).
+struct ReportOpts {
+    verifier: String,
+    node_id: String,
+    /// Bearer API token (the report route is identity-gated).
+    token: Option<String>,
+    /// The `x-kirra-client-id` identity header value.
+    client_id: Option<String>,
+    campaign_id: Option<String>,
+    artifact_version: Option<String>,
+}
+
+impl ReportOpts {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut verifier = std::env::var("KIRRA_VERIFIER_URL").ok();
+        let mut node_id = std::env::var("KIRRA_NODE_ID").ok();
+        let mut token = std::env::var("KIRRA_API_TOKEN").ok();
+        let mut client_id = std::env::var("KIRRA_CLIENT_ID").ok();
+        let mut campaign_id = None;
+        let mut artifact_version = None;
+
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let mut next = |flag: &str| -> Result<String, String> {
+                it.next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value"))
+            };
+            match a.as_str() {
+                "--verifier" => verifier = Some(next("--verifier")?),
+                "--node-id" => node_id = Some(next("--node-id")?),
+                "--token" => token = Some(next("--token")?),
+                "--client-id" => client_id = Some(next("--client-id")?),
+                "--campaign-id" => campaign_id = Some(next("--campaign-id")?),
+                "--artifact-version" => artifact_version = Some(next("--artifact-version")?),
+                other => return Err(format!("unknown report flag {other:?}")),
+            }
+        }
+        Ok(ReportOpts {
+            verifier: verifier
+                .ok_or("report requires --verifier <url> (or KIRRA_VERIFIER_URL)")?,
+            node_id: node_id.ok_or("report requires --node-id <id> (or KIRRA_NODE_ID)")?,
+            token,
+            client_id,
+            campaign_id,
+            artifact_version,
+        })
+    }
+}
+
+/// `report` — tell the verifier which governor digest this node is now RUNNING, so
+/// the fleet rollout summary's adoption count reflects it. Hashes the ACTIVE slot's
+/// governor binary and POSTs it to `/fleet/campaigns/report` (identity-gated: sends a
+/// Bearer token + `x-kirra-client-id`). Run after a commit (e.g. from the probe unit
+/// on a successful commit, or a periodic timer). Best-effort observability: a non-200
+/// is a warning, not a hard failure — the report retries next cycle.
+fn cmd_report(args: &[String]) -> Result<(), String> {
+    let opts = ReportOpts::parse(args)?;
+    let cfg = Cfg::from_env();
+
+    // Hash the active slot's governor — the digest the node is actually running.
+    let record = if cfg.record.exists() {
+        FileBootController::open(&cfg.record, Slot::A)
+            .and_then(|c| c.record())
+            .map_err(|e| format!("read boot record: {e}"))?
+    } else {
+        BootRecord {
+            active: Slot::A,
+            try_boot: None,
+            trying: None,
+        }
+    };
+    let active_path = cfg.governor_path(record.active);
+    if !active_path.exists() {
+        return Err(format!(
+            "active slot {} has no governor at {}; nothing to report",
+            record.active.as_str(),
+            active_path.display()
+        ));
+    }
+    let digest = artifact_sha256_hex(&active_path)
+        .map_err(|e| format!("hash active slot artifact: {e}"))?;
+
+    let mut body = serde_json::json!({
+        "node_id": opts.node_id,
+        "applied_digest": digest,
+    });
+    if let Some(c) = &opts.campaign_id {
+        body["campaign_id"] = serde_json::Value::String(c.clone());
+    }
+    if let Some(v) = &opts.artifact_version {
+        body["artifact_version"] = serde_json::Value::String(v.clone());
+    }
+    let body = body.to_string();
+
+    let url = format!(
+        "{}/fleet/campaigns/report",
+        opts.verifier.trim_end_matches('/')
+    );
+    let (code, resp) = http_post_json(&url, &body, opts.token.as_deref(), opts.client_id.as_deref())?;
+    if code == 200 {
+        println!(
+            "reported: node {} running digest {} (campaign {})",
+            opts.node_id,
+            digest,
+            opts.campaign_id.as_deref().unwrap_or("?")
+        );
+        Ok(())
+    } else {
+        Err(format!("verifier returned HTTP {code} for report: {resp}"))
+    }
+}
+
+/// HTTP POST JSON via `curl`; returns `(status_code, body)`. Sends the identity
+/// credential (Bearer token + `x-kirra-client-id`) when provided.
+fn http_post_json(
+    url: &str,
+    body: &str,
+    token: Option<&str>,
+    client_id: Option<&str>,
+) -> Result<(u16, String), String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--max-time",
+        "20",
+        "-X",
+        "POST",
+        "-H",
+        "content-type: application/json",
+    ]);
+    if let Some(t) = token {
+        cmd.arg("-H").arg(format!("authorization: Bearer {t}"));
+    }
+    if let Some(c) = client_id {
+        cmd.arg("-H").arg(format!("x-kirra-client-id: {c}"));
+    }
+    cmd.args(["-d", body, "-w", "\n%{http_code}", url]);
+    let out = cmd.output().map_err(|e| format!("run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl POST {url} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (resp, code) = text
+        .rsplit_once('\n')
+        .ok_or("curl output missing status line")?;
+    let code: u16 = code
+        .trim()
+        .parse()
+        .map_err(|_| format!("curl returned a non-numeric status: {code:?}"))?;
+    Ok((code, resp.to_string()))
+}
+
 /// `status` — print the record + which slot `run` would launch. READ-ONLY: it does
 /// NOT create the record or its directory (unlike the mutating commands), so
 /// querying an uninitialized node has no side effects.
@@ -673,6 +832,7 @@ fn print_usage() {
          \x20 kirra-ota-ctl rollback                   abandon the staged/trial state\n\
          \x20 kirra-ota-ctl probe --cmd '<health>'     auto commit-or-rollback on a trial's health\n\
          \x20 kirra-ota-ctl pull --verifier <url> ...  poll + install this node's assigned artifact\n\
+         \x20 kirra-ota-ctl report --verifier <url>    report the active slot's digest to the fleet summary\n\
          \x20 kirra-ota-ctl status                     show the boot record\n\
          \n\
          probe flags: --cmd '<sh>' (exit 0 = healthy; required) --window-secs N (30)\n\

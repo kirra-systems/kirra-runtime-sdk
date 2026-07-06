@@ -220,6 +220,25 @@ Schedule it fleet-wide with `deploy/kirra-ota-pull.{service,timer}` (env in
 `/etc/kirra/ota.env`); the timer's `RandomizedDelaySec` spreads a large fleet's polls.
 The `pull` agent uses `curl` for both the assignment query and the artifact download.
 
+### Reporting adoption back
+
+After a commit, the node tells the verifier which digest it is now running, so the
+fleet rollout summary (`GET /system/campaigns/summary` → each active campaign's
+`applied_nodes`) reflects real adoption:
+
+```sh
+# hashes the ACTIVE slot's governor and POSTs it (identity-gated: Bearer token +
+# x-kirra-client-id). Run after a successful commit, or on a timer.
+sudo kirra-ota-ctl report --verifier http://<verifier-host>:8090 --node-id robot-01 \
+     --token "$KIRRA_API_TOKEN" --client-id robot-01 \
+     --campaign-id <id> --artifact-version <v>
+# reported: node robot-01 running digest <sha256> (campaign <id>)
+```
+
+The report route is **identity-gated** (a node write needs a credential, unlike the
+open read-only assignment GET); a non-200 is a best-effort warning that retries next
+cycle. `--token`/`--client-id` also come from `KIRRA_API_TOKEN`/`KIRRA_CLIENT_ID`.
+
 ## Hardware result (GATE C evidence)
 
 Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd
