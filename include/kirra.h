@@ -91,6 +91,23 @@ double kirra_filter_rotate_velocity(double angular_demand, double dt);
  */
 uint32_t kirra_get_trust_score(void);
 
+/*
+ * Governor operating-posture codes returned by kirra_posture(). Ordered
+ * most-permissive (0) to most-restrictive (3); stable, append-only.
+ */
+#define KIRRA_POSTURE_NOMINAL      0  /* full autonomy — commands pass          */
+#define KIRRA_POSTURE_CONSTRAINED  1  /* constrained/advisory — reduced cap      */
+#define KIRRA_POSTURE_SHADOW       2  /* shadow — no new motion authored         */
+#define KIRRA_POSTURE_LOCKED_OUT   3  /* locked out — fallback only              */
+
+/**
+ * @return the governor's current operating posture as a KIRRA_POSTURE_* code
+ *         (the trust-mode band the score has settled into). An internal lock
+ *         failure fails CLOSED to the most-restrictive posture
+ *         (KIRRA_POSTURE_LOCKED_OUT), never a permissive default.
+ */
+int32_t kirra_posture(void);
+
 /**
  * Authenticated supervisor reset of the governor's trust state.
  *

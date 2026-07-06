@@ -140,6 +140,45 @@ pub extern "C" fn kirra_get_trust_score() -> u32 {
     GLOBAL_GOVERNOR.lock().map(|g| g.trust_engine.current_score).unwrap_or(0)
 }
 
+// --- Posture query (WS-2 SDK: posture query) -------------------------------
+//
+// A C integrator can read the governor's current operating posture — the
+// trust-mode band the score has settled into — to alert or take its own action
+// (e.g. surface a Degraded/LockedOut banner) without inferring it from the
+// per-command verdict stream.
+
+/// Stable C posture codes (mirror `include/kirra.h`'s `KIRRA_POSTURE_*`). Frozen
+/// wire values — ordered most-permissive (0) to most-restrictive (3), append-only.
+pub const KIRRA_POSTURE_NOMINAL: i32 = 0;
+pub const KIRRA_POSTURE_CONSTRAINED: i32 = 1;
+pub const KIRRA_POSTURE_SHADOW: i32 = 2;
+pub const KIRRA_POSTURE_LOCKED_OUT: i32 = 3;
+
+/// The stable C posture code for a `TrustMode`. Exhaustive (no wildcard): a new
+/// trust mode won't compile until it is mapped.
+#[must_use]
+fn trust_mode_to_posture(m: crate::TrustMode) -> i32 {
+    use crate::TrustMode as T;
+    match m {
+        T::FullAutonomy => KIRRA_POSTURE_NOMINAL,
+        T::ConstrainedAdvisory => KIRRA_POSTURE_CONSTRAINED,
+        T::ShadowMode => KIRRA_POSTURE_SHADOW,
+        T::LockedOut => KIRRA_POSTURE_LOCKED_OUT,
+    }
+}
+
+/// The governor's current operating posture as a `KIRRA_POSTURE_*` code. A
+/// poisoned lock fails closed to the MOST-RESTRICTIVE posture
+/// (`KIRRA_POSTURE_LOCKED_OUT`) — never a permissive default — so a consumer that
+/// gates on the posture stops rather than proceeds when the state is unreadable.
+#[no_mangle]
+pub extern "C" fn kirra_posture() -> i32 {
+    GLOBAL_GOVERNOR
+        .lock()
+        .map(|g| trust_mode_to_posture(g.trust_engine.mode))
+        .unwrap_or(KIRRA_POSTURE_LOCKED_OUT)
+}
+
 /// # Safety
 ///
 /// Caller must ensure:
@@ -410,6 +449,35 @@ mod verdict_tests {
         let v = kirra_check_move_velocity(1.0, 0.0);
         assert_eq!(v.code, KIRRA_VERDICT_INVALID_DT_REJECTED);
         assert!(v.sanitized_value.is_finite());
+    }
+
+    /// Every `TrustMode` maps to its stable, DISTINCT, correctly-ORDERED posture
+    /// code (0 most-permissive → 3 most-restrictive) — exhaustively.
+    #[test]
+    fn posture_codes_are_stable_ordered_and_distinct() {
+        use crate::TrustMode as T;
+        assert_eq!(trust_mode_to_posture(T::FullAutonomy), KIRRA_POSTURE_NOMINAL);
+        assert_eq!(trust_mode_to_posture(T::ConstrainedAdvisory), KIRRA_POSTURE_CONSTRAINED);
+        assert_eq!(trust_mode_to_posture(T::ShadowMode), KIRRA_POSTURE_SHADOW);
+        assert_eq!(trust_mode_to_posture(T::LockedOut), KIRRA_POSTURE_LOCKED_OUT);
+        // Ordered most-permissive → most-restrictive, and all distinct.
+        assert!(
+            KIRRA_POSTURE_NOMINAL < KIRRA_POSTURE_CONSTRAINED
+                && KIRRA_POSTURE_CONSTRAINED < KIRRA_POSTURE_SHADOW
+                && KIRRA_POSTURE_SHADOW < KIRRA_POSTURE_LOCKED_OUT
+        );
+    }
+
+    /// The FFI posture query never returns garbage: always a valid, in-range
+    /// posture code (regardless of the shared `GLOBAL_GOVERNOR` state other tests
+    /// leave it in). A poisoned lock would fail closed to LOCKED_OUT, still in range.
+    #[test]
+    fn ffi_posture_is_always_a_valid_code() {
+        let p = kirra_posture();
+        assert!(
+            (KIRRA_POSTURE_NOMINAL..=KIRRA_POSTURE_LOCKED_OUT).contains(&p),
+            "posture must be a valid KIRRA_POSTURE_* code, got {p}"
+        );
     }
 }
 
