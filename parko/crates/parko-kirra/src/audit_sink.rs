@@ -594,7 +594,7 @@ pub fn select_impact_sink(
 /// (best-effort) audit write happens — so the latch's safety behavior (the motion
 /// veto) is BIT-IDENTICAL with or without a sink, and a failed write only
 /// increments the sink's `write_failures` counter.
-// SAFETY: SG6 | REQ: impact-audit-bridge | TEST: test_rising_edge_emits_one_detected,test_clear_emits_one_cleared_relatch_emits_second_detected,test_impact_durably_recorded_signed_and_chained,test_sink_failure_counts_latch_and_veto_unchanged,test_no_sink_latch_behavior_identical,test_detected_payload_has_trigger_booleans,test_nonfinite_spike_magnitude_omitted
+// SAFETY: SG6 | REQ: impact-audit-bridge | TEST: test_rising_edge_emits_one_detected,test_clear_emits_one_cleared_relatch_emits_second_detected,test_impact_durably_recorded_signed_and_chained,test_sink_recovers_after_transient_poison_latch_and_veto_unchanged,test_no_sink_latch_behavior_identical,test_detected_payload_has_trigger_booleans,test_nonfinite_spike_magnitude_omitted
 pub struct RecordedImpactLatch {
     latch: ImpactLatch,
     sink: Arc<dyn ImpactEventSink>,
@@ -659,7 +659,7 @@ impl RecordedImpactLatch {
 /// the best-effort audit write — so [`is_immobilized`](Self::is_immobilized) (the
 /// motion veto) is BIT-IDENTICAL with or without a sink, and a failed write only
 /// increments the durable sink's `write_failures` counter.
-// SAFETY: SG6 | REQ: clearance-confirmation-loop | TEST: test_loop_escalation_raised_once,test_loop_clear_emits_impact_cleared,test_loop_rejection_recorded_state_unchanged,test_loop_sink_failure_state_unaffected,test_loop_veto_unchanged_without_sink
+// SAFETY: SG6 | REQ: clearance-confirmation-loop | TEST: test_loop_escalation_raised_once,test_loop_clear_emits_impact_cleared,test_loop_rejection_recorded_state_unchanged,test_loop_audit_path_state_unaffected_and_recovers_poison,test_loop_veto_unchanged_without_sink
 pub struct RecordedClearanceLoop {
     clearance: ClearanceLoop,
     sink: Arc<dyn ImpactEventSink>,

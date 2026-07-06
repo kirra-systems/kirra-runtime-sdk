@@ -1,10 +1,14 @@
 // src/traceability_gate.rs
 //
 // S3 traceability gate (issue #115) — parses `// SAFETY: ...` annotations
-// across the Governor source tree and asserts every Governor-ENFORCED safety
-// goal (SG1..SG9 per OCCY_SAFETY_GOALS.md) has at least one tagged code site,
-// every tagged site carries a non-empty REQ and TEST field, and every SG
-// identifier is in range.
+// across the Governor source tree (`src/`, `crates/`, `parko/crates/` — the SAME
+// three roots the extraction script scans, so the CI gate and the generated
+// matrix stay in lock-step) and asserts every Governor-ENFORCED safety goal
+// (SG1..SG9 per OCCY_SAFETY_GOALS.md) has at least one tagged code site, every
+// tagged site carries a non-empty REQ and TEST field, every SG identifier is in
+// range, and — crucially — every identifier-shaped `TEST:` name RESOLVES to a
+// real `fn` in the workspace (a renamed/deleted test can no longer leave the RTM
+// claim dangling; prose entries like `see §7` are a documented escape).
 //
 // Tag format (defined in docs/safety/TRACEABILITY.md §1):
 //
@@ -16,6 +20,7 @@
 // ENFORCED — its check is built (`kirra_core::containment`) and wired live into
 // the Option-B adapter slow loop (`kirra-trajectory` validation; #128/#131).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// One parsed `// SAFETY: ...` annotation.
@@ -42,15 +47,22 @@ pub const PENDING_SGS: &[u8] = &[];
 /// absent from Governor tags is OK; tracked in the SEooC contract (#126).
 pub const DELEGATED_SGS: &[u8] = &[4, 5, 6];
 
-/// Walks `src/` + `parko/crates/` under the workspace root and returns every
-/// parsed safety tag. Public so the extraction script can call it via a
-/// thin Rust binary.
+/// Walks `src/` + `crates/` + `parko/crates/` under the workspace root and returns
+/// every parsed safety tag. Public so the extraction script can call it via a
+/// thin Rust binary. These are the SAME three roots
+/// `scripts/extract_safety_traceability.sh` scans, so the CI gate and the
+/// generated matrix stay in lock-step — a kernel-crate tag (under `crates/`) is
+/// now gated, not just documented.
 pub fn walk_safety_tags() -> Vec<SafetyTag> {
     let mut tags = Vec::new();
     let root = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    for sub in &[root.join("src"), root.join("parko").join("crates")] {
+    for sub in &[
+        root.join("src"),
+        root.join("crates"),
+        root.join("parko").join("crates"),
+    ] {
         if sub.exists() {
             walk_dir(sub, &mut tags);
         }
@@ -78,6 +90,90 @@ fn walk_dir(dir: &Path, tags: &mut Vec<SafetyTag>) {
             }
         }
     }
+}
+
+/// Collect every `fn <name>` identifier defined anywhere in the workspace source
+/// (`src/`, `crates/`, `parko/`, and the root `tests/` integration dir) — the
+/// universe a `TEST:` reference must resolve into. An over-approximation (it
+/// includes non-test fns too), which is SAFE for the gate: a renamed/deleted test
+/// disappears from this set, so a dangling `TEST:` reference is still caught; the
+/// extra fn names only ever admit a reference, never wrongly reject one.
+#[must_use]
+pub fn walk_test_fn_names() -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let root = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    for sub in &[
+        root.join("src"),
+        root.join("crates"),
+        root.join("parko"),
+        root.join("tests"),
+    ] {
+        if sub.exists() {
+            walk_fn_dir(sub, &mut names);
+        }
+    }
+    names
+}
+
+fn walk_fn_dir(dir: &Path, names: &mut BTreeSet<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            walk_fn_dir(&path, names);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                extract_fn_names(&content, names);
+            }
+        }
+    }
+}
+
+/// Extract `fn <ident>` names from a source string. Matches `fn ` at a word
+/// boundary (so `…afn` doesn't match) and reads the following Rust identifier —
+/// covering `fn f(`, `pub fn f(`, `async fn f(`, `pub(crate) fn f<`, etc.
+fn extract_fn_names(content: &str, names: &mut BTreeSet<String>) {
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = content[i..].find("fn ") {
+        let pos = i + rel;
+        let boundary = pos == 0 || bytes[pos - 1].is_ascii_whitespace();
+        let mut j = pos + 3;
+        while j < bytes.len() && bytes[j] == b' ' {
+            j += 1;
+        }
+        if boundary {
+            let start = j;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+            {
+                j += 1;
+            }
+            if j > start {
+                names.insert(content[start..j].to_string());
+            }
+        }
+        i = pos + 3;
+    }
+}
+
+/// Whether a `TEST:` entry is a test-fn identifier (vs a prose reference like
+/// `see §7`). Only identifier-shaped entries are resolved against the fn universe;
+/// prose entries are a documented escape for evidence that isn't a named `#[test]`.
+#[cfg(test)]
+fn is_test_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn parse_file(path: &Path, content: &str, tags: &mut Vec<SafetyTag>) {
@@ -135,6 +231,7 @@ fn parse_safety_line(line: &str) -> Option<(Vec<u8>, String, Vec<String>)> {
 mod ci_gate_tests {
     use super::*;
 
+
     #[test]
     fn every_enforced_sg_has_at_least_one_tagged_site() {
         let tags = walk_safety_tags();
@@ -186,6 +283,51 @@ mod ci_gate_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_named_test_resolves_to_a_real_fn() {
+        // The RTM claim "this requirement is verified by `test_x`" is only true if
+        // `test_x` exists. This closes the drift the non-empty-TEST check misses: a
+        // renamed/deleted test leaves the tag pointing at nothing. Every
+        // identifier-shaped TEST entry must resolve to a real `fn` in the tree;
+        // prose entries (e.g. `see §7` — a documented escape for non-`#[test]`
+        // evidence) are skipped.
+        let tags = walk_safety_tags();
+        let fns = walk_test_fn_names();
+        let mut dangling = Vec::new();
+        for tag in &tags {
+            for t in &tag.tests {
+                if is_test_identifier(t) && !fns.contains(t) {
+                    dangling.push(format!(
+                        "{}:{} [REQ: {}] -> TEST `{}` has no matching fn",
+                        tag.file.display(),
+                        tag.line,
+                        tag.req,
+                        t
+                    ));
+                }
+            }
+        }
+        assert!(
+            dangling.is_empty(),
+            "SAFETY tags name tests that do not exist (renamed/deleted?) — update the \
+             tag or restore the test:\n{}",
+            dangling.join("\n")
+        );
+    }
+
+    #[test]
+    fn fn_name_extractor_finds_definitions_but_not_calls() {
+        let mut names = BTreeSet::new();
+        extract_fn_names(
+            "pub fn alpha() {} \n    async fn beta<T>() {}\n// call: gamma();\nlet x = notfn_delta;",
+            &mut names,
+        );
+        assert!(names.contains("alpha"), "plain fn");
+        assert!(names.contains("beta"), "async generic fn");
+        assert!(!names.contains("gamma"), "a call is not a definition");
+        assert!(!names.contains("delta"), "`notfn_` must not match at a word boundary");
     }
 
     #[test]
