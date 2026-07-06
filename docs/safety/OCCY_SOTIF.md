@@ -138,7 +138,7 @@ cluster happens when an entry warrants dedicated issues.
 coverage decision in `ci/sotif_trigger_coverage.json`, checked by the
 `scenario_kpi_gate` CI job (`kirra_kpi_gate::sotif_coverage`): each TC maps to a
 live generated scenario (`corpus`, resolved against the KPI corpus), a documented
-AoU (`aou`, resolved against ASSUMPTIONS_OF_USE.md), or an explicit referenced
+AoU (`aou`, resolved against `docs/safety/ASSUMPTIONS_OF_USE.md`), or an explicit referenced
 `external` demo / `deferred` gap. Adding a TC row here without a manifest entry —
 or pointing at a scenario/AoU that does not exist — reds the gate. This makes the
 "Verify" column an enforced mapping, not a prose promise (the WS-3 DoD clause:
