@@ -728,10 +728,15 @@ fn cmd_report(args: &[String]) -> Result<(), String> {
             digest,
             opts.campaign_id.as_deref().unwrap_or("?")
         );
-        Ok(())
     } else {
-        Err(format!("verifier returned HTTP {code} for report: {resp}"))
+        // BEST-EFFORT: a non-200 (LockedOut 403, transient 5xx, auth hiccup) is a
+        // warning, NOT a process failure — exit 0 so a systemd oneshot/timer doesn't
+        // mark the unit failed / trigger backoff; the next cycle retries. A genuine
+        // agent error (curl transport, bad AK key, unreadable slot) still returned
+        // `Err` above.
+        eprintln!("kirra-ota-ctl: report not recorded — verifier returned HTTP {code}: {resp} (will retry next cycle)");
     }
+    Ok(())
 }
 
 /// HTTP POST JSON via `curl`; returns `(status_code, body)`. Sends the identity

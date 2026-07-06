@@ -3023,16 +3023,37 @@ mod attestation_nonce_handler_tests {
         .status();
         assert_eq!(st, StatusCode::UNAUTHORIZED, "forged signature rejected");
 
-        // Unsigned report → accepted but unattested (a LATER timestamp so the
-        // monotonic store upsert lets it replace the attested row).
+        // Unsigned report for a DIFFERENT digest → a fresh claim, so attestation
+        // resets to false (attested is monotonic PER DIGEST — an unsigned report for
+        // the SAME digest would instead preserve the prior attested=true; that
+        // per-digest rule is covered by the store test).
+        let other_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let st = report(serde_json::json!({
-            "node_id": NODE, "applied_digest": digest,
+            "node_id": NODE, "applied_digest": other_digest,
         }))
         .await
         .into_response()
         .status();
         assert_eq!(st, StatusCode::OK, "unsigned report still accepted (identity-gated)");
         assert_eq!(attested_of(svc.clone()).await, Some(false), "unsigned → not attested");
+
+        // A signed report with a FAR-FUTURE timestamp is rejected (the monotonic
+        // upsert would otherwise let it permanently wedge later legitimate updates).
+        let future_ts = now_ms() + 3_600_000; // 1h ahead — beyond the skew allowance
+        let future_sig = B64.encode(
+            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
+                NODE, digest, future_ts,
+            ))
+            .to_bytes(),
+        );
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": future_sig, "reported_at_ms": future_ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::BAD_REQUEST, "far-future signed timestamp rejected");
     }
 
     // ---- PCR16 measured-boot binding (attestation follow-up) --------------

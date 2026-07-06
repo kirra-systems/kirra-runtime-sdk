@@ -580,6 +580,22 @@ pub fn summarize_campaigns(
         active: Vec::new(),
         halted_campaigns: Vec::new(),
     };
+
+    // Pre-index the adoption reports by digest in ONE pass → per-digest
+    // (applied, attested) counts. Keeps the whole summary O(nodes + campaigns)
+    // instead of O(active_campaigns × nodes) — the observability endpoints
+    // (`/metrics`, `/console/campaigns`) scrape this on every poll. node_id is the
+    // store PK, so each node contributes at most one status.
+    let mut adoption: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
+    for st in statuses {
+        let e = adoption.entry(st.applied_digest.as_str()).or_insert((0, 0));
+        e.0 += 1;
+        if st.attested {
+            e.1 += 1;
+        }
+    }
+
     for c in campaigns {
         match c.state {
             CampaignState::Draft => s.draft += 1,
@@ -589,18 +605,12 @@ pub fn summarize_campaigns(
             CampaignState::Halted => s.halted += 1,
         }
         if c.state.is_active() {
-            // Adoption numerator: distinct nodes reporting this campaign's digest.
-            // node_id is the store PK, so each node contributes at most one status.
-            let on_digest = statuses
-                .iter()
-                .filter(|st| st.applied_digest == c.artifact_digest);
-            let (mut applied_nodes, mut attested_nodes) = (0usize, 0usize);
-            for st in on_digest {
-                applied_nodes += 1;
-                if st.attested {
-                    attested_nodes += 1;
-                }
-            }
+            // Adoption numerator: distinct nodes reporting this campaign's digest,
+            // read from the pre-indexed map (O(1) per campaign).
+            let (applied_nodes, attested_nodes) = adoption
+                .get(c.artifact_digest.as_str())
+                .copied()
+                .unwrap_or((0, 0));
             s.active.push(CampaignProgress {
                 campaign_id: c.campaign_id.clone(),
                 state: c.state.as_str().to_string(),

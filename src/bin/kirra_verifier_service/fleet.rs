@@ -220,6 +220,11 @@ pub(crate) async fn get_node_campaign_assignment(
     }
 }
 
+/// Clock-skew allowance for a signed report's `reported_at_ms` (5 min). The upsert is
+/// monotonic on this timestamp, so a far-future value would wedge future updates; a
+/// time-synced fleet (AOU-TIMESYNC-001) never legitimately exceeds this.
+const REPORT_MAX_FUTURE_SKEW_MS: u64 = 300_000;
+
 /// Body of a node adoption report: the node id and the digest it is now running.
 /// Optionally attestation-SIGNED for unforgeable attribution.
 #[derive(Deserialize)]
@@ -283,6 +288,18 @@ pub(crate) async fn report_node_artifact(
             )
                 .into_response();
         };
+        // Bounded future-skew: the upsert is MONOTONIC on the (signed) timestamp, so a
+        // far-future `reported_at_ms` would permanently block every later legitimate
+        // report for this node. Reject beyond a small clock-skew allowance (nodes are
+        // time-synced per AOU-TIMESYNC-001); the signature covers `ts`, so this can't
+        // be shifted after signing.
+        if ts > now_ms().saturating_add(REPORT_MAX_FUTURE_SKEW_MS) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "reported_at_ms is too far in the future (clock skew)" })),
+            )
+                .into_response();
+        }
         let ak = svc.app.nodes.get(&node_id).and_then(|n| n.ak_public_pem.clone());
         let Some(ak) = ak else {
             return (

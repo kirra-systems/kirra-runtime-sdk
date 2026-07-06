@@ -161,7 +161,14 @@ impl VerifierStore {
                  campaign_id      = excluded.campaign_id,
                  artifact_version = excluded.artifact_version,
                  reported_at_ms   = excluded.reported_at_ms,
+                 -- `attested` is MONOTONIC PER DIGEST: a later report for the SAME
+                 -- digest cannot CLEAR unforgeable attestation evidence (so a token
+                 -- holder can't erase an attested adoption with an unsigned report),
+                 -- but a report for a DIFFERENT digest is a fresh claim that must
+                 -- re-earn attestation. (RHS references read the pre-update row.)
                  attested         = excluded.attested
+                    OR (node_artifact_status.attested
+                        AND node_artifact_status.applied_digest = excluded.applied_digest)
                WHERE excluded.reported_at_ms >= node_artifact_status.reported_at_ms",
             params![
                 st.node_id,
@@ -487,6 +494,40 @@ mod tests {
             .unwrap();
         assert_eq!(r01.reported_at_ms, 2_000, "stale report must not overwrite");
         assert_eq!(r01.applied_digest, other, "stale digest must not win");
+    }
+
+    #[test]
+    fn attested_flag_is_monotonic_per_digest() {
+        use crate::ota_campaign::NodeArtifactStatus;
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let mut s = store();
+        let mk = |digest: &str, at: u64, attested: bool| NodeArtifactStatus {
+            node_id: "robot-1".into(),
+            applied_digest: digest.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: at,
+            attested,
+        };
+        let attested_of = |s: &VerifierStore| {
+            s.load_node_artifact_statuses()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.node_id == "robot-1")
+                .unwrap()
+                .attested
+        };
+
+        // Signed report → attested.
+        s.upsert_node_artifact_status(&mk(DIGEST, 1_000, true)).unwrap();
+        assert!(attested_of(&s));
+        // A LATER UNSIGNED report for the SAME digest must NOT clear attestation
+        // (a token holder can't erase unforgeable evidence with an unsigned report).
+        s.upsert_node_artifact_status(&mk(DIGEST, 2_000, false)).unwrap();
+        assert!(attested_of(&s), "same-digest unsigned report preserves attested");
+        // A report for a DIFFERENT digest is a fresh claim → attestation must re-earn.
+        s.upsert_node_artifact_status(&mk(other, 3_000, false)).unwrap();
+        assert!(!attested_of(&s), "a different digest resets attested");
     }
 
     #[test]
