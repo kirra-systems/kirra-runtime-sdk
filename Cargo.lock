@@ -2301,6 +2301,7 @@ dependencies = [
  "kirra-contract-channel",
  "kirra-core",
  "kirra-fleet-types",
+ "kirra-ota-installer",
  "kirra-release-token",
  "parko-core",
  "parko-kirra",

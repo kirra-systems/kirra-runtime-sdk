@@ -152,6 +152,10 @@ hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 [dev-dependencies]
 rand = "0.8"
 proptest = "1"
+# The node-side OTA installer — the two-node rollout harness (Gate C #1,
+# tests/two_node_rollout.rs) drives BOTH the verifier campaign engine and the real
+# installer state machine end-to-end, so the drill needs the installer crate.
+kirra-ota-installer = { path = "crates/kirra-ota-installer" }
 # File-backed temp DBs for tamper-detection tests: a SQLite :memory: database is
 # per-connection, so tampering a row written by one connection from a second
 # connection (the audit-chain tamper scenario, SG-010) requires an on-disk file.
