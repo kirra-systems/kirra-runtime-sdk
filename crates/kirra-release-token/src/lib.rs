@@ -131,9 +131,24 @@ pub fn verify_release(
     actuating_view: &GovernorContractView,
     governor_vk: &VerifyingKey,
 ) -> Result<(), ReleaseDenied> {
+    // Re-derive the digest over the command the actuator is about to actuate,
+    // then defer to the crypto core.
+    verify_release_over_digest(token, &contract_digest(actuating_view), governor_vk)
+}
+
+/// The crypto core of step 7, over an ALREADY-COMPUTED expected digest — the
+/// caller supplies the digest of the command it is about to actuate (rather than
+/// a [`GovernorContractView`] to re-derive it from). Same two fail-closed checks
+/// as [`verify_release`]: (a) the token approves exactly `expected_digest`, and
+/// (b) the signature verifies against the governor key. This is the seam the C ABI
+/// (`kirra_verify_release_token`) and any caller that already holds the digest use.
+pub fn verify_release_over_digest(
+    token: &ReleaseToken,
+    expected_digest: &[u8; 32],
+    governor_vk: &VerifyingKey,
+) -> Result<(), ReleaseDenied> {
     // (a) The token must approve exactly the bytes about to be actuated.
-    let expected = contract_digest(actuating_view);
-    if token.digest != expected {
+    if &token.digest != expected_digest {
         return Err(ReleaseDenied::DigestMismatch);
     }
     // (b) The signature must verify against the governor key, over the same
@@ -188,6 +203,33 @@ mod tests {
         let v = view(1, b"steer:1.5");
         let token = issue_release_token(&v, &sk);
         assert_eq!(verify_release(&token, &v, &sk.verifying_key()), Ok(()));
+    }
+
+    /// The extracted crypto core [`verify_release_over_digest`] agrees with
+    /// [`verify_release`] and applies both fail-closed checks over a supplied
+    /// digest (the seam the C ABI uses).
+    #[test]
+    fn verify_over_digest_matches_the_view_path() {
+        let sk = governor_key();
+        let vk = sk.verifying_key();
+        let v = view(1, b"steer:1.5");
+        let token = issue_release_token(&v, &sk);
+        let digest = contract_digest(&v);
+
+        // Matches the view-based path on the honest token.
+        assert_eq!(verify_release_over_digest(&token, &digest, &vk), Ok(()));
+        // Digest of a different command → mismatch.
+        let other = contract_digest(&view(1, b"steer:9.9"));
+        assert_eq!(
+            verify_release_over_digest(&token, &other, &vk),
+            Err(ReleaseDenied::DigestMismatch)
+        );
+        // Wrong key → signature invalid.
+        let wrong = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        assert_eq!(
+            verify_release_over_digest(&token, &digest, &wrong),
+            Err(ReleaseDenied::SignatureInvalid)
+        );
     }
 
     #[test]

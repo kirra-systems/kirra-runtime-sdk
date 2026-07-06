@@ -127,6 +127,38 @@ typedef struct KirraEnvelope {
  */
 KirraEnvelope kirra_envelope(void);
 
+/*
+ * Release-token verify result codes returned by kirra_verify_release_token().
+ * RELEASE ONLY on KIRRA_RELEASE_OK (0); every other code is fail-closed.
+ */
+#define KIRRA_RELEASE_OK                 0  /* token approves the digest + valid sig */
+#define KIRRA_RELEASE_DIGEST_MISMATCH    1  /* approval was for different bytes       */
+#define KIRRA_RELEASE_SIGNATURE_INVALID  2  /* forged / tampered / wrong signer       */
+#define KIRRA_RELEASE_BAD_ARGS          -1  /* null / wrong length / invalid key      */
+
+/**
+ * Verify a governor release token before actuating a command (HVCHAN step 7).
+ *
+ * Confirms the governor approved EXACTLY the command about to be actuated and the
+ * signature verifies against the governor key. No crypto is done by the caller.
+ *
+ * @param token_ptr   96 bytes: digest(32) || Ed25519 signature(64).
+ * @param token_len   must be 96.
+ * @param digest_ptr  32 bytes: the SHA-256 digest of the command about to actuate.
+ * @param digest_len  must be 32.
+ * @param vk_ptr      32 bytes: the governor Ed25519 verifying key.
+ * @param vk_len      must be 32.
+ * @return KIRRA_RELEASE_OK (0) only if the token approves @p digest_ptr and the
+ *         signature verifies; otherwise a non-zero fail-closed KIRRA_RELEASE_*
+ *         code. Release ONLY on KIRRA_RELEASE_OK.
+ *
+ * @warning The caller owns pointer validity: each pointer must address its stated
+ *          length of valid, non-aliased bytes that outlive the call.
+ */
+int32_t kirra_verify_release_token(const uint8_t *token_ptr, size_t token_len,
+                                   const uint8_t *digest_ptr, size_t digest_len,
+                                   const uint8_t *vk_ptr, size_t vk_len);
+
 /**
  * Authenticated supervisor reset of the governor's trust state.
  *
