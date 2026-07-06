@@ -134,6 +134,16 @@ TC-05..08 are seeded** (identified + mitigation noted; promote to a full cluster
 New triggering conditions are added here (not as one-offs); promotion to a
 cluster happens when an entry warrants dedicated issues.
 
+**Coverage is machine-gated (WS-3.3).** Every TC above must carry a reviewed
+coverage decision in `ci/sotif_trigger_coverage.json`, checked by the
+`scenario_kpi_gate` CI job (`kirra_kpi_gate::sotif_coverage`): each TC maps to a
+live generated scenario (`corpus`, resolved against the KPI corpus), a documented
+AoU (`aou`, resolved against `docs/safety/ASSUMPTIONS_OF_USE.md`), or an explicit referenced
+`external` demo / `deferred` gap. Adding a TC row here without a manifest entry —
+or pointing at a scenario/AoU that does not exist — reds the gate. This makes the
+"Verify" column an enforced mapping, not a prose promise (the WS-3 DoD clause:
+*every SOTIF trigger row maps to scenarios or a documented AoU*).
+
 ---
 
 ## 4. SOTIF acceptance argument

@@ -1,0 +1,45 @@
+{
+  "_comment": "WS-3.3 SOTIF trigger-coverage manifest. The reviewed mapping from every ISO 21448 triggering condition in docs/safety/OCCY_SOTIF.md §3 to its verification evidence. Machine-checked by kirra_kpi_gate::sotif_coverage (rides the scenario_kpi_gate CI job): the gate reds on an orphan TC (in the doc, no entry here), a spurious entry (a TC not in the doc), a `corpus` prefix that matches no live generated scenario, or an `aou` reference not in docs/safety/ASSUMPTIONS_OF_USE.md. `corpus`/`aou` are the DoD's two positive buckets (maps to scenarios / a documented AoU); `external` transcribes a domain demo verified outside this doer/perception corpus; `deferred` records an explicit, referenced Phase-2 gap. Adding a TC to the catalog without an entry here fails the gate by construction.",
+  "triggers": {
+    "TC-01": {
+      "coverage": "corpus",
+      "scenarios": ["Water_"],
+      "note": "Standing water / flooding is exercised as SemanticClass::Water perception frames in generated_perception_corpus (near-distance x lateral-span sweep); the taj safety-weighted oracle scores hazard_recall / unsafe_miss over them."
+    },
+    "TC-08": {
+      "coverage": "corpus",
+      "scenarios": ["Stopped_", "StaticObstacle_"],
+      "note": "Stopped/stalled lead + static debris: the doer corpus Stopped_* rows (stationary lead, RSS stopped-queue term through the real checker) and the perception corpus StaticObstacle_* frames both back this trigger."
+    },
+    "TC-02": {
+      "coverage": "external",
+      "reference": "#109",
+      "note": "Rail-crossing / commit-zone: map-anchored COMMIT_ZONE_BLOCKED + train prediction is a verifier/parko-domain mechanism verified by the commit-zone demo, not the doer/perception KPI corpus."
+    },
+    "TC-03": {
+      "coverage": "external",
+      "reference": "#105",
+      "note": "Post-collision near-field object: the impact latch + immobilize + clearance gate (SG6) is verified by the post-collision demo, outside this corpus."
+    },
+    "TC-04": {
+      "coverage": "external",
+      "reference": "#112",
+      "note": "Teleoperator handoff: the doer-agnostic Governor check on all commands (handoff routed through the Governor) is verified by the teleop-injection demo, outside this corpus."
+    },
+    "TC-05": {
+      "coverage": "deferred",
+      "reference": "G1 / #94",
+      "note": "Occluded VRU: OCCY_SOTIF.md §6 G1 flags the occluded-VRU scenario as Phase-2 work on the RSS epic; recorded here as an explicit, referenced gap rather than an unstated omission."
+    },
+    "TC-06": {
+      "coverage": "external",
+      "reference": "#99",
+      "note": "Sensor degradation / adverse weather: world-model freshness + confidence + fail-toward-stale + weather-posture coupling is verified by stale/low-confidence injection, outside this corpus."
+    },
+    "TC-07": {
+      "coverage": "aou",
+      "aou": "AOU-LOCALIZATION-001",
+      "note": "Map/localization error near a map-anchored hazard: the residual is bounded by the documented localization-integrity Assumption of Use (OCCY_SOTIF.md §6 G2 raises the same coupling into the DFA scope)."
+    }
+  }
+}

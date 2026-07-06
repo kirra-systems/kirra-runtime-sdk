@@ -37,6 +37,8 @@
 //! reviewed, versioned policy. The binary exits non-zero on any breach and
 //! prints the scorecard either way.
 
+pub mod sotif_coverage;
+
 use kirra_core::corridor::{MockCorridorSource, Point};
 use kirra_core::trajectory::PerceivedObject;
 use kirra_doer_eval::{verdict_of, AdmissibilityTally, EvalScenario};
