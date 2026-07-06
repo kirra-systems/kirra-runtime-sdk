@@ -10,6 +10,12 @@
 // real `fn` in the workspace (a renamed/deleted test can no longer leave the RTM
 // claim dangling; prose entries like `see §7` are a documented escape).
 //
+// It ALSO reconciles the MANUAL RTM (`REQUIREMENTS_TRACEABILITY.md`, TR-NNN) with
+// reality: each named test's ✓ (verified) / ✗ (gap) marker must match whether the
+// test actually exists — a ✓ with no such fn is a false coverage claim, a ✗ whose
+// test now exists is stale pessimism; both fail the gate. So both the generated
+// SG/REQ matrix AND the hand-maintained TR matrix are drift-proof.
+//
 // Tag format (defined in docs/safety/TRACEABILITY.md §1):
 //
 //     // SAFETY: SG3 SG9 | REQ: <kebab-id> | TEST: test_a,test_b
@@ -185,6 +191,49 @@ fn is_test_identifier(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Parse the `(test-name, is_verified)` markers from the manual RTM
+/// (`REQUIREMENTS_TRACEABILITY.md`): each TR row's Test column marks a named test
+/// `` `test_x` ✓ `` (verified — the test exists) or `` `test_x` ✗ `` (a gap — no
+/// such test). Only identifier-shaped, marker-followed backtick tokens are
+/// captured (implementation refs like `` `src/x.rs:f` `` carry no marker).
+#[cfg(test)]
+fn parse_rtm_markers(md: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for line in md.lines() {
+        if !line.trim_start().starts_with("| TR-") {
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '`' {
+                let mut j = i + 1;
+                let mut tok = String::new();
+                while j < chars.len() && chars[j] != '`' {
+                    tok.push(chars[j]);
+                    j += 1;
+                }
+                if j < chars.len() {
+                    let mut k = j + 1;
+                    while k < chars.len() && chars[k].is_whitespace() {
+                        k += 1;
+                    }
+                    if k < chars.len()
+                        && (chars[k] == '✓' || chars[k] == '✗')
+                        && is_test_identifier(&tok)
+                    {
+                        out.push((tok, chars[k] == '✓'));
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 fn parse_file(path: &Path, content: &str, tags: &mut Vec<SafetyTag>) {
     for (idx, line) in content.lines().enumerate() {
         if let Some((sgs, req, tests)) = parse_safety_line(line) {
@@ -324,6 +373,55 @@ mod ci_gate_tests {
              tag or restore the test:\n{}",
             dangling.join("\n")
         );
+    }
+
+    #[test]
+    fn rtm_markers_match_test_existence() {
+        // The manual RTM (`REQUIREMENTS_TRACEABILITY.md`) marks each named test ✓
+        // (verified — the test exists) or ✗ (a gap — no such test). Reconcile the
+        // markers with reality so the safety matrix cannot silently lie: a ✓ whose
+        // test does NOT exist is a FALSE coverage claim; a ✗ whose test NOW exists
+        // is stale pessimism (the coverage landed — flip it to ✓).
+        let root = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let md_path = root.join("docs/safety/REQUIREMENTS_TRACEABILITY.md");
+        let md = std::fs::read_to_string(&md_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", md_path.display()));
+        let fns = walk_test_fn_names();
+
+        let mut false_check = Vec::new();
+        let mut stale_cross = Vec::new();
+        for (name, verified) in parse_rtm_markers(&md) {
+            let exists = fns.contains(&name);
+            if verified && !exists {
+                false_check.push(name);
+            } else if !verified && exists {
+                stale_cross.push(name);
+            }
+        }
+        assert!(
+            false_check.is_empty(),
+            "RTM marks these tests ✓ (verified) but no such fn exists — a FALSE \
+             coverage claim; write the test or flip the marker to ✗:\n  {}",
+            false_check.join("\n  ")
+        );
+        assert!(
+            stale_cross.is_empty(),
+            "RTM marks these tests ✗ (a gap) but the test NOW EXISTS — stale; flip \
+             the marker to ✓:\n  {}",
+            stale_cross.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn rtm_marker_parser_reads_ticks_and_crosses() {
+        let md = "| TR-001 | req | `src/x.rs:f` | `test_alpha` ✓, `test_beta` ✗ |\n\
+                  not a tr row `test_gamma` ✓\n";
+        let m = parse_rtm_markers(md);
+        assert_eq!(m, vec![("test_alpha".to_string(), true), ("test_beta".to_string(), false)]);
+        // An implementation ref (path/colon token) carries no marker → not captured.
+        assert!(!m.iter().any(|(n, _)| n.contains('/')));
     }
 
     #[test]

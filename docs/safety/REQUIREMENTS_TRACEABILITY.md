@@ -16,6 +16,20 @@ Traceability flows in both directions:
 - **Forward:** Safety Goal -> Technical Requirement -> Implementation -> Test
 - **Backward:** Test -> Implementation -> Technical Requirement -> Safety Goal
 
+### 1.1 Test-status markers (machine-gated)
+
+Each named test in the Test(s) column carries a status marker:
+
+- **✓** — the named test **exists** and demonstrates compliance.
+- **✗** — a **gap**: no test of that name exists yet.
+
+These markers are **reconciled against reality in CI** by
+`kirra_verifier::traceability_gate::ci_gate_tests::rtm_markers_match_test_existence`:
+a **✓ whose test does not exist** (a false coverage claim) and a **✗ whose test
+now exists** (stale pessimism — the coverage landed) both **fail the gate**. So a
+marker can no longer silently diverge from the code — when a gap test is written,
+its marker must flip to ✓, and a claimed test must actually exist.
+
 ---
 
 ## 2. Traceability Matrix
@@ -44,9 +58,9 @@ Traceability flows in both directions:
 
 | TR ID | Technical Requirement | Implementation | Test(s) |
 |-------|-----------------------|----------------|---------|
-| TR-003 | `spawn_telemetry_watchdog` shall detect absence of telemetry for any registered AV sensor node when the elapsed time since last telemetry exceeds `AV_TELEMETRY_TIMEOUT_MS = 2000` ms and shall transition that node to `Untrusted` | `src/telemetry_watchdog.rs:spawn_telemetry_watchdog` | `test_watchdog_marks_node_untrusted_after_timeout` ✗ |
-| TR-003a | The watchdog sweep interval shall be `AV_WATCHDOG_SWEEP_MS = 100` ms; the maximum detection latency shall not exceed `AV_TELEMETRY_TIMEOUT_MS + AV_WATCHDOG_SWEEP_MS = 2100` ms | `src/telemetry_watchdog.rs` — constant `AV_WATCHDOG_SWEEP_MS` | `test_watchdog_detection_latency_within_bound` ✗ |
-| TR-003b | After the watchdog transitions a node to `Untrusted`, it shall send a `PostureRecalcTrigger` to the posture engine worker channel within the same sweep cycle | `src/telemetry_watchdog.rs` trigger send | `test_watchdog_triggers_posture_recalculation` ✗ |
+| TR-003 | `spawn_telemetry_watchdog` shall detect absence of telemetry for any registered AV sensor node when the elapsed time since last telemetry exceeds `AV_TELEMETRY_TIMEOUT_MS = 2000` ms and shall transition that node to `Untrusted` | `src/telemetry_watchdog.rs:spawn_telemetry_watchdog` | `test_watchdog_marks_node_untrusted_after_timeout` ✓ |
+| TR-003a | The watchdog sweep interval shall be `AV_WATCHDOG_SWEEP_MS = 100` ms; the maximum detection latency shall not exceed `AV_TELEMETRY_TIMEOUT_MS + AV_WATCHDOG_SWEEP_MS = 2100` ms | `src/telemetry_watchdog.rs` — constant `AV_WATCHDOG_SWEEP_MS` | `test_watchdog_detection_latency_within_bound` ✓ |
+| TR-003b | After the watchdog transitions a node to `Untrusted`, it shall send a `PostureRecalcTrigger` to the posture engine worker channel within the same sweep cycle | `src/telemetry_watchdog.rs` trigger send | `test_watchdog_triggers_posture_recalculation` ✓ |
 
 ---
 
@@ -94,7 +108,7 @@ Traceability flows in both directions:
 
 | TR ID | Technical Requirement | Implementation | Test(s) |
 |-------|-----------------------|----------------|---------|
-| TR-008 | `startup_sentinel` shall verify all safety invariants (admin token present, watchdog spawned, posture engine running, SQLite WAL mode active) before the TCP listener binds; on any invariant failure, the process shall abort | `src/startup_sentinel.rs`, `src/bin/kirra_verifier_service.rs` | Integration smoke test, `test_startup_aborts_without_admin_token` ✗ |
+| TR-008 | `startup_sentinel` shall verify all safety invariants (admin token present, watchdog spawned, posture engine running, SQLite WAL mode active) before the TCP listener binds; on any invariant failure, the process shall abort | `src/startup_sentinel.rs`, `src/bin/kirra_verifier_service.rs` | Integration smoke test, `test_startup_aborts_without_admin_token` ✓ |
 | TR-008a | The `kirra_verifier_service` binary shall bind the TCP listener only after `startup_sentinel` succeeds; no route shall be served before all invariants pass | `src/bin/kirra_verifier_service.rs` — listener bind ordering | Integration test confirming no response before startup_sentinel completes |
 | TR-008b | The `KirraPolicyLayer` Tower middleware shall be applied to the router at construction time; there shall be no code path that serves a request without passing through the middleware | `src/gateway/policy_layer.rs:KirraPolicyLayer`, `src/bin/kirra_verifier_service.rs` | Integration test confirming all routes pass through middleware |
 
@@ -135,8 +149,8 @@ Traceability flows in both directions:
 | TR ID | Technical Requirement | Implementation | Test(s) |
 |-------|-----------------------|----------------|---------|
 | TR-012 | The DNP3 protocol adapter and verifier service shall write an audit chain entry for every DNP3 message with `dest_address == DNP3_BROADCAST_ADDRESS` before returning the verdict (Kirra classifies; physical actuation ordering is an integrator AoU) | `src/bin/kirra_verifier_service.rs:evaluate_dnp3_adapter` (+ unified `evaluate_unified_industrial_request`) → `save_posture_event_chained` | `test_dnp3_broadcast_always_audited` ✓ |
-| TR-012a | If the audit chain write fails for a DNP3 broadcast command, the control output shall be blocked and an error shall be returned to the caller | `src/bin/kirra_verifier_service.rs:evaluate_dnp3_adapter` — audit-then-verdict; broadcast audit failure ⇒ `allowed:false` / `DNP3_BROADCAST_AUDIT_UNAVAILABLE` / 503 | `test_dnp3_broadcast_blocked_on_audit_write_failure` ✓ |
-| TR-012b | Non-broadcast DNP3 commands (unicast) shall also be audited, but an audit write failure for a non-broadcast command shall not block the control output | `src/bin/kirra_verifier_service.rs:evaluate_dnp3_adapter` — unicast control audited, audit failure non-fatal | `test_dnp3_unicast_audit_failure_non_fatal` ✓ |
+| TR-012a | If the audit chain write fails for a DNP3 broadcast command, the control output shall be blocked and an error shall be returned to the caller | `src/bin/kirra_verifier_service.rs:evaluate_dnp3_adapter` — audit-then-verdict; broadcast audit failure ⇒ `allowed:false` / `DNP3_BROADCAST_AUDIT_UNAVAILABLE` / 503 | `test_dnp3_broadcast_blocked_on_audit_write_failure` ✗ |
+| TR-012b | Non-broadcast DNP3 commands (unicast) shall also be audited, but an audit write failure for a non-broadcast command shall not block the control output | `src/bin/kirra_verifier_service.rs:evaluate_dnp3_adapter` — unicast control audited, audit failure non-fatal | `test_dnp3_unicast_audit_failure_non_fatal` ✗ |
 
 ---
 
