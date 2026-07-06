@@ -24,7 +24,8 @@
 // callers (`kirra_verifier::governor_release::*`) are unchanged after the
 // consolidation.
 pub use kirra_release_token::{
-    contract_digest, issue_release_token, verify_release, ReleaseDenied, ReleaseToken,
+    contract_digest, issue_release_token, verify_release, verify_release_over_digest,
+    ReleaseDenied, ReleaseToken,
 };
 
 use ed25519_dalek::VerifyingKey;

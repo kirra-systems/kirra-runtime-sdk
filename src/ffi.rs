@@ -228,6 +228,86 @@ pub extern "C" fn kirra_envelope() -> KirraEnvelope {
     }
 }
 
+// --- Release-token verify (WS-2 SDK: release-token verify) -----------------
+//
+// The actuator's verify-before-release gate (HVCHAN §3 step 7) over the C ABI:
+// given a 96-byte release token, the 32-byte digest of the command the caller is
+// ABOUT to actuate, and the 32-byte governor verifying key, confirm the governor
+// approved exactly those bytes and the signature verifies. Delegates to the ONE
+// canonical `verify_release_over_digest` — no crypto is re-implemented here.
+
+/// The release token approves this digest AND its signature verifies — RELEASE.
+pub const KIRRA_RELEASE_OK: i32 = 0;
+/// The token's digest does not match the command about to be actuated (stale /
+/// substituted approval) — DO NOT release.
+pub const KIRRA_RELEASE_DIGEST_MISMATCH: i32 = 1;
+/// The signature does not verify against the governor key (forged / tampered /
+/// wrong signer) — DO NOT release.
+pub const KIRRA_RELEASE_SIGNATURE_INVALID: i32 = 2;
+/// A malformed argument (null pointer, wrong length, or a `governor_vk` that is
+/// not a valid Ed25519 point) — fail-closed, DO NOT release.
+pub const KIRRA_RELEASE_BAD_ARGS: i32 = -1;
+
+/// # Safety
+///
+/// Verify a governor release token before actuating a command (HVCHAN §3 step 7).
+/// Returns `KIRRA_RELEASE_OK` (0) ONLY if the token approves `digest_ptr` and its
+/// signature verifies against `vk_ptr`; every other outcome is a non-zero
+/// fail-closed code (`KIRRA_RELEASE_*`). Release ONLY on `== KIRRA_RELEASE_OK`.
+///
+/// - `token_ptr` must address `token_len` readable bytes; `token_len` must be 96
+///   (`digest[32] || signature[64]`).
+/// - `digest_ptr` must address `digest_len` readable bytes; `digest_len` must be
+///   32 — the SHA-256 digest of the command the caller is about to actuate.
+/// - `vk_ptr` must address `vk_len` readable bytes; `vk_len` must be 32 — the
+///   governor Ed25519 verifying key.
+/// - None of the regions may be aliased/mutated during the call and each must
+///   outlive it. The null + length checks catch obvious misuse but cannot validate
+///   that a pointer addresses real memory — irreducibly a caller responsibility at
+///   the C boundary.
+///
+/// Per CERT-005 RSR-001: every pub extern "C" fn that dereferences a raw pointer
+/// must be marked unsafe fn.
+#[no_mangle]
+pub unsafe extern "C" fn kirra_verify_release_token(
+    token_ptr: *const u8,
+    token_len: usize,
+    digest_ptr: *const u8,
+    digest_len: usize,
+    vk_ptr: *const u8,
+    vk_len: usize,
+) -> i32 {
+    if token_ptr.is_null()
+        || token_len != 96
+        || digest_ptr.is_null()
+        || digest_len != 32
+        || vk_ptr.is_null()
+        || vk_len != 32
+    {
+        return KIRRA_RELEASE_BAD_ARGS;
+    }
+    let mut token_arr = [0u8; 96];
+    let mut digest_arr = [0u8; 32];
+    let mut vk_arr = [0u8; 32];
+    // SAFETY: non-null + exact-length verified above; caller owns validity/outlives.
+    token_arr.copy_from_slice(unsafe { std::slice::from_raw_parts(token_ptr, 96) });
+    digest_arr.copy_from_slice(unsafe { std::slice::from_raw_parts(digest_ptr, 32) });
+    vk_arr.copy_from_slice(unsafe { std::slice::from_raw_parts(vk_ptr, 32) });
+
+    let vk = match ed25519_dalek::VerifyingKey::from_bytes(&vk_arr) {
+        Ok(k) => k,
+        Err(_) => return KIRRA_RELEASE_BAD_ARGS, // not a valid Ed25519 point
+    };
+    let token = crate::governor_release::ReleaseToken::from_bytes(&token_arr);
+    match crate::governor_release::verify_release_over_digest(&token, &digest_arr, &vk) {
+        Ok(()) => KIRRA_RELEASE_OK,
+        Err(crate::governor_release::ReleaseDenied::DigestMismatch) => KIRRA_RELEASE_DIGEST_MISMATCH,
+        Err(crate::governor_release::ReleaseDenied::SignatureInvalid) => {
+            KIRRA_RELEASE_SIGNATURE_INVALID
+        }
+    }
+}
+
 /// # Safety
 ///
 /// Caller must ensure:
@@ -579,6 +659,125 @@ mod verdict_tests {
             e.max_linear_velocity_mps
         );
     }
+}
+
+#[cfg(test)]
+mod release_token_ffi_tests {
+
+
+    use super::*;
+    use crate::governor_release::{contract_digest, issue_release_token};
+    use ed25519_dalek::SigningKey;
+    use kirra_contract_channel::GovernorContractView;
+
+    fn gov_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+    fn view(cmd: &[u8]) -> GovernorContractView {
+        GovernorContractView::new_command(2, 1, 100, 10_000, cmd).unwrap()
+    }
+
+    /// An honest token, verified against the digest of the SAME command and the
+    /// governor's key, releases (`KIRRA_RELEASE_OK`).
+    #[test]
+    fn honest_token_releases() {
+        let sk = gov_key();
+        let v = view(b"steer:1.5");
+        let token = issue_release_token(&v, &sk).to_bytes();
+        let digest = contract_digest(&v);
+        let vk = sk.verifying_key().to_bytes();
+        let code = unsafe {
+            kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, vk.as_ptr(), 32)
+        };
+        assert_eq!(code, KIRRA_RELEASE_OK);
+    }
+
+    /// A token for one command, verified against the digest of a DIFFERENT command,
+    /// is a digest mismatch (the anti-substitution check) — no release.
+    #[test]
+    fn digest_mismatch_denies() {
+        let sk = gov_key();
+        let token = issue_release_token(&view(b"steer:1.5"), &sk).to_bytes();
+        let other_digest = contract_digest(&view(b"steer:9.9")); // different bytes
+        let vk = sk.verifying_key().to_bytes();
+        let code = unsafe {
+            kirra_verify_release_token(token.as_ptr(), 96, other_digest.as_ptr(), 32, vk.as_ptr(), 32)
+        };
+        assert_eq!(code, KIRRA_RELEASE_DIGEST_MISMATCH);
+    }
+
+    /// A tampered signature (a flipped byte) fails the crypto verify — no release.
+    #[test]
+    fn tampered_signature_denies() {
+        let sk = gov_key();
+        let v = view(b"steer:1.5");
+        let mut token = issue_release_token(&v, &sk).to_bytes();
+        token[64] ^= 0x01; // flip a byte in the signature half (digest[32]||sig[64])
+        let digest = contract_digest(&v);
+        let vk = sk.verifying_key().to_bytes();
+        let code = unsafe {
+            kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, vk.as_ptr(), 32)
+        };
+        assert_eq!(code, KIRRA_RELEASE_SIGNATURE_INVALID);
+    }
+
+    /// The right token + digest but the WRONG governor key does not verify.
+    #[test]
+    fn wrong_governor_key_denies() {
+        let sk = gov_key();
+        let v = view(b"steer:1.5");
+        let token = issue_release_token(&v, &sk).to_bytes();
+        let digest = contract_digest(&v);
+        let other_vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        let code = unsafe {
+            kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, other_vk.as_ptr(), 32)
+        };
+        assert_eq!(code, KIRRA_RELEASE_SIGNATURE_INVALID);
+    }
+
+    /// Malformed arguments fail closed to `KIRRA_RELEASE_BAD_ARGS`, never OK.
+    #[test]
+    fn malformed_args_fail_closed() {
+        let sk = gov_key();
+        let v = view(b"steer:1.5");
+        let token = issue_release_token(&v, &sk).to_bytes();
+        let digest = contract_digest(&v);
+        let vk = sk.verifying_key().to_bytes();
+        // Wrong token length.
+        assert_eq!(
+            unsafe { kirra_verify_release_token(token.as_ptr(), 95, digest.as_ptr(), 32, vk.as_ptr(), 32) },
+            KIRRA_RELEASE_BAD_ARGS
+        );
+        // Wrong digest length.
+        assert_eq!(
+            unsafe { kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 31, vk.as_ptr(), 32) },
+            KIRRA_RELEASE_BAD_ARGS
+        );
+        // Null token pointer.
+        assert_eq!(
+            unsafe { kirra_verify_release_token(std::ptr::null(), 96, digest.as_ptr(), 32, vk.as_ptr(), 32) },
+            KIRRA_RELEASE_BAD_ARGS
+        );
+        // A correct-LENGTH but non-decodable Ed25519 key (not a valid curve point)
+        // also fails closed — the key parse rejects it before any verify.
+        let bad_vk = INVALID_ED25519_KEY;
+        assert!(
+            ed25519_dalek::VerifyingKey::from_bytes(&bad_vk).is_err(),
+            "the fixture must be a genuinely invalid Ed25519 key encoding"
+        );
+        assert_eq!(
+            unsafe {
+                kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, bad_vk.as_ptr(), 32)
+            },
+            KIRRA_RELEASE_BAD_ARGS
+        );
+    }
+
+    /// A 32-byte value that is NOT a valid compressed Edwards point (its `y` has
+    /// no `x` on the curve), so `VerifyingKey::from_bytes` rejects it. The
+    /// `is_err()` guard in the test above ensures this can never silently become a
+    /// valid key.
+    const INVALID_ED25519_KEY: [u8; 32] = [2u8; 32];
 }
 
 #[cfg(test)]
