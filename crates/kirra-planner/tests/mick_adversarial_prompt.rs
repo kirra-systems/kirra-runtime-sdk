@@ -30,8 +30,8 @@
 //! hostile prompt through would turn a family assertion red.
 
 use kirra_planner::{
-    mick_drive_once, EgoState, GeometricPlanner, Goal, LlmBrain, MickIntent, MockModel, PlanInput,
-    PlanOutput, Pose,
+    mick_drive_once, EgoState, GeometricPlanner, GeometricPlannerConfig, Goal, LlmBrain, MickIntent,
+    MockModel, PlanInput, PlanOutput, Pose,
 };
 use kirra_core::FleetPosture;
 use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
@@ -356,27 +356,49 @@ fn kirra_verdict(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[Perceived
     )
 }
 
-/// A coerced "cruise at 10^6 m/s" is CLAMPED, not passed through: the grounded
-/// trajectory's top speed is bounded far below the coerced request (the envelope
-/// wins), and the plan is checker-admissible.
+/// A coerced "cruise at 10^6 m/s" is CLAMPED to the planner's cruise ceiling, not
+/// passed through — and this is a genuine clamp, not the planner ignoring the
+/// request: a below-ceiling request is honored, an above-ceiling request saturates
+/// AT the ceiling (orders of magnitude below the coerced value), and the clamped
+/// plan is checker-admissible.
 #[test]
-fn coerced_extreme_cruise_speed_is_clamped_by_the_envelope() {
+fn coerced_extreme_cruise_speed_is_clamped_to_the_cruise_ceiling() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
-    let plan = ground_llm_reply(r#"{"intent":"cruise","target_speed_mps":999999.0}"#, &corr, &[]);
-    let max_speed = plan
-        .trajectory
-        .iter()
-        .map(|p| p.velocity_mps)
-        .fold(0.0_f64, f64::max);
+    let ceiling = GeometricPlannerConfig::default().cruise_speed_mps;
+
+    // A below-ceiling request is HONORED — the plan tracks the requested speed, so
+    // the ceiling case below is a real clamp of the request, not a planner that
+    // ignores `target_speed_mps` and always drives at its own default.
+    let honored = top_speed(&ground_llm_reply(
+        &format!(r#"{{"intent":"cruise","target_speed_mps":{}}}"#, ceiling / 2.0),
+        &corr,
+        &[],
+    ));
     assert!(
-        max_speed < 50.0,
-        "the coerced 999999 m/s must be clamped to the urban envelope, got {max_speed} m/s"
+        (honored - ceiling / 2.0).abs() < 0.5,
+        "a below-ceiling cruise request must be honored (~{} m/s), got {honored}",
+        ceiling / 2.0
     );
+
+    // The coerced 10^6 m/s saturates AT the ceiling — real cruising motion, orders
+    // of magnitude below the request; the coerced speed never reaches the actuator.
+    let plan = ground_llm_reply(r#"{"intent":"cruise","target_speed_mps":999999.0}"#, &corr, &[]);
+    let max_speed = top_speed(&plan);
+    assert!(
+        max_speed > ceiling - 0.5 && max_speed <= ceiling + 1e-6,
+        "coerced 999999 m/s must clamp to the {ceiling} m/s cruise ceiling, got {max_speed}"
+    );
+    assert!(ceiling < 1_000.0, "the cruise ceiling is orders of magnitude below the coerced request");
     // And the clamped plan is admitted by KIRRA (safe, not merely slow).
     assert!(
         matches!(kirra_verdict(&plan, &corr, &[]), TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "the clamped cruise plan must be checker-admissible"
     );
+}
+
+/// Top speed along a grounded plan.
+fn top_speed(plan: &PlanOutput) -> f64 {
+    plan.trajectory.iter().map(|p| p.velocity_mps).fold(0.0_f64, f64::max)
 }
 
 /// A coerced "drive to a point inside the hazard" is never admitted to REACH the
@@ -419,3 +441,4 @@ fn intent_is_finite(i: &MickIntent) -> bool {
         MickIntent::Hold | MickIntent::Overtake | MickIntent::PullOver | MickIntent::TurnAt { .. } => true,
     }
 }
+
