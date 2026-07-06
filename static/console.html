@@ -90,6 +90,11 @@
   </section>
 
   <section>
+    <h2>OTA rollouts <span class="badge">WS-4 · adoption</span></h2>
+    <div id="campaigns"><span class="empty">loading…</span></div>
+  </section>
+
+  <section>
     <h2>Escalation docket (SG6, open)</h2>
     <div id="escalations"><span class="empty">loading…</span></div>
   </section>
@@ -194,6 +199,27 @@ function renderFleet(d){
   }).join("");
 }
 
+// WS-4 OTA rollout view. `applied_nodes` is the adoption NUMERATOR (nodes that
+// reported running the campaign's digest) — never a fabricated completion %.
+function renderCampaigns(d){
+  const el = document.getElementById("campaigns");
+  if(!d){ el.innerHTML = '<span class="empty">unavailable</span>'; return; }
+  const counts = 'total '+esc(d.total)+' · '+esc(d.rolling)+' rolling · '+esc(d.staged)+
+    ' staged · '+esc(d.completed)+' done · '+esc(d.halted)+' halted';
+  const active = (d.active||[]).map(c =>
+    '<div class="row"><span class="et">'+esc(c.campaign_id)+'</span> '+
+    '<span class="pill Trusted">'+esc(c.state)+'</span> · stage '+esc(c.stage)+'/'+esc(c.stage_count)+
+    ' · '+esc(c.rollout_percent)+'% · <b>'+esc(c.applied_nodes)+'</b> nodes adopted · v'+
+    esc(c.artifact_version)+'</div>').join("");
+  const halted = (d.halted_campaigns||[]).map(c =>
+    '<div class="row"><span class="et">'+esc(c.campaign_id)+'</span> '+
+    '<span class="pill Untrusted">halted</span> · '+esc(c.halt_reason)+' · '+
+    esc(c.rollout_percent)+'%</div>').join("");
+  const body = active + halted;
+  el.innerHTML = '<div class="note" style="color:var(--dim);font-size:11px;margin-bottom:6px">'+
+    counts+'</div>' + (body || '<span class="empty">no active or halted campaigns</span>');
+}
+
 function payloadOf(e){
   // field-tolerant: the page rows carry whatever they carry — show what's there.
   return e.event_json ?? e.payload ?? e.posture_json ?? null;
@@ -268,6 +294,11 @@ async function poll(){
       getJSON("/console/fleet"), getJSON("/console/escalations"), getJSON("/console/audit?limit=50"),
     ]);
     renderFleet(fleet); renderEscalations(esc_); renderAudit(audit); updateGrantCard(fleet);
+    // OTA rollouts degrade INDEPENDENTLY — a campaigns-query hiccup must never blank
+    // the fleet/audit views (nor break the poll's connection status).
+    getJSON("/console/campaigns").then(renderCampaigns).catch(() => {
+      document.getElementById("campaigns").innerHTML = '<span class="empty">unavailable</span>';
+    });
     conn.textContent = "updated " + new Date().toLocaleTimeString(); conn.classList.remove("err");
   } catch(e){ conn.textContent = "poll error: "+e.message; conn.classList.add("err"); }
 }

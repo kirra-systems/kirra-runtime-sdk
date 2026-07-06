@@ -384,3 +384,34 @@ pub(crate) async fn console_versions(State(svc): State<Arc<ServiceState>>) -> im
     Json(json!({ "versions": versions, "total": total, "unknown": unknown }))
         .into_response()
 }
+
+/// GET /console/campaigns (WS-4 / Track 3) — public read-only OTA rollout view for
+/// the operator console. Same [`summarize_campaigns`] projection the admin
+/// `/system/campaigns/summary` returns (counts by state, active-campaign stage
+/// progress, halted-with-reason, and the `applied_nodes` adoption numerator joined
+/// from the node reports), but posture-exempt and unauthenticated like the rest of
+/// the `/console/` plane. No secrets: artifact digests are public release identities.
+/// Reads off the replica so a heavy fleet's console never contends the writer.
+pub(crate) async fn console_campaigns(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {
+    match svc
+        .app
+        .store
+        .call_read(|store| {
+            let campaigns = store.load_campaigns()?;
+            let statuses = store.load_node_artifact_statuses()?;
+            Ok::<_, rusqlite::Error>((campaigns, statuses))
+        })
+        .await
+    {
+        Ok(Ok((campaigns, statuses))) => {
+            let summary =
+                kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
+            Json(summary).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "load campaigns failed" })),
+        )
+            .into_response(),
+    }
+}

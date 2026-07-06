@@ -1788,6 +1788,8 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/console/analytics", get(console_analytics))
         .route("/console/sites", get(console_sites))
         .route("/console/versions", get(console_versions))
+        // WS-4 / Track 3 — public read-only OTA rollout + adoption view.
+        .route("/console/campaigns", get(console_campaigns))
         // #314 Phase 1 — operator clearance-challenge (unauthenticated; the nonce
         // alone grants nothing — only a valid signature over it does).
         .route("/console/clearance-challenge", get(clearance_challenge))
@@ -3710,6 +3712,53 @@ mod console_phase_a_tests {
         assert_eq!(v10["count"], 2);
         let pct = v10["pct"].as_f64().unwrap();
         assert!((pct - (2.0 / 3.0 * 100.0)).abs() < 1e-9, "pct = count/total*100");
+    }
+
+    #[tokio::test]
+    async fn console_campaigns_shows_rollout_and_adoption() {
+        // WS-4: the public console rollout view mirrors the admin summary — a Rolling
+        // campaign with its stage progress + the adoption count from node reports.
+        use kirra_verifier::ota_campaign::{Campaign, NodeArtifactStatus};
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let svc = build_state();
+
+        // Seed a reachable Rolling@10% campaign (arm + one advance) and two adoption
+        // reports on its digest, directly through the store.
+        let mut c = Campaign::new("c-live", digest, "v2", vec!["fleet".into()], vec![10, 100], 1)
+            .unwrap();
+        c.arm(2).unwrap();
+        c.advance(kirra_verifier::verifier::FleetPosture::Nominal, 3)
+            .unwrap();
+        svc.app
+            .store
+            .call(move |s| {
+                s.insert_campaign(&c)?;
+                for node in ["robot-1", "robot-2"] {
+                    s.upsert_node_artifact_status(&NodeArtifactStatus {
+                        node_id: node.into(),
+                        applied_digest: digest.into(),
+                        campaign_id: Some("c-live".into()),
+                        artifact_version: Some("v2".into()),
+                        reported_at_ms: 4,
+                    })?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .expect("store task")
+            .expect("seed campaign + reports");
+
+        let (status, body) = get(svc, "/console/campaigns").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["rolling"], 1);
+        let roll = &v["active"][0];
+        assert_eq!(roll["campaign_id"], "c-live");
+        assert_eq!(roll["rollout_percent"], 10);
+        assert_eq!(roll["stage"], 1);
+        assert_eq!(roll["stage_count"], 2);
+        assert_eq!(roll["applied_nodes"], 2, "both reports adopted the digest");
     }
 
     #[tokio::test]
