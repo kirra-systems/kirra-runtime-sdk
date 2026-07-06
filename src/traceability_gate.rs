@@ -191,11 +191,42 @@ fn is_test_identifier(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Extract the test-fn identifier(s) from a marker-bearing backtick token. Handles
+/// the qualified forms the RTM uses, not just a bare `test_x`:
+/// - bare:          `test_x`                          → `test_x`
+/// - path/mod:      `tests/f.rs::test_x`, `m::test_x`  → `test_x` (last `::` segment)
+/// - brace group:   `m::{test_a, test_b}`             → `test_a`, `test_b`
+///
+/// An abbreviating `...` inside a brace group (the doc's "and others") is not an
+/// identifier and is dropped. Anything that still isn't identifier-shaped after
+/// stripping the qualifier is ignored.
+#[cfg(test)]
+fn tests_in_token(tok: &str) -> Vec<String> {
+    let last_segment = |s: &str| s.rsplit("::").next().unwrap_or(s).trim().to_string();
+    // Brace group: names live inside `{ ... }`; the part before `{` is the module.
+    if let (Some(open), Some(close)) = (tok.find('{'), tok.rfind('}')) {
+        if open < close {
+            return tok[open + 1..close]
+                .split(',')
+                .map(|s| last_segment(s.trim()))
+                .filter(|s| is_test_identifier(s))
+                .collect();
+        }
+    }
+    let name = last_segment(tok.trim());
+    if is_test_identifier(&name) {
+        vec![name]
+    } else {
+        vec![]
+    }
+}
+
 /// Parse the `(test-name, is_verified)` markers from the manual RTM
 /// (`REQUIREMENTS_TRACEABILITY.md`): each TR row's Test column marks a named test
 /// `` `test_x` ✓ `` (verified — the test exists) or `` `test_x` ✗ `` (a gap — no
-/// such test). Only identifier-shaped, marker-followed backtick tokens are
-/// captured (implementation refs like `` `src/x.rs:f` `` carry no marker).
+/// such test). The marker follows a backtick token, which may be bare, path/mod-
+/// qualified, or a brace group ([`tests_in_token`]); implementation refs carry no
+/// marker and so are never captured.
 #[cfg(test)]
 fn parse_rtm_markers(md: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
@@ -218,11 +249,11 @@ fn parse_rtm_markers(md: &str) -> Vec<(String, bool)> {
                     while k < chars.len() && chars[k].is_whitespace() {
                         k += 1;
                     }
-                    if k < chars.len()
-                        && (chars[k] == '✓' || chars[k] == '✗')
-                        && is_test_identifier(&tok)
-                    {
-                        out.push((tok, chars[k] == '✓'));
+                    if k < chars.len() && (chars[k] == '✓' || chars[k] == '✗') {
+                        let verified = chars[k] == '✓';
+                        for name in tests_in_token(&tok) {
+                            out.push((name, verified));
+                        }
                     }
                     i = j + 1;
                     continue;
@@ -422,6 +453,27 @@ mod ci_gate_tests {
         assert_eq!(m, vec![("test_alpha".to_string(), true), ("test_beta".to_string(), false)]);
         // An implementation ref (path/colon token) carries no marker → not captured.
         assert!(!m.iter().any(|(n, _)| n.contains('/')));
+    }
+
+    #[test]
+    fn rtm_marker_parser_handles_qualified_and_brace_forms() {
+        // path::test, mod::test, and mod::{a, b, ...} all reduce to bare fn names,
+        // carrying the row's marker (Copilot #852) — so the gate reconciles every
+        // marked test, not only bare-identifier ones.
+        let md = "| TR-9 | r | i | `tests/f.rs::test_path_qualified` ✓ |\n\
+                  | TR-9a | r | i | `m::sub::test_mod_qualified` ✗ |\n\
+                  | TR-9b | r | i | `admin_tests::{test_a, test_b, ...}` ✓ |\n";
+        let m = parse_rtm_markers(md);
+        assert_eq!(
+            m,
+            vec![
+                ("test_path_qualified".to_string(), true),
+                ("test_mod_qualified".to_string(), false),
+                ("test_a".to_string(), true),
+                ("test_b".to_string(), true),
+            ],
+            "qualified/brace tokens must reduce to bare fn names with the marker; `...` is dropped"
+        );
     }
 
     #[test]
