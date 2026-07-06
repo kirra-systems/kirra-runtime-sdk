@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <inttypes.h>
 #include "kirra.h"
 
 /* Human label for a KIRRA_POSTURE_* code (integrators would branch on the int). */
@@ -61,7 +62,7 @@ int main(void) {
             fprintf(stderr, "FATAL: checker emitted a non-finite command\n");
             return 1;
         }
-        printf("%8.2f -> %7.2f   [%-22s] (trust=%u, posture=%s)\n",
+        printf("%8.2f -> %7.2f   [%-22s] (trust=%" PRIu32 ", posture=%s)\n",
                proposals[i], v.sanitized_value, verdict_label(v.code),
                trust, posture_label(kirra_posture()));
     }
