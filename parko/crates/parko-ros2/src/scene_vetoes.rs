@@ -131,7 +131,7 @@ pub fn apply_occlusion_gate(
 /// SG4 — WATER_UNTRAVERSABLE veto gate. A missing/stale scene when armed is
 /// `WaterScene::Unknown` → veto (the detector did not look). A bounded-safe
 /// puddle is NOT vetoed (no over-stop in rain); the unbounded signature stops.
-// SAFETY: SG4 | REQ: parko-ros2-water-gate | TEST: water_clear_passes,water_unbounded_signature_stops,water_missing_scene_fails_closed,already_stopped_outcome_passes_all_gates
+// SAFETY: SG4 | REQ: parko-ros2-water-gate | TEST: water_clear_passes,water_unknown_scene_stops,water_missing_scene_fails_closed,already_stopped_outcome_passes_all_gates
 pub fn apply_water_gate(
     outcome: TickOutcome,
     water: Option<&StampedScene<WaterScene>>,

@@ -325,7 +325,7 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
 /// Fail-closed-immediately: the drop to Degraded happens on the FIRST sub-trusted
 /// tick — hysteresis governs only the Degraded→LockedOut escalation and the
 /// recovery earn-back, never a grace period on the initial response.
-// SAFETY: SG2 | REQ: frame-integrity-escalates-posture | TEST: test_frame_degraded_escalates_immediately,test_frame_untrusted_sustained_locks_out,test_frame_trusted_recovery_clears_degraded,test_frame_lockout_is_sticky
+// SAFETY: SG2 | REQ: frame-integrity-escalates-posture | TEST: test_frame_degraded_escalates_immediately,test_frame_untrusted_escalates_immediately_then_locks_out_when_sustained,test_frame_trusted_recovery_clears_degraded,test_frame_lockout_is_sticky_across_trusted
 pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_ms: u64) {
     match trust {
         FrameTrust::Trusted => {
