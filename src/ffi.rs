@@ -542,9 +542,11 @@ mod verdict_tests {
         assert_eq!(e.fallback_linear_velocity_mps, 0.0);
     }
 
-    /// Structural invariants of any reported envelope: all finite, symmetric
-    /// (`min == -max`), non-negative max, positive accel limit — so a C consumer
-    /// can trust the shape without knowing the specific compiled numbers.
+    /// Structural invariants that hold for ANY reported envelope — including the
+    /// all-zero fail-closed envelope on a poisoned lock: all finite, symmetric
+    /// (`min == -max`), and non-negative bounds. (The stronger "positive/usable"
+    /// accel limit is a success-path property, asserted in
+    /// `envelope_reports_the_compiled_bounds`, not a universal API guarantee.)
     #[test]
     fn envelope_is_finite_and_symmetric() {
         let e = kirra_envelope();
@@ -558,8 +560,9 @@ mod verdict_tests {
             assert!(v.is_finite(), "every envelope field must be finite");
         }
         assert_eq!(e.min_linear_velocity_mps, -e.max_linear_velocity_mps, "symmetric envelope");
-        assert!(e.max_linear_velocity_mps >= 0.0 && e.max_angular_velocity_radps >= 0.0);
-        assert!(e.max_linear_acceleration_mps2 > 0.0, "a usable rate limit is positive");
+        assert!(e.max_linear_velocity_mps >= 0.0, "max velocity is non-negative");
+        assert!(e.max_angular_velocity_radps >= 0.0, "max angular rate is non-negative");
+        assert!(e.max_linear_acceleration_mps2 >= 0.0, "accel limit is non-negative (0 in the fail-closed envelope)");
     }
 
     /// The reported envelope agrees with what the checker enforces: a demand well
