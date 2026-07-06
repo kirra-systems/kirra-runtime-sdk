@@ -33,18 +33,30 @@ creates a second release path [Clause 3].
   Tested with two **in-process peer sessions** (no router, localhost TCP, multicast
   off).
 
-## Build / sandbox note (the bench is the build authority)
+## Transport confidentiality (opt-in TLS)
 
-This crate **builds and tests in the authoring sandbox** (rustc 1.94.1) — but only
-with Zenoh's **TLS/QUIC features disabled** (`default-features = false`, just
-`transport_tcp` + `unstable`). Zenoh's *default* TLS stack pulls an
-`rcgen` / `time` dependency chain that **does not compile on rustc 1.94.1**
-(`E0119`, a conflicting-impl break) — the anticipated MSRV/toolchain wall. We
-disable TLS deliberately: **TLS is confidentiality defense-in-depth, not the trust
-root** (the trust root is the Ed25519 payload signature), so dropping it costs no
-trust for the spike. The **bench is the authority** for the TLS-enabled production
-config; if a future transitive dep ever breaks the resolve, the
-`zenoh-pinned-deps-1-75` lockdown is the escape hatch.
+TLS is **available and opt-in** (`transport_tls`). It is **confidentiality + link
+authentication**, *not* the trust root — the trust root is the Ed25519 payload
+signature verified at ingest (Clause 1), so a plaintext deployment still verifies
+every payload; TLS only stops the carrier from exposing the report/grant stream on
+the wire.
+
+The production config seam is `transport::fleet_peer_config(listen, connect, tls)`
++ [`FleetTlsConfig`](src/transport.rs): pass `None` for `tls` (the default) and the
+session is plaintext `tcp/...`, **byte-identical** to the prior behaviour; pass
+`Some(&FleetTlsConfig{..})` (cert/key/CA PEM paths) and the endpoints become
+`tls/...` and the link is encrypted + cert-verified. `report_round_trip_over_tls_verifies`
+drives a real two-session encrypted round-trip end-to-end (CA-signed server leaf,
+SAN name-verification on).
+
+### The toolchain wall (cleared)
+
+Zenoh's TLS stack pulls a `time` / x509 chain that used to hit an `E0119`
+conflicting-impl break on rustc 1.94.1 — the anticipated MSRV/toolchain wall. It is
+**now cleared** by bumping `time` 0.3.48 → 0.3.53 in the workspace lockfile. Zenoh's
+TLS uses the **`ring`** rustls provider (not `aws-lc-rs`), so it does not conflict
+with the verifier's ring-only rustls invariant. If a future transitive dep ever
+breaks the resolve, the `zenoh-pinned-deps-1-75` lockdown is the escape hatch.
 
 The Zenoh tests require a **multi-threaded** tokio runtime
 (`#[tokio::test(flavor = "multi_thread", …)]`) — Zenoh's runtime rejects the

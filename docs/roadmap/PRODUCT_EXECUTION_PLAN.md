@@ -82,7 +82,7 @@ The gap analysis found a fail-closed codebase with a handful of fail-open or cla
 - **OTA/A-B for the governor artifact first** (narrow, high-value): signed artifact (WS-0.6 cosign roots it), dual-slot install with health-gated automatic rollback, campaign engine v1 in the verifier (cohorts, staged rollout %, halt-on-regression using posture telemetry), R156-shaped update audit trail. Then generalize to node software.
 - **Secure/measured boot** on a reference platform (Jetson Orin: UEFI Secure Boot + dm-verity rootfs) feeding the existing PCR16 attestation so the chain starts at boot, not runtime; default build no longer returns `Trusted` unconditionally — TPM feature on by default for the fleet product, explicit dev-mode opt-out.
 - **Persistence past the SQLite ceiling:** WORM/append-only off-box audit shipping (the chain already hash-links; add a shipper + remote verifier); documented + tested HA topology (active/passive stays, but the shared-file SPOF gets an alternative: replicated store or litestream-class WAL shipping with failover drill in CI); DR drill automated.
-- **Transport security executed:** Zenoh TLS/QUIC enabled (toolchain fight is the task), per-controller key registry (#314), rate limiting on ingest; two-box lane retired or hardened.
+- **Transport security executed:** Zenoh TLS enabled opt-in (`fleet_peer_config`/`FleetTlsConfig`; the toolchain fight is cleared — `time` 0.3.48→0.3.53, `ring` provider), per-controller key registry (#314), rate limiting on ingest; two-box lane retired or hardened.
 - **DoD = GATE C checklist.**
 
 ### WS-5 · Certification Leg (Stage 3, parallel from Stage 1 — closes G4, G5; consumes WS-3)

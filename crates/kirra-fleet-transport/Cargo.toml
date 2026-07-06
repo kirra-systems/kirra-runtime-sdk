@@ -5,13 +5,19 @@
 # Clause 2; ADR-0007). This crate is a LEAF consumer that depends on the SDK;
 # nothing under src/gateway/ or any safety path may depend on it.
 #
-# TLS DELIBERATELY OFF (the toolchain-wall mitigation + the trust model): zenoh's
-# default TLS/QUIC stack pulls an rcgen/time chain that does not compile on the
-# bench toolchain (rustc 1.94.1, E0119). We disable it — and trust does NOT come
-# from transport TLS anyway (it comes from Ed25519 payload signatures, ADR-0007
-# Clause 1), so dropping TLS costs no trust. `transport_tcp` gives the localhost
-# peer transport the in-process tests use. If a future transitive dep ever breaks
-# the resolve, the `zenoh-pinned-deps-1-75` lockdown is the escape hatch.
+# TLS AVAILABLE, OPT-IN (the toolchain wall was real but is now cleared): zenoh's
+# TLS stack pulls a `time`/x509 chain that used to hit an E0119 conflicting-impl
+# break on the bench toolchain (rustc 1.94.1). Bumping `time` 0.3.48 -> 0.3.53 in
+# the workspace lockfile clears it, so `transport_tls` is enabled here. Zenoh's TLS
+# uses the `ring` rustls provider (not aws-lc-rs), so it does not conflict with the
+# verifier's ring-only rustls invariant. TLS is OPT-IN and byte-identical when
+# unused: a session is encrypted ONLY when its endpoints use the `tls/...` scheme
+# (see `transport::fleet_peer_config` + `FleetTlsConfig`); the default `tcp/...`
+# path is unchanged. TLS is confidentiality + link auth, NOT the trust root — trust
+# is still Ed25519 payload signatures verified at ingest (ADR-0007 Clause 1), so a
+# plaintext deployment still verifies every payload. `transport_tcp` gives the
+# plaintext peer transport. If a future transitive dep ever breaks the resolve, the
+# `zenoh-pinned-deps-1-75` lockdown is the escape hatch.
 [package]
 name = "kirra-fleet-transport"
 version = "0.1.0"
@@ -33,10 +39,11 @@ kirra-fleet-types = { path = "../kirra-fleet-types" }
 # FleetPosture (the wire-shared posture enum) lives in the lean foundation.
 kirra-core = { path = "../kirra-core" }
 
-# The fleet carrier. default-features OFF (no TLS/QUIC — see the manifest note);
-# `transport_tcp` = the localhost peer transport; `unstable` only for the explicit
-# endpoint config the deterministic in-process tests wire (not the data path).
-zenoh = { version = "1", default-features = false, features = ["transport_tcp", "unstable"] }
+# The fleet carrier. default-features OFF, features enabled explicitly (see the
+# manifest note): `transport_tcp` = the plaintext peer transport; `transport_tls` =
+# the opt-in encrypted link (`tls/...` endpoints; `fleet_peer_config`/`FleetTlsConfig`);
+# `unstable` only for the explicit endpoint config the config seam + tests wire.
+zenoh = { version = "1", default-features = false, features = ["transport_tcp", "transport_tls", "unstable"] }
 
 serde = { version = "1", features = ["derive"] }
 # JSON on the fleet wire (NOT bincode like kirra-wire-client's governor hot path):
