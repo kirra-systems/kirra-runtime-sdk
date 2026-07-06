@@ -72,14 +72,17 @@ pub fn fleet_peer_config(
     insert_cfg(&mut c, "scouting/gossip/enabled", "false")?;
 
     // ALWAYS set listen explicitly — `[]` on the connect-only side — so Zenoh
-    // never falls back to its default `tcp/[::]:0` (IPv6) listener.
-    let listen_json = match listen {
-        Some(l) => format!("[\"{scheme}/{l}\"]"),
-        None => "[]".to_string(),
-    };
+    // never falls back to its default `tcp/[::]:0` (IPv6) listener. Build the
+    // endpoint array via serde so any character needing JSON escaping in the
+    // caller-supplied `host:port` is escaped correctly (never a raw `format!`).
+    let listen_endpoints: Vec<String> =
+        listen.map(|l| vec![format!("{scheme}/{l}")]).unwrap_or_default();
+    let listen_json = serde_json::to_string(&listen_endpoints).map_err(|e| e.to_string())?;
     insert_cfg(&mut c, "listen/endpoints", &listen_json)?;
     if let Some(cn) = connect {
-        insert_cfg(&mut c, "connect/endpoints", &format!("[\"{scheme}/{cn}\"]"))?;
+        let connect_json =
+            serde_json::to_string(&[format!("{scheme}/{cn}")]).map_err(|e| e.to_string())?;
+        insert_cfg(&mut c, "connect/endpoints", &connect_json)?;
     }
 
     if let Some(t) = tls {
