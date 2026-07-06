@@ -32,6 +32,79 @@ pub extern "C" fn kirra_filter_move_velocity(proposed_velocity: f64, dt: f64) ->
     GLOBAL_GOVERNOR.lock().map(|mut g| g.evaluate(proposed_velocity, dt).sanitized_scalar).unwrap_or(0.0)
 }
 
+// --- Structured verdict (WS-2 SDK: the verdict struct) ---------------------
+//
+// `kirra_filter_move_velocity` returns only the bounded scalar; a C integrator
+// cannot tell WHY it was bounded (a clean passthrough vs an envelope clamp vs a
+// fail-closed rejection). `kirra_check_move_velocity` returns both — the same
+// sanitized scalar plus a stable reason code — as a `#[repr(C)]` struct BY VALUE.
+// No raw pointers, so no `unsafe`: the ABI passes the small {f64,i32} aggregate
+// per the platform C convention, and the fail-closed contract is unchanged.
+
+/// Stable C verdict reason codes (mirror `include/kirra.h`'s `KIRRA_VERDICT_*`).
+/// Frozen wire values — only APPEND new codes, never renumber.
+pub const KIRRA_VERDICT_PASSTHROUGH: i32 = 0;
+pub const KIRRA_VERDICT_ENVELOPE_CLAMP: i32 = 1;
+pub const KIRRA_VERDICT_RATE_CLAMP: i32 = 2;
+pub const KIRRA_VERDICT_NONFINITE_REJECTED: i32 = 3;
+pub const KIRRA_VERDICT_INVALID_DT_REJECTED: i32 = 4;
+pub const KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP: i32 = 5;
+pub const KIRRA_VERDICT_DEGRADED_DECEL_HOLD: i32 = 6;
+pub const KIRRA_VERDICT_SHADOW_HOLD: i32 = 7;
+pub const KIRRA_VERDICT_LOCKOUT_FALLBACK: i32 = 8;
+/// FFI-only sentinel: the process governor lock was poisoned; `sanitized_value`
+/// is the fail-closed `0.0`. Not a `MitigationCode` (no verdict was computed).
+pub const KIRRA_VERDICT_LOCK_POISONED: i32 = 9;
+
+/// A governed-command verdict for the C ABI: the sanitized scalar to actuate plus
+/// the reason it was (or was not) bounded. `#[repr(C)]`, returned by value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KirraVerdict {
+    /// The scalar to send to the actuator — ALWAYS finite and inside the envelope
+    /// (identical to `kirra_filter_move_velocity` for the same input).
+    pub sanitized_value: f64,
+    /// One of the `KIRRA_VERDICT_*` codes.
+    pub code: i32,
+}
+
+/// The stable C reason code for a `MitigationCode`. Exhaustive (no wildcard): a
+/// new verdict variant will fail to compile here until it is given a code — the
+/// C ABI can never silently drop a new mitigation reason.
+#[must_use]
+fn mitigation_to_code(m: &crate::MitigationCode) -> i32 {
+    use crate::MitigationCode as M;
+    match m {
+        M::PassthroughUnrestrictedNormal => KIRRA_VERDICT_PASSTHROUGH,
+        M::EnvelopeClampTakesPriority => KIRRA_VERDICT_ENVELOPE_CLAMP,
+        M::RateClampEnforced { .. } => KIRRA_VERDICT_RATE_CLAMP,
+        M::NonfiniteInputRejectedFailsafe => KIRRA_VERDICT_NONFINITE_REJECTED,
+        M::InvalidTimeDeltaRejectedFailsafe => KIRRA_VERDICT_INVALID_DT_REJECTED,
+        M::DegradedPostureClamp { .. } => KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP,
+        M::DegradedDecelToStopHold { .. } => KIRRA_VERDICT_DEGRADED_DECEL_HOLD,
+        M::ShadowModeHoldEnforced { .. } => KIRRA_VERDICT_SHADOW_HOLD,
+        M::CriticalLockoutFallback => KIRRA_VERDICT_LOCKOUT_FALLBACK,
+    }
+}
+
+/// Bound a proposed LINEAR velocity (m/s) over `dt` (seconds) and return a
+/// structured [`KirraVerdict`] — the sanitized scalar plus WHY it was bounded.
+/// `sanitized_value` is byte-identical to [`kirra_filter_move_velocity`] for the
+/// same input; a poisoned lock fails closed to `{0.0, KIRRA_VERDICT_LOCK_POISONED}`.
+#[no_mangle]
+pub extern "C" fn kirra_check_move_velocity(proposed_velocity: f64, dt: f64) -> KirraVerdict {
+    match GLOBAL_GOVERNOR.lock() {
+        Ok(mut g) => {
+            let r = g.evaluate(proposed_velocity, dt);
+            KirraVerdict {
+                sanitized_value: r.sanitized_scalar,
+                code: mitigation_to_code(&r.mitigation),
+            }
+        }
+        Err(_) => KirraVerdict { sanitized_value: 0.0, code: KIRRA_VERDICT_LOCK_POISONED },
+    }
+}
+
 /// Bound a proposed ANGULAR velocity (rad/s) to the governor's `max_angular_rate`.
 /// Returns the clamped rate — ALWAYS finite. A non-finite proposal fails closed to
 /// `0.0` and decays trust; an over-limit proposal is clamped to the bound and decays
@@ -286,6 +359,57 @@ mod reset_clock_tests {
             now > 1_600_000_000_000,
             "supervisor reset must use real wall-clock ms (got {now}), never a frozen 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+    use crate::MitigationCode as M;
+
+    /// Every `MitigationCode` maps to its stable, DISTINCT C code — exhaustively,
+    /// so a new verdict variant cannot silently collide or default.
+    #[test]
+    fn mitigation_codes_are_stable_and_distinct() {
+        let cases = [
+            (M::PassthroughUnrestrictedNormal, KIRRA_VERDICT_PASSTHROUGH),
+            (M::EnvelopeClampTakesPriority, KIRRA_VERDICT_ENVELOPE_CLAMP),
+            (M::RateClampEnforced { max_rate: 1.0 }, KIRRA_VERDICT_RATE_CLAMP),
+            (M::NonfiniteInputRejectedFailsafe, KIRRA_VERDICT_NONFINITE_REJECTED),
+            (M::InvalidTimeDeltaRejectedFailsafe, KIRRA_VERDICT_INVALID_DT_REJECTED),
+            (M::DegradedPostureClamp { cap_min: -1.0, cap_max: 1.0 }, KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP),
+            (M::DegradedDecelToStopHold { held: 0.5 }, KIRRA_VERDICT_DEGRADED_DECEL_HOLD),
+            (M::ShadowModeHoldEnforced { retained: 0.2 }, KIRRA_VERDICT_SHADOW_HOLD),
+            (M::CriticalLockoutFallback, KIRRA_VERDICT_LOCKOUT_FALLBACK),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (m, expected) in cases {
+            assert_eq!(mitigation_to_code(&m), expected, "code for {m:?} must be stable");
+            assert!(seen.insert(expected), "code {expected} must be distinct");
+        }
+        // The poisoned-lock sentinel is distinct from every mapped code.
+        assert!(!seen.contains(&KIRRA_VERDICT_LOCK_POISONED));
+    }
+
+    /// The verdict's `sanitized_value` matches the scalar `kirra_filter_move_velocity`
+    /// returns for the same input — the struct adds a reason, never a different value.
+    /// Uses the non-finite input, whose fail-closed result is invariant of the shared
+    /// `GLOBAL_GOVERNOR` state (the P0 guard short-circuits before any trust branch).
+    #[test]
+    fn verdict_value_matches_the_scalar_filter_nonfinite() {
+        let v = kirra_check_move_velocity(f64::NAN, 0.05);
+        assert_eq!(v.code, KIRRA_VERDICT_NONFINITE_REJECTED, "a NaN demand is a fail-closed rejection");
+        assert!(v.sanitized_value.is_finite(), "the verdict value is never non-finite");
+        assert_eq!(v.sanitized_value, kirra_filter_move_velocity(f64::NAN, 0.05));
+    }
+
+    /// A non-positive timestep is a fail-closed rejection with the invalid-dt code
+    /// (also state-invariant — the dt guard runs before any trust branch).
+    #[test]
+    fn verdict_reports_invalid_dt() {
+        let v = kirra_check_move_velocity(1.0, 0.0);
+        assert_eq!(v.code, KIRRA_VERDICT_INVALID_DT_REJECTED);
+        assert!(v.sanitized_value.is_finite());
     }
 }
 

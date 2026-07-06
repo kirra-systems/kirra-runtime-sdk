@@ -35,6 +35,44 @@ extern "C" {
  */
 double kirra_filter_move_velocity(double demand, double dt);
 
+/*
+ * Verdict reason codes returned in KirraVerdict.code. Stable wire values — only
+ * appended, never renumbered. A poisoned internal lock yields LOCK_POISONED with
+ * a fail-closed value of 0.0.
+ */
+#define KIRRA_VERDICT_PASSTHROUGH             0  /* in envelope + rate: unchanged */
+#define KIRRA_VERDICT_ENVELOPE_CLAMP          1  /* clamped to the hard envelope  */
+#define KIRRA_VERDICT_RATE_CLAMP              2  /* clamped to the rate-of-change */
+#define KIRRA_VERDICT_NONFINITE_REJECTED      3  /* NaN/Inf demand: fail-closed   */
+#define KIRRA_VERDICT_INVALID_DT_REJECTED     4  /* dt <= 0: fail-closed          */
+#define KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP  5  /* bounded inside a reduced cap  */
+#define KIRRA_VERDICT_DEGRADED_DECEL_HOLD     6  /* decel-to-stop-and-hold        */
+#define KIRRA_VERDICT_SHADOW_HOLD             7  /* shadow mode: last value held  */
+#define KIRRA_VERDICT_LOCKOUT_FALLBACK        8  /* LockedOut: fallback commanded */
+#define KIRRA_VERDICT_LOCK_POISONED           9  /* internal lock poisoned        */
+
+/**
+ * A governed-command verdict: the sanitized scalar to actuate plus WHY it was
+ * bounded. Returned by value from kirra_check_move_velocity.
+ */
+typedef struct KirraVerdict {
+    double sanitized_value; /* what to actuate — ALWAYS finite, inside envelope */
+    int32_t code;           /* one of the KIRRA_VERDICT_* codes                 */
+} KirraVerdict;
+
+/**
+ * Bound a proposed LINEAR velocity AND report the reason.
+ *
+ * Same fail-closed bounding as kirra_filter_move_velocity — sanitized_value is
+ * identical for the same input — but also returns a KIRRA_VERDICT_* code so the
+ * caller can tell a clean passthrough from a clamp or a fail-closed rejection.
+ *
+ * @param demand  proposed linear velocity (m/s).
+ * @param dt      timestep since the previous command (seconds); must be > 0.
+ * @return a KirraVerdict; a poisoned internal lock yields {0.0, LOCK_POISONED}.
+ */
+KirraVerdict kirra_check_move_velocity(double demand, double dt);
+
 /**
  * Bound a proposed ANGULAR velocity to the governor's maximum angular rate.
  *
