@@ -1,0 +1,148 @@
+{
+  "_comment": "WS-3.3 SPI registry — the machine-checked transcription of UL4600_SAFETY_CASE.md §5.2. Gated by kirra_verifier::spi_ledger (a root-crate test): every `emitted`/`derived` SPI's event_type literals must be actually emitted in the workspace's NON-TEST code (root src/ + crates/*/src, scanned — some event_types are DerateCode reason tokens defined in kirra-core, not the verifier src/), a `parko`-scope SPI's verifier-side denominator must resolve, and the registry IDs must equal the §5.2 catalogue IDs. `threshold` is null where the §5 alarm limit is field-calibration TBD (the SPI is computed/reported but not alarm-gated); SPI-G06 (audit-chain integrity) is the hard 0-required precondition. Renaming/removing an audit event_type reds this gate.",
+  "spis": [
+    {
+      "id": "SPI-L01",
+      "name": "Comparator divergence rate",
+      "kind": "leading",
+      "source": "parko",
+      "event_types": ["ComparatorDivergence"],
+      "denominator": "MOTION_COMMAND_ADMITTED",
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Latent systematic fault / state drift between the primary and diverse governors. Emitted in the parko node-local chain (parko-kirra COMPARATOR_DIVERGENCE_EVENT_TYPE); the verifier-side admitted-command denominator resolves here."
+    },
+    {
+      "id": "SPI-L02",
+      "name": "RSS near-miss rate",
+      "kind": "leading",
+      "source": "emitted",
+      "event_types": ["RSS_VIOLATION"],
+      "denominator": "MOTION_COMMAND_ADMITTED",
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Closing on the minimum safe distance (IEEE 2846 / RSS). Emitted by append_rss_violation."
+    },
+    {
+      "id": "SPI-L03",
+      "name": "Sensor-health fault rate",
+      "kind": "leading",
+      "source": "emitted",
+      "event_types": ["SENSOR_HEALTH_REPORT_FAULT"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Perception/sensor channel degrading toward trust loss; counted per node-hour."
+    },
+    {
+      "id": "SPI-L04",
+      "name": "Perception-derate rate",
+      "kind": "leading",
+      "source": "emitted",
+      "event_types": ["PERCEPTION_SNAPSHOT_UNHEALTHY", "DETECTION_RANGE_DEGRADED"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Detection range / snapshot health below floor. Both are real perception DerateCode reasons (kirra_core::gateway::perception_monitor::DerateCode), emitted as the derate event's reason token — hence the scan spans crates/*/src, not just the verifier src/."
+    },
+    {
+      "id": "SPI-L05",
+      "name": "Degraded-entry frequency",
+      "kind": "leading",
+      "source": "derived",
+      "event_types": ["SYSTEM_POSTURE_TRANSITION"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "ODD/operational stress forcing the reduced-capability posture. Derived: the posture-transition event filtered to (→ Degraded)."
+    },
+    {
+      "id": "SPI-L06",
+      "name": "Posture-flap / recovery-reset rate",
+      "kind": "leading",
+      "source": "derived",
+      "event_types": ["SYSTEM_POSTURE_TRANSITION", "SENSOR_RECOVERY_CONFIRMED"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Instability: repeated fault↔recover cycling (hysteresis resets). Derived from the posture-transition + recovery-confirmed event pair."
+    },
+    {
+      "id": "SPI-L07",
+      "name": "Federation rejection rate",
+      "kind": "leading",
+      "source": "emitted",
+      "event_types": ["FEDERATION_REJECTED"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Trust-boundary pressure (misconfig or adversarial peers)."
+    },
+    {
+      "id": "SPI-G01",
+      "name": "LockedOut / MRC engagement rate",
+      "kind": "lagging",
+      "source": "derived",
+      "event_types": ["SYSTEM_POSTURE_TRANSITION"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Safe-state fallback engaged. Derived: the posture-transition event filtered to (→ LockedOut). A discrete MRC-maneuver event remains a §5.3 gap."
+    },
+    {
+      "id": "SPI-G02",
+      "name": "Command veto rate",
+      "kind": "lagging",
+      "source": "emitted",
+      "event_types": ["FABRIC_COMMAND_DENIED", "ACTION_FILTER_DENIED", "ACTION_FILTER_UNKNOWN_TYPE", "INDUSTRIAL_ACTION_DENIED"],
+      "denominator": "MOTION_COMMAND_ADMITTED",
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Governor blocked a command outright at the fabric/adapter layer (the kinematic-gateway veto rate is a §5.3 WCET-firewall gap)."
+    },
+    {
+      "id": "SPI-G03",
+      "name": "Command clamp rate",
+      "kind": "lagging",
+      "source": "emitted",
+      "event_types": ["FABRIC_COMMAND_CLAMPED"],
+      "denominator": "MOTION_COMMAND_ADMITTED",
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Governor admitted but bounded a command at the fabric layer (gateway clamp rate is a §5.3 gap)."
+    },
+    {
+      "id": "SPI-G04",
+      "name": "HA failover count",
+      "kind": "lagging",
+      "source": "emitted",
+      "event_types": ["STANDBY_PROMOTED_TO_ACTIVE"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Primary verifier failed; standby promoted (standby_monitor)."
+    },
+    {
+      "id": "SPI-G05",
+      "name": "Unknown-command denial count",
+      "kind": "lagging",
+      "source": "emitted",
+      "event_types": ["ACTION_FILTER_UNKNOWN_TYPE", "ACTION_FILTER_MALFORMED_REQUEST"],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": null,
+      "note": "Malformed/unknown command reached the gate and was denied."
+    },
+    {
+      "id": "SPI-G06",
+      "name": "Audit-chain integrity failures",
+      "kind": "lagging",
+      "source": "integrity",
+      "event_types": [],
+      "denominator": null,
+      "direction": "lower_better",
+      "threshold": 0.0,
+      "note": "Tamper/corruption of the evidence base itself. Not a tally: evaluated from verify_audit_chain_full (chain_intact && signature_valid). 0 required — a failure invalidates the rollup window (§5.1)."
+    }
+  ]
+}
