@@ -109,6 +109,25 @@ uint32_t kirra_get_trust_score(void);
 int32_t kirra_posture(void);
 
 /**
+ * The governor's compiled hard kinematic envelope + rate limits — the SAME bounds
+ * kirra_check_move_velocity / kirra_filter_* enforce. Returned by value.
+ */
+typedef struct KirraEnvelope {
+    double max_linear_velocity_mps;      /* upper envelope bound              */
+    double min_linear_velocity_mps;      /* lower envelope bound (== -max)    */
+    double max_angular_velocity_radps;   /* angular-rate ceiling             */
+    double max_linear_acceleration_mps2; /* rate-of-change limit             */
+    double fallback_linear_velocity_mps; /* fail-closed fallback command     */
+} KirraEnvelope;
+
+/**
+ * @return the governor's compiled envelope, so a caller can pre-clamp its own
+ *         proposals or display the limits. An internal lock failure fails CLOSED
+ *         to an ALL-ZERO envelope (max velocity 0 admits only a stop).
+ */
+KirraEnvelope kirra_envelope(void);
+
+/**
  * Authenticated supervisor reset of the governor's trust state.
  *
  * Requires the KIRRA_SUPERVISOR_RESET_KEY environment variable to be set and the
