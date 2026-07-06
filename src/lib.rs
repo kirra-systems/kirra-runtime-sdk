@@ -59,6 +59,7 @@ pub mod tpm;
 pub mod tpm_quote;
 pub mod startup_sentinel;
 pub mod attestation;
+pub mod attestation_quote;
 pub mod verifier;
 pub mod verifier_store;
 pub mod store_handle;

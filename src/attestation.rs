@@ -111,6 +111,13 @@ pub enum AttestationError {
     /// Fail-closed: a node whose measured boot is unattested or differs from its
     /// registration is refused, even with a valid (node_id, nonce) signature.
     Pcr16Mismatch,
+    /// A submitted TPM2 measured-boot QUOTE (`TPMS_ATTEST`) did not parse, or its
+    /// magic / structure tag was not a genuine TPM-generated PCR quote. Fail-closed:
+    /// a quote the verifier cannot faithfully decode is never accepted.
+    MalformedQuote,
+    /// A TPM2 quote's `extraData` did not carry the challenge nonce — the quote is
+    /// stale or replayed (not freshly bound to THIS challenge). Fail-closed.
+    QuoteNonceMismatch,
 }
 
 impl AttestationError {
@@ -123,6 +130,8 @@ impl AttestationError {
             Self::MalformedProof => "attestation proof malformed",
             Self::SignatureInvalid => "attestation signature invalid",
             Self::Pcr16Mismatch => "attestation pcr16 measured-boot mismatch",
+            Self::MalformedQuote => "attestation tpm quote malformed",
+            Self::QuoteNonceMismatch => "attestation tpm quote nonce mismatch",
         }
     }
 }
