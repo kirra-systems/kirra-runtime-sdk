@@ -156,11 +156,18 @@ pub(crate) async fn campaigns_summary_handler(
     match svc
         .app
         .store
-        .call_read(|store| store.load_campaigns())
+        .call_read(|store| {
+            // One replica read for both the campaigns and the node adoption reports;
+            // the pure `summarize_campaigns` joins them (adoption numerator per digest).
+            let campaigns = store.load_campaigns()?;
+            let statuses = store.load_node_artifact_statuses()?;
+            Ok::<_, rusqlite::Error>((campaigns, statuses))
+        })
         .await
     {
-        Ok(Ok(list)) => {
-            let summary = kirra_verifier::ota_campaign::summarize_campaigns(&list);
+        Ok(Ok((campaigns, statuses))) => {
+            let summary =
+                kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
             (StatusCode::OK, Json(summary)).into_response()
         }
         _ => (

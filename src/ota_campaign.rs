@@ -483,11 +483,30 @@ pub fn resolve_node_assignment(
     }
 }
 
+/// A node's self-reported artifact adoption: the digest it is actually RUNNING after
+/// an OTA commit. Reported by the node-side agent to
+/// `POST /fleet/campaigns/report`; the fleet summary joins it against the active
+/// campaigns to show real per-campaign adoption. `node_id` is the primary key in the
+/// store (latest report wins — a node runs one governor at a time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeArtifactStatus {
+    pub node_id: String,
+    /// The SHA-256 hex digest the node reports currently running.
+    pub applied_digest: String,
+    /// The campaign the node believes it adopted the digest under (optional — the
+    /// join is by digest, so this is context only).
+    pub campaign_id: Option<String>,
+    pub artifact_version: Option<String>,
+    pub reported_at_ms: u64,
+}
+
 /// A fleet-wide observability summary of every campaign — the operator's at-a-glance
-/// rollout view. Derived PURELY from the campaign records the verifier authoritatively
-/// owns (state, stage schedule, rollout percentage, halt reason). Per-node adoption —
-/// which node is actually running which digest — requires node feedback and is a
-/// separate follow-up; this summary never overstates what the verifier knows.
+/// rollout view. Campaign counts/state/progress come PURELY from the campaign records
+/// the verifier authoritatively owns; per-node ADOPTION (`applied_nodes`) is joined
+/// from the nodes' self-reported [`NodeArtifactStatus`]. The rolled-set DENOMINATOR
+/// (how many nodes a stage targets) needs per-node cohort membership the verifier does
+/// not persist, so this reports the adoption NUMERATOR only — it never fabricates a
+/// completion percentage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CampaignSummary {
     pub total: usize,
@@ -516,6 +535,9 @@ pub struct CampaignProgress {
     pub stage_count: usize,
     pub rollout_percent: u8,
     pub cohorts: Vec<String>,
+    /// Distinct nodes that have REPORTED running this campaign's `artifact_digest`
+    /// (the adoption numerator). `0` until nodes report; needs no cohort data.
+    pub applied_nodes: usize,
 }
 
 /// A halted campaign and its reason in the [`CampaignSummary`].
@@ -531,10 +553,14 @@ pub struct HaltedCampaign {
     pub rollout_percent: u8,
 }
 
-/// Summarize a set of campaigns into a [`CampaignSummary`]. Pure and total: it counts
-/// each campaign by state and projects the active + halted ones into progress views,
-/// preserving the input order. No clock, no store.
-pub fn summarize_campaigns(campaigns: &[Campaign]) -> CampaignSummary {
+/// Summarize a set of campaigns into a [`CampaignSummary`], joining the nodes'
+/// self-reported adoption `statuses` to fill each active campaign's `applied_nodes`
+/// (distinct nodes reporting that campaign's digest). Pure and total: no clock, no
+/// store; preserves the campaigns' input order.
+pub fn summarize_campaigns(
+    campaigns: &[Campaign],
+    statuses: &[NodeArtifactStatus],
+) -> CampaignSummary {
     let mut s = CampaignSummary {
         total: campaigns.len(),
         draft: 0,
@@ -554,6 +580,12 @@ pub fn summarize_campaigns(campaigns: &[Campaign]) -> CampaignSummary {
             CampaignState::Halted => s.halted += 1,
         }
         if c.state.is_active() {
+            // Adoption numerator: distinct nodes reporting this campaign's digest.
+            // node_id is the store PK, so each node contributes at most one status.
+            let applied_nodes = statuses
+                .iter()
+                .filter(|st| st.applied_digest == c.artifact_digest)
+                .count();
             s.active.push(CampaignProgress {
                 campaign_id: c.campaign_id.clone(),
                 state: c.state.as_str().to_string(),
@@ -562,6 +594,7 @@ pub fn summarize_campaigns(campaigns: &[Campaign]) -> CampaignSummary {
                 stage_count: c.stages.len(),
                 rollout_percent: c.rollout_percent,
                 cohorts: c.cohorts.clone(),
+                applied_nodes,
             });
         }
         if c.state == CampaignState::Halted {
@@ -942,9 +975,43 @@ mod tests {
 
     #[test]
     fn summary_of_empty_set_is_all_zero() {
-        let s = summarize_campaigns(&[]);
+        let s = summarize_campaigns(&[], &[]);
         assert_eq!(s.total, 0);
         assert!(s.active.is_empty() && s.halted_campaigns.is_empty());
+    }
+
+    fn status(node: &str, digest: &str) -> NodeArtifactStatus {
+        NodeArtifactStatus {
+            node_id: node.into(),
+            applied_digest: digest.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn summary_counts_adopted_nodes_by_digest() {
+        // A Rolling campaign; three nodes reported — two on its digest, one on another.
+        let mut rolling =
+            Campaign::new("c-roll", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        rolling.state = CampaignState::Rolling;
+        rolling.rollout_percent = 50;
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let statuses = [
+            status("node-a", DIGEST),
+            status("node-b", DIGEST),
+            status("node-c", other), // still on the old artifact
+        ];
+        let s = summarize_campaigns(std::slice::from_ref(&rolling), &statuses);
+        assert_eq!(s.active.len(), 1);
+        assert_eq!(
+            s.active[0].applied_nodes, 2,
+            "only the two nodes on the campaign's digest count"
+        );
+        // No reports → zero adoption, never a fabricated number.
+        let s0 = summarize_campaigns(std::slice::from_ref(&rolling), &[]);
+        assert_eq!(s0.active[0].applied_nodes, 0);
     }
 
     #[test]
@@ -970,7 +1037,7 @@ mod tests {
         halted.halt_reason = Some(HaltReason::PostureLockedOut);
         halted.rollout_percent = 50;
 
-        let s = summarize_campaigns(&[draft, staged, rolling, completed, halted]);
+        let s = summarize_campaigns(&[draft, staged, rolling, completed, halted], &[]);
         assert_eq!(s.total, 5);
         assert_eq!(
             (s.draft, s.staged, s.rolling, s.completed, s.halted),
@@ -999,7 +1066,7 @@ mod tests {
         let mut op = Campaign::new("c-op", DIGEST, "v1", vec!["fleet".into()], vec![100], 1).unwrap();
         op.state = CampaignState::Halted;
         op.halt_reason = Some(HaltReason::OperatorHalt);
-        let s = summarize_campaigns(std::slice::from_ref(&op));
+        let s = summarize_campaigns(std::slice::from_ref(&op), &[]);
         assert_eq!(s.halted_campaigns[0].halt_reason, "operator_halt");
     }
 }

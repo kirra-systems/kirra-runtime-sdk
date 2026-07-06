@@ -1604,6 +1604,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
         .route("/action_filter/evaluate", post(evaluate_action_filter))
+        .route("/fleet/campaigns/report", post(report_node_artifact))
         .route("/industrial/evaluate", post(evaluate_industrial_adapter))
         .route("/industrial/ethernet-ip/evaluate", post(evaluate_ethernet_ip_adapter))
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
@@ -1926,6 +1927,9 @@ mod posture_gate_real_router_tests {
                 post(super::create_campaign_handler).get(super::list_campaigns_handler),
             )
             .route("/system/campaigns/summary", get(super::campaigns_summary_handler))
+            // The node adoption report (bare here for logic testing; its identity gate
+            // is proven by `ws1_scope_gated_routes_fail_closed_on_real_router`).
+            .route("/fleet/campaigns/report", post(super::report_node_artifact))
             .route("/system/campaigns/{campaign_id}", get(super::get_campaign_handler))
             .route("/system/campaigns/{campaign_id}/arm", post(super::arm_campaign_handler))
             .route(
@@ -2104,6 +2108,54 @@ mod posture_gate_real_router_tests {
         assert_eq!(j["halted_campaigns"].as_array().map(|a| a.len()), Some(1));
         assert_eq!(j["halted_campaigns"][0]["campaign_id"], "camp-halt");
         assert_eq!(j["halted_campaigns"][0]["halt_reason"], "operator_halt");
+    }
+
+    /// Node adoption reporting closes the observability loop: a node reports the
+    /// digest it is running, and the summary's active-campaign `applied_nodes`
+    /// reflects it. Also proves validation (bad digest → 400, no row written) and
+    /// upsert semantics (a node's re-report replaces, never double-counts).
+    #[tokio::test]
+    async fn node_adoption_report_reflects_in_summary_end_to_end() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        // A Rolling campaign (create → arm → advance) whose digest nodes will adopt.
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-adopt")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/arm", None).await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/advance", None).await;
+
+        // A bad digest is rejected (400) and records nothing.
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/fleet/campaigns/report",
+            Some(&serde_json::json!({ "node_id": "robot-x", "applied_digest": "nothex" }).to_string()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "non-hex digest must 400");
+
+        // Two nodes report the campaign's digest; robot-1 reports TWICE (upsert).
+        let report = |node: &str| {
+            serde_json::json!({
+                "node_id": node,
+                "applied_digest": CAMPAIGN_DIGEST,
+                "campaign_id": "camp-adopt",
+                "artifact_version": "v1.2.3",
+            })
+            .to_string()
+        };
+        for body in [report("robot-1"), report("robot-2"), report("robot-1")] {
+            let (st, _) =
+                campaign_req(svc.clone(), "POST", "/fleet/campaigns/report", Some(&body)).await;
+            assert_eq!(st, StatusCode::OK, "valid report recorded");
+        }
+
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let roll = &j["active"][0];
+        assert_eq!(roll["campaign_id"], "camp-adopt");
+        // TWO distinct nodes adopted the digest (robot-1's re-report did not double-count).
+        assert_eq!(roll["applied_nodes"], 2);
     }
 
     /// The summary's static path segment wins the match over `{campaign_id}`: a GET
@@ -2434,6 +2486,8 @@ mod posture_gate_real_router_tests {
             ("GET", "/system/audit/verify"),
             // integration group, switched admin-token → SCOPE_INTEGRATION_EVALUATE.
             ("POST", "/action_filter/evaluate"),
+            // WS-4 node adoption report — identity-gated (a node write needs a credential).
+            ("POST", "/fleet/campaigns/report"),
         ];
         for (method, path) in cases {
             let status =

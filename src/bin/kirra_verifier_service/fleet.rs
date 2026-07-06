@@ -202,6 +202,80 @@ pub(crate) async fn get_node_campaign_assignment(
     }
 }
 
+/// Body of a node adoption report: the node id and the digest it is now running.
+#[derive(Deserialize)]
+pub(crate) struct NodeArtifactReport {
+    node_id: String,
+    /// 64-char lowercase hex SHA-256 of the artifact the node currently runs.
+    applied_digest: String,
+    #[serde(default)]
+    campaign_id: Option<String>,
+    #[serde(default)]
+    artifact_version: Option<String>,
+}
+
+/// POST /fleet/campaigns/report — WS-4 / Track 3. A node reports the governor
+/// artifact digest it is now RUNNING (its OTA agent calls this after a commit); the
+/// fleet summary joins these to show real per-campaign adoption. IDENTITY-GATED (Tier
+/// 1: `SCOPE_INTEGRATION_EVALUATE` + client-identity), like the other node-facing
+/// writes — a report is a mutation, so it needs a credential (unlike the open,
+/// read-only assignment GET). Validated fail-closed: a non-hex digest or empty
+/// node_id is a 400 and nothing is written. Pure observability — the upsert is NOT
+/// audit-chained and never gates any actuator/posture decision.
+pub(crate) async fn report_node_artifact(
+    State(svc): State<Arc<ServiceState>>,
+    Json(req): Json<NodeArtifactReport>,
+) -> impl IntoResponse {
+    let node_id = req.node_id.trim().to_string();
+    let applied_digest = req.applied_digest.trim().to_ascii_lowercase();
+    if !valid_identifier(&node_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "node_id must be non-empty and free of '|' or control characters" })),
+        )
+            .into_response();
+    }
+    if !is_sha256_hex_lower(&applied_digest) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "applied_digest must be a 64-char lowercase hex sha256" })),
+        )
+            .into_response();
+    }
+
+    let status = kirra_verifier::ota_campaign::NodeArtifactStatus {
+        node_id,
+        applied_digest,
+        campaign_id: req.campaign_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        artifact_version: req
+            .artifact_version
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        reported_at_ms: now_ms(),
+    };
+
+    match svc
+        .app
+        .store
+        .call(move |store| store.upsert_node_artifact_status(&status))
+        .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({ "recorded": true }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to record adoption report" })),
+        )
+            .into_response(),
+    }
+}
+
+/// A 64-char lowercase hex SHA-256 (the artifact identity a node reports).
+fn is_sha256_hex_lower(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,
 /// recovery streak, last telemetry). Admin-gated; no secrets returned. (#385)
 pub(crate) async fn list_av_subsystems(State(svc): State<Arc<ServiceState>>) -> impl IntoResponse {

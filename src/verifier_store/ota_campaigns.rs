@@ -11,7 +11,7 @@
 // restart (a halted rollout must never silently resume).
 
 use super::*;
-use crate::ota_campaign::{Campaign, CampaignState, HaltReason};
+use crate::ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 
 impl VerifierStore {
     /// Persist a freshly-authored campaign (`Draft`) and append the
@@ -140,6 +140,50 @@ impl VerifierStore {
              ORDER BY created_at_ms ASC, campaign_id ASC",
         )?;
         let rows = stmt.query_map([], Self::map_campaign_row)?;
+        rows.collect()
+    }
+
+    /// Upsert a node's artifact-adoption report (keyed by `node_id` — the latest
+    /// report replaces the prior one; a node runs one governor at a time). Pure
+    /// observability: a plain upsert, NOT audit-chained (these are high-volume
+    /// telemetry, not security mutations, and never gate any actuator decision).
+    pub fn upsert_node_artifact_status(&mut self, st: &NodeArtifactStatus) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO node_artifact_status
+                 (node_id, applied_digest, campaign_id, artifact_version, reported_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(node_id) DO UPDATE SET
+                 applied_digest   = excluded.applied_digest,
+                 campaign_id      = excluded.campaign_id,
+                 artifact_version = excluded.artifact_version,
+                 reported_at_ms   = excluded.reported_at_ms",
+            params![
+                st.node_id,
+                st.applied_digest,
+                st.campaign_id,
+                st.artifact_version,
+                st.reported_at_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load every node's latest artifact-adoption report (for the fleet summary
+    /// join). Newest report first.
+    pub fn load_node_artifact_statuses(&self) -> Result<Vec<NodeArtifactStatus>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, applied_digest, campaign_id, artifact_version, reported_at_ms
+             FROM node_artifact_status ORDER BY reported_at_ms DESC, node_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(NodeArtifactStatus {
+                node_id: row.get(0)?,
+                applied_digest: row.get(1)?,
+                campaign_id: row.get(2)?,
+                artifact_version: row.get(3)?,
+                reported_at_ms: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
         rows.collect()
     }
 
@@ -387,6 +431,38 @@ mod tests {
         assert_eq!(all.len(), 2);
         // Newest first by created_at_ms.
         assert_eq!(all[0].campaign_id, "camp-2");
+    }
+
+    #[test]
+    fn node_artifact_status_upserts_latest_wins() {
+        use crate::ota_campaign::NodeArtifactStatus;
+        let mut s = store();
+        let st = |digest: &str, at: u64| NodeArtifactStatus {
+            node_id: "robot-01".into(),
+            applied_digest: digest.into(),
+            campaign_id: Some("camp-1".into()),
+            artifact_version: Some("v2".into()),
+            reported_at_ms: at,
+        };
+        s.upsert_node_artifact_status(&st(DIGEST, 1_000)).unwrap();
+        // A second node on a different digest.
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        s.upsert_node_artifact_status(&NodeArtifactStatus {
+            node_id: "robot-02".into(),
+            applied_digest: other.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: 1_001,
+        })
+        .unwrap();
+        // robot-01 re-reports a newer digest → the row is REPLACED, not duplicated.
+        s.upsert_node_artifact_status(&st(other, 2_000)).unwrap();
+
+        let all = s.load_node_artifact_statuses().unwrap();
+        assert_eq!(all.len(), 2, "one row per node (upsert, not append)");
+        let r01 = all.iter().find(|r| r.node_id == "robot-01").unwrap();
+        assert_eq!(r01.applied_digest, other, "latest report wins");
+        assert_eq!(r01.reported_at_ms, 2_000);
     }
 
     #[test]

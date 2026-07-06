@@ -182,6 +182,7 @@ src/
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
 | `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
 | `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
+| `node_artifact_status` | WS-4 (Track 3) per-node adoption reports (node_id PK + applied_digest + campaign_id + version + reported_at_ms; upsert-latest-wins, non-audit-chained observability; the fleet summary's `applied_nodes` join source) |
 
 ---
 
@@ -272,6 +273,7 @@ Admin token or an `integrator`-role principal.
 - `GET  /system/posture/stream` — SSE broadcast of posture events
 - `POST /federation/reports/submit` — Submit signed federated trust report
 - `POST /action_filter/evaluate` — Evaluate action claim against posture
+- `POST /fleet/campaigns/report` — WS-4 node adoption report (a node reports the governor digest it is now running → the fleet summary's `applied_nodes`; a write, so identity-gated, unlike the open read-only assignment GET; upsert by node_id, not audit-chained)
 - `POST /industrial/evaluate` — Evaluate Modbus/OPC-UA industrial event
 
 ### Tier 2 — Admin (`SCOPE_ADMIN`; Bearer `KIRRA_ADMIN_TOKEN` or `admin`-role principal)
@@ -280,7 +282,7 @@ Admin token or an `integrator`-role principal.
 - `POST /system/backup/export` — Full state dump (admin-only; NOT in the auditor tier)
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
 - `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
-- `POST/GET /system/campaigns`, `GET /system/campaigns/summary`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT). `summary` = fleet rollout observability (`summarize_campaigns`: counts by state + active-campaign stage progress + halted-with-reason; read-only, static path wins over `{id}`)
+- `POST/GET /system/campaigns`, `GET /system/campaigns/summary`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT). `summary` = fleet rollout observability (`summarize_campaigns`: counts by state + active-campaign stage progress + halted-with-reason + `applied_nodes` adoption numerator joined from `node_artifact_status`; read-only, static path wins over `{id}`)
 - `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role)
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
