@@ -14,6 +14,106 @@ use crate::{
     SignedClearanceGrant,
 };
 
+/// Opt-in TLS material for an encrypted fleet link (ADR-0007 §"Transport
+/// confidentiality"). Every field is a filesystem path to a PEM file; an absent
+/// field is simply not wired.
+///
+/// TLS here is **confidentiality + link authentication**, *not* the trust root —
+/// payload trust is still the Ed25519 signature verified at ingest (ADR-0007
+/// Clause 1). Enabling TLS does not change what a caller must verify; it only
+/// keeps the carrier from exposing the plaintext report/grant stream on the wire.
+#[derive(Clone, Debug, Default)]
+pub struct FleetTlsConfig {
+    /// Trust anchor the CONNECT side verifies the server against (PEM path).
+    pub root_ca_certificate: Option<String>,
+    /// Server (LISTEN side) certificate chain (PEM path).
+    pub listen_certificate: Option<String>,
+    /// Server (LISTEN side) private key (PEM path).
+    pub listen_private_key: Option<String>,
+    /// Client (CONNECT side) certificate — only needed under mutual TLS.
+    pub connect_certificate: Option<String>,
+    /// Client (CONNECT side) private key — only needed under mutual TLS.
+    pub connect_private_key: Option<String>,
+    /// Require the client to present a cert too (mutual TLS). `None` → Zenoh
+    /// default (off). mTLS is link-level peer auth; it does not replace the
+    /// per-payload Ed25519 check.
+    pub enable_mtls: Option<bool>,
+    /// Verify the server name/SAN on connect. `None` → Zenoh default (on). Set
+    /// `Some(false)` only for a bare-IP endpoint whose cert carries no matching
+    /// SAN (e.g. an ad-hoc test peer).
+    pub verify_name_on_connect: Option<bool>,
+}
+
+fn insert_cfg(c: &mut zenoh::Config, key: &str, json5: &str) -> Result<(), String> {
+    c.insert_json5(key, json5)
+        .map_err(|e| format!("zenoh config `{key}`: {e:?}"))
+}
+
+/// Build a deterministic peer-session [`zenoh::Config`] for the fleet lane — the
+/// **production config seam**.
+///
+/// `listen` / `connect` are bare `host:port` (no scheme); the scheme is derived
+/// from `tls`: `tcp/…` when `tls` is `None` (plaintext, byte-identical to the
+/// prior behaviour), `tls/…` when `Some`. Multicast + gossip scouting are OFF so
+/// the peers connect only via the explicit endpoints (no router, no discovery) —
+/// the same deterministic topology the in-process tests rely on.
+///
+/// # Errors
+/// Returns a message if any Zenoh config insertion fails (malformed key/value).
+pub fn fleet_peer_config(
+    listen: Option<&str>,
+    connect: Option<&str>,
+    tls: Option<&FleetTlsConfig>,
+) -> Result<zenoh::Config, String> {
+    let scheme = if tls.is_some() { "tls" } else { "tcp" };
+    let mut c = zenoh::Config::default();
+    insert_cfg(&mut c, "mode", "\"peer\"")?;
+    insert_cfg(&mut c, "scouting/multicast/enabled", "false")?;
+    insert_cfg(&mut c, "scouting/gossip/enabled", "false")?;
+
+    // ALWAYS set listen explicitly — `[]` on the connect-only side — so Zenoh
+    // never falls back to its default `tcp/[::]:0` (IPv6) listener.
+    let listen_json = match listen {
+        Some(l) => format!("[\"{scheme}/{l}\"]"),
+        None => "[]".to_string(),
+    };
+    insert_cfg(&mut c, "listen/endpoints", &listen_json)?;
+    if let Some(cn) = connect {
+        insert_cfg(&mut c, "connect/endpoints", &format!("[\"{scheme}/{cn}\"]"))?;
+    }
+
+    if let Some(t) = tls {
+        // PEM paths → JSON5 string values (serde escapes the path safely).
+        for (key, val) in [
+            ("root_ca_certificate", &t.root_ca_certificate),
+            ("listen_certificate", &t.listen_certificate),
+            ("listen_private_key", &t.listen_private_key),
+            ("connect_certificate", &t.connect_certificate),
+            ("connect_private_key", &t.connect_private_key),
+        ] {
+            if let Some(path) = val {
+                let json = serde_json::to_string(path).map_err(|e| e.to_string())?;
+                insert_cfg(&mut c, &format!("transport/link/tls/{key}"), &json)?;
+            }
+        }
+        if let Some(m) = t.enable_mtls {
+            insert_cfg(&mut c, "transport/link/tls/enable_mtls", bool_json5(m))?;
+        }
+        if let Some(v) = t.verify_name_on_connect {
+            insert_cfg(&mut c, "transport/link/tls/verify_name_on_connect", bool_json5(v))?;
+        }
+    }
+    Ok(c)
+}
+
+fn bool_json5(b: bool) -> &'static str {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 /// Vehicle-side publisher (vehicle → ops/cloud). Publishes signed trust reports +
 /// posture summaries on the versioned `kirra/v1/fleet/{node_id}/…` keys.
 pub struct FleetPublisher {
@@ -196,28 +296,32 @@ mod transport_tests {
             .port()
     }
 
-    /// A deterministic in-process peer config: explicit TCP endpoint, multicast
-    /// scouting OFF (so the two sessions connect ONLY to each other — no router,
-    /// no network discovery).
+    /// A deterministic in-process plaintext peer config — thin wrapper over the
+    /// production seam [`fleet_peer_config`] with no TLS. `ep` is a bare
+    /// `host:port`; the `tcp/` scheme is supplied by the seam.
     fn peer_config(listen: Option<&str>, connect: Option<&str>) -> zenoh::Config {
-        let mut c = zenoh::Config::default();
-        c.insert_json5("mode", "\"peer\"").unwrap();
-        c.insert_json5("scouting/multicast/enabled", "false")
-            .unwrap();
-        c.insert_json5("scouting/gossip/enabled", "false").unwrap();
-        // ALWAYS set listen explicitly — `[]` on the connect-only side — so zenoh
-        // never falls back to its default `tcp/[::]:0` (IPv6) listener, which the
-        // sandbox does not support. The connector dials out; it need not listen.
-        let listen_json = match listen {
-            Some(l) => format!("[\"{l}\"]"),
-            None => "[]".to_string(),
-        };
-        c.insert_json5("listen/endpoints", &listen_json).unwrap();
-        if let Some(cn) = connect {
-            c.insert_json5("connect/endpoints", &format!("[\"{cn}\"]"))
-                .unwrap();
-        }
-        c
+        fleet_peer_config(listen, connect, None).unwrap()
+    }
+
+    // A minimal ed25519 test PKI, used ONLY by the in-process TLS round-trip test
+    // below: a CA (`fleet_test_ca`, CA:TRUE) that signs a server leaf
+    // (`fleet_test_server_cert`, CA:FALSE, SAN IP:127.0.0.1 / localhost). The client
+    // trusts the CA; the server presents the leaf. Base64-wrapped (matching the
+    // verifier's `tls.rs` convention) so no raw PEM `PRIVATE KEY` block lives in the
+    // tree; decoded to temp files at test time and fed through the SAME config seam.
+    // Localhost test material — NEVER a deployment credential; the trust root remains
+    // the Ed25519 payload signature (ADR-0007 Clause 1), which TLS does not replace.
+    const TEST_CA_B64: &str = include_str!("../tests/fixtures/tls/fleet_test_ca.pem.b64");
+    const TEST_SERVER_CERT_B64: &str =
+        include_str!("../tests/fixtures/tls/fleet_test_server_cert.pem.b64");
+    const TEST_SERVER_KEY_B64: &str =
+        include_str!("../tests/fixtures/tls/fleet_test_server_key.pem.b64");
+
+    fn write_b64_pem(dir: &std::path::Path, name: &str, b64: &str) -> String {
+        let path = dir.join(name);
+        let pem = B64.decode(b64.trim()).expect("decode tls fixture");
+        std::fs::write(&path, pem).unwrap();
+        path.to_str().unwrap().to_string()
     }
 
     async fn settle() {
@@ -231,7 +335,7 @@ mod transport_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn report_round_trip_over_two_peer_sessions_verifies() {
         let (sk, pk) = keypair();
-        let ep = format!("tcp/127.0.0.1:{}", free_port());
+        let ep = format!("127.0.0.1:{}", free_port());
 
         // Subscriber session listens; publisher session connects to it.
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
@@ -260,13 +364,72 @@ mod transport_tests {
         assert_eq!(counter.total_rejected(), 0);
     }
 
+    /// REPORT ROUND-TRIP over an **encrypted** (`tls/…`) link: the same publish →
+    /// verify path as the plaintext test, but the two peer sessions negotiate TLS
+    /// (server presents the test cert; client verifies it against the same cert as
+    /// its root CA, with SAN name-verification ON against the `127.0.0.1` endpoint).
+    /// Proves the opt-in TLS seam ([`fleet_peer_config`] + [`FleetTlsConfig`])
+    /// actually establishes an encrypted carrier that still delivers + verifies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn report_round_trip_over_tls_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = write_b64_pem(dir.path(), "ca.pem", TEST_CA_B64);
+        let cert = write_b64_pem(dir.path(), "server.pem", TEST_SERVER_CERT_B64);
+        let key = write_b64_pem(dir.path(), "server-key.pem", TEST_SERVER_KEY_B64);
+
+        // Server: present the leaf cert+key. Client: trust the CA and verify the
+        // server name (the leaf carries an IP:127.0.0.1 SAN).
+        let server_tls = FleetTlsConfig {
+            listen_certificate: Some(cert.clone()),
+            listen_private_key: Some(key.clone()),
+            ..Default::default()
+        };
+        let client_tls = FleetTlsConfig {
+            root_ca_certificate: Some(ca.clone()),
+            verify_name_on_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (sk, pk) = keypair();
+        let ep = format!("127.0.0.1:{}", free_port());
+
+        let sub_session = zenoh::open(fleet_peer_config(Some(&ep), None, Some(&server_tls)).unwrap())
+            .await
+            .unwrap();
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-tls")
+            .await
+            .unwrap();
+
+        let pub_session = zenoh::open(fleet_peer_config(None, Some(&ep), Some(&client_tls)).unwrap())
+            .await
+            .unwrap();
+        let publisher = FleetPublisher::new(pub_session);
+        settle().await;
+
+        let report = signed_report(&sk, "robot-tls");
+        publisher.publish_report(&report).await.unwrap();
+
+        let counter = RejectionCounter::new();
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            subscriber.recv_report(&pk, &counter),
+        )
+        .await
+        .expect("recv timed out — the TLS carrier did not deliver")
+        .expect("verified report over TLS");
+
+        assert_eq!(got, report);
+        assert_eq!(counter.snapshot().accepted, 1);
+        assert_eq!(counter.total_rejected(), 0);
+    }
+
     /// TAMPER over the wire: a byte flipped in the published payload is rejected at
     /// the subscriber (bad signature) and counted — the carrier cannot launder a
     /// tampered payload into an accepted one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tampered_payload_over_the_wire_is_rejected_and_counted() {
         let (sk, pk) = keypair();
-        let ep = format!("tcp/127.0.0.1:{}", free_port());
+        let ep = format!("127.0.0.1:{}", free_port());
 
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
         let subscriber = FleetSubscriber::declare(&sub_session, "robot-02")
@@ -305,7 +468,7 @@ mod transport_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn grant_relay_over_the_wire_lands_a_pending_row_phase_b_consumes() {
         let (sk, pk) = keypair();
-        let ep = format!("tcp/127.0.0.1:{}", free_port());
+        let ep = format!("127.0.0.1:{}", free_port());
 
         // Vehicle side declares the grant-ingest subscriber + owns the store.
         let veh_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();

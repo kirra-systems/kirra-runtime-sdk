@@ -52,9 +52,11 @@ identity, topic name, or Zenoh's own authentication:
 payload to a caller; unsigned / bad-signature / malformed payloads are **rejected
 and counted** (`RejectionCounter`, surfaced for ops). Zenoh-level TLS/auth is
 **confidentiality defense-in-depth, not the trust root** — a deployment may enable
-it, but the safety/trust argument does not depend on it. (Concretely: the spike
-disables TLS to dodge a bench-toolchain dep wall, and **loses no trust** by doing
-so — see *Honest limits*.)
+it, but the safety/trust argument does not depend on it. (Concretely: TLS is now
+**available and opt-in** via `transport::fleet_peer_config` + `FleetTlsConfig`
+(`tls/...` endpoints, cert/key/CA PEM paths); the default plaintext path still
+**loses no trust** because every payload is Ed25519-verified at ingest regardless —
+see *Honest limits*.)
 
 ### Clause 2 — strictly QM / fleet lane (the domain rule)
 
@@ -135,14 +137,19 @@ debuggability.
 - **Multi-tenant fleet side** — a per-controller **public-key registry** (which
   key verifies which source) and per-operator identity at fleet scale is **#314**.
   The spike verifies against a supplied key; it does not yet manage a keyring.
-- **TLS + the toolchain wall (MSRV).** Zenoh's *default* TLS/QUIC features pull an
-  `rcgen`/`time` chain that does **not compile on the bench toolchain** (rustc
-  1.94.1, `E0119`). The spike disables TLS (`default-features = false`,
-  `transport_tcp` + `unstable`) — which, per Clause 1, costs no trust. The **bench
-  is the build authority** for the TLS-enabled production config; the
-  `zenoh-pinned-deps-1-75` dependency lockdown remains the escape hatch if a future
-  transitive break appears. Zenoh's runtime additionally requires a multi-threaded
-  scheduler (the tests use `flavor = "multi_thread"`).
+- **TLS + the toolchain wall (MSRV) — now cleared, opt-in.** Zenoh's TLS features
+  pull a `time` / x509 chain that used to hit an `E0119` conflicting-impl break on
+  the bench toolchain (rustc 1.94.1) — the anticipated toolchain wall. Bumping
+  `time` 0.3.48 → 0.3.53 in the workspace lockfile clears it, so `transport_tls` is
+  now **enabled and opt-in**: `transport::fleet_peer_config(listen, connect, tls)`
+  builds a plaintext `tcp/...` session when `tls` is `None` (byte-identical default)
+  and an encrypted, cert-verified `tls/...` session when a `FleetTlsConfig`
+  (cert/key/CA PEM paths, optional mTLS) is supplied. Per Clause 1 the plaintext
+  path still costs no trust. Zenoh's TLS uses the **`ring`** rustls provider (not
+  `aws-lc-rs`), so it does not conflict with the verifier's ring-only rustls
+  invariant. The `zenoh-pinned-deps-1-75` dependency lockdown remains the escape
+  hatch if a future transitive break appears. Zenoh's runtime additionally requires
+  a multi-threaded scheduler (the tests use `flavor = "multi_thread"`).
 
 ## Conditions that reopen this decision
 
