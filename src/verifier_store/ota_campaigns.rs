@@ -11,7 +11,7 @@
 // restart (a halted rollout must never silently resume).
 
 use super::*;
-use crate::ota_campaign::{Campaign, CampaignState, HaltReason};
+use crate::ota_campaign::{Campaign, CampaignState, HaltReason, NodeArtifactStatus};
 
 impl VerifierStore {
     /// Persist a freshly-authored campaign (`Draft`) and append the
@@ -140,6 +140,65 @@ impl VerifierStore {
              ORDER BY created_at_ms ASC, campaign_id ASC",
         )?;
         let rows = stmt.query_map([], Self::map_campaign_row)?;
+        rows.collect()
+    }
+
+    /// Upsert a node's artifact-adoption report (keyed by `node_id` — the latest
+    /// report replaces the prior one; a node runs one governor at a time). Pure
+    /// observability: a plain upsert, NOT audit-chained (these are high-volume
+    /// telemetry, not security mutations, and never gate any actuator decision).
+    pub fn upsert_node_artifact_status(&mut self, st: &NodeArtifactStatus) -> Result<()> {
+        // MONOTONIC upsert: a report only replaces the stored one when its
+        // `reported_at_ms` is NOT older (the `WHERE` on the DO UPDATE). This makes a
+        // replayed OLD report (signed or not) a no-op — it can never move a node's
+        // recorded adoption backward in time.
+        self.conn.execute(
+            "INSERT INTO node_artifact_status
+                 (node_id, applied_digest, campaign_id, artifact_version, reported_at_ms, attested)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(node_id) DO UPDATE SET
+                 applied_digest   = excluded.applied_digest,
+                 campaign_id      = excluded.campaign_id,
+                 artifact_version = excluded.artifact_version,
+                 reported_at_ms   = excluded.reported_at_ms,
+                 -- `attested` is MONOTONIC PER DIGEST: a later report for the SAME
+                 -- digest cannot CLEAR unforgeable attestation evidence (so a token
+                 -- holder can't erase an attested adoption with an unsigned report),
+                 -- but a report for a DIFFERENT digest is a fresh claim that must
+                 -- re-earn attestation. (RHS references read the pre-update row.)
+                 attested         = excluded.attested
+                    OR (node_artifact_status.attested
+                        AND node_artifact_status.applied_digest = excluded.applied_digest)
+               WHERE excluded.reported_at_ms >= node_artifact_status.reported_at_ms",
+            params![
+                st.node_id,
+                st.applied_digest,
+                st.campaign_id,
+                st.artifact_version,
+                st.reported_at_ms as i64,
+                st.attested as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load every node's latest artifact-adoption report (for the fleet summary
+    /// join). Newest report first.
+    pub fn load_node_artifact_statuses(&self) -> Result<Vec<NodeArtifactStatus>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, applied_digest, campaign_id, artifact_version, reported_at_ms, attested
+             FROM node_artifact_status ORDER BY reported_at_ms DESC, node_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(NodeArtifactStatus {
+                node_id: row.get(0)?,
+                applied_digest: row.get(1)?,
+                campaign_id: row.get(2)?,
+                artifact_version: row.get(3)?,
+                reported_at_ms: row.get::<_, i64>(4)? as u64,
+                attested: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
         rows.collect()
     }
 
@@ -387,6 +446,88 @@ mod tests {
         assert_eq!(all.len(), 2);
         // Newest first by created_at_ms.
         assert_eq!(all[0].campaign_id, "camp-2");
+    }
+
+    #[test]
+    fn node_artifact_status_upserts_latest_wins() {
+        use crate::ota_campaign::NodeArtifactStatus;
+        let mut s = store();
+        let st = |digest: &str, at: u64| NodeArtifactStatus {
+            node_id: "robot-01".into(),
+            applied_digest: digest.into(),
+            campaign_id: Some("camp-1".into()),
+            artifact_version: Some("v2".into()),
+            reported_at_ms: at,
+            attested: false,
+        };
+        s.upsert_node_artifact_status(&st(DIGEST, 1_000)).unwrap();
+        // A second node on a different digest.
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        s.upsert_node_artifact_status(&NodeArtifactStatus {
+            node_id: "robot-02".into(),
+            applied_digest: other.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: 1_001,
+            attested: true,
+        })
+        .unwrap();
+        // robot-01 re-reports a newer digest → the row is REPLACED, not duplicated.
+        s.upsert_node_artifact_status(&st(other, 2_000)).unwrap();
+
+        let all = s.load_node_artifact_statuses().unwrap();
+        assert_eq!(all.len(), 2, "one row per node (upsert, not append)");
+        let r01 = all.iter().find(|r| r.node_id == "robot-01").unwrap();
+        assert_eq!(r01.applied_digest, other, "latest report wins");
+        assert_eq!(r01.reported_at_ms, 2_000);
+        let r02 = all.iter().find(|r| r.node_id == "robot-02").unwrap();
+        assert!(r02.attested, "attested flag round-trips");
+
+        // MONOTONIC guard: a STALE report (older timestamp) is a no-op, never
+        // overwriting the newer stored one.
+        s.upsert_node_artifact_status(&st(DIGEST, 500)).unwrap();
+        let r01 = s
+            .load_node_artifact_statuses()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.node_id == "robot-01")
+            .unwrap();
+        assert_eq!(r01.reported_at_ms, 2_000, "stale report must not overwrite");
+        assert_eq!(r01.applied_digest, other, "stale digest must not win");
+    }
+
+    #[test]
+    fn attested_flag_is_monotonic_per_digest() {
+        use crate::ota_campaign::NodeArtifactStatus;
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let mut s = store();
+        let mk = |digest: &str, at: u64, attested: bool| NodeArtifactStatus {
+            node_id: "robot-1".into(),
+            applied_digest: digest.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: at,
+            attested,
+        };
+        let attested_of = |s: &VerifierStore| {
+            s.load_node_artifact_statuses()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.node_id == "robot-1")
+                .unwrap()
+                .attested
+        };
+
+        // Signed report → attested.
+        s.upsert_node_artifact_status(&mk(DIGEST, 1_000, true)).unwrap();
+        assert!(attested_of(&s));
+        // A LATER UNSIGNED report for the SAME digest must NOT clear attestation
+        // (a token holder can't erase unforgeable evidence with an unsigned report).
+        s.upsert_node_artifact_status(&mk(DIGEST, 2_000, false)).unwrap();
+        assert!(attested_of(&s), "same-digest unsigned report preserves attested");
+        // A report for a DIFFERENT digest is a fresh claim → attestation must re-earn.
+        s.upsert_node_artifact_status(&mk(other, 3_000, false)).unwrap();
+        assert!(!attested_of(&s), "a different digest resets attested");
     }
 
     #[test]

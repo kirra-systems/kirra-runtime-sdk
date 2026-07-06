@@ -87,10 +87,28 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
             .command_source_write_failures
             .load(Ordering::Relaxed),
     };
-    let body = svc
+    let mut body = svc
         .app
         .fleet_metrics
         .format_prometheus(&kirra_verifier::standby_monitor::instance_id(), &snap);
+
+    // WS-4: append the OTA fleet-rollout series (campaign counts by state + per
+    // active-campaign rollout % and adoption). Store read off the REPLICA (never
+    // contends the writer); posture-EXEMPT like the rest of `/metrics`, so a rollout
+    // stays observable under LockedOut. Best-effort — a query hiccup omits the
+    // campaign series this scrape but never fails the core fleet-safety series.
+    if let Ok(Ok((campaigns, statuses))) = svc
+        .app
+        .store
+        .call_read(|store| {
+            Ok::<_, rusqlite::Error>((store.load_campaigns()?, store.load_node_artifact_statuses()?))
+        })
+        .await
+    {
+        let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
+        body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(&summary));
+    }
+
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -200,6 +218,153 @@ pub(crate) async fn get_node_campaign_assignment(
         )
             .into_response(),
     }
+}
+
+/// Clock-skew allowance for a signed report's `reported_at_ms` (5 min). The upsert is
+/// monotonic on this timestamp, so a far-future value would wedge future updates; a
+/// time-synced fleet (AOU-TIMESYNC-001) never legitimately exceeds this.
+const REPORT_MAX_FUTURE_SKEW_MS: u64 = 300_000;
+
+/// Body of a node adoption report: the node id and the digest it is now running.
+/// Optionally attestation-SIGNED for unforgeable attribution.
+#[derive(Deserialize)]
+pub(crate) struct NodeArtifactReport {
+    node_id: String,
+    /// 64-char lowercase hex SHA-256 of the artifact the node currently runs.
+    applied_digest: String,
+    #[serde(default)]
+    campaign_id: Option<String>,
+    #[serde(default)]
+    artifact_version: Option<String>,
+    /// Optional base64 Ed25519 signature over
+    /// `attestation::adoption_report_signing_payload(node_id, applied_digest,
+    /// reported_at_ms)`, verified against the node's registered `ak_public_pem`.
+    #[serde(default)]
+    signature: Option<String>,
+    /// The node's claimed report timestamp. REQUIRED when `signature` is present (the
+    /// signature covers it); ignored (server stamps `now_ms`) when unsigned.
+    #[serde(default)]
+    reported_at_ms: Option<u64>,
+}
+
+/// POST /fleet/campaigns/report — WS-4 / Track 3. A node reports the governor
+/// artifact digest it is now RUNNING (its OTA agent calls this after a commit); the
+/// fleet summary joins these to show real per-campaign adoption. IDENTITY-GATED (Tier
+/// 1: `SCOPE_INTEGRATION_EVALUATE` + client-identity), like the other node-facing
+/// writes — a report is a mutation, so it needs a credential (unlike the open,
+/// read-only assignment GET). Validated fail-closed: a non-hex digest or empty
+/// node_id is a 400 and nothing is written. Pure observability — the upsert is NOT
+/// audit-chained and never gates any actuator/posture decision.
+pub(crate) async fn report_node_artifact(
+    State(svc): State<Arc<ServiceState>>,
+    Json(req): Json<NodeArtifactReport>,
+) -> impl IntoResponse {
+    let node_id = req.node_id.trim().to_string();
+    let applied_digest = req.applied_digest.trim().to_ascii_lowercase();
+    if !valid_identifier(&node_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "node_id must be non-empty and free of '|' or control characters" })),
+        )
+            .into_response();
+    }
+    if !is_sha256_hex_lower(&applied_digest) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "applied_digest must be a 64-char lowercase hex sha256" })),
+        )
+            .into_response();
+    }
+
+    // Optional attestation signature → unforgeable attribution. Present + valid →
+    // attested (using the node-signed timestamp); present + invalid / no registered
+    // AK / bad base64 → fail-closed reject; absent → an unattested (identity-gated
+    // only) report stamped with the server clock.
+    let (attested, reported_at_ms) = if let Some(sig_b64) = req.signature.as_deref() {
+        let Some(ts) = req.reported_at_ms else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "a signed report requires reported_at_ms" })),
+            )
+                .into_response();
+        };
+        // Bounded future-skew: the upsert is MONOTONIC on the (signed) timestamp, so a
+        // far-future `reported_at_ms` would permanently block every later legitimate
+        // report for this node. Reject beyond a small clock-skew allowance (nodes are
+        // time-synced per AOU-TIMESYNC-001); the signature covers `ts`, so this can't
+        // be shifted after signing.
+        if ts > now_ms().saturating_add(REPORT_MAX_FUTURE_SKEW_MS) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "reported_at_ms is too far in the future (clock skew)" })),
+            )
+                .into_response();
+        }
+        let ak = svc.app.nodes.get(&node_id).and_then(|n| n.ak_public_pem.clone());
+        let Some(ak) = ak else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "no registered attestation key for node" })),
+            )
+                .into_response();
+        };
+        use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+        let Ok(sig) = b64e.decode(sig_b64.trim()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "signature is not valid base64" })),
+            )
+                .into_response();
+        };
+        let payload = kirra_verifier::attestation::adoption_report_signing_payload(
+            &node_id,
+            &applied_digest,
+            ts,
+        );
+        if !kirra_verifier::attestation::verify_ed25519_pem_signature(&ak, &payload, &sig) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "adoption report signature invalid" })),
+            )
+                .into_response();
+        }
+        (true, ts)
+    } else {
+        (false, now_ms())
+    };
+
+    let status = kirra_verifier::ota_campaign::NodeArtifactStatus {
+        node_id,
+        applied_digest,
+        campaign_id: req.campaign_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        artifact_version: req
+            .artifact_version
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        reported_at_ms,
+        attested,
+    };
+
+    match svc
+        .app
+        .store
+        .call(move |store| store.upsert_node_artifact_status(&status))
+        .await
+    {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({ "recorded": true }))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to record adoption report" })),
+        )
+            .into_response(),
+    }
+}
+
+/// A 64-char lowercase hex SHA-256 (the artifact identity a node reports).
+fn is_sha256_hex_lower(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Read-only listing of registered AV subsystem diagnostics (confidence floor,

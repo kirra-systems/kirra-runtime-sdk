@@ -30,6 +30,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub mod nvbootctrl;
+pub use nvbootctrl::{NvbootctrlBootController, NvbootctrlRunner, SystemNvbootctrl};
+
 /// One of the two governor-artifact slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -546,6 +549,152 @@ pub fn plan_rollback(rec: &BootRecord) -> BootRecord {
     }
 }
 
+/// The exact byte payload a node signs (with its attestation key) to make an OTA
+/// adoption report unforgeable — **byte-identical** to the verifier's
+/// `kirra_verifier::attestation::adoption_report_signing_payload`. Domain-separated,
+/// length-prefixed on the two string fields (u64 LE length then bytes), with
+/// `reported_at_ms` appended as a fixed u64 LE. A drift from the server is caught by
+/// the byte-pinned `adoption_report_payload_is_byte_stable` test.
+pub fn adoption_report_payload(node_id: &str, applied_digest: &str, reported_at_ms: u64) -> Vec<u8> {
+    const DOMAIN: &[u8] = b"KIRRA-ADOPTION-REPORT-v1";
+    let mut p =
+        Vec::with_capacity(DOMAIN.len() + 16 + node_id.len() + applied_digest.len() + 8);
+    p.extend_from_slice(DOMAIN);
+    for field in [node_id, applied_digest] {
+        p.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        p.extend_from_slice(field.as_bytes());
+    }
+    p.extend_from_slice(&reported_at_ms.to_le_bytes());
+    p
+}
+
+/// A consecutive-success health gate for the app-level probe agent (WS-4). A trial
+/// slot is declared healthy — and thus committable — only after `required_streak`
+/// CONSECUTIVE healthy samples: a single lucky sample never commits, and any failure
+/// resets the streak to zero, so a flapping trial can never accumulate credit toward
+/// a commit. This mirrors the fleet's AV recovery hysteresis (a streak of healthy
+/// reports) applied to the OTA health gate.
+///
+/// Pure and wall-clock-free: the CALLER owns the sampling cadence and the overall
+/// window deadline (commit on a healthy verdict; roll back when the window expires
+/// without one). This type only folds boolean samples into the streak verdict, so it
+/// unit-tests without a clock, a process, or a device — the same doer/checker
+/// discipline as the rest of the installer.
+#[derive(Debug, Clone)]
+pub struct HealthGate {
+    required_streak: u32,
+    streak: u32,
+}
+
+impl HealthGate {
+    /// `required_streak` is clamped to `>= 1` — a zero requirement would "commit"
+    /// before any probe ran, defeating the gate.
+    pub fn new(required_streak: u32) -> Self {
+        Self {
+            required_streak: required_streak.max(1),
+            streak: 0,
+        }
+    }
+
+    /// The current consecutive-healthy streak (for progress logging).
+    pub fn streak(&self) -> u32 {
+        self.streak
+    }
+
+    /// The streak length required to declare healthy.
+    pub fn required_streak(&self) -> u32 {
+        self.required_streak
+    }
+
+    /// Fold one health sample. Returns `Some(true)` once the required consecutive
+    /// streak is reached (the caller should COMMIT the trial); otherwise `None`
+    /// (keep probing until the window expires, then ROLL BACK). A `false` sample
+    /// resets the streak to zero.
+    pub fn observe(&mut self, healthy: bool) -> Option<bool> {
+        if healthy {
+            self.streak = self.streak.saturating_add(1);
+            if self.streak >= self.required_streak {
+                return Some(true);
+            }
+        } else {
+            self.streak = 0;
+        }
+        None
+    }
+}
+
+/// A node's campaign assignment as returned by the verifier's
+/// `GET /fleet/campaigns/assignment/{node_id}` — the SUBSET the installer needs.
+/// Every field defaults, and unknown fields are ignored, so a partial response (or
+/// one the verifier later extends) still deserializes. The installer never depends
+/// on the verifier crate; this is a decoupled wire mirror.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AssignmentView {
+    /// `true` iff the node is inside a matching campaign's rolled percentage.
+    #[serde(default)]
+    pub rolled: bool,
+    /// The signed artifact digest the node should run (`None`/absent → stay on the
+    /// current/baseline artifact).
+    #[serde(default)]
+    pub artifact_digest: Option<String>,
+    #[serde(default)]
+    pub artifact_version: Option<String>,
+    #[serde(default)]
+    pub campaign_id: Option<String>,
+}
+
+/// What the pull agent should do after reconciling an [`AssignmentView`] against the
+/// node's current on-disk state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullAction {
+    /// Nothing to stage: not rolled, no assigned digest, already running the assigned
+    /// digest, or a trial is already in flight.
+    UpToDate,
+    /// Fetch this signed artifact, verify its SHA-256, and stage it into the inactive
+    /// slot. `digest` is the content-addressed identity (SHA-256 hex).
+    Stage {
+        digest: String,
+        version: Option<String>,
+        campaign_id: Option<String>,
+    },
+}
+
+/// Reconcile a fetched assignment against the node's current state into a
+/// [`PullAction`]. Pure + idempotent + FAIL-CLOSED:
+///
+/// - a trial already in flight (`trial_in_flight`) → `UpToDate`: never re-stage
+///   mid-cycle (matches [`plan_stage`]'s guard) — let the trial commit or roll back;
+/// - not rolled, or no assigned digest → `UpToDate`: stay on the baseline artifact;
+/// - the assigned digest already equals `current_digest` (the SHA-256 of the running
+///   slot's artifact) → `UpToDate`: idempotent, so a periodic poll never re-stages
+///   an already-applied update;
+/// - otherwise → `Stage` the assigned digest.
+///
+/// Because the assigned digest is content-addressed and compared to a hash of the
+/// running artifact, the agent needs no persisted "last applied" bookkeeping — the
+/// filesystem IS the state.
+pub fn decide_pull(
+    assignment: &AssignmentView,
+    current_digest: Option<&str>,
+    trial_in_flight: bool,
+) -> PullAction {
+    if trial_in_flight {
+        return PullAction::UpToDate;
+    }
+    let digest = match assignment.artifact_digest.as_deref() {
+        Some(d) if assignment.rolled && !d.is_empty() => d,
+        _ => return PullAction::UpToDate,
+    };
+    if current_digest == Some(digest) {
+        return PullAction::UpToDate;
+    }
+    PullAction::Stage {
+        digest: digest.to_string(),
+        version: assignment.artifact_version.clone(),
+        campaign_id: assignment.campaign_id.clone(),
+    }
+}
+
 fn read_record(path: &Path) -> std::io::Result<BootRecord> {
     let text = std::fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -937,6 +1086,153 @@ mod tests {
             plan_commit(&rec(Slot::A, None, None)),
             Err(InstallError::InvalidTransition { .. })
         ));
+    }
+
+    // --- adoption report signing payload ---------------------------------
+
+    #[test]
+    fn adoption_report_payload_is_byte_stable() {
+        // PIN the exact bytes so any drift from the server's
+        // attestation::adoption_report_signing_payload is caught here. Layout:
+        // domain || u64_le(len(node)) || node || u64_le(len(digest)) || digest || u64_le(ts).
+        let p = adoption_report_payload("n1", "ab", 1);
+        let mut want = Vec::new();
+        want.extend_from_slice(b"KIRRA-ADOPTION-REPORT-v1");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(b"n1");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        want.extend_from_slice(b"ab");
+        want.extend_from_slice(&1u64.to_le_bytes());
+        assert_eq!(p, want);
+    }
+
+    // --- health gate (probe agent) ---------------------------------------
+
+    #[test]
+    fn health_gate_clamps_zero_requirement_to_one() {
+        // A zero streak would commit before any probe — clamp to 1.
+        let mut g = HealthGate::new(0);
+        assert_eq!(g.required_streak(), 1);
+        assert_eq!(g.observe(true), Some(true), "one healthy sample commits");
+    }
+
+    #[test]
+    fn health_gate_requires_consecutive_successes() {
+        let mut g = HealthGate::new(3);
+        assert_eq!(g.observe(true), None, "1/3");
+        assert_eq!(g.observe(true), None, "2/3");
+        assert_eq!(g.observe(true), Some(true), "3/3 → healthy");
+    }
+
+    #[test]
+    fn health_gate_failure_resets_the_streak() {
+        let mut g = HealthGate::new(3);
+        g.observe(true);
+        g.observe(true);
+        assert_eq!(g.streak(), 2);
+        // A single failure wipes the accumulated credit.
+        assert_eq!(g.observe(false), None);
+        assert_eq!(g.streak(), 0, "streak reset on failure");
+        // Must earn the full streak again from scratch.
+        assert_eq!(g.observe(true), None);
+        assert_eq!(g.observe(true), None);
+        assert_eq!(g.observe(true), Some(true));
+    }
+
+    #[test]
+    fn health_gate_flapping_never_commits() {
+        // Alternating healthy/unhealthy never reaches a 2-streak → no false commit.
+        let mut g = HealthGate::new(2);
+        for _ in 0..10 {
+            assert_eq!(g.observe(true), None);
+            assert_eq!(g.observe(false), None);
+        }
+        assert_eq!(g.streak(), 0);
+    }
+
+    // --- pull reconciler (HTTP agent) ------------------------------------
+
+    fn assign(rolled: bool, digest: Option<&str>) -> AssignmentView {
+        AssignmentView {
+            rolled,
+            artifact_digest: digest.map(String::from),
+            artifact_version: Some("v2".into()),
+            campaign_id: Some("camp-1".into()),
+        }
+    }
+
+    #[test]
+    fn pull_not_rolled_stays_on_baseline() {
+        assert_eq!(
+            decide_pull(&assign(false, Some(DIGEST_HELLO)), None, false),
+            PullAction::UpToDate,
+            "not rolled → never stage, even with a digest present"
+        );
+    }
+
+    #[test]
+    fn pull_rolled_with_new_digest_stages() {
+        let action = decide_pull(&assign(true, Some(DIGEST_HELLO)), Some("old"), false);
+        assert_eq!(
+            action,
+            PullAction::Stage {
+                digest: DIGEST_HELLO.to_string(),
+                version: Some("v2".into()),
+                campaign_id: Some("camp-1".into()),
+            }
+        );
+        // Also stages when nothing is installed yet (current_digest None).
+        assert!(matches!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), None, false),
+            PullAction::Stage { .. }
+        ));
+    }
+
+    #[test]
+    fn pull_already_running_assigned_digest_is_idempotent() {
+        assert_eq!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), Some(DIGEST_HELLO), false),
+            PullAction::UpToDate,
+            "assigned == running → no re-stage (idempotent poll)"
+        );
+    }
+
+    #[test]
+    fn pull_never_restages_mid_trial() {
+        // Even a genuinely new digest is deferred while a cycle is in flight.
+        assert_eq!(
+            decide_pull(&assign(true, Some(DIGEST_HELLO)), Some("old"), true),
+            PullAction::UpToDate
+        );
+    }
+
+    #[test]
+    fn pull_rolled_without_digest_is_noop() {
+        assert_eq!(
+            decide_pull(&assign(true, None), Some("old"), false),
+            PullAction::UpToDate
+        );
+        // An empty-string digest is also refused (never a valid content address).
+        assert_eq!(
+            decide_pull(&assign(true, Some("")), Some("old"), false),
+            PullAction::UpToDate
+        );
+    }
+
+    #[test]
+    fn assignment_view_deserializes_full_endpoint_json_and_ignores_extra() {
+        // Mirrors the verifier's NodeAssignment JSON, plus an unknown field.
+        let json = r#"{"node_id":"robot-01","rolled":true,"campaign_id":"camp-1",
+            "artifact_digest":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            "artifact_version":"v2","future_field":123}"#;
+        let a: AssignmentView = serde_json::from_str(json).unwrap();
+        assert!(a.rolled);
+        assert_eq!(a.artifact_digest.as_deref(), Some(DIGEST_HELLO));
+        assert_eq!(a.artifact_version.as_deref(), Some("v2"));
+        // An unrolled response deserializes to a no-op assignment.
+        let none: AssignmentView =
+            serde_json::from_str(r#"{"node_id":"x","rolled":false}"#).unwrap();
+        assert_eq!(decide_pull(&none, None, false), PullAction::UpToDate);
     }
 
     #[test]

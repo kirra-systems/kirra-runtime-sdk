@@ -15,6 +15,12 @@
 Description=Kirra governor (app-level A/B, health-gated rollback)
 After=network-online.target
 Wants=network-online.target
+# If BOTH slots crash-loop, stop trying (surfaces a hard fault instead of a
+# tight restart loop). Tune per platform. NOTE: these two keys belong in [Unit],
+# NOT [Service] — systemd (v230+) ignores them under [Service] with an "Unknown
+# key name ... ignoring" warning, silently disabling the crash-loop backstop.
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=exec
@@ -24,10 +30,6 @@ ExecStart=/usr/local/bin/kirra-ota-ctl run
 # previous active on the next start.
 Restart=always
 RestartSec=2
-# If BOTH slots crash-loop, stop trying (surfaces a hard fault instead of a
-# tight restart loop). Tune per platform.
-StartLimitIntervalSec=60
-StartLimitBurst=10
 # Hardening (adjust to the governor's real needs).
 NoNewPrivileges=true
 ProtectSystem=strict

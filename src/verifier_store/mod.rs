@@ -705,6 +705,24 @@ impl VerifierStore {
             [],
         )?;
 
+        // WS-4 / Track 3 — node artifact adoption reports. Each node reports the
+        // digest it is actually RUNNING (after an OTA commit); the fleet summary
+        // joins this against the active campaigns to show real per-campaign
+        // adoption. Keyed by node_id (latest report wins — a node runs one governor
+        // at a time). Pure observability: never gates any actuator/posture decision,
+        // so it is NOT audit-chained (unlike the lifecycle mutations).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS node_artifact_status (
+                node_id          TEXT    PRIMARY KEY,
+                applied_digest   TEXT    NOT NULL,
+                campaign_id      TEXT,
+                artifact_version TEXT,
+                reported_at_ms   INTEGER NOT NULL,
+                attested         INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
         // AV subsystem metadata: confidence floors, telemetry timestamps, recovery streak.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS av_subsystem_meta (

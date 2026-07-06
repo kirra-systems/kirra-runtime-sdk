@@ -1,0 +1,37 @@
+# kirra-ota-probe.service — automatic post-trial health gate (WS-4 / Track 3).
+#
+# Runs `kirra-ota-ctl probe` after the governor (re)starts. When the node is in a
+# trial boot (boot record `trying` set), it samples the health command until it
+# passes `--successes` times in a row → `commit`, or the `--window-secs` window
+# expires without such a streak → `rollback` + restart the governor onto the good
+# slot. When NOT in a trial, `probe` is a no-op — so it is safe to run on every start.
+#
+# Trigger it after each governor start by adding to kirra-governor.service:
+#     [Unit]
+#     Wants=kirra-ota-probe.service
+#     Before=kirra-ota-probe.service
+# (or drive it from a .path unit watching /var/lib/kirra/boot-record.json).
+#
+# Install:
+#   cp kirra-ota-probe.service /etc/systemd/system/
+#   # edit the --cmd health check below for your governor, then:
+#   systemctl daemon-reload
+[Unit]
+Description=Kirra governor A/B health probe (post-trial commit-or-rollback)
+After=kirra-governor.service
+# Only meaningful while the governor unit is loaded.
+Requisite=kirra-governor.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/kirra/ota.env
+# EDIT --cmd to a real health check for your governor (exit 0 = healthy). The
+# default probes an HTTP health endpoint; a process-liveness or IPC check works too.
+ExecStart=/usr/local/bin/kirra-ota-ctl probe \
+  --cmd 'curl -fsS http://127.0.0.1:8090/health' \
+  --window-secs 30 --interval-secs 2 --successes 3
+# probe writes the root-owned boot record and may `systemctl restart` on rollback.
+User=root
+
+[Install]
+WantedBy=multi-user.target

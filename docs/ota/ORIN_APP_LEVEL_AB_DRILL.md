@@ -13,6 +13,13 @@ only be confirmed on the device.
 
 > Everything here uses paths from `/etc/kirra/ota.env`
 > (`crates/kirra-ota-installer/deploy/kirra-ota.env.example`). Adjust to your box.
+>
+> **`sudo` note:** the mutating commands (`stage` / `commit` / `rollback`) write
+> the root-owned slot dirs (`/opt/kirra/...`) and boot record (`/var/lib/kirra/...`),
+> so run them with `sudo`. `run` already runs as root under systemd; `status` is
+> read-only and needs no privilege. A `stage` that can't write its slot fails
+> **closed** — the boot record is left un-armed, so a permission error can never
+> leave a half-staged trial.
 
 ---
 
@@ -57,7 +64,7 @@ trial-boot it, confirm health, commit.
 NEW=/path/to/new/kirra-governor
 DIGEST=$(sha256sum "$NEW" | cut -d' ' -f1)
 
-kirra-ota-ctl stage "$NEW" "$DIGEST"
+sudo kirra-ota-ctl stage "$NEW" "$DIGEST"
 # staged into slot b (/opt/kirra/slots/b/kirra-governor); `systemctl restart` to trial-boot it
 kirra-ota-ctl status
 # active=a try_boot=Some("b") trying=None -> run would launch slot b ...
@@ -71,7 +78,7 @@ kirra-ota-ctl status
 curl -fsS http://127.0.0.1:8090/health && echo OK
 
 # Healthy → commit. B becomes the permanent active.
-kirra-ota-ctl commit
+sudo kirra-ota-ctl commit
 # committed: active slot is now b
 kirra-ota-ctl status
 # active=b try_boot=None trying=None -> run would launch slot b ...
@@ -93,7 +100,7 @@ printf '{"active":"a","try_boot":null,"trying":null}' | sudo tee /var/lib/kirra/
 
 BAD=/path/to/broken/kirra-governor      # crashes / exits immediately
 DIGEST=$(sha256sum "$BAD" | cut -d' ' -f1)
-kirra-ota-ctl stage "$BAD" "$DIGEST"
+sudo kirra-ota-ctl stage "$BAD" "$DIGEST"
 
 sudo systemctl restart kirra-governor    # trial-boots slot B → it crashes
 # systemd (Restart=always) restarts the unit; `run` now sees the consumed
@@ -116,6 +123,157 @@ For each path, paste: the `kirra-ota-ctl status` lines, the `systemctl status`
 one-liner, and the relevant `journalctl` excerpt. If anything diverges (paths,
 systemd `Type=exec` vs your systemd version, the health probe), tell me and I'll
 adjust the unit / CLI.
+
+## 3. Automatic health gate (`probe`) — hands-off commit/rollback
+
+Drills 1–2 gated health by hand (`curl … && commit`). The `probe` subcommand
+automates the decision: after a trial boot it samples a health command and either
+commits (a `--successes` streak of healthy samples within `--window-secs`) or rolls
+back and restarts onto the good slot. It is a **no-op unless the node is in a trial**
+(`trying` set), so it is safe to run on every start.
+
+### 3a. Healthy trial → probe auto-commits
+
+```sh
+# baseline: active=b (from Drill 1). Stage the healthy v2 again into slot a.
+cat >/tmp/gov-h <<'EOF'
+#!/bin/sh
+echo "governor (v-probe healthy) pid $$"; exec sleep infinity
+EOF
+chmod 0755 /tmp/gov-h
+sudo kirra-ota-ctl stage /tmp/gov-h "$(sha256sum /tmp/gov-h | cut -d' ' -f1)"
+sudo systemctl restart kirra-governor            # trial-boot slot a
+kirra-ota-ctl status                             # trying=Some("a")
+
+# The health check here is just "the unit is running" — swap in a real endpoint probe.
+sudo kirra-ota-ctl probe --cmd 'systemctl is-active --quiet kirra-governor' \
+  --window-secs 12 --interval-secs 2 --successes 3
+# ... sample healthy=true streak=1/3 / 2/3 / healthy (3/3) -> committed: active slot is now a
+kirra-ota-ctl status                             # active=a try_boot=None trying=None
+```
+
+### 3b. Unhealthy trial → probe auto-rolls-back
+
+```sh
+# Stage a governor that STAYS UP but is UNHEALTHY (running, but the probe fails).
+cat >/tmp/gov-sick <<'EOF'
+#!/bin/sh
+echo "governor (v-probe SICK: up but unhealthy) pid $$"; exec sleep infinity
+EOF
+chmod 0755 /tmp/gov-sick
+sudo kirra-ota-ctl stage /tmp/gov-sick "$(sha256sum /tmp/gov-sick | cut -d' ' -f1)"
+sudo systemctl restart kirra-governor            # trial-boot the sick slot
+kirra-ota-ctl status                             # trying=Some(<inactive>)
+
+# A probe that always FAILS (exit 1) simulates "process up, but not actually healthy" —
+# the case the crash-based rollback in Drill 2 can NOT catch. probe rolls back + restarts.
+sudo kirra-ota-ctl probe --cmd 'false' --window-secs 8 --interval-secs 2 --successes 3
+echo "probe exit=$?"                             # non-zero (unhealthy)
+sleep 3
+kirra-ota-ctl status                             # back to the prior active; trying=None
+systemctl status kirra-governor --no-pager -l | head -6
+```
+
+**Expected:** 3a commits with no operator decision; 3b rolls back an *up-but-unhealthy*
+trial (which Drill 2's crash-rollback would have missed) and restarts onto the good
+slot. `probe` needs `sudo` (writes the boot record; restarts the unit on rollback).
+
+To make this fully automatic on every trial boot, install the example
+`deploy/kirra-ota-probe.service` oneshot (edit its `--cmd`) and wire it after the
+governor unit — see that file's header.
+
+## 4. Fleet-driven install (`pull`) — the closed loop
+
+`pull` connects this node-side installer to the verifier's campaign control plane
+(#827–#829): it polls `GET /fleet/campaigns/assignment/{node_id}?cohorts=…`, and if
+the node is rolled into a campaign whose signed artifact digest differs from what it's
+running, it downloads that artifact from the content-addressed store, verifies its
+SHA-256, and `stage`s it. Then §1's restart trial-boots it and §3's `probe` commits or
+rolls back — a full campaign → node loop with no manual `stage`.
+
+```sh
+# Point the agent at the verifier + a content-addressed artifact store
+# ({base}/{digest} serves the artifact). These can also come from /etc/kirra/ota.env.
+PULL="--verifier http://<verifier-host>:8090 --node-id robot-01 \
+      --cohorts canary --artifact-base https://<artifact-store>/governor"
+
+sudo kirra-ota-ctl pull $PULL
+# rolled + new digest:  "assigned <digest> ... differs from running — staging"
+#                       "staged assigned artifact into slot b (...)"
+# not rolled / no change: "up to date (...); nothing to stage"
+# fleet LockedOut (403):  "verifier returned HTTP 403 ...; no update this cycle"
+
+kirra-ota-ctl status                       # try_boot=Some(b) when it staged something
+sudo systemctl restart kirra-governor      # trial-boot the pulled slot
+sudo kirra-ota-ctl probe --cmd '<health>'  # auto commit-or-rollback (§3)
+```
+
+**Fail-closed properties** (each validated in-tree; re-checkable on target):
+- A **tampered artifact** (store serves bytes whose SHA-256 ≠ the assigned digest) is
+  rejected at verification — the slot is never armed, the node stays on its good slot.
+- **LockedOut** (assignment 403) → no update this cycle (exit 0); no artifact is
+  adopted while the fleet is locked out. A periodic poll retries.
+- **In-flight** trial or an **already-applied** digest → idempotent no-op, so the
+  `kirra-ota-pull.timer` can poll freely.
+
+Schedule it fleet-wide with `deploy/kirra-ota-pull.{service,timer}` (env in
+`/etc/kirra/ota.env`); the timer's `RandomizedDelaySec` spreads a large fleet's polls.
+The `pull` agent uses `curl` for both the assignment query and the artifact download.
+
+### Reporting adoption back
+
+After a commit, the node tells the verifier which digest it is now running, so the
+fleet rollout summary (`GET /system/campaigns/summary` → each active campaign's
+`applied_nodes`) reflects real adoption:
+
+```sh
+# hashes the ACTIVE slot's governor and POSTs it (identity-gated: Bearer token +
+# x-kirra-client-id). Run after a successful commit, or on a timer.
+sudo kirra-ota-ctl report --verifier http://<verifier-host>:8090 --node-id robot-01 \
+     --token "$KIRRA_API_TOKEN" --client-id robot-01 \
+     --campaign-id <id> --artifact-version <v>
+# reported: node robot-01 running digest <sha256> (campaign <id>)
+```
+
+The report route is **identity-gated** (a node write needs a credential, unlike the
+open read-only assignment GET); a non-200 is a best-effort warning that retries next
+cycle. `--token`/`--client-id` also come from `KIRRA_API_TOKEN`/`KIRRA_CLIENT_ID`.
+
+**Unforgeable attribution (optional):** add `--ak-key <pkcs8.pem>` (or
+`KIRRA_OTA_AK_KEY`) to SIGN the report with the node's Ed25519 attestation key. The
+verifier checks the signature against the node's registered `ak_public_pem` and marks
+the stored report **attested** (surfaced as `attested_nodes` in the summary /
+`kirra_ota_campaign_attested_nodes` metric / the console's "(N attested)"). An
+invalid signature is rejected 401 — so a rogue integrator token can't fake adoption
+for a node it doesn't hold the key for.
+
+```sh
+sudo kirra-ota-ctl report --verifier http://<verifier>:8090 --node-id robot-01 \
+     --token "$KIRRA_API_TOKEN" --client-id robot-01 --ak-key /etc/kirra/ak.pem
+```
+
+## Hardware result (GATE C evidence)
+
+Both paths were run end-to-end on a **Jetson (Yahboom X3, aarch64) under systemd
+`Type=exec`**, 2026-07-06, with stand-in governor scripts (a healthy `exec sleep
+infinity`, a broken `exit 1`):
+
+- **Healthy → commit:** `stage` (SHA-256 verified) → `systemctl restart` consumed
+  the one-shot `try_boot`, boot record went to `{"active":"a","try_boot":null,
+  "trying":"b"}` (in trial, still fenced by A), the new slot ran (`Main PID` was the
+  slot binary, not `kirra-ota-ctl` — confirming the `exec` handoff), `commit` →
+  `{"active":"b",...}`. ✓
+- **Unhealthy → automatic rollback:** staged a governor that exits 1 into the
+  inactive slot, `systemctl restart` trial-booted it; the journal shows the broken
+  trial `status=1/FAILURE`, `Restart=always` relaunched, and `run` reverted to the
+  good active slot with **no operator action** — boot record settled back to
+  `{"active":"b","try_boot":null,"trying":null}`. ✓
+
+Two things the hardware surfaced, both fixed in the shipped artifacts:
+- `stage`/`commit`/`rollback` need `sudo` (root-owned slot + record dirs) — noted above.
+- `StartLimitIntervalSec` / `StartLimitBurst` must live in `[Unit]`, not `[Service]`
+  (systemd v230+ ignored them under `[Service]` with an "Unknown key name" warning,
+  silently disabling the crash-loop backstop) — moved in `deploy/kirra-governor.service`.
 
 ## Follow-ups (after this drill passes)
 

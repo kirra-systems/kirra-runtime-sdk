@@ -1604,6 +1604,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/system/posture/stream", get(system_posture_stream))
         .route("/federation/reports/submit", post(submit_federated_report))
         .route("/action_filter/evaluate", post(evaluate_action_filter))
+        .route("/fleet/campaigns/report", post(report_node_artifact))
         .route("/industrial/evaluate", post(evaluate_industrial_adapter))
         .route("/industrial/ethernet-ip/evaluate", post(evaluate_ethernet_ip_adapter))
         .route("/industrial/canopen/evaluate", post(evaluate_canopen_adapter))
@@ -1636,6 +1637,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // plane. SCOPE_ADMIN; each lifecycle mutation writes an R156-shaped audit
         // entry. `advance` is fail-closed on fleet posture (non-Nominal → HALT).
         .route("/system/campaigns", post(create_campaign_handler).get(list_campaigns_handler))
+        .route("/system/campaigns/summary", get(campaigns_summary_handler))
         .route("/system/campaigns/{campaign_id}", get(get_campaign_handler))
         .route("/system/campaigns/{campaign_id}/arm", post(arm_campaign_handler))
         .route("/system/campaigns/{campaign_id}/advance", post(advance_campaign_handler))
@@ -1786,6 +1788,8 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .route("/console/analytics", get(console_analytics))
         .route("/console/sites", get(console_sites))
         .route("/console/versions", get(console_versions))
+        // WS-4 / Track 3 — public read-only OTA rollout + adoption view.
+        .route("/console/campaigns", get(console_campaigns))
         // #314 Phase 1 — operator clearance-challenge (unauthenticated; the nonce
         // alone grants nothing — only a valid signature over it does).
         .route("/console/clearance-challenge", get(clearance_challenge))
@@ -1924,6 +1928,10 @@ mod posture_gate_real_router_tests {
                 "/system/campaigns",
                 post(super::create_campaign_handler).get(super::list_campaigns_handler),
             )
+            .route("/system/campaigns/summary", get(super::campaigns_summary_handler))
+            // The node adoption report (bare here for logic testing; its identity gate
+            // is proven by `ws1_scope_gated_routes_fail_closed_on_real_router`).
+            .route("/fleet/campaigns/report", post(super::report_node_artifact))
             .route("/system/campaigns/{campaign_id}", get(super::get_campaign_handler))
             .route("/system/campaigns/{campaign_id}/arm", post(super::arm_campaign_handler))
             .route(
@@ -1986,6 +1994,7 @@ mod posture_gate_real_router_tests {
         let cases = [
             ("POST", "/system/campaigns"),
             ("GET", "/system/campaigns"),
+            ("GET", "/system/campaigns/summary"),
             ("GET", "/system/campaigns/c1"),
             ("POST", "/system/campaigns/c1/arm"),
             ("POST", "/system/campaigns/c1/advance"),
@@ -2052,6 +2061,115 @@ mod posture_gate_real_router_tests {
         let (st, _) =
             campaign_req(svc.clone(), "POST", "/system/campaigns/camp-e2e/advance", None).await;
         assert_eq!(st, StatusCode::CONFLICT, "terminal campaign must reject advance");
+    }
+
+    /// The fleet rollout summary reflects real campaign state through the HTTP
+    /// handler: counts by state, active-campaign stage progress, and a halted
+    /// campaign surfaced with its reason.
+    #[tokio::test]
+    async fn campaign_summary_reflects_fleet_state_end_to_end() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        // camp-roll: create → arm → advance → Rolling @ 10% (stage 1 of 3).
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-roll")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/arm", None).await;
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-roll/advance", None).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // camp-draft: left in Draft. camp-halt: armed then operator-halted (halt is
+        // only legal from an active state).
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-draft")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-halt")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/arm", None).await;
+        let (st, _) =
+            campaign_req(svc.clone(), "POST", "/system/campaigns/camp-halt/halt", None).await;
+        assert_eq!(st, StatusCode::OK, "operator halt of an armed campaign");
+
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK, "summary; body={j}");
+        assert_eq!(j["total"], 3);
+        assert_eq!(j["draft"], 1);
+        assert_eq!(j["rolling"], 1);
+        assert_eq!(j["halted"], 1);
+
+        // The active list holds exactly the rolling campaign, with its stage progress
+        // (camp-draft is Draft, camp-halt is Halted — neither is active).
+        assert_eq!(j["active"].as_array().map(|a| a.len()), Some(1));
+        let roll = &j["active"][0];
+        assert_eq!(roll["campaign_id"], "camp-roll");
+        assert_eq!(roll["state"], "rolling");
+        assert_eq!(roll["rollout_percent"], 10);
+        assert_eq!(roll["stage"], 1);
+        assert_eq!(roll["stage_count"], 3);
+
+        // The halted campaign is surfaced WITH its reason.
+        assert_eq!(j["halted_campaigns"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(j["halted_campaigns"][0]["campaign_id"], "camp-halt");
+        assert_eq!(j["halted_campaigns"][0]["halt_reason"], "operator_halt");
+    }
+
+    /// Node adoption reporting closes the observability loop: a node reports the
+    /// digest it is running, and the summary's active-campaign `applied_nodes`
+    /// reflects it. Also proves validation (bad digest → 400, no row written) and
+    /// upsert semantics (a node's re-report replaces, never double-counts).
+    #[tokio::test]
+    async fn node_adoption_report_reflects_in_summary_end_to_end() {
+        let svc = state_with(FleetPosture::Nominal);
+
+        // A Rolling campaign (create → arm → advance) whose digest nodes will adopt.
+        campaign_req(svc.clone(), "POST", "/system/campaigns", Some(&create_body("camp-adopt")))
+            .await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/arm", None).await;
+        campaign_req(svc.clone(), "POST", "/system/campaigns/camp-adopt/advance", None).await;
+
+        // A bad digest is rejected (400) and records nothing.
+        let (st, _) = campaign_req(
+            svc.clone(),
+            "POST",
+            "/fleet/campaigns/report",
+            Some(&serde_json::json!({ "node_id": "robot-x", "applied_digest": "nothex" }).to_string()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "non-hex digest must 400");
+
+        // Two nodes report the campaign's digest; robot-1 reports TWICE (upsert).
+        let report = |node: &str| {
+            serde_json::json!({
+                "node_id": node,
+                "applied_digest": CAMPAIGN_DIGEST,
+                "campaign_id": "camp-adopt",
+                "artifact_version": "v1.2.3",
+            })
+            .to_string()
+        };
+        for body in [report("robot-1"), report("robot-2"), report("robot-1")] {
+            let (st, _) =
+                campaign_req(svc.clone(), "POST", "/fleet/campaigns/report", Some(&body)).await;
+            assert_eq!(st, StatusCode::OK, "valid report recorded");
+        }
+
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let roll = &j["active"][0];
+        assert_eq!(roll["campaign_id"], "camp-adopt");
+        // TWO distinct nodes adopted the digest (robot-1's re-report did not double-count).
+        assert_eq!(roll["applied_nodes"], 2);
+    }
+
+    /// The summary's static path segment wins the match over `{campaign_id}`: a GET
+    /// on `/system/campaigns/summary` returns the summary, never a campaign lookup
+    /// for an id "summary".
+    #[tokio::test]
+    async fn campaign_summary_route_is_not_shadowed_by_id_param() {
+        let svc = state_with(FleetPosture::Nominal);
+        let (st, j) = campaign_req(svc.clone(), "GET", "/system/campaigns/summary", None).await;
+        assert_eq!(st, StatusCode::OK, "summary must resolve, not 404 as a missing id");
+        // A summary body has the count fields; a campaign body would not.
+        assert!(j.get("total").is_some(), "got a summary, not a campaign; body={j}");
     }
 
     /// Fail-closed on posture UNAVAILABILITY: with a cold posture cache
@@ -2370,6 +2488,8 @@ mod posture_gate_real_router_tests {
             ("GET", "/system/audit/verify"),
             // integration group, switched admin-token → SCOPE_INTEGRATION_EVALUATE.
             ("POST", "/action_filter/evaluate"),
+            // WS-4 node adoption report — identity-gated (a node write needs a credential).
+            ("POST", "/fleet/campaigns/report"),
         ];
         for (method, path) in cases {
             let status =
@@ -2449,6 +2569,9 @@ mod posture_gate_real_router_tests {
             "kirra_post_incident_write_failures_total{",
             "kirra_incident_durability_failures_total{",
             "kirra_command_source_write_failures_total{",
+            // WS-4 OTA rollout series — always emitted (counts by state), so the
+            // fleet's update posture is observable even under LockedOut.
+            "kirra_ota_campaigns_total{",
         ] {
             assert!(
                 text.contains(family),
@@ -2839,6 +2962,98 @@ mod attestation_nonce_handler_tests {
         }))
         .expect("build request");
         verify_attestation(State(svc), Json(req)).await.into_response().status()
+    }
+
+    /// WS-4: an attestation-SIGNED adoption report is verified against the node's
+    /// registered AK — a valid signature marks the stored report `attested`, a
+    /// tampered one is rejected fail-closed (401), and an unsigned report is accepted
+    /// but unattested.
+    #[tokio::test]
+    async fn signed_adoption_report_is_attested_and_forgery_rejected() {
+        use super::{report_node_artifact, NodeArtifactReport};
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = svc_with_registered_node(public_key_to_pem(&sk.verifying_key()));
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ts: u64 = 5_000;
+        let good_sig = B64.encode(
+            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
+                NODE, digest, ts,
+            ))
+            .to_bytes(),
+        );
+
+        let report = |body: serde_json::Value| {
+            let req: NodeArtifactReport = serde_json::from_value(body).expect("build report");
+            report_node_artifact(State(svc.clone()), Json(req))
+        };
+        let attested_of = |svc: Arc<ServiceState>| async move {
+            svc.app
+                .store
+                .call_read(|s| s.load_node_artifact_statuses())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.node_id == NODE)
+                .map(|r| r.attested)
+        };
+
+        // Valid signature → 200 and stored attested=true.
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": good_sig, "reported_at_ms": ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::OK, "valid signed report accepted");
+        assert_eq!(attested_of(svc.clone()).await, Some(true), "stored as attested");
+
+        // Tampered signature (flip a byte) → 401, fail-closed.
+        let mut bad = B64.decode(&good_sig).unwrap();
+        bad[0] ^= 0x01;
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": B64.encode(&bad), "reported_at_ms": ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "forged signature rejected");
+
+        // Unsigned report for a DIFFERENT digest → a fresh claim, so attestation
+        // resets to false (attested is monotonic PER DIGEST — an unsigned report for
+        // the SAME digest would instead preserve the prior attested=true; that
+        // per-digest rule is covered by the store test).
+        let other_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": other_digest,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::OK, "unsigned report still accepted (identity-gated)");
+        assert_eq!(attested_of(svc.clone()).await, Some(false), "unsigned → not attested");
+
+        // A signed report with a FAR-FUTURE timestamp is rejected (the monotonic
+        // upsert would otherwise let it permanently wedge later legitimate updates).
+        let future_ts = now_ms() + 3_600_000; // 1h ahead — beyond the skew allowance
+        let future_sig = B64.encode(
+            sk.sign(&kirra_verifier::attestation::adoption_report_signing_payload(
+                NODE, digest, future_ts,
+            ))
+            .to_bytes(),
+        );
+        let st = report(serde_json::json!({
+            "node_id": NODE, "applied_digest": digest,
+            "signature": future_sig, "reported_at_ms": future_ts,
+        }))
+        .await
+        .into_response()
+        .status();
+        assert_eq!(st, StatusCode::BAD_REQUEST, "far-future signed timestamp rejected");
     }
 
     // ---- PCR16 measured-boot binding (attestation follow-up) --------------
@@ -3592,6 +3807,54 @@ mod console_phase_a_tests {
         assert_eq!(v10["count"], 2);
         let pct = v10["pct"].as_f64().unwrap();
         assert!((pct - (2.0 / 3.0 * 100.0)).abs() < 1e-9, "pct = count/total*100");
+    }
+
+    #[tokio::test]
+    async fn console_campaigns_shows_rollout_and_adoption() {
+        // WS-4: the public console rollout view mirrors the admin summary — a Rolling
+        // campaign with its stage progress + the adoption count from node reports.
+        use kirra_verifier::ota_campaign::{Campaign, NodeArtifactStatus};
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let svc = build_state();
+
+        // Seed a reachable Rolling@10% campaign (arm + one advance) and two adoption
+        // reports on its digest, directly through the store.
+        let mut c = Campaign::new("c-live", digest, "v2", vec!["fleet".into()], vec![10, 100], 1)
+            .unwrap();
+        c.arm(2).unwrap();
+        c.advance(kirra_verifier::verifier::FleetPosture::Nominal, 3)
+            .unwrap();
+        svc.app
+            .store
+            .call(move |s| {
+                s.insert_campaign(&c)?;
+                for node in ["robot-1", "robot-2"] {
+                    s.upsert_node_artifact_status(&NodeArtifactStatus {
+                        node_id: node.into(),
+                        applied_digest: digest.into(),
+                        campaign_id: Some("c-live".into()),
+                        artifact_version: Some("v2".into()),
+                        reported_at_ms: 4,
+                        attested: false,
+                    })?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .expect("store task")
+            .expect("seed campaign + reports");
+
+        let (status, body) = get(svc, "/console/campaigns").await;
+        assert_eq!(status, StatusCode::OK);
+        let v = parse(&body);
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["rolling"], 1);
+        let roll = &v["active"][0];
+        assert_eq!(roll["campaign_id"], "c-live");
+        assert_eq!(roll["rollout_percent"], 10);
+        assert_eq!(roll["stage"], 1);
+        assert_eq!(roll["stage_count"], 2);
+        assert_eq!(roll["applied_nodes"], 2, "both reports adopted the digest");
     }
 
     #[tokio::test]

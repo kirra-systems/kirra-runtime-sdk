@@ -483,6 +483,240 @@ pub fn resolve_node_assignment(
     }
 }
 
+/// A node's self-reported artifact adoption: the digest it is actually RUNNING after
+/// an OTA commit. Reported by the node-side agent to
+/// `POST /fleet/campaigns/report`; the fleet summary joins it against the active
+/// campaigns to show real per-campaign adoption. `node_id` is the primary key in the
+/// store (latest report wins — a node runs one governor at a time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeArtifactStatus {
+    pub node_id: String,
+    /// The SHA-256 hex digest the node reports currently running.
+    pub applied_digest: String,
+    /// The campaign the node believes it adopted the digest under (optional — the
+    /// join is by digest, so this is context only).
+    pub campaign_id: Option<String>,
+    pub artifact_version: Option<String>,
+    pub reported_at_ms: u64,
+    /// `true` iff the report carried a valid Ed25519 signature over
+    /// [`crate::attestation::adoption_report_signing_payload`] against the node's
+    /// registered attestation key — unforgeable attribution. An unsigned (merely
+    /// identity-gated) report is `false`.
+    #[serde(default)]
+    pub attested: bool,
+}
+
+/// A fleet-wide observability summary of every campaign — the operator's at-a-glance
+/// rollout view. Campaign counts/state/progress come PURELY from the campaign records
+/// the verifier authoritatively owns; per-node ADOPTION (`applied_nodes`) is joined
+/// from the nodes' self-reported [`NodeArtifactStatus`]. The rolled-set DENOMINATOR
+/// (how many nodes a stage targets) needs per-node cohort membership the verifier does
+/// not persist, so this reports the adoption NUMERATOR only — it never fabricates a
+/// completion percentage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignSummary {
+    pub total: usize,
+    pub draft: usize,
+    pub staged: usize,
+    pub rolling: usize,
+    pub completed: usize,
+    pub halted: usize,
+    /// Active (`Staged`/`Rolling`) campaigns with their stage progress. Preserves the
+    /// input order (the store yields newest-first).
+    pub active: Vec<CampaignProgress>,
+    /// Halted campaigns and WHY — surfaces fail-closed auto-halts (a posture
+    /// regression) distinctly from operator halts. Preserves input order.
+    pub halted_campaigns: Vec<HaltedCampaign>,
+}
+
+/// Per-active-campaign rollout progress in the [`CampaignSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignProgress {
+    pub campaign_id: String,
+    pub state: String,
+    pub artifact_version: String,
+    /// 1-based current stage number (`stage_index + 1`) and the total stage count —
+    /// e.g. stage 2 of 4.
+    pub stage: usize,
+    pub stage_count: usize,
+    pub rollout_percent: u8,
+    pub cohorts: Vec<String>,
+    /// Distinct nodes that have REPORTED running this campaign's `artifact_digest`
+    /// (the adoption numerator). `0` until nodes report; needs no cohort data.
+    pub applied_nodes: usize,
+    /// Of `applied_nodes`, how many carried a valid attestation signature —
+    /// unforgeable adoption. `attested_nodes <= applied_nodes` always.
+    pub attested_nodes: usize,
+}
+
+/// A halted campaign and its reason in the [`CampaignSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HaltedCampaign {
+    pub campaign_id: String,
+    pub artifact_version: String,
+    /// The machine-readable halt reason (`posture_locked_out` / `posture_degraded` /
+    /// `operator_halt`); `"unknown"` only if a persisted `Halted` row somehow lacks
+    /// one (defensive — the engine always sets it).
+    pub halt_reason: String,
+    /// The percentage the rollout had reached when it halted.
+    pub rollout_percent: u8,
+}
+
+/// Summarize a set of campaigns into a [`CampaignSummary`], joining the nodes'
+/// self-reported adoption `statuses` to fill each active campaign's `applied_nodes`
+/// (distinct nodes reporting that campaign's digest). Pure and total: no clock, no
+/// store; preserves the campaigns' input order.
+pub fn summarize_campaigns(
+    campaigns: &[Campaign],
+    statuses: &[NodeArtifactStatus],
+) -> CampaignSummary {
+    let mut s = CampaignSummary {
+        total: campaigns.len(),
+        draft: 0,
+        staged: 0,
+        rolling: 0,
+        completed: 0,
+        halted: 0,
+        active: Vec::new(),
+        halted_campaigns: Vec::new(),
+    };
+
+    // Pre-index the adoption reports by digest in ONE pass → per-digest
+    // (applied, attested) counts. Keeps the whole summary O(nodes + campaigns)
+    // instead of O(active_campaigns × nodes) — the observability endpoints
+    // (`/metrics`, `/console/campaigns`) scrape this on every poll. node_id is the
+    // store PK, so each node contributes at most one status.
+    let mut adoption: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
+    for st in statuses {
+        let e = adoption.entry(st.applied_digest.as_str()).or_insert((0, 0));
+        e.0 += 1;
+        if st.attested {
+            e.1 += 1;
+        }
+    }
+
+    for c in campaigns {
+        match c.state {
+            CampaignState::Draft => s.draft += 1,
+            CampaignState::Staged => s.staged += 1,
+            CampaignState::Rolling => s.rolling += 1,
+            CampaignState::Completed => s.completed += 1,
+            CampaignState::Halted => s.halted += 1,
+        }
+        if c.state.is_active() {
+            // Adoption numerator: distinct nodes reporting this campaign's digest,
+            // read from the pre-indexed map (O(1) per campaign).
+            let (applied_nodes, attested_nodes) = adoption
+                .get(c.artifact_digest.as_str())
+                .copied()
+                .unwrap_or((0, 0));
+            s.active.push(CampaignProgress {
+                campaign_id: c.campaign_id.clone(),
+                state: c.state.as_str().to_string(),
+                artifact_version: c.artifact_version.clone(),
+                stage: c.stage_index.saturating_add(1),
+                stage_count: c.stages.len(),
+                rollout_percent: c.rollout_percent,
+                cohorts: c.cohorts.clone(),
+                applied_nodes,
+                attested_nodes,
+            });
+        }
+        if c.state == CampaignState::Halted {
+            s.halted_campaigns.push(HaltedCampaign {
+                campaign_id: c.campaign_id.clone(),
+                artifact_version: c.artifact_version.clone(),
+                halt_reason: c
+                    .halt_reason
+                    .map(|r| r.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                rollout_percent: c.rollout_percent,
+            });
+        }
+    }
+    s
+}
+
+/// Escape a string for use as a Prometheus label VALUE (`\` → `\\`, `"` → `\"`,
+/// newline → `\n`) — a campaign id is emitted inside `campaign_id="…"`.
+fn escape_prom_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a [`CampaignSummary`] as Prometheus exposition text (WS-4 fleet-rollout
+/// series), for the `/metrics` scrape. Emits campaign counts by state, plus per
+/// active-campaign rollout percentage and adoption count. Pure — the caller loads the
+/// summary and appends this to the scrape body. Posture-exempt like the rest of
+/// `/metrics`, so a rollout stays observable even under LockedOut.
+pub fn campaign_metrics_prometheus(summary: &CampaignSummary) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaigns_total OTA governor-artifact campaigns by lifecycle state."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaigns_total gauge");
+    for (state, n) in [
+        ("draft", summary.draft),
+        ("staged", summary.staged),
+        ("rolling", summary.rolling),
+        ("completed", summary.completed),
+        ("halted", summary.halted),
+    ] {
+        let _ = writeln!(s, "kirra_ota_campaigns_total{{state=\"{state}\"}} {n}");
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_rollout_percent Rollout percentage of an active (staged/rolling) campaign."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_rollout_percent gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_rollout_percent{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.rollout_percent
+        );
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_applied_nodes Distinct nodes reporting an active campaign's artifact digest (adoption numerator)."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_applied_nodes gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_applied_nodes{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.applied_nodes
+        );
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_attested_nodes Attested (Ed25519-signed) subset of an active campaign's adopting nodes."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_attested_nodes gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_attested_nodes{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.attested_nodes
+        );
+    }
+    s
+}
+
 /// A 64-char lowercase hex SHA-256 digest (the cosign-signed artifact identity).
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
@@ -840,5 +1074,140 @@ mod tests {
         assert!(!a.rolled);
         assert_eq!(a.node_id, "node-1");
         assert!(a.campaign_id.is_none());
+    }
+
+    // --- fleet campaign summary (observability) ---------------------------
+
+    #[test]
+    fn summary_of_empty_set_is_all_zero() {
+        let s = summarize_campaigns(&[], &[]);
+        assert_eq!(s.total, 0);
+        assert!(s.active.is_empty() && s.halted_campaigns.is_empty());
+    }
+
+    fn status(node: &str, digest: &str) -> NodeArtifactStatus {
+        status_att(node, digest, false)
+    }
+    fn status_att(node: &str, digest: &str, attested: bool) -> NodeArtifactStatus {
+        NodeArtifactStatus {
+            node_id: node.into(),
+            applied_digest: digest.into(),
+            campaign_id: None,
+            artifact_version: None,
+            reported_at_ms: 1,
+            attested,
+        }
+    }
+
+    #[test]
+    fn summary_counts_adopted_nodes_by_digest() {
+        // A Rolling campaign; three nodes reported — two on its digest, one on another.
+        let mut rolling =
+            Campaign::new("c-roll", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        rolling.state = CampaignState::Rolling;
+        rolling.rollout_percent = 50;
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let statuses = [
+            status_att("node-a", DIGEST, true), // attested
+            status("node-b", DIGEST),           // unattested
+            status("node-c", other),            // still on the old artifact
+        ];
+        let s = summarize_campaigns(std::slice::from_ref(&rolling), &statuses);
+        assert_eq!(s.active.len(), 1);
+        assert_eq!(
+            s.active[0].applied_nodes, 2,
+            "only the two nodes on the campaign's digest count"
+        );
+        assert_eq!(
+            s.active[0].attested_nodes, 1,
+            "only the attested node counts toward attested adoption"
+        );
+        // No reports → zero adoption, never a fabricated number.
+        let s0 = summarize_campaigns(std::slice::from_ref(&rolling), &[]);
+        assert_eq!(s0.active[0].applied_nodes, 0);
+    }
+
+    #[test]
+    fn summary_counts_every_state_and_projects_active_and_halted() {
+        let draft = Campaign::new("c-draft", DIGEST, "v1", vec!["fleet".into()], vec![50, 100], 1)
+            .unwrap();
+        let mut staged = draft.clone();
+        staged.campaign_id = "c-staged".into();
+        staged.state = CampaignState::Staged;
+        let mut rolling = draft.clone();
+        rolling.campaign_id = "c-rolling".into();
+        rolling.artifact_version = "v2".into();
+        rolling.state = CampaignState::Rolling;
+        rolling.stage_index = 0; // stage 1 of 2
+        rolling.rollout_percent = 50;
+        let mut completed = draft.clone();
+        completed.campaign_id = "c-done".into();
+        completed.state = CampaignState::Completed;
+        completed.rollout_percent = 100;
+        let mut halted = draft.clone();
+        halted.campaign_id = "c-halt".into();
+        halted.state = CampaignState::Halted;
+        halted.halt_reason = Some(HaltReason::PostureLockedOut);
+        halted.rollout_percent = 50;
+
+        let s = summarize_campaigns(&[draft, staged, rolling, completed, halted], &[]);
+        assert_eq!(s.total, 5);
+        assert_eq!(
+            (s.draft, s.staged, s.rolling, s.completed, s.halted),
+            (1, 1, 1, 1, 1)
+        );
+
+        // Active = Staged + Rolling (2), in input order.
+        assert_eq!(s.active.len(), 2);
+        assert_eq!(s.active[0].campaign_id, "c-staged");
+        let roll = &s.active[1];
+        assert_eq!(roll.campaign_id, "c-rolling");
+        assert_eq!(roll.state, "rolling");
+        assert_eq!(roll.artifact_version, "v2");
+        assert_eq!((roll.stage, roll.stage_count), (1, 2)); // 1-based stage of 2
+        assert_eq!(roll.rollout_percent, 50);
+
+        // Halted projection carries the reason (auto-halt visibility).
+        assert_eq!(s.halted_campaigns.len(), 1);
+        assert_eq!(s.halted_campaigns[0].campaign_id, "c-halt");
+        assert_eq!(s.halted_campaigns[0].halt_reason, "posture_locked_out");
+        assert_eq!(s.halted_campaigns[0].rollout_percent, 50);
+    }
+
+    #[test]
+    fn campaign_metrics_emit_counts_and_active_series() {
+        let mut rolling =
+            Campaign::new("gov.11", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        rolling.state = CampaignState::Rolling;
+        rolling.rollout_percent = 50;
+        let summary =
+            summarize_campaigns(std::slice::from_ref(&rolling), &[status("n1", DIGEST)]);
+        let m = campaign_metrics_prometheus(&summary);
+        assert!(m.contains("kirra_ota_campaigns_total{state=\"rolling\"} 1"));
+        assert!(m.contains("kirra_ota_campaigns_total{state=\"draft\"} 0"));
+        assert!(m.contains("kirra_ota_campaign_rollout_percent{campaign_id=\"gov.11\"} 50"));
+        assert!(m.contains("kirra_ota_campaign_applied_nodes{campaign_id=\"gov.11\"} 1"));
+        // Every series carries a HELP + TYPE header (valid exposition).
+        assert!(m.contains("# TYPE kirra_ota_campaigns_total gauge"));
+    }
+
+    #[test]
+    fn campaign_metrics_escape_label_values() {
+        // A quote/backslash in an id must be escaped so the exposition stays valid.
+        let mut c =
+            Campaign::new("a\"b\\c", DIGEST, "v1", vec!["f".into()], vec![100], 1).unwrap();
+        c.state = CampaignState::Rolling;
+        c.rollout_percent = 100;
+        let m = campaign_metrics_prometheus(&summarize_campaigns(std::slice::from_ref(&c), &[]));
+        assert!(m.contains("campaign_id=\"a\\\"b\\\\c\""), "got: {m}");
+    }
+
+    #[test]
+    fn summary_distinguishes_operator_halt_from_regression() {
+        let mut op = Campaign::new("c-op", DIGEST, "v1", vec!["fleet".into()], vec![100], 1).unwrap();
+        op.state = CampaignState::Halted;
+        op.halt_reason = Some(HaltReason::OperatorHalt);
+        let s = summarize_campaigns(std::slice::from_ref(&op), &[]);
+        assert_eq!(s.halted_campaigns[0].halt_reason, "operator_halt");
     }
 }
