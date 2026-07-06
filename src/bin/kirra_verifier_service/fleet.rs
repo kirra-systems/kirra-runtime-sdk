@@ -87,10 +87,28 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
             .command_source_write_failures
             .load(Ordering::Relaxed),
     };
-    let body = svc
+    let mut body = svc
         .app
         .fleet_metrics
         .format_prometheus(&kirra_verifier::standby_monitor::instance_id(), &snap);
+
+    // WS-4: append the OTA fleet-rollout series (campaign counts by state + per
+    // active-campaign rollout % and adoption). Store read off the REPLICA (never
+    // contends the writer); posture-EXEMPT like the rest of `/metrics`, so a rollout
+    // stays observable under LockedOut. Best-effort — a query hiccup omits the
+    // campaign series this scrape but never fails the core fleet-safety series.
+    if let Ok(Ok((campaigns, statuses))) = svc
+        .app
+        .store
+        .call_read(|store| {
+            Ok::<_, rusqlite::Error>((store.load_campaigns()?, store.load_node_artifact_statuses()?))
+        })
+        .await
+    {
+        let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
+        body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(&summary));
+    }
+
     (
         [(
             axum::http::header::CONTENT_TYPE,

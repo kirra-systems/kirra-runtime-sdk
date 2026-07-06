@@ -2569,6 +2569,9 @@ mod posture_gate_real_router_tests {
             "kirra_post_incident_write_failures_total{",
             "kirra_incident_durability_failures_total{",
             "kirra_command_source_write_failures_total{",
+            // WS-4 OTA rollout series — always emitted (counts by state), so the
+            // fleet's update posture is observable even under LockedOut.
+            "kirra_ota_campaigns_total{",
         ] {
             assert!(
                 text.contains(family),

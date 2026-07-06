@@ -612,6 +612,72 @@ pub fn summarize_campaigns(
     s
 }
 
+/// Escape a string for use as a Prometheus label VALUE (`\` → `\\`, `"` → `\"`,
+/// newline → `\n`) — a campaign id is emitted inside `campaign_id="…"`.
+fn escape_prom_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a [`CampaignSummary`] as Prometheus exposition text (WS-4 fleet-rollout
+/// series), for the `/metrics` scrape. Emits campaign counts by state, plus per
+/// active-campaign rollout percentage and adoption count. Pure — the caller loads the
+/// summary and appends this to the scrape body. Posture-exempt like the rest of
+/// `/metrics`, so a rollout stays observable even under LockedOut.
+pub fn campaign_metrics_prometheus(summary: &CampaignSummary) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaigns_total OTA governor-artifact campaigns by lifecycle state."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaigns_total gauge");
+    for (state, n) in [
+        ("draft", summary.draft),
+        ("staged", summary.staged),
+        ("rolling", summary.rolling),
+        ("completed", summary.completed),
+        ("halted", summary.halted),
+    ] {
+        let _ = writeln!(s, "kirra_ota_campaigns_total{{state=\"{state}\"}} {n}");
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_rollout_percent Rollout percentage of an active (staged/rolling) campaign."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_rollout_percent gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_rollout_percent{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.rollout_percent
+        );
+    }
+    let _ = writeln!(
+        s,
+        "# HELP kirra_ota_campaign_applied_nodes Distinct nodes reporting an active campaign's artifact digest (adoption numerator)."
+    );
+    let _ = writeln!(s, "# TYPE kirra_ota_campaign_applied_nodes gauge");
+    for c in &summary.active {
+        let _ = writeln!(
+            s,
+            "kirra_ota_campaign_applied_nodes{{campaign_id=\"{}\"}} {}",
+            escape_prom_label(&c.campaign_id),
+            c.applied_nodes
+        );
+    }
+    s
+}
+
 /// A 64-char lowercase hex SHA-256 digest (the cosign-signed artifact identity).
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
@@ -1059,6 +1125,34 @@ mod tests {
         assert_eq!(s.halted_campaigns[0].campaign_id, "c-halt");
         assert_eq!(s.halted_campaigns[0].halt_reason, "posture_locked_out");
         assert_eq!(s.halted_campaigns[0].rollout_percent, 50);
+    }
+
+    #[test]
+    fn campaign_metrics_emit_counts_and_active_series() {
+        let mut rolling =
+            Campaign::new("gov.11", DIGEST, "v2", vec!["fleet".into()], vec![50, 100], 1).unwrap();
+        rolling.state = CampaignState::Rolling;
+        rolling.rollout_percent = 50;
+        let summary =
+            summarize_campaigns(std::slice::from_ref(&rolling), &[status("n1", DIGEST)]);
+        let m = campaign_metrics_prometheus(&summary);
+        assert!(m.contains("kirra_ota_campaigns_total{state=\"rolling\"} 1"));
+        assert!(m.contains("kirra_ota_campaigns_total{state=\"draft\"} 0"));
+        assert!(m.contains("kirra_ota_campaign_rollout_percent{campaign_id=\"gov.11\"} 50"));
+        assert!(m.contains("kirra_ota_campaign_applied_nodes{campaign_id=\"gov.11\"} 1"));
+        // Every series carries a HELP + TYPE header (valid exposition).
+        assert!(m.contains("# TYPE kirra_ota_campaigns_total gauge"));
+    }
+
+    #[test]
+    fn campaign_metrics_escape_label_values() {
+        // A quote/backslash in an id must be escaped so the exposition stays valid.
+        let mut c =
+            Campaign::new("a\"b\\c", DIGEST, "v1", vec!["f".into()], vec![100], 1).unwrap();
+        c.state = CampaignState::Rolling;
+        c.rollout_percent = 100;
+        let m = campaign_metrics_prometheus(&summarize_campaigns(std::slice::from_ref(&c), &[]));
+        assert!(m.contains("campaign_id=\"a\\\"b\\\\c\""), "got: {m}");
     }
 
     #[test]

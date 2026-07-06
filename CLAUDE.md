@@ -301,7 +301,7 @@ Admin token or an `integrator`-role principal.
 
 ### Public read-only
 - `GET /health`, `GET /ready`
-- `GET /metrics` — Prometheus fleet-safety series (WS-0.5); posture-exempt so the scrape survives LockedOut
+- `GET /metrics` — Prometheus fleet-safety series (WS-0.5) + WS-4 OTA rollout series (`kirra_ota_campaigns_total{state}`, `kirra_ota_campaign_rollout_percent{campaign_id}`, `kirra_ota_campaign_applied_nodes{campaign_id}` via `campaign_metrics_prometheus`); posture-exempt so the scrape survives LockedOut
 - `GET /attestation/status/:node_id`
 - `GET /fleet/posture`, `GET /fleet/posture/:node_id`
 - `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id`
