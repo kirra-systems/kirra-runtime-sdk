@@ -50,6 +50,60 @@ use kirra_contract_channel::GovernorContractView;
 /// from (file / dev-fixed; TPM-unseal deferred). See [`provisioning`].
 pub mod provisioning;
 
+/// WP-13 (MGA G-7) — the Uptane four-role OTA metadata model (root / targets /
+/// snapshot / timestamp): role-separated keys, rollback + freeze protection,
+/// and key rotation. Pure metadata + verification core; see [`uptane`].
+pub mod uptane;
+
+/// Crate-private standard-alphabet base64 (padding), shared by
+/// [`artifact_release`] and [`uptane`]. Inlined so the lean actuation-path
+/// crate pulls no `base64` dependency (see the manifest header).
+pub(crate) mod b64 {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub(crate) fn encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            out.push(B64[(n >> 18) as usize & 63] as char);
+            out.push(B64[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+        }
+        out
+    }
+
+    pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
+        let s = s.trim_end_matches('=');
+        let mut out = Vec::with_capacity(s.len() * 3 / 4);
+        let mut acc: u32 = 0;
+        let mut bits = 0u32;
+        for c in s.bytes() {
+            let v = B64.iter().position(|&b| b == c)? as u32;
+            acc = (acc << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn round_trips_all_lengths() {
+            for len in 0..70 {
+                let data: Vec<u8> = (0..len as u8).collect();
+                assert_eq!(decode(&encode(&data)).unwrap(), data, "len {len}");
+            }
+        }
+    }
+}
+
 /// Domain tag for the contract digest (step 5). Distinct from every audit-chain
 /// / causal tag so the two hash spaces never collide.
 const DIGEST_DOMAIN: &[u8] = b"KIRRA-GOVERNOR-CONTRACT-DIGEST-V1";
@@ -398,41 +452,7 @@ pub mod artifact_release {
             .map_err(|_| ArtifactReleaseError::SignatureInvalid)
     }
 
-    // Minimal standard-alphabet base64 (with padding) — this crate is
-    // deliberately dependency-lean (see the manifest header), so the ~30
-    // lines are inlined rather than pulling the `base64` crate into the
-    // actuation-path dependency tree.
-    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    fn base64_encode(data: &[u8]) -> String {
-        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-        for chunk in data.chunks(3) {
-            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            out.push(B64[(n >> 18) as usize & 63] as char);
-            out.push(B64[(n >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
-            out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
-        }
-        out
-    }
-
-    fn base64_decode(s: &str) -> Option<Vec<u8>> {
-        let s = s.trim_end_matches('=');
-        let mut out = Vec::with_capacity(s.len() * 3 / 4);
-        let mut acc: u32 = 0;
-        let mut bits = 0u32;
-        for c in s.bytes() {
-            let v = B64.iter().position(|&b| b == c)? as u32;
-            acc = (acc << 6) | v;
-            bits += 6;
-            if bits >= 8 {
-                bits -= 8;
-                out.push((acc >> bits) as u8);
-            }
-        }
-        Some(out)
-    }
+    use crate::b64::{decode as base64_decode, encode as base64_encode};
 
     #[cfg(test)]
     mod tests {
@@ -494,15 +514,6 @@ pub mod artifact_release {
                 Err(ArtifactReleaseError::MalformedSignature),
                 "wrong length after decode"
             );
-        }
-
-        #[test]
-        fn base64_round_trips() {
-            for len in 0..70 {
-                let data: Vec<u8> = (0..len as u8).collect();
-                let enc = base64_encode(&data);
-                assert_eq!(base64_decode(&enc).unwrap(), data, "len {len}");
-            }
         }
 
         /// Domain separation: an artifact signature is NOT a valid command
