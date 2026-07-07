@@ -48,6 +48,19 @@ Net: **17 of 22 gaps have a fully or substantially closable software component i
 
 ---
 
+## 2a. Execution status
+
+| WP | Status | Evidence |
+|---|---|---|
+| WP-01 | **DONE** 2026-07-07 (`a04c454`) | Paired fences in `seqlock.rs` (driver-owned, all bindings inherit); loom model `seqlock_accepted_snapshot_is_never_torn` (0.6 s, preemption bound 2); EACH fence's necessity verified by removal (loom reports the torn accept); 68 dependent-crate tests green |
+| WP-02 | **DONE** 2026-07-07 (`527afb9`) | Limiter wired into `recv_report`/`recv_and_ingest` pre-verify; `flood_is_rate_limited_before_the_signature_verify` proves the excess rejects RateLimited (not BadSignature) over a live Zenoh link with `bad_signature == 0`; 32/32 crate tests |
+| WP-03 | **DONE** 2026-07-07 (`ce3b808`, locks `7cdb7d0`) | Two isolated pools (API 512 / console 64) + load-shed 429+Retry-After + 256 KiB body cap, probes exempt; deterministic shed/recovery + 413 tests; posture-gate ordering re-proven on the new assembly; env vars in CLAUDE.md |
+| WP-04 | **DONE** 2026-07-07 (`413aa3d`) | Advisories GATE both workspaces (RUSTSEC-2025-0134 triaged with reason); fuzz lane runs every target 60 s (verified locally: 4/4 clean, 3.9M–47M execs); codecov.yml blocking project ratchet (auto+0.5%). fmt lane DEFERRED: ~3,900 unformatted files need a dedicated mechanical reformat commit first |
+| WP-05 | **DONE** 2026-07-07 (`74dc084`) | `LatencyHistogram` (lock-free, fixed buckets) → `kirra_http_request_duration_seconds` + `kirra_actuator_envelope_duration_seconds` on /metrics; outermost request-observability middleware (span + x-kirra-request-id, hostile ids replaced); 2,481 workspace tests green |
+| WP-06 | **DONE** 2026-07-07 (`7078ad7`) | Stale "306 passing" purged from 5 docs (real figure 2,476, machine-derived, do-not-hand-carry note); AEGIS-* ID lineage note added to SAFETY_CASE_INDEX §1 (deliberate cert lineage, not un-rebranded — renaming would break code cross-refs). Goal-scheme unification found already addressed by SAFETY_GOALS.md's canonical-scheme section |
+
+Wave 0 complete. Next: Wave 1 (WP-07 RSS lateral params → WP-08 mutation gate → WP-09 divergence latch → WP-10 pedestrian-RSS feed).
+
 ## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
 
 Independent, high-ROI, low-risk. Can run as parallel sessions.
