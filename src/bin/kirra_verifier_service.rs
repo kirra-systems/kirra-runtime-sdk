@@ -511,11 +511,40 @@ struct RegisterNodeRequest {
     firmware_version: Option<String>,
     /// TPM-quote follow-up (#572): when `true`, the node MUST present a hardware
     /// TPM quote on `/attestation/verify` — a self-reported PCR16 digest alone is
-    /// not accepted. Absent/`false` → no requirement (back-compat). Persisted to
-    /// the `node_attestation_policy` table before the node record is committed,
-    /// so a required-quote node is never live without its policy (fail-closed).
+    /// not accepted. Persisted to the `node_attestation_policy` table before the
+    /// node record is committed, so a required-quote node is never live without its
+    /// policy (fail-closed).
+    ///
+    /// WP-16 (MGA G-8): `Option<bool>` so an OMITTED field defers to the
+    /// `KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT` env gate (measured-boot fleets flip the
+    /// default to quote-required), while an EXPLICIT value always wins — a node with
+    /// no TPM can still register `require_tpm_quote: false` even when the fleet
+    /// default is on. See `resolve_require_tpm_quote`.
     #[serde(default)]
-    require_tpm_quote: bool,
+    require_tpm_quote: Option<bool>,
+}
+
+/// WP-16 (MGA G-8) — parse the `KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT` env gate: the
+/// fleet-wide default TPM-quote requirement for a registration that does NOT set
+/// the field explicitly. Default OFF (unset/empty/other → `false`), so a
+/// deployment that does not opt in is byte-identical to prior behaviour. `1` /
+/// `true` (case-insensitive, trimmed) enable it — the same convention as the other
+/// bool env gates. Pure (takes the raw value), so it needs no `set_var` to test.
+fn require_tpm_quote_fleet_default(raw: Option<&str>) -> bool {
+    raw.map(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
+    .unwrap_or(false)
+}
+
+/// WP-16 (MGA G-8) — resolve the EFFECTIVE quote requirement for a registration.
+/// An EXPLICIT request field always wins (a TPM-less node can register
+/// `require_tpm_quote: false` even under a quote-required fleet default); an
+/// OMITTED field (`None`) defers to the fleet default. Pure, so the truth table is
+/// unit-tested without env (INVARIANT #13).
+fn resolve_require_tpm_quote(explicit: Option<bool>, fleet_default: bool) -> bool {
+    explicit.unwrap_or(fleet_default)
 }
 
 #[derive(Deserialize)]
@@ -2943,7 +2972,7 @@ mod fabric_command_authoritative_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod attestation_nonce_handler_tests {
-    use super::{verify_attestation, VerifyAttestationRequest};
+    use super::{register_node, verify_attestation, RegisterNodeRequest, VerifyAttestationRequest};
 
     use std::sync::Arc;
 
@@ -3318,6 +3347,165 @@ mod attestation_nonce_handler_tests {
         assert!(
             matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
             "node attests via the back-compat self-report path"
+        );
+    }
+
+    // ---- WP-16 (MGA G-8): quote-required-default env gate at registration -----
+
+    /// The pure `KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT` parser: `1`/`true`
+    /// (case-insensitive, trimmed) enable it; everything else (unset/empty/`0`/
+    /// `false`/garbage) is OFF — fail-safe to the byte-identical back-compat default.
+    #[test]
+    fn require_tpm_quote_fleet_default_parses_the_gate() {
+        for on in ["1", "true", "TRUE", "True", "  true  ", "\t1"] {
+            assert!(super::require_tpm_quote_fleet_default(Some(on)), "{on:?} must enable");
+        }
+        for off in [None, Some(""), Some("0"), Some("false"), Some("yes"), Some("2"), Some("on")] {
+            assert!(!super::require_tpm_quote_fleet_default(off), "{off:?} must stay off");
+        }
+    }
+
+    /// The pure resolver: an EXPLICIT request field always wins; an OMITTED field
+    /// (`None`) defers to the fleet default. This is the whole WP-16 policy.
+    #[test]
+    fn resolve_require_tpm_quote_explicit_wins_else_default() {
+        assert!(super::resolve_require_tpm_quote(Some(true), false), "explicit true wins over off");
+        assert!(!super::resolve_require_tpm_quote(Some(false), true), "explicit false opts out under an on default");
+        assert!(super::resolve_require_tpm_quote(None, true), "omitted defers to an on default");
+        assert!(!super::resolve_require_tpm_quote(None, false), "omitted under off default stays off (back-compat)");
+    }
+
+    /// An Active service with an EMPTY node registry — for exercising register_node.
+    fn active_svc_no_nodes() -> Arc<ServiceState> {
+        let app = Arc::new(AppState::new(
+            VerifierStore::new(":memory:").expect("in-memory store"),
+            VerifierOperationMode::Active,
+        ));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(None));
+        Arc::new(ServiceState {
+            app,
+            posture_cache,
+            started_at_ms: now_ms(),
+            audit_verifying_key: None,
+            fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
+            fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
+            posture_engine_tx: std::sync::OnceLock::new(),
+            perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
+            perception_monitor_enabled: false,
+        })
+    }
+
+    /// Drive `register_node` for `node_id` with the given (optional) explicit flag,
+    /// assert 201, and return the persisted `require_tpm_quote` policy. The env gate
+    /// is UNSET in the test process, so an omitted flag resolves to the off default
+    /// (no `set_var` — INVARIANT #13; the on-default case is the pure-fn test above).
+    async fn register_and_policy(
+        svc: &Arc<ServiceState>,
+        node_id: &str,
+        require: Option<bool>,
+    ) -> bool {
+        let mut body = serde_json::json!({ "node_id": node_id });
+        if let Some(r) = require {
+            body["require_tpm_quote"] = serde_json::json!(r);
+        }
+        let req: RegisterNodeRequest = serde_json::from_value(body).expect("build request");
+        let status = register_node(State(Arc::clone(svc)), Json(req)).await.into_response().status();
+        assert_eq!(status, StatusCode::CREATED, "registration succeeds");
+        let nid = node_id.to_string();
+        svc.app
+            .store
+            .call_read(move |s| s.node_requires_tpm_quote(&nid))
+            .await
+            .expect("store task")
+            .expect("policy query")
+    }
+
+    /// An omitted `require_tpm_quote` with the gate UNSET registers a node with NO
+    /// quote requirement — the back-compat default is preserved byte-for-byte.
+    #[tokio::test]
+    async fn register_omitted_field_defaults_off_when_gate_unset() {
+        let svc = active_svc_no_nodes();
+        assert!(
+            !register_and_policy(&svc, "node-omit", None).await,
+            "omitted field + unset gate → not quote-required (back-compat)"
+        );
+    }
+
+    /// An EXPLICIT `require_tpm_quote: true` in the request enrolls the node as
+    /// quote-required regardless of the gate — the one-call measured-boot enrollment.
+    #[tokio::test]
+    async fn register_explicit_true_requires_quote() {
+        let svc = active_svc_no_nodes();
+        assert!(
+            register_and_policy(&svc, "node-strict", Some(true)).await,
+            "explicit require_tpm_quote:true persists the policy"
+        );
+    }
+
+    /// An EXPLICIT `require_tpm_quote: false` opts a (TPM-less) node OUT even when a
+    /// fleet default would otherwise apply — the explicit field always wins.
+    #[tokio::test]
+    async fn register_explicit_false_opts_out() {
+        let svc = active_svc_no_nodes();
+        assert!(
+            !register_and_policy(&svc, "node-nopt", Some(false)).await,
+            "explicit require_tpm_quote:false is honored (a TPM-less node can still enroll)"
+        );
+    }
+
+    /// WP-16 end-to-end: ENROLL a node through the real `register_node` handler with
+    /// the exact body `kirra-ota-ctl enroll` posts (AK + PCR16 + require_tpm_quote),
+    /// then prove the measured-boot contract holds — a self-report WITHOUT a quote is
+    /// now REFUSED, and only a genuine TPM quote (generated via `marshal_pcr16_quote`)
+    /// attests the node Trusted. This ties the provisioning path to the LIVE quote
+    /// enforcement: challenge → quote → verify.
+    #[tokio::test]
+    async fn enroll_via_register_handler_then_quote_attests_end_to_end() {
+        let node_key = SigningKey::from_bytes(&[7u8; 32]);
+        let svc = active_svc_no_nodes();
+
+        // 1. Enroll — the wire body `enroll` builds (require_tpm_quote explicit).
+        let body = serde_json::json!({
+            "node_id": NODE,
+            "ak_public_pem": public_key_to_pem(&node_key.verifying_key()),
+            "expected_pcr16_digest_hex": PCR16_VALUE_HEX,
+            "require_tpm_quote": true,
+        });
+        let req: RegisterNodeRequest = serde_json::from_value(body).expect("build request");
+        let status = register_node(State(Arc::clone(&svc)), Json(req)).await.into_response().status();
+        assert_eq!(status, StatusCode::CREATED, "enrollment registers the node");
+
+        // 2. A valid self-report but NO quote is refused — enrollment made a quote
+        //    mandatory (fail-closed, nonce preserved for the retry).
+        let nonce = 0x1122_3344_5566_7788;
+        svc.app.issue_challenge(NODE, nonce, now_ms());
+        let no_quote = verify_with_quote(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+            None,
+        )
+        .await;
+        assert_eq!(no_quote, StatusCode::FORBIDDEN, "an enrolled node must present a quote");
+        assert!(svc.app.pending_challenges.contains_key(NODE), "the refusal preserves the nonce");
+
+        // 3. A genuine TPM quote attests → Trusted.
+        let ok = verify_with_quote(
+            Arc::clone(&svc),
+            nonce,
+            sign_proof_with_pcr16(&node_key, NODE, nonce, Some(PCR16_VALUE_HEX)),
+            Some(PCR16_VALUE_HEX),
+            Some(quote_evidence(&node_key, nonce, PCR16_VALUE_HEX)),
+        )
+        .await;
+        assert_eq!(ok, StatusCode::OK, "a valid quote attests the enrolled node");
+        assert!(
+            matches!(svc.app.nodes.get(NODE).unwrap().status, NodeTrustState::Trusted),
+            "the enrolled measured-boot node becomes Trusted after a valid quote"
         );
     }
 

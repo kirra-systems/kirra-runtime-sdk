@@ -34,7 +34,13 @@ pub(crate) async fn register_node(
     {
         // SAFETY: SG-HA-3 — durable write off the async worker pool.
         let node_id_p = req.node_id.clone();
-        let require = req.require_tpm_quote;
+        // WP-16 (MGA G-8): an omitted `require_tpm_quote` defers to the
+        // KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT fleet gate (measured-boot fleets flip
+        // the default to quote-required); an explicit value in the request wins.
+        let fleet_default = require_tpm_quote_fleet_default(
+            std::env::var("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT").ok().as_deref(),
+        );
+        let require = resolve_require_tpm_quote(req.require_tpm_quote, fleet_default);
         let policy_err = !matches!(
             svc.app.store.call(move |store| {
                 store.set_node_attestation_policy(&node_id_p, require)
