@@ -36,6 +36,18 @@ use crate::posture_cache::POSTURE_CACHE_TTL_MS;
 /// so an expired lease is bounded by the posture-cache staleness window.
 pub const DEFAULT_LEASE_TTL_MS: u64 = 3_000;
 
+/// Arithmetic floor for a lease TTL: `from_ttl` clamps UP to this so
+/// `renew_interval_ms = ttl/2 ≥ 1`, keeping the demote-before-promote invariant
+/// total. This is a correctness floor, not a policy one — a real lease is seconds
+/// (`DEFAULT_LEASE_TTL_MS`); a sub-floor value is a misconfiguration.
+pub const MIN_LEASE_TTL_MS: u64 = 2;
+
+/// Arithmetic ceiling for a lease TTL: `from_ttl` clamps DOWN to this so
+/// `ttl + ttl/2` can never overflow `u64` and wrap `promote_after_ms` below
+/// `ttl_ms` (which would be a premature-promotion split-brain hazard). `u64::MAX/2`
+/// keeps `ttl + ttl/2 ≤ ¾·u64::MAX < u64::MAX`. Astronomically above any real TTL.
+pub const MAX_LEASE_TTL_MS: u64 = u64::MAX / 2;
+
 // Compile-time guards: the TTL is bounded by the posture-cache TTL, and the derived
 // promote deadline meets the ≤ 5 s failover target.
 const _: () = assert!(
@@ -67,9 +79,24 @@ pub struct LeaseParams {
 
 impl LeaseParams {
     /// Derive all timings from a TTL. `renew = ttl/2`, `promote_after = ttl + ttl/2`.
+    ///
+    /// TOTAL by construction (Copilot #864): the TTL is clamped into
+    /// `[MIN_LEASE_TTL_MS, MAX_LEASE_TTL_MS]` first, so `renew_interval_ms ≥ 1` (a
+    /// tiny TTL can never make it 0, which would break `demote_before_promote`) and
+    /// `ttl + ttl/2` can never overflow `u64` and wrap `promote_after_ms` below
+    /// `ttl_ms` (a premature-promotion hazard). Every `from_ttl` output therefore
+    /// satisfies the split-brain invariant — clamping UP/DOWN is the safe direction.
     #[must_use]
     pub const fn from_ttl(ttl_ms: u64) -> Self {
-        let renew_interval_ms = ttl_ms / 2;
+        let ttl_ms = if ttl_ms < MIN_LEASE_TTL_MS {
+            MIN_LEASE_TTL_MS
+        } else if ttl_ms > MAX_LEASE_TTL_MS {
+            MAX_LEASE_TTL_MS
+        } else {
+            ttl_ms
+        };
+        let renew_interval_ms = ttl_ms / 2; // ≥ 1 by the MIN clamp
+        // No overflow by the MAX clamp, so this is exact (not saturating).
         Self { ttl_ms, renew_interval_ms, promote_after_ms: ttl_ms + renew_interval_ms }
     }
 
@@ -171,6 +198,27 @@ mod tests {
             assert!(should_promote(p.promote_after_ms, &p), "challenger promotes at promote_after");
             assert!(p.guard_margin_ms() > 0, "positive guard margin for ttl={ttl}");
         }
+    }
+
+    /// `from_ttl` is TOTAL (Copilot #864): for ANY u64 input — including the
+    /// degenerate 0/1 and the overflow-prone extremes — the derived params satisfy
+    /// the demote-before-promote invariant (renew > 0, promote_after > ttl, no wrap).
+    #[test]
+    fn from_ttl_is_total_and_never_violates_the_invariant() {
+        for ttl in [0u64, 1, 2, 3, 100, 3_000, MAX_LEASE_TTL_MS, MAX_LEASE_TTL_MS + 1, u64::MAX] {
+            let p = LeaseParams::from_ttl(ttl);
+            assert!(p.renew_interval_ms >= 1, "renew must be ≥ 1 for input {ttl}");
+            assert!(
+                p.promote_after_ms > p.ttl_ms,
+                "promote_after ({}) must exceed ttl ({}) for input {ttl} — no overflow wrap",
+                p.promote_after_ms,
+                p.ttl_ms
+            );
+            assert!(p.demote_before_promote(), "invariant must hold for input {ttl}");
+        }
+        // The degenerate inputs clamp to the floor; the huge inputs clamp to the ceiling.
+        assert_eq!(LeaseParams::from_ttl(0).ttl_ms, MIN_LEASE_TTL_MS);
+        assert_eq!(LeaseParams::from_ttl(u64::MAX).ttl_ms, MAX_LEASE_TTL_MS);
     }
 
     #[test]
