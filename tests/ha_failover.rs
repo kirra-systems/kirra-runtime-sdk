@@ -13,6 +13,8 @@
 //! promotes by claiming the next durable epoch, and the old primary is then FENCED
 //! out of writing.
 
+use kirra_verifier::lease::{lease_expired, should_promote, LeaseParams, DEFAULT_LEASE_TTL_MS};
+use kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS;
 use kirra_verifier::standby_monitor::{
     should_self_demote_on_heartbeat_failures, HEARTBEAT_INTERVAL_MS, HEARTBEAT_KEY,
     MAX_CONSECUTIVE_HEARTBEAT_FAILURES, PROMOTION_TIMEOUT_MS,
@@ -104,6 +106,45 @@ fn heartbeat_timing_leaves_no_split_brain_window() {
         (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64) * HEARTBEAT_INTERVAL_MS < PROMOTION_TIMEOUT_MS,
         "self-demote window ({} ms) must close before the promotion window ({} ms) opens",
         (MAX_CONSECUTIVE_HEARTBEAT_FAILURES as u64) * HEARTBEAT_INTERVAL_MS,
+        PROMOTION_TIMEOUT_MS
+    );
+}
+
+/// WP-19 (G-21) — the LEASE timing model carries the SAME split-brain non-overlap
+/// guarantee as the heartbeat clamp above, but as a first-class contract derived
+/// from one TTL, and it is FASTER: the default lease promotes within the ≤5 s
+/// failover target (bounded by the posture-cache TTL) instead of the legacy ~12 s.
+/// This is the pure timing proof; wiring the lease into the live promotion loop is
+/// the recorded WP-19 follow-up (the epoch fence + heartbeat writer stay intact).
+#[test]
+fn lease_timing_leaves_no_split_brain_window_and_is_faster() {
+    let p = LeaseParams::default_params();
+
+    // Non-overlap: the holder's lease has expired (it must have self-demoted) by
+    // `ttl_ms`, while a challenger is not yet allowed to promote until `promote_after_ms`.
+    assert!(lease_expired(p.ttl_ms, &p), "the holder's lease has expired at ttl");
+    assert!(
+        !should_promote(p.ttl_ms, &p),
+        "a challenger must NOT promote at ttl — the holder may only just have demoted"
+    );
+    assert!(should_promote(p.promote_after_ms, &p), "the challenger promotes at promote_after");
+    assert!(
+        p.ttl_ms < p.promote_after_ms && p.guard_margin_ms() > 0,
+        "demote deadline ({} ms) strictly precedes promote deadline ({} ms), guard {} ms",
+        p.ttl_ms,
+        p.promote_after_ms,
+        p.guard_margin_ms()
+    );
+
+    // Faster + bounded: the lease promote deadline meets the ≤5 s target, stays within
+    // the posture-cache staleness window, and beats the legacy heartbeat timeout.
+    assert_eq!(p.ttl_ms, DEFAULT_LEASE_TTL_MS);
+    assert!(p.promote_after_ms <= 5_000, "≤5 s failover target");
+    assert!(p.ttl_ms <= POSTURE_CACHE_TTL_MS, "TTL bounded by the posture-cache TTL");
+    assert!(
+        p.promote_after_ms < PROMOTION_TIMEOUT_MS,
+        "the lease promote deadline ({} ms) is faster than the legacy heartbeat timeout ({} ms)",
+        p.promote_after_ms,
         PROMOTION_TIMEOUT_MS
     );
 }
