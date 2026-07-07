@@ -77,27 +77,12 @@ pub const VRU_STOP_EPSILON_CEILING_MPS: f64 = STOP_EPSILON_MPS;
 /// trajectory and fails closed.
 const SEG_DEGENERATE_EPS_M: f64 = 1e-9;
 
-/// A perceived pedestrian / VRU. Deliberately minimal for v0: the
-/// omnidirectional model needs only a position (velocity is accepted for
-/// forward-compatibility with the directed refinement but does not weaken
-/// the v0 bound).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PerceivedPedestrian {
-    pub id: u64,
-    /// Position, ego-world frame (same frame as `PerceivedObject.pos`).
-    pub pos: Point,
-    /// Tracked velocity vector, m/s (informational in v0 — the reachable
-    /// disc assumes `v_ped_max` in every direction regardless).
-    pub vel: Point,
-    /// Age of this measurement at evaluation time, s (#789 F8): how long ago the
-    /// pedestrian was observed. The reachable disc has ALREADY been growing for
-    /// `age_s` before the trajectory's `t = 0`, so the bound adds `v_ped_max ·
-    /// age_s` to the required clearance. Frozen into the wire shape NOW, before a
-    /// producer exists, so the age term never has to be retrofitted. A fresh
-    /// synchronous measurement passes `0.0`; a negative or non-finite age is a
-    /// perception fault and fails closed (breach).
-    pub age_s: f64,
-}
+/// The pedestrian contract type now lives in the lean contract crate
+/// (`kirra_core::trajectory`, next to `PerceivedObject`) so the PRODUCER
+/// (kirra-taj's WP-10 classifier) can emit it without depending on this
+/// checker crate; re-exported here so every existing consumer path keeps
+/// working unchanged.
+pub use kirra_core::trajectory::PerceivedPedestrian;
 
 /// Parameters of the VRU bound. Every default is CONSERVATIVE-FIRST and
 /// **VALIDATION-PENDING** (deployment-tunable per ODD; see the design doc

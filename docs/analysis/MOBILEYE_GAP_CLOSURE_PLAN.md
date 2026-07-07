@@ -65,7 +65,9 @@ Net: **17 of 22 gaps have a fully or substantially closable software component i
 
 | WP-08 | **DONE** 2026-07-07 | cargo-mutants gate on the checker: CI `mutation-gate` lane runs `--in-diff` over the PR's checker diff (new code must kill its mutants; non-checker PRs skip in seconds); test scope pinned in `.cargo/mutants.toml` (checker + adapter validation suite — measured: own-tests-only overstates survivors 318 vs 202). Baseline debt register `docs/testing/MUTATION_BASELINE.md` + 198-entry snapshot, shrink-only ratchet with triage policy. Starter kill: the ego-frame rotation cluster (`validation.rs:496`×3 + `415:38`) via a 45°-heading cut-in test — every prior cut-in test sat at the sin=0 degenerate point. parko-core RSS = next crate under the gate (own workspace, follow-up) |
 
-Wave 0 complete; Wave 1 in progress (WP-07 ✓ → WP-09 ✓ → WP-08 ✓ → WP-10 pedestrian-RSS feed).
+| WP-10 | **SUBSTANTIALLY DONE** 2026-07-07 | The pedestrian-RSS PRODUCER: cluster extent threaded through Taj Phase-A (`cluster_objects_with_extent`/`process_parts` — contracts untouched), `Track` gains extent+persistence, `TajTracker::classify_pedestrians` (uncertainty promotes TO pedestrian; large/fast → vehicle-only; classified peds stay objects — strictly additive). `PerceivedPedestrian` moved to kirra-core (re-exported from `kirra_trajectory::vru`, all paths unchanged) so producer+checker share the lean contract. AdaptorState pedestrian channel with enabled-but-silent/stale/poisoned → fail-closed snapshot semantics. Evidence: 6 classifier tests incl. the end-to-end proof (Taj-classified kerbside ped → checker refuses an 8 m/s pass admitted without the channel) + 4 channel tests. REMAINING (recorded in PEDESTRIAN_RSS.md): the ros2-gated node.rs subscription + env gate + MRC-on-None consumption — CI-ros2-lane work; params VALIDATION-PENDING |
+
+Wave 1 complete (WP-07 ✓ → WP-09 ✓ → WP-08 ✓ → WP-10 ✓ substantially — node wiring recorded). Next: Wave 2 (WP-12 signature-verified OTA staging → WP-13 Uptane roles → WP-14 key rotation → WP-15 cert lifecycle → WP-16 measured-boot tooling).
 
 ## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
 

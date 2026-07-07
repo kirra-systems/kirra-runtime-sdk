@@ -58,6 +58,31 @@ pub enum TrajectoryVerdict {
 /// `longitudinal_safe_distance` + `lateral_safe_distance` per object × per
 /// pose). Position is the centroid in world frame; heading is the object's
 /// motion direction.
+/// A perceived pedestrian / VRU — the CONTRACT type shared by the producer
+/// (kirra-taj's WP-10 classifier) and the checker (`kirra_trajectory::vru`'s
+/// omnidirectional reachable-set bound), living here in the lean contract
+/// crate exactly like [`PerceivedObject`]. Deliberately minimal for v0: the
+/// omnidirectional model needs only a position (velocity is accepted for
+/// forward-compatibility with the directed refinement but does not weaken
+/// the v0 bound).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerceivedPedestrian {
+    pub id: u64,
+    /// Position, ego-world frame (same frame as `PerceivedObject.pos`).
+    pub pos: Point,
+    /// Tracked velocity vector, m/s (informational in v0 — the reachable
+    /// disc assumes `v_ped_max` in every direction regardless).
+    pub vel: Point,
+    /// Age of this measurement at evaluation time, s (#789 F8): how long ago the
+    /// pedestrian was observed. The reachable disc has ALREADY been growing for
+    /// `age_s` before the trajectory's `t = 0`, so the bound adds `v_ped_max ·
+    /// age_s` to the required clearance. Frozen into the wire shape before the
+    /// producer existed, so the age term never had to be retrofitted. A fresh
+    /// synchronous measurement passes `0.0`; a negative or non-finite age is a
+    /// perception fault and fails closed (breach).
+    pub age_s: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PerceivedObject {
     pub id: u64,
