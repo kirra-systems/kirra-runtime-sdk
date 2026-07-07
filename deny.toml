@@ -14,10 +14,13 @@
 #               registries (both lockfiles are 100% crates.io today; this
 #               pins that property).
 #
-# `advisories` runs as a separate NON-GATING CI step: it goes red on events
-# external to the repo (a new CVE), which is signal for a human, not a
-# reason to block an unrelated PR. Tighten to gating once triage rotation
-# exists.
+# `advisories` runs as a separate GATING CI step over both workspaces
+# (WP-04 / MGA G-6): a new RUSTSEC advisory reds the PR until the dependency
+# is bumped or the advisory is triaged into `[advisories].ignore` below with
+# a written reason + removal condition. An advisory firing on an unrelated
+# PR is by design — someone triages it (bump or scoped ignore entry), and
+# every PR after that is green again; the previous non-gating mode let every
+# advisory pass unseen instead.
 
 [graph]
 # Resolve the graph for the shipped feature set (default features), all
@@ -73,6 +76,17 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
 
 [advisories]
-# Consumed by the non-gating CI step (see header). db-path/db-urls default.
+# Consumed by the GATING CI advisories steps (see header). db-path/db-urls
+# default. Each ignore entry carries its justification and removal
+# condition — re-audit on every release.
 version = 2
 yanked = "warn"
+ignore = [
+    # rustls-pemfile is unmaintained (its PEM parsing moved into
+    # rustls-pki-types::pem); no drop-in upgrade exists. It parses
+    # OPERATOR-SUPPLIED PEM files (TLS cert/key loading), not
+    # attacker-controlled wire input, and the advisory is unmaintained-class
+    # only (no known vulnerability). Remove when the dependents migrate to
+    # rustls-pki-types PemObject (track reqwest/rustls bumps).
+    { id = "RUSTSEC-2025-0134", reason = "unmaintained; no drop-in upgrade; parses operator-supplied PEM only" },
+]
