@@ -131,22 +131,17 @@ crates/kirra-trajectory/src/validation.rs:754:47: replace / with * in predictive
 crates/kirra-trajectory/src/validation.rs:765:32: replace - with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:766:32: replace - with + in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:769:32: replace * with + in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:769:32: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:769:37: replace + with - in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:769:45: replace * with + in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:769:45: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:770:26: delete - in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:770:33: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:770:38: replace + with - in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:770:46: replace * with + in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:775:29: replace > with == in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:775:29: replace > with >= in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:783:33: replace * with + in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:783:33: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:783:41: replace + with * in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:783:41: replace + with - in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:783:47: replace * with + in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:783:47: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:784:45: replace < with <= in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:784:45: replace < with == in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:784:45: replace < with > in predictive_rss_breach
@@ -159,11 +154,9 @@ crates/kirra-trajectory/src/validation.rs:806:29: replace < with > in predictive
 crates/kirra-trajectory/src/validation.rs:806:58: replace && with || in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:817:29: delete - in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:817:42: replace + with - in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:817:48: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:818:50: replace > with >= in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:822:46: replace && with || in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:827:44: replace * with + in predictive_rss_breach
-crates/kirra-trajectory/src/validation.rs:827:44: replace * with / in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:831:33: replace < with <= in predictive_rss_breach
 crates/kirra-trajectory/src/validation.rs:931:39: replace >= with < in check_command_conforms
 crates/kirra-trajectory/src/validation.rs:941:25: replace > with >= in check_command_conforms
