@@ -28,7 +28,7 @@ use kirra_core::kinematics_contract::{
 use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::FleetPosture;
 use parko_core::rss::{
-    lateral_safe_distance, longitudinal_safe_distance, opposite_direction_safe_distance,
+    lateral_safe_distance_split, longitudinal_safe_distance, opposite_direction_safe_distance,
     RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
 };
 
@@ -51,6 +51,25 @@ const SLOW_LOOP_MAX_CORRIDOR_AGE_MS: u64 = 500;
 /// RSS reaction time (s). Per IEEE 2846-2022 §5.1 the canonical value
 /// is 0.5 s for SAE-Level-4 stacks; we use the conservative end.
 const RSS_REACTION_TIME_S: f64 = 0.5;
+
+/// WP-07 (#408 Option A) — the minimum committed lateral BRAKING deceleration
+/// (`a_lat,brake,min`) as a FRACTION of the lateral-accel budget the caller
+/// passes (which now plays only the IEEE 2846 §5.2 response-phase drift role,
+/// `a_lat,accel,max`). Expressed as a fraction — not an absolute — so it
+/// composes with BOTH profile selection (Nominal 3.5 vs MRC 1.5 m/s²) and any
+/// derated budget: the brake role can never exceed the accel role, which is
+/// exactly the condition under which the split bound is STRICTLY >= the
+/// legacy single-parameter bound on every input (property-tested in
+/// parko-core `test_lat_split_conservative_vs_legacy`). Deratings therefore
+/// remain tightening-or-equal. VALIDATION-PENDING: the deployed value must be
+/// safety-case-derived (docs/CONTRACT_PROFILES.md discipline); 0.7 is the
+/// placeholder pending #408 sign-off.
+const RSS_LAT_BRAKE_FRACTION: f64 = 0.7;
+
+/// WP-07 — the IEEE 2846 §5.2 lateral-fluctuation margin `mu` (metres),
+/// previously an implicit 0. Additive, so strictly conservative.
+/// VALIDATION-PENDING placeholder pending #408 sign-off.
+const RSS_MU_LATERAL_M: f64 = 0.2;
 
 /// Speed slack (m/s) on the RSS-Rule-4 assured-clear-distance bound, to avoid
 /// rejecting a trajectory for float noise / a sub-decimetre overshoot of the cap.
@@ -492,11 +511,13 @@ pub fn validate_trajectory_slow_capped(
             let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
             if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
                 let ego_lat_vel = 0.0; // straight-following assumption per §3
-                let lat_required = lateral_safe_distance(
+                let lat_required = lateral_safe_distance_split(
                     ego_lat_vel,
                     obj_lat_vel,
                     kinematics.max_lateral_accel_mps2,
+                    RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
                     RSS_REACTION_TIME_S,
+                    RSS_MU_LATERAL_M,
                 );
                 if dy_ego.abs() < lat_required {
                     return TrajectoryVerdict::MRCFallback;
@@ -799,11 +820,13 @@ fn predictive_rss_breach(
             // urban minimum), mirroring the snapshot pass — see its rationale.
             let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
             if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
-                let lat_required = lateral_safe_distance(
+                let lat_required = lateral_safe_distance_split(
                     0.0, // straight-following assumption per §3 (ego lateral vel)
                     obj_lat_v,
                     max_lateral_accel_mps2,
+                    RSS_LAT_BRAKE_FRACTION * max_lateral_accel_mps2,
                     RSS_REACTION_TIME_S,
+                    RSS_MU_LATERAL_M,
                 );
                 if dy_ego.abs() < lat_required {
                     return true;

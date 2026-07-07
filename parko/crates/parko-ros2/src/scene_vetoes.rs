@@ -201,6 +201,8 @@ mod tests {
             brake_min: 1.0,
             brake_max: 4.0,
             lat_accel_max: 0.5,
+            lat_brake_min: 0.35, // 0.7 × lat_accel_max (WP-07 split)
+            mu_lateral_m: 0.2,
         }
     }
 

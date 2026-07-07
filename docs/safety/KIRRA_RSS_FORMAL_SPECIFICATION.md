@@ -237,7 +237,7 @@ redundancy_disabled
 | Clause | Subject | KIRRA Implementation | Test Case |
 |--------|---------|---------------------|----------|
 | §3 Longitudinal Safety | Rear-end / Head-on collision prevention | `longitudinal_safe_distance(v_ego, v_obj, t_reaction, a_ego, a_obj)` | `rss_longitudinal_covers_...` |
-| §4 Lateral Safety | Side collision prevention | `lateral_safe_distance(v_lat_ego, v_lat_obj, a_lat_max, t_reaction)` | `rss_lateral_covers_...` |
+| §4 Lateral Safety | Side collision prevention | `lateral_safe_distance_split(v_lat_ego, v_lat_obj, a_lat_accel_max, a_lat_brake_min, t_reaction, mu)` — the IEEE 2846 §5.2 roles taken SEPARATELY (#408 Option A / WP-07): each actor drifts toward the other with up to `a_lat,accel,max` during `t_reaction`, then brakes laterally with at least `a_lat,brake,min`; `mu` is the explicit additive lateral-fluctuation margin (previously an implicit 0). Deployed: `a_lat,brake,min = RSS_LAT_BRAKE_FRACTION (0.7, VALIDATION-PENDING) × a_lat,accel,max`, `mu = 0.2 m (VALIDATION-PENDING)`. With `brake ≤ accel` and `mu ≥ 0` the split is proven ≥ the legacy single-parameter bound on every input (`test_lat_split_conservative_vs_legacy`, 256-case property), so the migration is strictly conservative. | `rss_lateral_covers_...`, `test_lat_split_conservative_vs_legacy` |
 | §4 §3 Conjunction | Collision ⇔ unsafe longitudinally AND laterally | `if dx_ego <= CONFLICT_M && (lon_unsafe \| lat_closing): check_lateral` | `rss_conjunction_still_rejects_...` |
 | Rule 4 (Occlusion) | Limited-visibility speed bound | `v ≤ sqrt((a*t)² + 2*a*remaining) - a*t` | `acda_...` |
 | Reaction Time | Human reaction latency | `RSS_REACTION_TIME_S = 0.5 s` (configurable) | `rss_reaction_time_is_0_5s` |
