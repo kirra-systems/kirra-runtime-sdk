@@ -92,7 +92,12 @@ src/
 ├── verifier.rs               — AppState, FleetPosture, DAG traversal, TransportIdentityConfig
 ├── verifier_store/           — SQLite persistence (all tables; WAL mode); module dir:
 │                               mod.rs + per-table submodules (nodes, attestation, audit,
-│                               federation, epoch, principals, ota_campaigns, …)
+│                               federation, epoch, principals, ota_campaigns, …).
+│                               migrations.rs (WP-18/G-20): versioned schema framework
+│                               over PRAGMA user_version — SCHEMA_VERSION, fail-closed
+│                               assert_schema_not_future (refuse a newer-binary DB),
+│                               run_migrations (apply registered steps + stamp); new()
+│                               gates on it. VerifierStore::schema_version() reads it
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,

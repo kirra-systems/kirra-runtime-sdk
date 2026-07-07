@@ -22,7 +22,7 @@ is what an integrator can touch from outside:
 | Prometheus exposition (metric names + label vocabularies) | `src/metrics.rs` (WS-0.5; label values are pinned by test) |
 | C FFI (`include/kirra.h`, `src/ffi.rs`) | ADR-0006 Clause 3 boundary |
 | Wire schemas: capture schema (`kirra-capture-schema`), governor wire (`kirra-wire-client`), hypervisor contract channel (`GovernorContractView`, frozen `#[repr(C)]`) | crate docs + `docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md` |
-| SQLite schema (forward migration expectations) | `src/verifier_store/` (module; tables in `mod.rs` + per-domain files) |
+| SQLite schema (forward migration expectations) | `src/verifier_store/` (module; tables in `mod.rs` + per-domain files). **WP-18/G-20**: the schema is now version-stamped via `PRAGMA user_version` and gated by `verifier_store::migrations` (`SCHEMA_VERSION` = current target). `new()` FAIL-CLOSES the downgrade direction — a database whose `user_version` exceeds this binary's `SCHEMA_VERSION` (written by a newer binary) is REFUSED rather than opened (a destructive-migration MAJOR the safety-asymmetry clause below already implies). Additive change → bump `SCHEMA_VERSION` + push a `Migration` step (MINOR); destructive → MAJOR. |
 | Release artifact layout (tarball structure, SBOM, signature bundles) | `.github/workflows/release.yml` |
 
 ## 2. Semantic versioning rules
