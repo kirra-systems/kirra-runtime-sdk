@@ -26,8 +26,10 @@ __pycache__/
 coverage-report/
 lcov.info
 
-# cargo-mutants output (quality-hardening pass)
+# cargo-mutants output (quality-hardening pass; `.run*` = kept prior runs
+# for scope comparison, e.g. WP-08's own-tests vs +adapter-tests baselines)
 mutants.out/
+mutants.out.run*/
 
 # colcon build artifacts (ros2_ws)
 ros2_ws/build/
