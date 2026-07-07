@@ -30,6 +30,7 @@ lcov.info
 # for scope comparison, e.g. WP-08's own-tests vs +adapter-tests baselines)
 mutants.out/
 mutants.out.run*/
+mutants.kill-check/
 
 # colcon build artifacts (ros2_ws)
 ros2_ws/build/

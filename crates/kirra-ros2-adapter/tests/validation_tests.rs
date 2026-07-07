@@ -314,6 +314,78 @@ fn snapshot_rss_uses_velocity_vector_not_orientation_dc1() {
 }
 
 #[test]
+fn snapshot_rss_lateral_rotation_is_frame_correct_at_nonzero_heading() {
+    // MUTATION-KILL (WP-08; mutants.out survivors at validation.rs:496): the
+    // ego-frame lateral object velocity is `-sin_h·vx + cos_h·vy`. Every prior
+    // cut-in test used ego heading 0 (sin_h = 0), so arithmetic corruptions of
+    // the rotation (delete `-`, `*`→`+`, `+`→`-`, ...) survived the whole
+    // suite. Two cases at heading π/4 where the rotation is load-bearing:
+    //
+    //  A. a PARALLEL traveler (world velocity along the ego heading): true
+    //     lateral component is exactly 0 → no cut-in → Accept. Every
+    //     corrupted rotation reads ≥ ~1 m/s of phantom lateral motion →
+    //     spurious cut-in → MRC (the mutant flips Accept→MRC).
+    //  B. a TRUE diagonal cut-in (world velocity perpendicular to the ego
+    //     heading, closing): true lateral ≈ −2.83 m/s → MRC. The delete-`-`
+    //     corruption reads it as 0 → no cut-in → Accept (flips MRC→Accept).
+    let heading = std::f64::consts::FRAC_PI_4;
+    let (sin_h, cos_h) = heading.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: heading },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    // Ego-frame offset (dx = 3 ahead, dy = 1.5 left) → world frame.
+    let (dx_ego, dy_ego) = (3.0, 1.5);
+    let pos = Point {
+        x_m: 10.0 + dx_ego * cos_h - dy_ego * sin_h,
+        y_m: dx_ego * sin_h + dy_ego * cos_h,
+    };
+
+    // A: moving WITH the ego heading (pure longitudinal, pulling away from the
+    // stopped ego) — zero true lateral component.
+    let parallel = PerceivedObject {
+        id: 1,
+        pos,
+        velocity_mps: (2.0f64).hypot(2.0),
+        heading_rad: heading,
+        vel: Point { x_m: 2.0, y_m: 2.0 },
+    };
+    let v = validate_trajectory_slow(
+        &ego, &corridor, std::slice::from_ref(&parallel), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        v,
+        TrajectoryVerdict::Accept,
+        "a parallel traveler at 45° ego heading has zero lateral motion and must be \
+         admitted — a phantom cut-in here means the frame rotation is corrupted; got {v:?}"
+    );
+
+    // B: moving PERPENDICULAR to the ego heading, closing on the ego path.
+    let cutting_in = PerceivedObject {
+        id: 2,
+        pos,
+        velocity_mps: (2.0f64).hypot(2.0),
+        heading_rad: heading - std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 2.0, y_m: -2.0 },
+    };
+    let v = validate_trajectory_slow(
+        &ego, &corridor, std::slice::from_ref(&cutting_in), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        v,
+        TrajectoryVerdict::MRCFallback,
+        "a true diagonal cut-in at 45° ego heading must be refused — reading its \
+         lateral motion as ~0 means the frame rotation is corrupted; got {v:?}"
+    );
+}
+
+#[test]
 fn snapshot_rss_catches_a_forward_facing_lateral_cut_in_dc1() {
     // An object FACING forward (heading 0) but MOVING laterally into the ego path
     // must be refused. The orientation-based form read its lateral motion as ~0

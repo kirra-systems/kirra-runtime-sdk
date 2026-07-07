@@ -63,7 +63,9 @@ Net: **17 of 22 gaps have a fully or substantially closable software component i
 
 | WP-09 | **DONE** 2026-07-07 | S-DG1a/b + c-adapter implemented per STAGE_S-DG1 (all three recommended decisions adopted: reuse the comparator accumulator as significance, immediate-Degraded, DI sink). Verifier: `GovernorDivergence` reason+trigger, `apply_governor_divergence_state` (immediate Degraded, comparator-owned escalation → STICKY LockedOut, agreement-streak recovery), composed into Degraded/LockedOut clauses AND the #688 sticky guard. parko-kirra: `PostureSignalSink` seam (None = byte-identical), emission mapping tests; `PostureEngineSenderSink` adapter (try_send, fail-safe drop semantics, `verifier-sink` feature). Full §5 test matrix + end-to-end worker test (trigger → Degraded → sticky LockedOut surviving healthy recalc). REMAINING before ENFORCED (recorded in the doc): live parko-ros2 node wiring (remote-verifier topology needs a trigger transport or embedded engine). 2,499 workspace + 179 parko-kirra tests green |
 
-Wave 0 complete; Wave 1 in progress (WP-07 ✓ → WP-09 ✓ → WP-08 mutation gate → WP-10 pedestrian-RSS feed).
+| WP-08 | **DONE** 2026-07-07 | cargo-mutants gate on the checker: CI `mutation-gate` lane runs `--in-diff` over the PR's checker diff (new code must kill its mutants; non-checker PRs skip in seconds); test scope pinned in `.cargo/mutants.toml` (checker + adapter validation suite — measured: own-tests-only overstates survivors 318 vs 202). Baseline debt register `docs/testing/MUTATION_BASELINE.md` + 198-entry snapshot, shrink-only ratchet with triage policy. Starter kill: the ego-frame rotation cluster (`validation.rs:496`×3 + `415:38`) via a 45°-heading cut-in test — every prior cut-in test sat at the sin=0 degenerate point. parko-core RSS = next crate under the gate (own workspace, follow-up) |
+
+Wave 0 complete; Wave 1 in progress (WP-07 ✓ → WP-09 ✓ → WP-08 ✓ → WP-10 pedestrian-RSS feed).
 
 ## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
 
