@@ -323,3 +323,193 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// WP-12 (MGA G-7) — governor ARTIFACT release signatures.
+// ---------------------------------------------------------------------------
+
+/// WP-12 — sign/verify a governor ARTIFACT digest (the OTA campaign's
+/// content identity), domain-separated from the per-command release token
+/// above: a signature over an artifact can never be replayed as a command
+/// release nor vice versa. The payload signs the VALIDATED 64-lowercase-hex
+/// ASCII digest (the canonical representation campaigns, stores, and the
+/// assignment API already exchange), length-prefixed per the house style.
+pub mod artifact_release {
+    use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+
+    const ARTIFACT_RELEASE_DOMAIN: &[u8] = b"KIRRA-GOVERNOR-ARTIFACT-RELEASE-V1";
+
+    /// Why an artifact-release signature was refused (or could not be made).
+    /// Fail-closed: every variant means "do not stage/serve this artifact".
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ArtifactReleaseError {
+        /// The digest is not 64 lowercase hex chars — refuse before any crypto.
+        MalformedDigest,
+        /// The signature is not valid base64 / not 64 bytes.
+        MalformedSignature,
+        /// The signature does not verify against the release key.
+        SignatureInvalid,
+    }
+
+    fn digest_hex_valid(digest_hex: &str) -> bool {
+        digest_hex.len() == 64
+            && digest_hex.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    }
+
+    fn payload(digest_hex: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ARTIFACT_RELEASE_DOMAIN.len() + 8 + digest_hex.len());
+        out.extend_from_slice(ARTIFACT_RELEASE_DOMAIN);
+        out.extend_from_slice(&(digest_hex.len() as u64).to_le_bytes());
+        out.extend_from_slice(digest_hex.as_bytes());
+        out
+    }
+
+    /// Sign an artifact digest with the governor release key → base64
+    /// signature (the campaign-record / assignment-API wire form).
+    pub fn sign_artifact_release(
+        digest_hex: &str,
+        signing_key: &SigningKey,
+    ) -> Result<String, ArtifactReleaseError> {
+        if !digest_hex_valid(digest_hex) {
+            return Err(ArtifactReleaseError::MalformedDigest);
+        }
+        let sig = signing_key.sign(&payload(digest_hex));
+        Ok(base64_encode(&sig.to_bytes()))
+    }
+
+    /// Verify a base64 artifact-release signature over `digest_hex` against
+    /// the pinned release verifying key. `verify_strict` (the attestation
+    /// path — rejects malleable/small-order points); every failure mode is a
+    /// distinct fail-closed error.
+    pub fn verify_artifact_release(
+        digest_hex: &str,
+        signature_b64: &str,
+        release_vk: &VerifyingKey,
+    ) -> Result<(), ArtifactReleaseError> {
+        if !digest_hex_valid(digest_hex) {
+            return Err(ArtifactReleaseError::MalformedDigest);
+        }
+        let bytes = base64_decode(signature_b64).ok_or(ArtifactReleaseError::MalformedSignature)?;
+        let arr: [u8; 64] =
+            bytes.try_into().map_err(|_| ArtifactReleaseError::MalformedSignature)?;
+        let sig = Signature::from_bytes(&arr);
+        release_vk
+            .verify_strict(&payload(digest_hex), &sig)
+            .map_err(|_| ArtifactReleaseError::SignatureInvalid)
+    }
+
+    // Minimal standard-alphabet base64 (with padding) — this crate is
+    // deliberately dependency-lean (see the manifest header), so the ~30
+    // lines are inlined rather than pulling the `base64` crate into the
+    // actuation-path dependency tree.
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    fn base64_encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            out.push(B64[(n >> 18) as usize & 63] as char);
+            out.push(B64[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+        }
+        out
+    }
+
+    fn base64_decode(s: &str) -> Option<Vec<u8>> {
+        let s = s.trim_end_matches('=');
+        let mut out = Vec::with_capacity(s.len() * 3 / 4);
+        let mut acc: u32 = 0;
+        let mut bits = 0u32;
+        for c in s.bytes() {
+            let v = B64.iter().position(|&b| b == c)? as u32;
+            acc = (acc << 6) | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ed25519_dalek::SigningKey;
+
+        fn key() -> SigningKey {
+            SigningKey::from_bytes(&[7u8; 32])
+        }
+        const DIGEST: &str =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        #[test]
+        fn round_trip_signs_and_verifies() {
+            let sk = key();
+            let sig = sign_artifact_release(DIGEST, &sk).unwrap();
+            assert!(verify_artifact_release(DIGEST, &sig, &sk.verifying_key()).is_ok());
+        }
+
+        #[test]
+        fn wrong_key_is_refused() {
+            let sig = sign_artifact_release(DIGEST, &key()).unwrap();
+            let other = SigningKey::from_bytes(&[9u8; 32]);
+            assert_eq!(
+                verify_artifact_release(DIGEST, &sig, &other.verifying_key()),
+                Err(ArtifactReleaseError::SignatureInvalid)
+            );
+        }
+
+        #[test]
+        fn signature_over_a_different_digest_is_refused() {
+            let sk = key();
+            let sig = sign_artifact_release(DIGEST, &sk).unwrap();
+            let other_digest =
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            assert_eq!(
+                verify_artifact_release(other_digest, &sig, &sk.verifying_key()),
+                Err(ArtifactReleaseError::SignatureInvalid)
+            );
+        }
+
+        #[test]
+        fn malformed_digest_and_signature_fail_closed_before_crypto() {
+            let sk = key();
+            assert_eq!(
+                sign_artifact_release("ABCDEF", &sk),
+                Err(ArtifactReleaseError::MalformedDigest)
+            );
+            assert_eq!(
+                verify_artifact_release("not-hex", "AAAA", &sk.verifying_key()),
+                Err(ArtifactReleaseError::MalformedDigest)
+            );
+            assert_eq!(
+                verify_artifact_release(DIGEST, "@@not-base64@@", &sk.verifying_key()),
+                Err(ArtifactReleaseError::MalformedSignature)
+            );
+            assert_eq!(
+                verify_artifact_release(DIGEST, "AAAA", &sk.verifying_key()),
+                Err(ArtifactReleaseError::MalformedSignature),
+                "wrong length after decode"
+            );
+        }
+
+        #[test]
+        fn base64_round_trips() {
+            for len in 0..70 {
+                let data: Vec<u8> = (0..len as u8).collect();
+                let enc = base64_encode(&data);
+                assert_eq!(base64_decode(&enc).unwrap(), data, "len {len}");
+            }
+        }
+
+        /// Domain separation: an artifact signature is NOT a valid command
+        /// release token signature (and the payloads differ by construction).
+        #[test]
+        fn artifact_domain_is_separated_from_command_release() {
+            assert_ne!(ARTIFACT_RELEASE_DOMAIN, super::super::RELEASE_DOMAIN);
+        }
+    }
+}

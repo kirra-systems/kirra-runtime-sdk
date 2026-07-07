@@ -196,6 +196,13 @@ pub struct Campaign {
     pub campaign_id: String,
     /// SHA-256 hex (64 lowercase) of the signed governor artifact being rolled.
     pub artifact_digest: String,
+    /// WP-12 (MGA G-7) — the governor artifact-release signature over
+    /// `artifact_digest` (base64 Ed25519, `kirra_release_token::artifact_release`
+    /// domain). Optional at the record level for pre-WP-12 campaigns; a node
+    /// with a provisioned release key refuses to stage an assignment without it,
+    /// so unsigned campaigns are the rejected legacy mode fleet-side.
+    #[serde(default)]
+    pub artifact_signature_b64: Option<String>,
     pub artifact_version: String,
     /// Target cohort labels (node groups). Non-empty.
     pub cohorts: Vec<String>,
@@ -247,6 +254,7 @@ impl Campaign {
         Ok(Campaign {
             campaign_id,
             artifact_digest,
+            artifact_signature_b64: None,
             artifact_version,
             cohorts,
             stages,
@@ -257,6 +265,15 @@ impl Campaign {
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         })
+    }
+
+    /// WP-12 — attach the governor artifact-release signature (base64 Ed25519
+    /// over `artifact_digest`; see `kirra_release_token::artifact_release`).
+    /// Builder-style so the existing constructor call sites do not ripple.
+    #[must_use]
+    pub fn with_artifact_signature(mut self, signature_b64: impl Into<String>) -> Self {
+        self.artifact_signature_b64 = Some(signature_b64.into());
+        self
     }
 
     /// Arm the campaign for rollout: `Draft → Staged`. The deliberate operator
@@ -400,6 +417,10 @@ pub struct NodeAssignment {
     /// The signed artifact digest the node should run (`None` when not rolled — the
     /// node stays on its current/baseline artifact).
     pub artifact_digest: Option<String>,
+    /// WP-12 — the release signature over `artifact_digest` (absent on a
+    /// legacy unsigned campaign; a key-provisioned node then refuses to stage).
+    #[serde(default)]
+    pub artifact_signature_b64: Option<String>,
     pub artifact_version: Option<String>,
 }
 
@@ -471,6 +492,7 @@ pub fn resolve_node_assignment(
             rolled: true,
             campaign_id: Some(c.campaign_id.clone()),
             artifact_digest: Some(c.artifact_digest.clone()),
+            artifact_signature_b64: c.artifact_signature_b64.clone(),
             artifact_version: Some(c.artifact_version.clone()),
         },
         None => NodeAssignment {
@@ -478,6 +500,7 @@ pub fn resolve_node_assignment(
             rolled: false,
             campaign_id: None,
             artifact_digest: None,
+            artifact_signature_b64: None,
             artifact_version: None,
         },
     }

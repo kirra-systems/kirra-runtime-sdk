@@ -44,6 +44,7 @@ fn node_runs_cycle(
     let view = AssignmentView {
         rolled: assignment.rolled,
         artifact_digest: assignment.artifact_digest.clone(),
+        artifact_signature_b64: assignment.artifact_signature_b64.clone(),
         artifact_version: assignment.artifact_version.clone(),
         campaign_id: assignment.campaign_id.clone(),
     };
@@ -203,4 +204,77 @@ fn unhealthy_node_rolls_back_and_is_not_counted_adopted() {
         prog.applied_nodes, 1,
         "only the healthy node adopted; the rolled-back node is not counted"
     );
+}
+
+/// WP-12 — the release signature flows verifier → assignment → node, and the
+/// node's provisioned installer ENFORCES it: a correctly-signed campaign
+/// stages and commits; a FORGED signature and an UNSIGNED (legacy) campaign
+/// both leave a key-provisioned node on its baseline with the slot never armed.
+#[test]
+fn signed_campaign_flows_the_release_signature_to_a_verifying_node() {
+    use kirra_ota_installer::InstallError;
+    use kirra_release_token::artifact_release::sign_artifact_release;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let artifact = dir.path().join("governor-v2.bin");
+    std::fs::write(&artifact, b"signed governor v2").expect("write artifact");
+    let digest = artifact_sha256_hex(&artifact).expect("digest");
+
+    let release_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let sig = sign_artifact_release(&digest, &release_key).expect("sign");
+
+    // Verifier side: a SIGNED campaign, armed and advanced to 100%.
+    let mut store = VerifierStore::new(":memory:").expect("store");
+    let mut c =
+        Campaign::new("camp-signed", &digest, "v2", vec!["fleet".into()], vec![50, 100], 1)
+            .unwrap()
+            .with_artifact_signature(&sig);
+    store.insert_campaign(&c).expect("insert");
+    c.arm(2).unwrap();
+    store.update_campaign(&c, "OtaCampaignArmed").expect("arm");
+    // One advance → Rolling@50% (a single [100] stage would jump to Completed,
+    // which resolve_node_assignment excludes).
+    c.advance(FleetPosture::Nominal, 3).unwrap();
+    store.update_campaign(&c, "OtaCampaignAdvanced").expect("advance");
+
+    // A node deterministically inside the 50% bucket fetches the assignment,
+    // which carries the signature.
+    let node = (0..500)
+        .map(|i| format!("node-{i}"))
+        .find(|n| is_node_rolled("camp-signed", n, 50))
+        .expect("a node in the 50% bucket");
+    let active = store.load_active_campaigns().expect("active");
+    let assignment = resolve_node_assignment(&node, &["fleet".into()], &active);
+    assert!(assignment.rolled);
+    assert_eq!(assignment.artifact_signature_b64.as_deref(), Some(sig.as_str()));
+
+    // Node side: a key-provisioned installer accepts the signed stage...
+    let mut inst = Installer::new(InMemoryBootController::new(Slot::A), 1)
+        .expect("installer")
+        .with_release_key(release_key.verifying_key());
+    let sig_from_assignment = assignment.artifact_signature_b64.as_deref().unwrap();
+    inst.stage_verified_signed(&artifact, &digest, sig_from_assignment)
+        .expect("a correctly-signed artifact stages");
+    inst.begin_trial().expect("trial");
+    match inst.report_health(true).expect("health") {
+        HealthOutcome::Committed { active } => assert_eq!(active, Slot::B),
+        other => panic!("healthy signed rollout must commit, got {other:?}"),
+    }
+
+    // ...and refuses a FORGED signature (attacker key), slot never armed.
+    let attacker = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+    let forged = sign_artifact_release(&digest, &attacker).expect("sign");
+    let mut inst2 = Installer::new(InMemoryBootController::new(Slot::A), 1)
+        .expect("installer")
+        .with_release_key(release_key.verifying_key());
+    assert!(matches!(
+        inst2.stage_verified_signed(&artifact, &digest, &forged),
+        Err(InstallError::ArtifactSignatureInvalid)
+    ));
+
+    // ...and refuses the UNSIGNED legacy path outright.
+    assert!(matches!(
+        inst2.stage(&artifact, &digest),
+        Err(InstallError::SignatureRequired)
+    ));
 }

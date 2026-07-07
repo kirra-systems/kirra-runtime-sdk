@@ -67,7 +67,15 @@ Net: **17 of 22 gaps have a fully or substantially closable software component i
 
 | WP-10 | **SUBSTANTIALLY DONE** 2026-07-07 | The pedestrian-RSS PRODUCER: cluster extent threaded through Taj Phase-A (`cluster_objects_with_extent`/`process_parts` — contracts untouched), `Track` gains extent+persistence, `TajTracker::classify_pedestrians` (uncertainty promotes TO pedestrian; large/fast → vehicle-only; classified peds stay objects — strictly additive). `PerceivedPedestrian` moved to kirra-core (re-exported from `kirra_trajectory::vru`, all paths unchanged) so producer+checker share the lean contract. AdaptorState pedestrian channel with enabled-but-silent/stale/poisoned → fail-closed snapshot semantics. Evidence: 6 classifier tests incl. the end-to-end proof (Taj-classified kerbside ped → checker refuses an 8 m/s pass admitted without the channel) + 4 channel tests. REMAINING (recorded in PEDESTRIAN_RSS.md): the ros2-gated node.rs subscription + env gate + MRC-on-None consumption — CI-ros2-lane work; params VALIDATION-PENDING |
 
-Wave 1 complete (WP-07 ✓ → WP-09 ✓ → WP-08 ✓ → WP-10 ✓ substantially — node wiring recorded). Next: Wave 2 (WP-12 signature-verified OTA staging → WP-13 Uptane roles → WP-14 key rotation → WP-15 cert lifecycle → WP-16 measured-boot tooling).
+Wave 1 complete (WP-07 ✓ → WP-09 ✓ → WP-08 ✓ → WP-10 ✓ substantially — node wiring recorded).
+
+## 5a. Wave 2 status
+
+| WP | Status | Evidence |
+|---|---|---|
+| WP-12 | **DONE** 2026-07-07 | Signature-verified OTA staging (first Uptane slice). `kirra_release_token::artifact_release` — domain-separated sign/verify over the artifact digest (own tests incl. wrong-key/replay/malformed fail-closed). Installer: `with_release_key` provisions the key → `stage_verified_signed` (verify sig THEN digest); once provisioned, the unsigned `stage` is refused (`SignatureRequired`) — hash-only is the rejected legacy mode. Signature flows verifier→node: `Campaign.artifact_signature_b64` (store column + ADD-COLUMN migration + create route), `NodeAssignment`/`AssignmentView`/`PullAction` carry it, `kirra-ota-ctl pull` verifies before download (`--release-pubkey`/`KIRRA_OTA_RELEASE_PUBKEY`; provisioned-but-unsigned → refuse, unprovisioned → warn). Tamper suite (installer, 7 tests) + end-to-end drill extension (`signed_campaign_flows_the_release_signature_to_a_verifying_node`): signed→commit, forged→refuse, unsigned→refuse. 2,510+ tests green. NOTE: the installer checks a real SIGNATURE now (not just a hash) — the MGA G-7 "installer verifies a hash not a signature" finding is closed; full Uptane role separation is WP-13 |
+
+Next: Wave 2 continues (WP-13 Uptane roles → WP-14 key rotation → WP-15 cert lifecycle → WP-16 measured-boot tooling).
 
 ## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
 

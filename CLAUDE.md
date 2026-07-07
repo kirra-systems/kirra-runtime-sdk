@@ -183,7 +183,7 @@ src/
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
 | `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
-| `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
+| `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + WP-12 `artifact_signature_b64` release signature + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
 | `node_artifact_status` | WS-4 (Track 3) per-node adoption reports (node_id PK + applied_digest + campaign_id + version + reported_at_ms + `attested`; upsert monotonic on reported_at_ms, non-audit-chained observability; the fleet summary's `applied_nodes`/`attested_nodes` join source) |
 
 ---
