@@ -85,8 +85,8 @@ pub use mick_llm::{
 
 pub mod learned;
 pub use learned::{
-    LearnedManeuverPlanner, LearnedPlanner, QuantizedLearnedPlanner, QuantizedScorerWeights,
-    ScoredPlanner, ScorerWeights, Teacher,
+    CalibrationMethod, LearnedManeuverPlanner, LearnedPlanner, QuantizedLearnedPlanner,
+    QuantizedScorerWeights, ScoredPlanner, ScorerWeights, Teacher,
 };
 
 // M-1 (parko/DOER_MODEL_SCALEUP.md): the real-sized doer scorer — offset×speed
