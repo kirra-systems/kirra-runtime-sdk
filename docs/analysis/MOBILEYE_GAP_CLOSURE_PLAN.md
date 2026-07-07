@@ -1,0 +1,216 @@
+# Mobileye Gap-Closure Execution Plan — Claude Code Track
+
+**Date:** 2026-07-07
+**Basis:** `docs/analysis/MOBILEYE_GAP_ANALYSIS.md` (MGA G-1…G-22, 2026-07-06).
+**Scope rule:** this plan covers ONLY work executable with Claude Code in this repository — code, tests, CI, and evidence artifacts that build and verify in a Linux sandbox. **Certification-process items (ASIL-D assessment, TÜV engagement, IEEE/standards body work, Ferrocene licensing) and hardware/license-blocked items (QNX Hypervisor, target-silicon WCET, Jetson CI runner, sensor procurement) are separate tracks** and appear here only where a work package produces their *software half* so the external track starts unblocked.
+**Tracking:** on completion, each work package (WP) updates `docs/analysis/GAP_CLOSURE_STATUS.md` conventions — a row naming its evidence (test/fn/CI job), and the MGA gap it closes or partially closes.
+
+---
+
+## 1. Tractability triage of the 22 MGA gaps
+
+| MGA gap | Claude-Code tractable? | What closes here / what stays external |
+|---|---|---|
+| G-1 in-line RT enforcement | **Partial** | Build + host-verify the SHM in-line governor path (WP-21); QNX/target validation external |
+| G-2 hypervisor FFI | **No** | License + hardware campaign. WP-21/WP-01 keep the software side ready |
+| G-3 certified WCET | **Partial** | EVT/MBPTA analysis + reporting in kirra-timing (WP-22); target data external |
+| G-4 perception/world model | **Partial** | Feed pedestrian-RSS from taj (WP-10); real sensors/D1 hardware external |
+| G-5 independent assessment | **Excluded** (user carve-out) | Doc-consistency WP-06 reduces assessor friction, that's all |
+| G-6 tool qual + MC/DC + mutation | **Mostly** | Mutation gate, run-to-fuzz, coverage gating, fmt lane (WP-04, WP-08); Ferrocene external |
+| G-7 Uptane OTA + keys | **Yes** | Signature-verified staging, role metadata, rotation (WP-12/13/14) |
+| G-8 secure/measured boot | **Partial** | Provisioning tooling + quote-required policy path (WP-16); device enrollment external |
+| G-9 fleet-scale store | **Yes** | Store trait + second backend + lease (WP-18/19) |
+| G-10 rate limit / tracing / histograms | **Yes** | WP-02/03/05 |
+| G-11 execution manager | **Yes** (Linux-testable) | WP-20 |
+| G-12 RSS lateral/geometry | **Yes** (constants stay VALIDATION-PENDING) | WP-07, WP-11 |
+| G-13 seqlock ordering + loom | **Yes** | WP-01 |
+| G-14 divergence→posture | **Yes** | WP-09 |
+| G-15 ML lineage/OOD | **Yes** (hardware CI external) | WP-24 |
+| G-16 statistical validation | **Mostly** (CPU-bound corpus + stats; CARLA runs external) | WP-23 |
+| G-17 config unification | **Yes** | WP-17 |
+| G-18 zero-copy adoption | **Partial** | Feature-gated iceoryx2 integration, host-tested (WP-21b) |
+| G-19 cert lifecycle | **Yes** | WP-15 |
+| G-20 migration framework | **Yes** | WP-18 (bundled) |
+| G-21 faster failover | **Yes** | WP-19 |
+| G-22 AUTOSAR interop | **Deferred** | Customer-driven; not scheduled |
+
+Net: **17 of 22 gaps have a fully or substantially closable software component in this repo.**
+
+---
+
+## 2. Execution protocol (applies to every WP)
+
+1. **One WP = one branch = one PR**, named `claude/wp-NN-<slug>`. Small enough to review in one sitting; split if >~800 diff lines.
+2. **Invariants:** CLAUDE.md's 13 security invariants and the doer-checker invariants are non-negotiable gates on every WP. Fail-closed is the default answer to every design fork.
+3. **Evidence-first DoD.** A WP is done when: (a) `cargo test --workspace` + affected `-p` suites green; (b) new behavior has a *negative* test (the fault/abuse case, not just the happy path); (c) safety-relevant code carries `// Verifies: SG-NNN` / `// SAFETY:` tags so the auto-generated RTM picks it up; (d) `ci/check_quality_guardrails.py` passes (panic budget, line ceilings); (e) the WP's row lands in `GAP_CLOSURE_STATUS.md`.
+4. **No silent claim inflation.** Anything a WP cannot verify in-sandbox (target timing, real TPM, GPU) is labeled the way the repo already labels it (`INDICATIVE`, `VALIDATION-PENDING`, self-skipping test) — never asserted.
+5. **Session sizing** below is in Claude Code working sessions (S ≈ 1, M ≈ 2–4, L ≈ 5–10 sessions), assuming review turnaround between PRs.
+
+---
+
+## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
+
+Independent, high-ROI, low-risk. Can run as parallel sessions.
+
+### WP-01 · Seqlock weak-memory fix + loom model — closes G-13
+- **Change:** insert the acquire fence after the body copy and before the `g2` re-read in `crates/kirra-contract-channel/src/seqlock.rs` (`core::sync::atomic::fence(Acquire)`); document the aarch64 rationale at the site.
+- **Evidence:** new loom model in `crates/kirra-loom-models` exercising writer/reader interleavings of the odd/even protocol (torn-read never accepted; retry-exhaustion fail-closed reachable); keep the 20k stress test.
+- **Acceptance:** loom lane green with the new model; byte-layout compile-time asserts untouched.
+- **Effort:** S. **Risk:** none (strictly strengthens ordering).
+
+### WP-02 · Wire the fleet ingress rate limiter — closes G-10 (fleet half)
+- **Change:** call `IngressRateLimiter::allow()` at the top of `recv_report` (`transport.rs:201`) and `recv_and_ingest` (`transport.rs:236`), **before** signature verification; surface `RejectReason::RateLimited` through the existing `RejectionCounter`.
+- **Evidence:** flood test proving N+1-th message in a window is dropped pre-verify (assert verify not invoked — e.g. count verify calls via test signer); global-backstop test under spoofed source ids.
+- **Acceptance:** zero behavior change under nominal rates (existing tests untouched).
+- **Effort:** S.
+
+### WP-03 · HTTP control-plane backpressure — closes G-10 (HTTP half)
+- **Change:** tower layers on the assembled router: global + per-route concurrency limits, request-body size caps, load-shed → 429/503 with `Retry-After`. **Design constraint:** `/health`, `/ready`, `/metrics` stay exempt (scrape must survive load, mirroring the posture-exemption precedent); the actuator route sheds *closed* (a shed command is a denied command, which the consumer already treats as safe-stop per #405).
+- **Evidence:** integration test flooding a mutation route → 429s while `/health` stays 200; SSE lag behavior documented.
+- **Effort:** M.
+
+### WP-04 · CI verification ratchets — closes G-6 (non-Ferrocene slices)
+- **Change:** (a) `cargo fmt --check` lane; (b) fuzz lane upgraded from build-only to run-each-target N seconds (bounded, seed-corpus committed); (c) cargo-deny advisories gating with a documented triage allowlist; (d) coverage lane gains a ratchet threshold (start at current %, fail on regression — same philosophy as `check_quality_guardrails.py`).
+- **Evidence:** the lanes themselves; a deliberately-broken canary branch is NOT merged, just verified locally.
+- **Effort:** S–M.
+
+### WP-05 · Observability: histograms + spans — closes G-10 (observability half)
+- **Change:** latency histograms (fixed buckets, fixed label cardinality per existing metrics discipline) for verdict path, store ops, HTTP request duration; `#[instrument]` spans with a per-request correlation id propagated into audit entries where one exists.
+- **Constraint:** zero allocation added to `validate_vehicle_command` itself — instrument at the middleware boundary, not inside the pure kernel (WCET gate must stay byte-identical on the kernel).
+- **Evidence:** `/metrics` shows `_bucket` series; wcet-gate lane unchanged.
+- **Effort:** M.
+
+### WP-06 · Safety-doc consistency pass — reduces G-5 friction (docs only)
+- **Change:** unify the 16-goal kernel + 9-goal Occy schemes into one indexed catalog (keep both IDs, one authoritative table); purge the stale "306 passing" figure from the ~5 downstream docs; finish the AEGIS→KIRRA ID rebrand in doc headers.
+- **Acceptance:** `grep -r "306 passing"` empty; SAFETY_CASE_INDEX cross-links resolve.
+- **Effort:** S.
+
+---
+
+## 4. Wave 1 — Safety-kernel correctness (5 WPs, ~2–6 weeks elapsed)
+
+The checker is the product; these WPs make its strongest claims true.
+
+### WP-07 · RSS lateral primitive completion (#408) — closes G-12 (params half)
+- **Change:** split `lat_accel_max` into `a_lat_accel_max` / `a_lat_brake_min` per IEEE 2846 §5.2 (resolving the non-monotonic single-parameter collapse documented at `rss.rs:111-141`); add the μ lateral-fluctuation margin as an explicit additive term; parameterize the hardcoded 2.5 m footprint band from the vehicle-class contract (`KIRRA_VEHICLE_CLASS` → footprint), keeping the current constant as the robotaxi value.
+- **Constants discipline:** all new numbers tagged `VALIDATION-PENDING` exactly like `contract_profiles.rs:23` — the *code shape* closes here; sign-off is the external track.
+- **Evidence:** proptest properties — new bound ≥ old bound everywhere (strict conservatism), monotonicity in each param, fail-safe on non-finite; MC/DC pair-completion tests extended to the new decisions; update `KIRRA_RSS_FORMAL_SPECIFICATION.md` §2.
+- **Effort:** M. **Dependency:** none.
+
+### WP-08 · Mutation-testing gate — closes G-6 (mutation slice)
+- **Change:** `cargo-mutants` CI lane scoped to the checker crates (`kirra-core` kinematics, `kirra-trajectory`, `parko-core` rss/detector) with a survivors baseline file (ratchet: no NEW survivors); triage and kill the initial survivor set with targeted tests.
+- **Evidence:** the lane + a `docs/testing/MUTATION_BASELINE.md` documenting accepted survivors with justification (mirrors the panic-budget pattern).
+- **Effort:** M (survivor triage dominates).
+
+### WP-09 · Divergence → durable fleet posture — closes G-14
+- **Change:** implement `STAGE_S-DG1_DIVERGENCE_POSTURE.md`: the comparator's `recommended_posture` escalation, when sustained past the existing accumulator lockout level, reports into the verifier (existing identity-gated report route or a typed `PostureRecalcTrigger`) and latches the durable sticky `LockedOut` (human-reset). Route through `PostureEngineSender` (never direct recalc — CLAUDE.md).
+- **Evidence:** integration test: sustained injected divergence → fleet `LockedOut` survives verifier restart (generation persistence); transient divergence → no latch (hysteresis preserved); loom model if a new cross-thread latch protocol is introduced.
+- **Doc:** flip COMPARATOR_DIVERSITY.md §status from "wiring PROPOSED" to implemented-pending-signoff.
+- **Effort:** M. **Dependency:** none (parko + verifier seams both exist).
+
+### WP-10 · Feed pedestrian RSS from Taj — closes the armed-but-unfed half of G-4
+- **Change:** heuristic VRU classifier in `kirra-taj` over existing clusters (extent + speed envelope + persistence → `PerceivedPedestrian` with honest `age_s`); plumb the channel through `AdaptorState` → `node.rs` (replacing the hardcoded `None` at `node.rs:708-713`), env-gated like the other slow-loop features (default off → byte-identical, per the doer-checker invariant).
+- **Fail-closed rule:** classifier *uncertainty* promotes TO pedestrian (the stricter bound), never away from it; a silent/stale VRU channel with the gate enabled → MRC-floor cap, mirroring the redundancy monitor.
+- **Evidence:** scenario tests through the real checker (crossing pedestrian → rejection/derate; clear corridor → admitted); kpi-gate rows with a negative-control mutation.
+- **Effort:** M–L. **Dependency:** none.
+
+### WP-11 · Curved-geometry RSS (Frenet along the lane corridor) — closes G-12 (geometry half)
+- **Change:** longitudinal/lateral decomposition along the `LaneCorridor` centerline arc-length instead of straight-lane axes; straight-lane remains the degenerate case (byte-identical on straight corridors — regression-tested).
+- **Evidence:** curved-lane scenarios where straight-lane RSS under/over-triggers, proving the fix; conservatism property vs the straight-lane bound on synthetic arcs.
+- **Effort:** L. **Dependency:** WP-07 (build on the completed lateral primitive). Schedule late in wave or slip to Wave 3.
+
+---
+
+## 5. Wave 2 — OTA & security depth (5 WPs, ~4–8 weeks elapsed)
+
+Pure software; converts "R156-shaped" into defensible depth.
+
+### WP-12 · Signature-verified staging — closes G-7 (first slice)
+- **Change:** extend `verify_staged_artifact` (`kirra-ota-installer/src/lib.rs:321`) to require an Ed25519 signature over the artifact digest, verified against the pinned governor release key (`kirra-release-token` seam); campaign records carry the signature; assignment GET serves it; hash-only becomes a rejected legacy mode.
+- **Evidence:** tamper tests — right hash/wrong sig, wrong key, sig-over-different-digest all refuse to arm the slot; two_node_rollout drill extended.
+- **Effort:** M. **Dependency:** none.
+
+### WP-13 · Uptane role metadata — closes G-7 (core)
+- **Change:** implement the four-role model in `kirra-release-token` + the campaign engine: `root` (key rotation authority), `targets` (artifact digests), `snapshot` (consistency), `timestamp` (freshness); metadata expiry enforced fail-closed on the node's `decide_pull` path; rollback/freeze-attack protection via monotonic versions (reuse the generation-persistence pattern).
+- **Evidence:** attack-scenario test suite — replayed old targets, frozen timestamp, forked snapshot, rotated-root recovery after simulated targets-key compromise; store tables for role metadata with the existing audit-chain treatment.
+- **Effort:** L (largest WP in the plan; split root/targets from snapshot/timestamp into two PRs).
+- **Dependency:** WP-12.
+
+### WP-14 · Governor key rotation + revocation — closes G-7 (lifecycle)
+- **Change:** rotation flow for the release identity (new key signed by root role from WP-13; nodes accept during an overlap window; old key revocable), audit-chained like the existing audit-signing-key rotation route.
+- **Evidence:** rotation drill test — fleet mid-campaign, key rotates, staged nodes still verify, revoked-key artifacts refuse.
+- **Effort:** M. **Dependency:** WP-13.
+
+### WP-15 · mTLS cert lifecycle — closes G-19
+- **Change:** expiry tracking + renewal seam for `cert_principals` (expiry column, `/system/cert-principals` renewal op, startup + periodic expiry warnings via metrics/audit), CRL-file or explicit-revocation check at the TLS verifier callback.
+- **Evidence:** expired-cert rejected, renewed-cert accepted without restart, revocation honored on next handshake.
+- **Effort:** M.
+
+### WP-16 · Measured-boot software completion — closes G-8 (software half)
+- **Change:** provisioning CLI (`kirra-ota-ctl` subcommand or sibling) that enrolls a node's AK + PCR16 + `require_tpm_quote=true` in one audited operation against a real-or-simulated TPM (use `swtpm`-compatible flows so it's sandbox-testable); make quote-required the documented default for new registrations behind an env gate.
+- **Evidence:** end-to-end challenge→quote→verify test against the existing `tpm_quote` parser with generated fixtures; docs update to stop overstating deployment reality (per MGA §4 G-8).
+- **Effort:** M. **External remainder:** Orin Secure Boot + dm-verity + physical TPM — hardware track.
+
+---
+
+## 6. Wave 3 — Platform & scale (8 WPs, ~2–5 months elapsed)
+
+### WP-17 · Config unification — closes G-17
+- Typed `KirraConfig` for verifier + ros2 node using the gateway config pattern (versioned, validated, effective-config SHA-256 digest logged to the audit chain at startup); every `KIRRA_*` env var becomes a documented field with a fail-closed parse; unknown-var warning sweep.
+- **Evidence:** invalid-config abort tests per field class; digest appears in audit; ENVIRONMENT.md regenerated from the schema (single source of truth).
+- **Effort:** M–L.
+
+### WP-18 · Store abstraction + migrations + Postgres backend — closes G-9 (store half) + G-20
+- Extract a `VerifierStorage` trait from `VerifierStore` (per-table submodules make this tractable); SQLite impl unchanged and default; Postgres impl behind a feature; versioned migration framework (`user_version` for SQLite, migrations table for PG) with CI upgrade tests from the last released schema.
+- **Constraint:** INVARIANT #12 (disk-before-memory ordering) holds for every backend; the epoch fence semantics must be reproduced transactionally in PG (`SELECT … FOR UPDATE`).
+- **Evidence:** the full store test suite (88 tests) runs against both backends in CI (PG via service container); ha_failover + audit_powerloss drills stay SQLite (file-topology-specific) and are documented as such.
+- **Effort:** L. Split: trait extraction PR → migration framework PR → PG backend PR.
+
+### WP-19 · Lease-based failover — closes G-21, completes G-9
+- Replace heartbeat-poll promotion with a store-backed lease (TTL ≤ posture cache TTL, renewed at half-life, CAS on the existing epoch machinery); demotion window provably closes before promotion window opens (extend the existing pure invariant in `tests/ha_failover.rs`).
+- **Evidence:** failover drill target ≤5 s detection; split-brain fence tests preserved.
+- **Effort:** M. **Dependency:** WP-18 trait (so the lease is backend-portable).
+
+### WP-20 · Execution manager — closes G-11
+- Declarative task manifest (TOML in the unified config): per-background-task priority/affinity (Linux `sched_setaffinity`/`SCHED_FIFO` where permitted, degrade-with-warning where not), startup dependency DAG (replacing implicit ordering in `main`), per-task deadline-miss counters feeding metrics + supervisor escalation.
+- **Evidence:** startup-order test (dependency violated → abort); deadline-miss counter fires under injected stall; existing supervisor restart-budget tests preserved.
+- **Effort:** L.
+
+### WP-21 · In-line SHM enforcement path (host-verified) — closes G-1 software half; WP-21b closes G-18 slice
+- Assemble the already-built parts into the deployable shape ADR-0006/0030 promise: a governor process consuming proposals via `kirra-hv-carrier` SHM seqlock, verdicting with the pure kernel, emitting release tokens out-of-band (per the 91 µs finding), with the HTTP plane demoted to management. Extend `kirra-l3-e2e` from drill to long-running service mode with graceful degradation.
+- **21b:** feature-gated iceoryx2 transport implementing the same `ContractReader/Writer` seam (spike → SDK behind `iceoryx2` feature, keeping the isolation rule for default builds).
+- **Evidence:** host soak test (hours, zero missed MRC publications), fault-injection rows from HV_FAULT_CAMPAIGN that don't need the hypervisor (writer kill, stale generation, torn-write simulation); timing stays labeled INDICATIVE.
+- **Effort:** L–XL. **Dependency:** WP-01. **External remainder:** QNX/hypervisor/target = hardware track, which inherits this code unchanged.
+
+### WP-22 · EVT/MBPTA in kirra-timing — closes G-3 software half
+- Add extreme-value-theory tail fitting (GEV/GPD over block maxima / peaks-over-threshold), i.i.d./stationarity checks, and convergence criteria to `kirra-timing`; `kirra-wcet-bench` reports pWCET curves alongside HWM, all still env-tagged INDICATIVE on host.
+- **Evidence:** statistical unit tests against synthetic distributions with known tails; methodology doc §4 updated; the CI wcet-gate keeps p99.9 (no gate change until target data exists).
+- **Effort:** M.
+
+### WP-23 · Statistical scenario campaign — closes G-16 software half
+- Procedural scenario generator scaling the KPI corpus to 10⁴–10⁵ (parameterized sweeps + seeded Monte-Carlo sampling over the existing scenario schema); Wilson/Clopper-Pearson confidence intervals on `unsafe_miss_rate`/`hazard_recall` in `kirra-kpi-gate`; CI runs a sampled subset per-PR + full corpus nightly; CARLA campaign runner script (executes when a sim host exists — external).
+- **Evidence:** gate thresholds re-expressed as CI upper bounds, negative-control rows preserved; corpus generation deterministic by seed.
+- **Effort:** L.
+
+### WP-24 · ML lineage + OOD — closes G-15 software half
+- (a) Model integrity flips from opt-in-logging to deny-by-default under a deployment profile, with signed model manifests (reuse WP-13 targets-role machinery) and rollback to last-good; (b) OOD/input-shift monitor (activation/confidence-distribution drift vs a calibration baseline) feeding the existing posture-escalation accumulator — derate-only, fail-closed on monitor absence per the doer-checker invariant.
+- **Evidence:** substituted-model refused; injected distribution shift escalates posture in the tick-pipeline test rig; nominal corpus does not (false-positive budget test).
+- **Effort:** L. **External remainder:** Jetson CI runner.
+
+---
+
+## 7. Sequencing & dependency summary
+
+```
+Wave 0 (parallel): WP-01  WP-02  WP-03  WP-04  WP-05  WP-06
+Wave 1:            WP-07 ──► WP-11        WP-08   WP-09   WP-10
+Wave 2:            WP-12 ──► WP-13 ──► WP-14     WP-15   WP-16
+Wave 3:            WP-17    WP-18 ──► WP-19      WP-20   WP-22   WP-23   WP-24
+                   WP-01 ──► WP-21 (◄ WP-13 for release-token roles, soft)
+```
+
+Suggested cadence: Wave 0 as an immediate sprint; then interleave one Wave-1 safety WP with one Wave-2 security WP per review cycle (they touch disjoint crates, so sessions parallelize cleanly); Wave 3 starts once WP-13 and WP-07 merge. Total plan volume ≈ **60–90 Claude Code sessions** across ~24 PR-sized units.
+
+## 8. What this plan deliberately does NOT claim
+
+Completing every WP makes the *software* production-shaped and leaves the following honestly open (external tracks, per the user's carve-out): QNX Hypervisor procurement + interference campaign (G-2), target-silicon WCET rows (G-3), physical secure boot/TPM enrollment (G-8), Jetson CI runner (G-15), real sensor/perception integration or D1 hardware (G-4), Ferrocene (G-6), and all certification-body engagement (G-5). Each corresponding WP is designed so the external track starts with its software dependency already merged, tested, and labeled.
