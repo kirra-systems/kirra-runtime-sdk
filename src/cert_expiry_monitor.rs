@@ -56,8 +56,12 @@ pub fn sweep_cert_expiry_once(
             "mTLS cert principals are lapsed or lapsing — renew before they stop authorizing"
         );
         // Non-repudiable trail: an operator can prove WHEN a lapse was first
-        // surfaced. Payload is counts only (no fingerprint, no secret).
-        let _ = store.append_clearance_audit_event(
+        // surfaced. Payload is counts only (no fingerprint, no secret). The audit
+        // IS this sweep's product, so PROPAGATE a failure (Copilot #857) rather than
+        // dropping it — the caller's `Ok(Err(e))` arm logs "sweep DB error", so a
+        // broken audit trail is surfaced, not silently skipped while callers/tests
+        // treat the entry as evidence.
+        store.append_clearance_audit_event(
             "CertPrincipalExpiryWarning",
             &serde_json::json!({
                 "expired": summary.expired,
@@ -68,7 +72,7 @@ pub fn sweep_cert_expiry_once(
             })
             .to_string(),
             now_ms,
-        );
+        )?;
     }
     Ok(summary)
 }

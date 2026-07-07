@@ -23,6 +23,20 @@ impl VerifierStore {
         not_after_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<()> {
+        // SQLite INTEGER is signed 64-bit. Convert CHECKED, not `as i64`: a
+        // `not_after_ms > i64::MAX` would silently wrap to a NEGATIVE value and read
+        // back as a huge u64 — effectively disabling expiry (a fail-OPEN failure).
+        // Refuse it (Copilot #857). Such a value is ~292M years past epoch — never a
+        // real notAfter, so this only ever catches a bug/tamper, never a valid cert.
+        let not_after_i64 = match not_after_ms {
+            Some(v) => Some(i64::try_from(v).map_err(|_| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not_after_ms exceeds i64::MAX",
+                )))
+            })?),
+            None => None,
+        };
         self.conn.execute(
             "INSERT INTO cert_principals
                  (principal_id, cert_sha256, role, created_at_ms, revoked_at_ms, not_after_ms)
@@ -33,7 +47,7 @@ impl VerifierStore {
                  created_at_ms = excluded.created_at_ms,
                  revoked_at_ms = NULL,
                  not_after_ms  = excluded.not_after_ms",
-            params![principal_id, cert_sha256, role, now_ms as i64, not_after_ms.map(|v| v as i64)],
+            params![principal_id, cert_sha256, role, now_ms as i64, not_after_i64],
         )?;
         Ok(())
     }
@@ -117,7 +131,15 @@ impl VerifierStore {
             role: row.get(1)?,
             created_at_ms: row.get::<_, i64>(2)? as u64,
             revoked_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-            not_after_ms: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+            // FAIL-CLOSED read (Copilot #857): a NEGATIVE stored `not_after_ms` (only
+            // reachable via corruption/tamper — the write path refuses > i64::MAX)
+            // maps to `Some(0)` = "expired at epoch", so `is_expired(now)` is true for
+            // any `now`. A tampered expiry can therefore only make a cert MORE
+            // restricted (always-expired), never reinterpret to a huge never-expiring
+            // value. `u64::try_from` fails only for negatives → clamp to 0.
+            not_after_ms: row
+                .get::<_, Option<i64>>(4)?
+                .map(|v| u64::try_from(v).unwrap_or(0)),
         })
     }
 }
@@ -244,6 +266,39 @@ mod tests {
         let renewed = s.load_cert_principal_by_fingerprint("fp-new").unwrap().unwrap();
         assert!(renewed.is_valid_at(6_000) && renewed.is_valid_at(19_999));
         assert_eq!(renewed.not_after_ms, Some(20_000));
+    }
+
+    #[test]
+    fn not_after_ms_past_i64_max_is_refused_not_wrapped() {
+        // Copilot #857: a u64 expiry > i64::MAX would wrap to a negative on `as i64`
+        // and read back as a huge "never expires" value (fail-OPEN). Refuse it.
+        let mut s = store();
+        let err = s.register_cert_principal("svc", "fp", "integrator", Some(u64::MAX), 1_000);
+        assert!(err.is_err(), "an expiry beyond i64::MAX must be refused, not truncated");
+        assert!(
+            s.load_cert_principal_by_fingerprint("fp").unwrap().is_none(),
+            "the refused registration persisted nothing"
+        );
+        // The largest representable value is accepted.
+        assert!(s
+            .register_cert_principal("svc", "fp", "integrator", Some(i64::MAX as u64), 1_000)
+            .is_ok());
+    }
+
+    #[test]
+    fn negative_stored_expiry_reads_as_expired_fail_closed() {
+        // Copilot #857: a NEGATIVE not_after_ms in the DB (only reachable via
+        // corruption/tamper) must fail CLOSED — read as already-expired, never as a
+        // huge never-expiring u64. Inject one directly (bypassing the checked write).
+        let mut s = store();
+        s.register_cert_principal("svc", "fp", "integrator", Some(5_000), 1_000).unwrap();
+        s.conn
+            .execute("UPDATE cert_principals SET not_after_ms = -1 WHERE principal_id = 'svc'", [])
+            .unwrap();
+        let rec = s.load_cert_principal_by_fingerprint("fp").unwrap().unwrap();
+        assert_eq!(rec.not_after_ms, Some(0), "negative clamps to epoch-0, not a huge u64");
+        assert!(rec.is_expired(1), "a tampered negative expiry reads as always-expired");
+        assert!(!rec.is_valid_at(0), "and never authorizes");
     }
 
     #[test]
