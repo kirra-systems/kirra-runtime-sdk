@@ -38,6 +38,7 @@ pub mod kirra_core;
 pub mod governor_guard;
 pub mod modbus_adapter;
 pub mod config;
+pub mod env_config;
 pub mod kinematics_contract;
 pub mod ros2_adapter;
 pub mod action_filter;

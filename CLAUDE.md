@@ -150,7 +150,14 @@ src/
 ├── dds_bridge.rs             — CDR encapsulation, Volatile durability
 ├── standby_monitor.rs        — HA heartbeat writer and promotion monitor
 ├── startup_sentinel.rs       — Pre-flight invariant checks at startup
-├── config.rs                 — Configuration loading helpers
+├── config.rs                 — Configuration loading helpers (Modbus gateway
+│                               file-config: KirraRuntimeConfig, versioned+validated)
+├── env_config.rs             — WP-17/G-17 unified verifier ENV config: KIRRA_ENV_KEYS
+│                               canonical registry (single source of truth for every
+│                               KIRRA_* var), unknown_kirra_env_vars fail-closed sweep,
+│                               versioned EffectiveConfig + effective_digest (SHA-256);
+│                               startup WARNs on unknown vars + commits an
+│                               EffectiveConfigDigest audit event (drift-detectable)
 ├── audit_log.rs              — Audit log helpers
 ├── metrics.rs                — Metrics collection
 ├── health.rs                 — Health check utilities
@@ -462,6 +469,13 @@ proptest = "1"  # dev-dependency
 ---
 
 ## Environment Variables
+
+**WP-17 (G-17): the canonical machine-readable registry of every verifier `KIRRA_*`
+var is `KIRRA_ENV_KEYS` in `src/env_config.rs`** — this table mirrors it. At startup
+the service WARNs on any `KIRRA_*` env var NOT in the registry (a typo / stale var
+that is not taking effect) and commits an `EffectiveConfigDigest` audit event (the
+SHA-256 of the boot-config snapshot, so drift is detectable across restarts). Adding
+a new `KIRRA_*` read means adding its `EnvKeySpec` row.
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
