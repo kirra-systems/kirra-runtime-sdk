@@ -575,6 +575,7 @@ mod attestation;
 mod av_subsystem;
 mod epoch;
 mod fabric;
+pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 
 impl VerifierStore {
     pub fn new(path: &str) -> Result<Self> {
@@ -584,6 +585,12 @@ impl VerifierStore {
         // P2: ride out a concurrent WAL checkpoint instead of surfacing SQLITE_BUSY
         // as a fail-closed error (the read replica already does this).
         conn.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+
+        // WP-18 (G-20): FAIL-CLOSED downgrade protection — refuse to open a database
+        // a NEWER binary has migrated past this one (its `PRAGMA user_version` exceeds
+        // our SCHEMA_VERSION) BEFORE touching any schema, so we never misread a column
+        // we don't understand. A pre-framework DB reads version 0 and proceeds.
+        migrations::assert_schema_not_future(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS nodes (
@@ -976,6 +983,13 @@ impl VerifierStore {
                 ON fabric_causal_log(timestamp_ms);"
         )?;
 
+        // WP-18 (G-20): the baseline DDL above (idempotent) IS schema version 1. Apply
+        // any registered post-baseline migrations in order and stamp `user_version` up
+        // to SCHEMA_VERSION — so a fresh or pre-framework (version-0) DB is recorded at
+        // the baseline, and a future v2+ change upgrades in order. Runs on `conn`; the
+        // stamp is a DB-header property shared by the durable connection to the same file.
+        migrations::run_migrations(&conn)?;
+
         // Durable (force-synced) connection for the fence-correctness + anti-
         // replay writes (#74). Same WAL DB file; `synchronous=FULL` fsyncs every
         // commit. In-memory stores have no power-loss semantics and a second
@@ -1166,6 +1180,15 @@ impl VerifierStore {
 
     pub fn health_check(&self) -> Result<()> {
         self.conn.query_row("SELECT 1", [], |_| Ok(()))
+    }
+
+    /// WP-18 (G-20) — the schema version stamped in this database's `PRAGMA
+    /// user_version`. After a successful `new()` this equals
+    /// [`migrations::SCHEMA_VERSION`]; a pre-framework database reads it as the
+    /// value the migration on open stamped (the baseline). Surfaces the versioned
+    /// migration state for observability + the schema-migration drill.
+    pub fn schema_version(&self) -> Result<i64> {
+        migrations::read_user_version(&self.conn)
     }
 
     /// SG-008 startup-invariant support: true when the hot connection reports
