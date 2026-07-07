@@ -74,8 +74,39 @@ separation on top of the key-layer separation.
   installer signature check).
 - **On-device client** — `kirra-ota-ctl` fetches + verifies the chain; the
   release-pubkey provisioning (WP-12) generalizes to the root trust anchor.
-- **Key custody / rotation ops** — HSM/TPM-held root key + the rotation
-  runbook (WP-14).
+- **Key custody** — HSM/TPM-held root key (deferred; the software rotation
+  flow below is complete).
 
 All metadata expiry/version values are operational parameters; the crypto is
 the frozen part.
+
+
+## 5. WP-14 status update (2026-07-07) — rotation operations + durable trust
+
+The ROTATION OPERATIONS and node-side PERSISTENCE are implemented:
+
+- `kirra_release_token::uptane` gained the operator/repository side:
+  `SignedRoot` (the wire/storage bundle: root metadata + the outgoing +
+  incoming root signatures), `author_initial_root` (self-signed anchor),
+  `author_root_rotation` (mints a rotation signed by both root keys — the
+  compromise-recovery mint), and `apply_root_rotation` (the node-side ergonomic
+  wrapper over `verify_root_rotation`). The metadata types gained OPTIONAL
+  serde derives behind a `serde` feature (off by default; the crypto core needs
+  no serialization).
+- `kirra_ota_installer::uptane_trust::UptaneTrustStore` — a JSON file (sibling
+  of the OTA boot record) persisting the adopted `SignedRoot` + `TrustedVersions`
+  floor, written with the boot record's atomic temp-fsync-rename discipline and
+  loaded FAIL-CLOSED (missing/unparseable → error; the stored root is
+  re-verified on load so a tampered file is rejected). `provision` /
+  `adopt_rotation` / `record_versions`.
+
+REVOCATION is proven end-to-end and across the restart boundary
+(`adopted_rotation_revokes_the_old_key_across_a_reload`): after a node adopts a
+root that rotates the `targets` key and persists it, a RELOAD refuses metadata
+signed by the revoked old key and accepts the new — a leaked key is dead the
+moment the node adopts the new root, no device re-flash.
+
+REMAINING (recorded): HSM/TPM root-key custody; the audit-chained rotation
+control-plane route on the verifier (mirrors the audit-signing-key rotation
+route); wiring `UptaneTrustStore` into the `kirra-ota-ctl pull` path so a served
+root-rotation is adopted before staging.

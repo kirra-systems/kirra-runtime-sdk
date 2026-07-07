@@ -33,6 +33,12 @@ use serde::{Deserialize, Serialize};
 pub mod nvbootctrl;
 pub use nvbootctrl::{NvbootctrlBootController, NvbootctrlRunner, SystemNvbootctrl};
 
+// WP-14 (MGA G-7) — node-side durable Uptane trust state + key-rotation
+// application (persists the adopted root + version floor so a revoked key
+// stays revoked across restarts).
+pub mod uptane_trust;
+pub use uptane_trust::{TrustState, TrustStoreError, UptaneTrustStore};
+
 /// One of the two governor-artifact slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

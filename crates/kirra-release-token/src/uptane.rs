@@ -90,6 +90,7 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
 }
 
 /// The `root` metadata: the versioned, expiring set of role verifying keys.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootMetadata {
     pub version: u64,
@@ -124,6 +125,7 @@ impl RootMetadata {
 }
 
 /// One artifact entry in the `targets` metadata.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetEntry {
     /// SHA-256 hex (64 lowercase) of the governor artifact.
@@ -133,6 +135,7 @@ pub struct TargetEntry {
 }
 
 /// The `targets` metadata: the authorized artifacts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetsMetadata {
     pub version: u64,
@@ -162,6 +165,7 @@ impl TargetsMetadata {
 }
 
 /// The `snapshot` metadata: pins the `targets` version (consistency).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotMetadata {
     pub version: u64,
@@ -181,6 +185,7 @@ impl SnapshotMetadata {
 }
 
 /// The `timestamp` metadata: pins the `snapshot` version (freshness).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimestampMetadata {
     pub version: u64,
@@ -201,6 +206,7 @@ impl TimestampMetadata {
 
 /// A role's last-trusted metadata versions on a node — the rollback floor. A
 /// verification never accepts a version at or below the corresponding field.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrustedVersions {
     pub targets: u64,
@@ -277,6 +283,80 @@ pub fn verify_root_rotation(
 pub fn verify_root_self(meta: &RootMetadata, sig_b64: &str) -> Result<(), UptaneError> {
     let vk = meta.key_for(Role::Root)?;
     verify_image(&meta.signing_image(), sig_b64, &vk, Role::Root)
+}
+
+// ---------------------------------------------------------------------------
+// WP-14 (MGA G-7) — key-rotation OPERATIONS: the operator/repository side that
+// MINTS a rotation, the wire/storage bundle, and the node-side application.
+// ---------------------------------------------------------------------------
+
+/// A root metadata bundled with the signature(s) that authorize it — the
+/// wire/storage form a node persists and a repository serves.
+///
+/// - the INITIAL anchor is self-signed: `sig_by_current_root == sig_by_new_root`
+///   (both are the root key signing itself), authored by [`author_initial_root`];
+/// - a ROTATION carries two DISTINCT signatures — the outgoing root
+///   (authorizes) and the incoming root (proves possession) — authored by
+///   [`author_root_rotation`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedRoot {
+    pub meta: RootMetadata,
+    /// Signature by the CURRENT (outgoing) root key over `meta`'s image.
+    pub sig_by_current_root_b64: String,
+    /// Signature by the NEW (incoming) root key over `meta`'s image. Equal to
+    /// `sig_by_current_root_b64` for a self-signed anchor.
+    pub sig_by_new_root_b64: String,
+}
+
+/// Author the INITIAL trust anchor: a self-signed root at the given version.
+/// The node is provisioned with the result (or its `meta.root_key`) as its
+/// trust root; [`verify_root_self`] checks it.
+#[must_use]
+pub fn author_initial_root(meta: RootMetadata, root_key: &SigningKey) -> SignedRoot {
+    let sig = sign_root(&meta, root_key);
+    SignedRoot { meta, sig_by_current_root_b64: sig.clone(), sig_by_new_root_b64: sig }
+}
+
+/// Author a ROOT ROTATION that produces `new_meta` from the currently-trusted
+/// root, signed by BOTH the outgoing and incoming root keys. `new_meta.version`
+/// MUST exceed the current root's (asserted at [`apply_root_rotation`] /
+/// [`verify_root_rotation`] time; this only signs). When the ROOT key itself is
+/// unchanged, pass the same key twice — the two signatures are then identical
+/// but the bundle is still a valid rotation of the OTHER role keys.
+///
+/// This is the compromise-recovery mint: to revoke a leaked `targets` (or
+/// `snapshot` / `timestamp`) key, author a higher-version root that lists a
+/// fresh key for that role; nodes that adopt it will refuse anything signed by
+/// the old key (see the revocation test).
+#[must_use]
+pub fn author_root_rotation(
+    new_meta: RootMetadata,
+    outgoing_root_key: &SigningKey,
+    incoming_root_key: &SigningKey,
+) -> SignedRoot {
+    let image = new_meta.signing_image();
+    SignedRoot {
+        sig_by_current_root_b64: sign_image(&image, outgoing_root_key),
+        sig_by_new_root_b64: sign_image(&image, incoming_root_key),
+        meta: new_meta,
+    }
+}
+
+/// Node side: apply a presented [`SignedRoot`] rotation against the currently
+/// trusted root, returning the new trusted root iff it verifies (strictly
+/// higher version + both signatures). Ergonomic wrapper over
+/// [`verify_root_rotation`] that threads the bundle's two signatures.
+pub fn apply_root_rotation(
+    current: &RootMetadata,
+    presented: &SignedRoot,
+) -> Result<RootMetadata, UptaneError> {
+    verify_root_rotation(
+        current,
+        &presented.meta,
+        &presented.sig_by_current_root_b64,
+        &presented.sig_by_new_root_b64,
+    )
 }
 
 /// A verified metadata update: the caller may now trust `targets` and should
@@ -621,5 +701,94 @@ mod tests {
         let snap = SnapshotMetadata { version: 1, expires_at_ms: EXP, targets_version: 1 };
         let tsm = TimestampMetadata { version: 1, expires_at_ms: EXP, snapshot_version: 1 };
         assert_ne!(snap.signing_image(), tsm.signing_image());
+    }
+
+    // ---- WP-14: rotation OPERATIONS (author + apply + revocation) ----------
+
+    /// The authored initial anchor is self-signed and verifies; `apply_root_rotation`
+    /// then adopts an authored higher-version rotation.
+    #[test]
+    fn author_and_apply_round_trip() {
+        let r = Repo::new();
+        let anchor = author_initial_root(r.root(1, EXP), &r.root_sk);
+        assert!(verify_root_self(&anchor.meta, &anchor.sig_by_current_root_b64).is_ok());
+
+        // Rotate the targets key (root key unchanged) at v2.
+        let new_targets_sk = SigningKey::from_bytes(&[9u8; 32]);
+        let mut m2 = r.root(2, EXP);
+        m2.targets_key = new_targets_sk.verifying_key().to_bytes();
+        let rotation = author_root_rotation(m2, &r.root_sk, &r.root_sk);
+        let adopted = apply_root_rotation(&anchor.meta, &rotation).expect("valid rotation adopts");
+        assert_eq!(adopted.version, 2);
+        assert_eq!(adopted.targets_key, new_targets_sk.verifying_key().to_bytes());
+    }
+
+    /// REVOCATION — the payoff of rotation. After the node adopts a root that
+    /// rotates the `targets` key, metadata signed by the OLD targets key is
+    /// refused, while metadata signed by the NEW key verifies. A leaked key is
+    /// dead the moment the node adopts the new root — no device re-flash.
+    #[test]
+    fn rotating_the_targets_key_revokes_the_old_one() {
+        let r = Repo::new();
+        let anchor = r.root(1, EXP);
+
+        // A metadata set the OLD targets key signs — valid under the old root.
+        let (tgt, ts_sig, snap, sn_sig, tsm, tm_sig) = metaset(&r, 5, 5, 5);
+        assert!(verify_update(
+            &anchor, TrustedVersions::default(), NOW,
+            &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+        )
+        .is_ok());
+
+        // Rotate the targets key to a fresh one; node adopts the new root.
+        let new_targets_sk = SigningKey::from_bytes(&[9u8; 32]);
+        let mut m2 = r.root(2, EXP);
+        m2.targets_key = new_targets_sk.verifying_key().to_bytes();
+        let rotation = author_root_rotation(m2, &r.root_sk, &r.root_sk);
+        let adopted = apply_root_rotation(&anchor, &rotation).expect("adopt");
+
+        // The SAME metadata (still signed by the OLD targets key) is now REFUSED
+        // under the new root — the old key is revoked.
+        assert_eq!(
+            verify_update(
+                &adopted, TrustedVersions::default(), NOW,
+                &tsm, &tm_sig, &snap, &sn_sig, &tgt, &ts_sig,
+            ),
+            Err(UptaneError::SignatureInvalid(Role::Targets))
+        );
+
+        // Re-signed by the NEW targets key, it verifies under the new root.
+        let new_tgt_sig = sign_targets(&tgt, &new_targets_sk);
+        assert!(verify_update(
+            &adopted, TrustedVersions::default(), NOW,
+            &tsm, &tm_sig, &snap, &sn_sig, &tgt, &new_tgt_sig,
+        )
+        .is_ok());
+    }
+
+    /// An authored rotation that does not raise the version is refused on apply
+    /// (no silent downgrade), and a rotation authored by an ATTACKER root key
+    /// (not the trusted outgoing one) is refused.
+    #[test]
+    fn apply_rejects_downgrade_and_untrusted_author() {
+        let r = Repo::new();
+        let current = r.root(3, EXP);
+
+        let same_ver = author_root_rotation(r.root(3, EXP), &r.root_sk, &r.root_sk);
+        assert_eq!(
+            apply_root_rotation(&current, &same_ver),
+            Err(UptaneError::InvalidRootRotation)
+        );
+
+        let attacker = SigningKey::from_bytes(&[99u8; 32]);
+        let mut m4 = r.root(4, EXP);
+        m4.root_key = attacker.verifying_key().to_bytes();
+        // Signed only by the attacker's key on both sides — the outgoing
+        // signature is NOT the trusted current root's.
+        let forged = author_root_rotation(m4, &attacker, &attacker);
+        assert_eq!(
+            apply_root_rotation(&current, &forged),
+            Err(UptaneError::InvalidRootRotation)
+        );
     }
 }

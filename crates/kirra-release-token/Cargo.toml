@@ -32,6 +32,14 @@ sha2 = "0.11"
 # unsafe_code)]` blocks a hand-rolled volatile wipe, so we use the vetted crate
 # (already in the tree via ed25519-dalek/curve25519). Provisioning only.
 zeroize = "1"
+# WP-14: OPTIONAL serde derives on the uptane metadata types so a node can
+# PERSIST its trusted root + version floor (kirra-ota-installer's UptaneTrustStore).
+# Off by default — the crypto core needs no serialization; the derives compile in
+# only under the `serde` feature.
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
 
 [dev-dependencies]
 # The governor decision step, for the end-to-end governor→actuator release-flow
