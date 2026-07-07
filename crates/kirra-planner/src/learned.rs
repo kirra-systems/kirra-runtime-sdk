@@ -602,34 +602,104 @@ impl ScoredPlanner for QuantizedLearnedPlanner {
     }
 }
 
+/// The activation-scale calibration estimator (PTQ). Governs how the per-tensor
+/// *activation* clip threshold (→ `s_x` on the inputs, `s_h` on the hidden layer)
+/// is derived from the observed |activation| distribution over the calibration
+/// corpus. Weights are always per-tensor absmax — they are static and
+/// corpus-independent, so they carry no outlier risk.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum CalibrationMethod {
+    /// The largest observed |activation|. Simple and the historical default, but a
+    /// single outlier scenario stretches the int8 bins for the WHOLE corpus,
+    /// coarsening the resolution of the in-distribution bulk.
+    #[default]
+    AbsMax,
+    /// Clip at the given quantile of |activation| in `[0.0, 1.0]` (nearest-rank; the
+    /// value is clamped into that range). A rare outlier SATURATES gracefully to
+    /// `±127` while the bulk keeps tight bins (and precision). `Percentile(1.0)` is
+    /// exactly [`AbsMax`](Self::AbsMax) and `Percentile(0.0)` is the min. The
+    /// pre-emptive graduation path for when the scorer moves off tanh / grows
+    /// (design-note §9/§11); absmax remains the default until a model fails the PTQ
+    /// quality gate.
+    Percentile(f64),
+}
+
+/// Nearest-rank quantile of the |activation| magnitudes `xs` at fraction `frac`
+/// (sorts in place). `frac` is clamped to `[0.0, 1.0]`: `>= 1.0` returns the max
+/// (so `Percentile(1.0)` coincides with `AbsMax`), `0.0` the min; an empty set
+/// returns `0.0` (→ the degenerate unit scale, guarded by [`int8_scale`]). Sorted
+/// by [`f64::total_cmp`] for a genuine total order — NaNs sort last, though a
+/// finite calibration set (the only caller) has none.
+pub(crate) fn percentile_nearest_rank(xs: &mut [f64], frac: f64) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(f64::total_cmp);
+    let n = xs.len();
+    let frac = frac.clamp(0.0, 1.0);
+    // 1-based nearest rank = ceil(frac * n), clamped to [1, n]; index = rank - 1.
+    let rank = ((frac * n as f64).ceil() as usize).clamp(1, n);
+    xs[rank - 1]
+}
+
 impl LearnedPlanner {
     /// **Post-training int8 quantization** (PTQ) of this planner's scorer, calibrated
-    /// over `calibration` inputs. Weights are quantized per-tensor (symmetric int8);
-    /// the activation scales — `s_x` on the input features, `s_h` on the hidden layer
-    /// — are the absmax observed across the calibration corpus (a real PTQ
-    /// calibration pass). Returns an int8 [`QuantizedLearnedPlanner`] with the same
-    /// vocabulary + teacher.
+    /// over `calibration` inputs with the default [`CalibrationMethod::AbsMax`].
+    /// Byte-identical to the historical behaviour — the shipped artifact path.
     ///
     /// PTQ is a QUALITY operation, not a safety one (see the section header): the int8
     /// scorer's proposal is still bounded by the unchanged checker.
     pub fn quantize_int8(&self, calibration: &[PlanInput]) -> QuantizedLearnedPlanner {
+        self.quantize_int8_with(calibration, CalibrationMethod::AbsMax)
+    }
+
+    /// [`quantize_int8`](Self::quantize_int8) with an explicit activation-calibration
+    /// `method`. Weights are per-tensor symmetric int8 (absmax); the activation
+    /// scales `s_x` / `s_h` are derived from the calibration corpus per `method`.
+    pub fn quantize_int8_with(
+        &self,
+        calibration: &[PlanInput],
+        method: CalibrationMethod,
+    ) -> QuantizedLearnedPlanner {
         // Weight scales: per-tensor absmax over the (static) trained weights.
         let s_w1 = int8_scale(absmax2(&self.scorer.w1));
         let s_w2 = int8_scale(absmax2(&self.scorer.w2));
 
-        // Activation scales: absmax of the input features and the hidden activations
-        // observed over the calibration corpus.
-        let mut ax = 0.0_f64;
-        let mut ah = 0.0_f64;
-        for input in calibration {
-            let x = featurize(&scene_of(input));
-            for &xi in &x {
-                ax = ax.max(xi.abs());
+        // Activation clip thresholds over the calibration corpus, per `method`.
+        // AbsMax streams a running max (zero-alloc, byte-identical to the historical
+        // path); Percentile collects the magnitudes and takes the nearest-rank quantile.
+        let (ax, ah) = match method {
+            CalibrationMethod::AbsMax => {
+                let mut ax = 0.0_f64;
+                let mut ah = 0.0_f64;
+                for input in calibration {
+                    let x = featurize(&scene_of(input));
+                    for &xi in &x {
+                        ax = ax.max(xi.abs());
+                    }
+                    for hj in self.scorer.hidden(&x) {
+                        ah = ah.max(hj.abs());
+                    }
+                }
+                (ax, ah)
             }
-            for hj in self.scorer.hidden(&x) {
-                ah = ah.max(hj.abs());
+            CalibrationMethod::Percentile(frac) => {
+                // Sizes are predictable: one magnitude per input feature / hidden
+                // unit per calibration scenario — reserve up front, no re-growth.
+                let mut xs = Vec::with_capacity(calibration.len() * IN);
+                let mut hs = Vec::with_capacity(calibration.len() * H);
+                for input in calibration {
+                    let x = featurize(&scene_of(input));
+                    for &xi in &x {
+                        xs.push(xi.abs());
+                    }
+                    for hj in self.scorer.hidden(&x) {
+                        hs.push(hj.abs());
+                    }
+                }
+                (percentile_nearest_rank(&mut xs, frac), percentile_nearest_rank(&mut hs, frac))
             }
-        }
+        };
         let s_x = int8_scale(ax);
         let s_h = int8_scale(ah);
 
@@ -849,5 +919,65 @@ mod ptq_tests {
         assert!(moved, "int8 forward must differ from fp32 — quantization is non-trivial");
         let maxdiff = yf.iter().zip(yq.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         assert!(maxdiff < 0.5, "int8 perturbation should be small, got {maxdiff}");
+    }
+
+    // ---- Percentile calibrator (#3: the graduation path off absmax) ----
+
+    #[test]
+    fn percentile_nearest_rank_math() {
+        // frac = 1.0 is the max → Percentile(1.0) == AbsMax.
+        let mut v = vec![0.3, 0.1, 0.2, 0.5, 0.4];
+        assert!((percentile_nearest_rank(&mut v, 1.0) - 0.5).abs() < 1e-12);
+        // A mid quantile picks the nearest-rank element.
+        let mut v = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        // rank = ceil(0.6 * 5) = 3 → the 3rd smallest = 0.3.
+        assert!((percentile_nearest_rank(&mut v, 0.6) - 0.3).abs() < 1e-12);
+        // Degenerate inputs are guarded.
+        assert_eq!(percentile_nearest_rank(&mut [], 0.99), 0.0);
+        let mut one = vec![7.0];
+        assert_eq!(percentile_nearest_rank(&mut one, 0.5), 7.0);
+        // frac clamps into [0,1]; a huge frac is still the max, a tiny one the min.
+        let mut v = vec![1.0, 2.0, 3.0, 4.0];
+        assert_eq!(percentile_nearest_rank(&mut v, 5.0), 4.0);
+        assert_eq!(percentile_nearest_rank(&mut v, 0.0), 1.0);
+    }
+
+    /// The load-bearing #3 test — the two halves of the Gap-2 claim, deterministically:
+    /// with one extreme outlier in the calibration magnitudes, (a) the percentile clip
+    /// threshold is FAR below absmax (the outlier is clipped, not allowed to stretch the
+    /// bins), and (b) as a direct consequence the in-distribution BULK reconstructs with
+    /// FINER resolution under the percentile scale — while the outlier merely saturates.
+    #[test]
+    fn percentile_clips_outlier_and_keeps_finer_bulk_resolution() {
+        // 99 tightly-clustered bulk magnitudes + 1 blow-out outlier.
+        let mut mags: Vec<f64> = (0..99).map(|i| 0.20 + 0.001 * f64::from(i)).collect();
+        let outlier = 100.0;
+        mags.push(outlier);
+
+        let s_absmax = int8_scale(mags.iter().fold(0.0_f64, |a, &v| a.max(v)));
+        let s_pct = int8_scale(percentile_nearest_rank(&mut mags.clone(), 0.99));
+
+        // (a) The outlier stretches absmax; the 99th-percentile clip ignores it.
+        assert!(
+            s_pct < s_absmax / 10.0,
+            "percentile clip must be far tighter than absmax: s_pct={s_pct}, s_absmax={s_absmax}"
+        );
+
+        // (b) Finer bulk resolution: mean fake-quant reconstruction error over the bulk
+        // is strictly smaller under the tighter percentile scale.
+        let bulk: Vec<f64> = (0..99).map(|i| 0.20 + 0.001 * f64::from(i)).collect();
+        let mean_err = |scale: f64| -> f64 {
+            bulk.iter().map(|&v| (fake_quant(v, scale) - v).abs()).sum::<f64>() / bulk.len() as f64
+        };
+        assert!(
+            mean_err(s_pct) < mean_err(s_absmax),
+            "percentile scale must reconstruct the bulk more precisely: pct={}, absmax={}",
+            mean_err(s_pct),
+            mean_err(s_absmax)
+        );
+
+        // The outlier merely saturates (graceful), never a panic / out-of-range code.
+        assert_eq!(quantize_i8(outlier, s_pct), 127);
+        assert_eq!(quantize_i8(-outlier, s_pct), -127);
     }
 }

@@ -173,7 +173,17 @@ is absent, never silently passed). Reuses the existing bench scaffolding.
   (PARK-027/028/030).
 - **Q-4 — FP8/INT4** (extend `PrecisionMode`) where hardware supports it, if the
   contract shows headroom.
-- **QAT** — only spun up for a specific model that fails PTQ's quality gate.
+- **Calibrator graduation (available, opt-in).** Before QAT, the PTQ activation
+  calibrator can graduate from absmax to a **percentile clip**:
+  `LearnedPlanner::quantize_int8_with(_, CalibrationMethod::Percentile(frac))` clips
+  at the `frac` quantile of |activation| so a rare outlier saturates gracefully
+  instead of stretching the int8 bins (keeping precision for the bulk).
+  `Percentile(1.0)` == `AbsMax`, and **absmax stays the default** — evidence-gated:
+  at the current tanh scale the held-out gap is ~0 (nothing has failed the gate), so
+  the percentile rung is armed for the M-lane scale-up / off-tanh activations, not
+  switched on speculatively.
+- **QAT** — the last rung, only spun up for a specific model that fails PTQ's quality
+  gate even after the percentile calibrator.
 
 ## 10. Risks & mitigations
 

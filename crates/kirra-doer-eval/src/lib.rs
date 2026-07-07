@@ -760,6 +760,25 @@ mod tests {
         }
     }
 
+    /// The percentile calibrator (#3) is wired through and back-compatible: over the
+    /// real corpus, `Percentile(1.0)` (clip at the max) reproduces `AbsMax`, which in
+    /// turn equals the default `quantize_int8` — so the shipped-artifact path is
+    /// byte-identical and only an explicit sub-1.0 fraction changes the scales.
+    #[test]
+    fn percentile_1_0_equals_absmax_and_is_backcompat() {
+        use kirra_planner::CalibrationMethod;
+        let corpus = demo_corpus();
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
+
+        let default = fp32.quantize_int8(&inputs);
+        let absmax = fp32.quantize_int8_with(&inputs, CalibrationMethod::AbsMax);
+        let p100 = fp32.quantize_int8_with(&inputs, CalibrationMethod::Percentile(1.0));
+
+        assert_eq!(default.scales(), absmax.scales(), "default == explicit AbsMax");
+        assert_eq!(absmax.scales(), p100.scales(), "Percentile(1.0) == AbsMax");
+    }
+
     /// Quantization is a pure function of `(planner, calibration set)` — same inputs,
     /// byte-identical artifact and eval. (Reproducibility is a scorecard-provenance
     /// requirement; see Q1 scope §5.)
