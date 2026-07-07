@@ -169,6 +169,12 @@ pub(crate) struct RegisterCertPrincipalRequest {
     cert_sha256: String,
     /// One of `admin` | `integrator` | `auditor` | `operator`.
     role: String,
+    /// WP-15 (MGA G-19) — the pinned cert's X.509 notAfter, epoch ms. The admin
+    /// computes it offline alongside the fingerprint. Optional: omitted → no expiry
+    /// tracked (the pin never ages out, back-compat). Present → the cert stops
+    /// authorizing at/after this instant (renewal = re-register with a later value).
+    #[serde(default)]
+    not_after_ms: Option<u64>,
 }
 
 /// POST /system/cert-principals — pin (or rotate) a client cert to a scoped
@@ -204,7 +210,18 @@ pub(crate) async fn register_cert_principal_handler(
         }))).into_response();
     }
 
+    // Reject a plainly-invalid expiry: notAfter must be in the FUTURE at
+    // registration time (a cert already lapsed the moment it is pinned is an
+    // operator mistake — accepting it would silently 401 every request under it).
     let now = now_ms();
+    if let Some(exp) = req.not_after_ms {
+        if exp <= now {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+                "error": "not_after_ms must be in the future (the cert would be expired on registration)"
+            }))).into_response();
+        }
+    }
+    let not_after_ms = req.not_after_ms;
     let admin_fp = admin_token_fingerprint(&headers);
     let id = principal_id.to_string();
     let role_str = role.as_str().to_string();
@@ -215,13 +232,14 @@ pub(crate) async fn register_cert_principal_handler(
     // only rotates the SAME id) — maps to 409, not a generic 500. cert_sha256 is
     // operator-supplied, so this collision is a plausible, actionable mistake.
     let persisted = svc.app.store.call(move |store| {
-        store.register_cert_principal(&id, &fp_store, &role_str, now)?;
+        store.register_cert_principal(&id, &fp_store, &role_str, not_after_ms, now)?;
         let _ = store.append_clearance_audit_event(
             "CertPrincipalRegistered",
             &json!({
                 "principal_id": id,
                 "role": role_str,
                 "cert_sha256": fp_audit,
+                "not_after_ms": not_after_ms,
                 "registered_by_admin_fingerprint": admin_fp,
             }).to_string(),
             now,
@@ -234,6 +252,7 @@ pub(crate) async fn register_cert_principal_handler(
             "principal_id": principal_id,
             "role": role.as_str(),
             "cert_sha256": fingerprint,
+            "not_after_ms": not_after_ms,
         }))).into_response(),
         Ok(Err(e)) if is_unique_violation(&e) => (StatusCode::CONFLICT, Json(json!({
             "error": "cert_sha256 is already pinned to another principal"
@@ -260,14 +279,22 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
 pub(crate) async fn list_cert_principals_handler(
     State(svc): State<Arc<ServiceState>>,
 ) -> impl IntoResponse {
+    // Evaluate expiry against a single "now" so every row's `expired`/`valid` is
+    // consistent within one listing.
+    let now = now_ms();
     match svc.app.store.call_read(|store| store.load_cert_principals()).await {
         Ok(Ok(list)) => {
             let out: Vec<_> = list.into_iter().map(|p| json!({
                 "principal_id": p.principal_id,
                 "role": p.role,
                 "created_at_ms": p.created_at_ms,
+                // `active` = not revoked (the pin's on/off state); `expired` and
+                // `valid` add the WP-15 lifecycle view (valid = authorizes right now).
                 "active": p.is_active(),
                 "revoked_at_ms": p.revoked_at_ms,
+                "not_after_ms": p.not_after_ms,
+                "expired": p.is_expired(now),
+                "valid": p.is_valid_at(now),
             })).collect();
             (StatusCode::OK, Json(json!({ "cert_principals": out }))).into_response()
         }

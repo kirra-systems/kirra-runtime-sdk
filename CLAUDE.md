@@ -127,6 +127,12 @@ src/
 │                               (CAMPAIGN_SWEEP_MS); auto-halts active campaigns on a
 │                               CONFIRMED regression between advances (unavailable/
 │                               stale posture is skipped, never a halt)
+├── cert_expiry_monitor.rs    — WP-15/G-19 mTLS cert-principal expiry monitor:
+│                               sweep_cert_expiry_once + spawn_cert_expiry_monitor
+│                               (CERT_EXPIRY_SWEEP_MS / CERT_EXPIRY_WARN_WINDOW_MS);
+│                               hourly census → WARN + hash-chained
+│                               CertPrincipalExpiryWarning audit for lapsed/lapsing
+│                               certs (observability only; auth already fail-closes)
 ├── kinematics_contract.rs    — KinematicContract, scalar clamping
 ├── kinematics_sim.rs         — re-export shim → kirra_core::kinematics_sim (relocated
 │                               Stage 7; VehicleState, apply_enforcement, run_simulation)
@@ -182,7 +188,7 @@ src/
 | `federation_report_nonces` | Burned nonces (replay prevention) |
 | `attestation_identity_registry` | Hardware fingerprint (AK public key digest) per node |
 | `api_principals` | WS-1 (#G7) per-principal scoped API tokens (SHA-256 hash + role; plaintext never stored) |
-| `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here) |
+| `cert_principals` | WS-1 (#G7) Track 1.2 mTLS cert principals (client-cert SHA-256 leaf fingerprint + role; CA-verified at the TLS layer, pinned here). WP-15 (G-19): nullable `not_after_ms` (X.509 notAfter) → the auth path fail-closes a cert at/past expiry exactly as on revocation; renewal = re-pin in place with a later expiry, no restart |
 | `ota_campaigns` | WS-4 (Track 3) OTA governor-artifact campaigns (artifact digest + WP-12 `artifact_signature_b64` release signature + cohorts + staged rollout schedule + lifecycle state + halt reason; the `crate::ota_campaign` state machine's durable backing) |
 | `node_artifact_status` | WS-4 (Track 3) per-node adoption reports (node_id PK + applied_digest + campaign_id + version + reported_at_ms + `attested`; upsert monotonic on reported_at_ms, non-audit-chained observability; the fleet summary's `applied_nodes`/`attested_nodes` join source) |
 
@@ -285,7 +291,7 @@ Admin token or an `integrator`-role principal.
 - `POST /system/audit/rotate-signing-key` — Rotate the audit signing key
 - `POST/GET /system/principals`, `POST /system/principals/{id}/revoke` — API principal registry
 - `POST/GET /system/campaigns`, `GET /system/campaigns/summary`, `GET /system/campaigns/{id}`, `POST /system/campaigns/{id}/{arm,advance,halt}` — WS-4 OTA governor-artifact campaign control plane (each lifecycle mutation writes an R156-shaped audit entry; `advance` is fail-closed on fleet posture — non-Nominal → HALT). `summary` = fleet rollout observability (`summarize_campaigns`: counts by state + active-campaign stage progress + halted-with-reason + `applied_nodes` adoption numerator joined from `node_artifact_status`; read-only, static path wins over `{id}`)
-- `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role)
+- `POST/GET /system/cert-principals`, `POST /system/cert-principals/{id}/revoke` — mTLS cert-principal registry (pin a CA-verified client cert by SHA-256 fingerprint → role). WP-15: register accepts optional `not_after_ms` (X.509 notAfter, must be future); the auth path fail-closes a cert at/past expiry; renewal = re-pin in place with a later expiry; GET surfaces `not_after_ms`/`expired`/`valid`
 - `POST /federation/controllers/register` — Register trusted peer controller
 - `POST /attestation/identity/register` — Register hardware fingerprint
 
@@ -303,7 +309,7 @@ Admin token or an `integrator`-role principal.
 
 ### Public read-only
 - `GET /health`, `GET /ready`
-- `GET /metrics` — Prometheus fleet-safety series (WS-0.5) + WS-4 OTA rollout series (`kirra_ota_campaigns_total{state}`, `kirra_ota_campaign_rollout_percent{campaign_id}`, `kirra_ota_campaign_applied_nodes{campaign_id}` via `campaign_metrics_prometheus`); posture-exempt so the scrape survives LockedOut
+- `GET /metrics` — Prometheus fleet-safety series (WS-0.5) + WS-4 OTA rollout series (`kirra_ota_campaigns_total{state}`, `kirra_ota_campaign_rollout_percent{campaign_id}`, `kirra_ota_campaign_applied_nodes{campaign_id}` via `campaign_metrics_prometheus`) + WP-15 cert-lifecycle census (`kirra_cert_principals{state="active|revoked|expired|expiring_soon|no_expiry"}` via `cert_expiry_prometheus`); posture-exempt so the scrape survives LockedOut
 - `GET /attestation/status/:node_id`
 - `GET /fleet/posture`, `GET /fleet/posture/:node_id`
 - `GET /fleet/history/:node_id`, `GET /fleet/flapping/:node_id`
@@ -342,6 +348,10 @@ PROMOTION_TIMEOUT_MS         = 10_000     // standby promotes if primary silent 
 
 // campaign_monitor.rs
 CAMPAIGN_SWEEP_MS            = 1_000      // OTA campaign posture-sweep interval
+
+// cert_expiry_monitor.rs
+CERT_EXPIRY_SWEEP_MS        = 3_600_000  // mTLS cert-expiry census interval (1h)
+CERT_EXPIRY_WARN_WINDOW_MS  = 1_209_600_000 // "expiring soon" horizon (14 days)
 
 // audit_shipper.rs
 AUDIT_SHIP_INTERVAL_MS      = 5_000      // WORM off-box audit-ship cycle interval

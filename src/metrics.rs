@@ -461,6 +461,46 @@ impl FleetSafetyMetrics {
     }
 }
 
+/// WP-15 (MGA G-19) — render the cert-principal lifecycle census as a Prometheus
+/// gauge family (`kirra_cert_principals{state="…"}`), appended to `/metrics`
+/// best-effort (mirrors `ota_campaign::campaign_metrics_prometheus`). A store-time
+/// gauge, not an accumulated counter: it reports the registry's shape at scrape
+/// time, so `kirra_cert_principals{state="expired"}` and `{state="expiring_soon"}`
+/// alert on lapsed/lapsing mTLS credentials. `node_id` is label-escaped here (the
+/// caller passes the raw instance id).
+#[must_use]
+pub fn cert_expiry_prometheus(
+    node_id: &str,
+    summary: &crate::verifier_store::CertExpirySummary,
+) -> String {
+    use std::fmt::Write as _;
+    let node_id = escape_label_value(node_id);
+    let mut out = String::with_capacity(512);
+    let _ = writeln!(
+        out,
+        "# HELP kirra_cert_principals mTLS cert-principal registry census by lifecycle \
+         state (state=active|revoked|expired|expiring_soon|no_expiry; expired/expiring \
+         alert on lapsed/lapsing client certs)"
+    );
+    let _ = writeln!(out, "# TYPE kirra_cert_principals gauge");
+    for (state, val) in [
+        ("active", summary.active),
+        ("revoked", summary.revoked),
+        ("expired", summary.expired),
+        ("expiring_soon", summary.expiring_soon),
+        ("no_expiry", summary.no_expiry),
+    ] {
+        let _ = writeln!(
+            out,
+            "kirra_cert_principals{{node_id=\"{node_id}\",state=\"{state}\"}} {val}"
+        );
+    }
+    let _ = writeln!(out, "# HELP kirra_cert_principals_total Registered mTLS cert principals");
+    let _ = writeln!(out, "# TYPE kirra_cert_principals_total gauge");
+    let _ = writeln!(out, "kirra_cert_principals_total{{node_id=\"{node_id}\"}} {}", summary.total);
+    out
+}
+
 pub struct LockFreeMetricsAggregator {
     pub total_processed_frames: AtomicU64,
     pub envelope_clamping_events: AtomicU64,
@@ -701,6 +741,42 @@ mod fleet_metrics_tests {
             !text.lines().any(|l| l.starts_with("newline")),
             "a raw newline in node_id must not split a sample line:\n{text}"
         );
+    }
+
+    /// WP-15 (MGA G-19) — the cert-expiry census renders one gauge sample per
+    /// lifecycle state plus a total, with escaped node_id.
+    #[test]
+    fn cert_expiry_exposition_has_every_state_and_total() {
+        use crate::verifier_store::CertExpirySummary;
+        let summary = CertExpirySummary {
+            total: 5,
+            active: 3,
+            revoked: 1,
+            expired: 1,
+            expiring_soon: 2,
+            no_expiry: 1,
+        };
+        let text = super::cert_expiry_prometheus("node-a", &summary);
+        assert!(text.contains("# TYPE kirra_cert_principals gauge"), "{text}");
+        for (state, val) in
+            [("active", 3), ("revoked", 1), ("expired", 1), ("expiring_soon", 2), ("no_expiry", 1)]
+        {
+            assert!(
+                text.contains(&format!(
+                    "kirra_cert_principals{{node_id=\"node-a\",state=\"{state}\"}} {val}\n"
+                )),
+                "missing state={state}:\n{text}"
+            );
+        }
+        assert!(text.contains("kirra_cert_principals_total{node_id=\"node-a\"} 5\n"), "{text}");
+    }
+
+    #[test]
+    fn cert_expiry_exposition_escapes_node_id() {
+        use crate::verifier_store::CertExpirySummary;
+        let text = super::cert_expiry_prometheus("bad\"id\nx", &CertExpirySummary::default());
+        assert!(text.contains("node_id=\"bad\\\"id\\nx\""), "node_id must be escaped:\n{text}");
+        assert!(!text.lines().any(|l| l.starts_with("x\"")), "no raw newline splits a line:\n{text}");
     }
 
     /// Label values are the stable snake_case codes (renaming one breaks

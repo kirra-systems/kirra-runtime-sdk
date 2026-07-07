@@ -157,9 +157,27 @@ async fn authorize_scope(
                     {
                         Ok(Ok(Some(rec))) => {
                             resolved_via_cert = true;
+                            // WP-15 (MGA G-19) — a cert is a LIFECYCLE credential: it
+                            // stops authorizing past its X.509 notAfter exactly as it
+                            // does on revocation. Fold expiry into the same
+                            // invalid-credential flag the pure predicate denies on
+                            // (`revoked` = "this credential is no longer valid"), and
+                            // WARN distinctly on an expired-but-not-revoked cert so an
+                            // operator sees a lapsed cert, not a mystery 401.
+                            let now = now_ms();
+                            let expired = rec.is_expired(now);
+                            if expired && rec.revoked_at_ms.is_none() {
+                                tracing::warn!(
+                                    principal_id = %rec.principal_id,
+                                    not_after_ms = rec.not_after_ms.unwrap_or(0),
+                                    now_ms = now,
+                                    "mTLS cert principal is EXPIRED (past notAfter) → \
+                                     denied 401 (fail-closed; renew the cert)"
+                                );
+                            }
                             Some(ResolvedPrincipal {
                                 role: ApiRole::parse_role(&rec.role),
-                                revoked: rec.revoked_at_ms.is_some(),
+                                revoked: rec.revoked_at_ms.is_some() || expired,
                                 principal_id: rec.principal_id,
                             })
                         }

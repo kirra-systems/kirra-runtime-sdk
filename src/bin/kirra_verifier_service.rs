@@ -350,6 +350,18 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
         "OTA campaign posture-sweep monitor spawned (WS-4 halt-on-regression)"
     );
 
+    // WP-15 (MGA G-19) — mTLS cert-principal expiry monitor. Periodically censuses
+    // the cert_principals registry and WARNs (log + audit) when a pinned client cert
+    // has lapsed or is about to, so an operator renews before it silently stops
+    // authorizing. Observability only (the auth path already fail-closes an expired
+    // cert); supervised non-critical. Active-only (this instance owns audit writes).
+    kirra_verifier::cert_expiry_monitor::spawn_cert_expiry_monitor(Arc::clone(&svc.app));
+    tracing::info!(
+        sweep_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_SWEEP_MS,
+        warn_window_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_WARN_WINDOW_MS,
+        "mTLS cert-principal expiry monitor spawned (WP-15 cert lifecycle)"
+    );
+
     // WS-4 / Track 3 — WORM off-box audit shipper. Opt-in: runs only when
     // KIRRA_AUDIT_SHIP_PATH names an append-only sink file, appending new audit
     // records off-box each cycle so the tamper-evidence log survives loss of this

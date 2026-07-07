@@ -109,6 +109,28 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(&summary));
     }
 
+    // WP-15 (MGA G-19): append the mTLS cert-principal lifecycle census
+    // (`kirra_cert_principals{state=…}`) so a lapsed/lapsing client cert is
+    // alertable. Same best-effort, posture-exempt treatment as the campaign series;
+    // evaluated against `now_ms()` with the monitor's 14-day warn window.
+    let cert_now = now_ms();
+    if let Ok(Ok(cert_summary)) = svc
+        .app
+        .store
+        .call_read(move |store| {
+            store.cert_expiry_summary(
+                cert_now,
+                kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_WARN_WINDOW_MS,
+            )
+        })
+        .await
+    {
+        body.push_str(&kirra_verifier::metrics::cert_expiry_prometheus(
+            &kirra_verifier::standby_monitor::instance_id(),
+            &cert_summary,
+        ));
+    }
+
     (
         [(
             axum::http::header::CONTENT_TYPE,
