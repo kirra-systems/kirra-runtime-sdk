@@ -115,6 +115,13 @@ pub enum InstallError {
     },
     /// An I/O failure reading the artifact or driving the boot controller.
     Io(std::io::Error),
+    /// WP-12: a release verifying key is provisioned on this installer, so an
+    /// UNSIGNED stage is refused — hash-only staging is the legacy mode and is
+    /// rejected once the node knows the governor release key.
+    SignatureRequired,
+    /// WP-12: the artifact-release signature failed verification (malformed,
+    /// wrong key, or signed over a different digest). The slot is never armed.
+    ArtifactSignatureInvalid,
 }
 
 impl std::fmt::Display for InstallError {
@@ -131,6 +138,13 @@ impl std::fmt::Display for InstallError {
                 write!(f, "cannot {action} from state {state}")
             }
             InstallError::Io(e) => write!(f, "io: {e}"),
+            InstallError::SignatureRequired => write!(
+                f,
+                "a release key is provisioned: unsigned (hash-only) staging is refused"
+            ),
+            InstallError::ArtifactSignatureInvalid => {
+                write!(f, "artifact release signature invalid — refusing to stage")
+            }
         }
     }
 }
@@ -169,6 +183,11 @@ pub struct Installer<B: BootController> {
     boot: B,
     state: InstallState,
     max_boot_attempts: u8,
+    /// WP-12 — the pinned governor artifact-release verifying key. `None` =
+    /// legacy hash-only mode (pre-provisioning); once `Some`, EVERY stage must
+    /// carry a valid signature ([`stage_verified_signed`](Self::stage_verified_signed))
+    /// and the unsigned path is refused fail-closed.
+    release_vk: Option<ed25519_dalek::VerifyingKey>,
 }
 
 impl<B: BootController> Installer<B> {
@@ -181,7 +200,20 @@ impl<B: BootController> Installer<B> {
             boot,
             state: InstallState::Idle { active },
             max_boot_attempts: max_boot_attempts.max(1),
+            release_vk: None,
         })
+    }
+
+    /// WP-12 — provision the governor artifact-release verifying key. From
+    /// this point EVERY stage must carry a valid release signature
+    /// ([`stage_verified_signed`](Self::stage_verified_signed)); the unsigned
+    /// [`stage_verified`](Self::stage_verified) path is refused
+    /// (`SignatureRequired`). Provisioning is one-way by design — an
+    /// installer never downgrades to hash-only once it knows the key.
+    #[must_use]
+    pub fn with_release_key(mut self, release_vk: ed25519_dalek::VerifyingKey) -> Self {
+        self.release_vk = Some(release_vk);
+        self
     }
 
     pub fn state(&self) -> InstallState {
@@ -216,6 +248,54 @@ impl<B: BootController> Installer<B> {
                 })
             }
         };
+        // WP-12: once the release key is provisioned, hash-only staging is
+        // the rejected legacy mode — a digest names WHICH bytes but proves
+        // nothing about WHO released them.
+        if self.release_vk.is_some() {
+            return Err(InstallError::SignatureRequired);
+        }
+        verify_staged_artifact(artifact_path, expected_digest)?;
+        let target = active.other();
+        self.state = InstallState::Staged { active, target };
+        Ok(target)
+    }
+
+    /// WP-12 — verify-then-stage with the governor artifact-release
+    /// SIGNATURE: the artifact's SHA-256 must equal `expected_digest` AND
+    /// `signature_b64` must verify over that digest against the provisioned
+    /// release key. Any failure (no key provisioned, malformed/mismatched
+    /// digest, bad signature) leaves the state machine in `Idle` — the slot
+    /// is never armed by an artifact whose release provenance is unproven.
+    pub fn stage_verified_signed(
+        &mut self,
+        artifact_path: &Path,
+        expected_digest: &str,
+        signature_b64: &str,
+    ) -> Result<Slot, InstallError> {
+        let active = match self.state {
+            InstallState::Idle { active } => active,
+            InstallState::Staged { .. } => {
+                return Err(InstallError::InvalidTransition {
+                    state: "staged",
+                    action: "stage",
+                })
+            }
+            InstallState::Trying { .. } => {
+                return Err(InstallError::InvalidTransition {
+                    state: "trying",
+                    action: "stage",
+                })
+            }
+        };
+        // A signed stage REQUIRES the key: verifying against nothing is not a
+        // pass. (An unprovisioned node uses the legacy path explicitly.)
+        let vk = self.release_vk.as_ref().ok_or(InstallError::SignatureRequired)?;
+        kirra_release_token::artifact_release::verify_artifact_release(
+            expected_digest,
+            signature_b64,
+            vk,
+        )
+        .map_err(|_| InstallError::ArtifactSignatureInvalid)?;
         verify_staged_artifact(artifact_path, expected_digest)?;
         let target = active.other();
         self.state = InstallState::Staged { active, target };
@@ -637,6 +717,11 @@ pub struct AssignmentView {
     /// current/baseline artifact).
     #[serde(default)]
     pub artifact_digest: Option<String>,
+    /// WP-12 — the governor artifact-release signature over `artifact_digest`
+    /// (base64 Ed25519). Absent on legacy/pre-WP-12 assignments; a node with a
+    /// provisioned release key refuses to stage without it.
+    #[serde(default)]
+    pub artifact_signature_b64: Option<String>,
     #[serde(default)]
     pub artifact_version: Option<String>,
     #[serde(default)]
@@ -654,6 +739,9 @@ pub enum PullAction {
     /// slot. `digest` is the content-addressed identity (SHA-256 hex).
     Stage {
         digest: String,
+        /// WP-12 — the release signature to verify at stage time (absent on a
+        /// legacy assignment; a key-provisioned node then refuses to stage).
+        signature_b64: Option<String>,
         version: Option<String>,
         campaign_id: Option<String>,
     },
@@ -690,6 +778,7 @@ pub fn decide_pull(
     }
     PullAction::Stage {
         digest: digest.to_string(),
+        signature_b64: assignment.artifact_signature_b64.clone(),
         version: assignment.artifact_version.clone(),
         campaign_id: assignment.campaign_id.clone(),
     }
@@ -1150,12 +1239,123 @@ mod tests {
         assert_eq!(g.streak(), 0);
     }
 
+    // --- WP-12: signature-enforced staging (tamper suite) -----------------
+
+    fn release_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn signed_installer() -> Installer<InMemoryBootController> {
+        Installer::new(InMemoryBootController::new(Slot::A), 3)
+            .unwrap()
+            .with_release_key(release_key().verifying_key())
+    }
+
+    fn sign_digest(digest: &str, key: &ed25519_dalek::SigningKey) -> String {
+        kirra_release_token::artifact_release::sign_artifact_release(digest, key).unwrap()
+    }
+
+    /// Happy path: a correctly-signed artifact stages into the inactive slot.
+    #[test]
+    fn signed_stage_with_valid_signature_arms_the_slot() {
+        let p = write_temp("signed_ok", b"hello");
+        let mut inst = signed_installer();
+        let sig = sign_digest(DIGEST_HELLO, &release_key());
+        let target = inst.stage_verified_signed(&p, DIGEST_HELLO, &sig).unwrap();
+        assert_eq!(target, Slot::B);
+        assert!(matches!(inst.state(), InstallState::Staged { .. }));
+    }
+
+    /// Once the release key is provisioned, the hash-only legacy path is a
+    /// rejected mode — a digest proves WHICH bytes, not WHO released them.
+    #[test]
+    fn provisioned_key_refuses_unsigned_stage() {
+        let p = write_temp("signed_legacy", b"hello");
+        let mut inst = signed_installer();
+        assert!(matches!(
+            inst.stage(&p, DIGEST_HELLO),
+            Err(InstallError::SignatureRequired)
+        ));
+        assert!(matches!(inst.state(), InstallState::Idle { .. }), "slot never armed");
+    }
+
+    /// A signature from the WRONG key never arms the slot.
+    #[test]
+    fn wrong_key_signature_never_arms() {
+        let p = write_temp("signed_wrongkey", b"hello");
+        let mut inst = signed_installer();
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+        let sig = sign_digest(DIGEST_HELLO, &attacker);
+        assert!(matches!(
+            inst.stage_verified_signed(&p, DIGEST_HELLO, &sig),
+            Err(InstallError::ArtifactSignatureInvalid)
+        ));
+        assert!(matches!(inst.state(), InstallState::Idle { .. }));
+    }
+
+    /// A VALID signature over a DIFFERENT digest never arms the slot (a
+    /// replayed release for artifact X cannot bless artifact Y).
+    #[test]
+    fn signature_over_different_digest_never_arms() {
+        let p = write_temp("signed_replay", b"hello");
+        let mut inst = signed_installer();
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let sig = sign_digest(other, &release_key());
+        assert!(matches!(
+            inst.stage_verified_signed(&p, DIGEST_HELLO, &sig),
+            Err(InstallError::ArtifactSignatureInvalid)
+        ));
+        assert!(matches!(inst.state(), InstallState::Idle { .. }));
+    }
+
+    /// Right signature, TAMPERED bytes: the digest check still refuses — the
+    /// signature blesses a digest, the bytes must still equal it.
+    #[test]
+    fn valid_signature_with_tampered_bytes_never_arms() {
+        let p = write_temp("signed_tampered", b"HELLO-TAMPERED");
+        let mut inst = signed_installer();
+        let sig = sign_digest(DIGEST_HELLO, &release_key());
+        assert!(matches!(
+            inst.stage_verified_signed(&p, DIGEST_HELLO, &sig),
+            Err(InstallError::DigestMismatch { .. })
+        ));
+        assert!(matches!(inst.state(), InstallState::Idle { .. }));
+    }
+
+    /// Without a provisioned key, the SIGNED path refuses too — verifying
+    /// against nothing is not a pass (an unprovisioned node stays on the
+    /// explicit legacy path).
+    #[test]
+    fn signed_stage_without_provisioned_key_is_refused() {
+        let p = write_temp("signed_nokey", b"hello");
+        let mut inst = Installer::new(InMemoryBootController::new(Slot::A), 3).unwrap();
+        let sig = sign_digest(DIGEST_HELLO, &release_key());
+        assert!(matches!(
+            inst.stage_verified_signed(&p, DIGEST_HELLO, &sig),
+            Err(InstallError::SignatureRequired)
+        ));
+    }
+
+    /// The pull reconciler threads the assignment's signature into the action.
+    #[test]
+    fn decide_pull_carries_the_release_signature() {
+        let mut a = assign(true, Some(DIGEST_HELLO));
+        a.artifact_signature_b64 = Some("c2ln".into());
+        match decide_pull(&a, Some("something-else"), false) {
+            PullAction::Stage { signature_b64, .. } => {
+                assert_eq!(signature_b64.as_deref(), Some("c2ln"));
+            }
+            other => panic!("expected Stage, got {other:?}"),
+        }
+    }
+
     // --- pull reconciler (HTTP agent) ------------------------------------
 
     fn assign(rolled: bool, digest: Option<&str>) -> AssignmentView {
         AssignmentView {
             rolled,
             artifact_digest: digest.map(String::from),
+            artifact_signature_b64: None,
             artifact_version: Some("v2".into()),
             campaign_id: Some("camp-1".into()),
         }
@@ -1177,6 +1377,7 @@ mod tests {
             action,
             PullAction::Stage {
                 digest: DIGEST_HELLO.to_string(),
+                signature_b64: None,
                 version: Some("v2".into()),
                 campaign_id: Some("camp-1".into()),
             }

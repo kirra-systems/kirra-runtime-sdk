@@ -352,6 +352,45 @@ jobs:
             echo "::endgroup::"
           done
 
+  # WP-08 (MGA G-6) — mutation gate on the CHECKER. Runs cargo-mutants ONLY
+  # over the mutants lying in this PR's diff of the checker crate
+  # (`--in-diff`): new/changed checker code must kill its own mutants, while
+  # the pre-existing survivor debt (tracked + triaged in
+  # docs/testing/MUTATION_BASELINE.md, ratcheted DOWN by targeted kill tests)
+  # does not red unrelated PRs. A PR that does not touch the checker skips in
+  # seconds. The test scope (checker + the adapter validation suite, where the
+  # checker's deepest tests live) comes from .cargo/mutants.toml — measured on
+  # the 2026-07-07 baseline, own-tests-only overstates survivors 318 vs 202.
+  mutation-gate:
+    name: Mutation gate (checker diff, WP-08)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Compute the PR's checker diff
+        run: |
+          set -euo pipefail
+          git diff "origin/${{ github.base_ref }}"...HEAD -- \
+            crates/kirra-trajectory/src > checker.diff
+          wc -l checker.diff
+      - name: Install cargo-mutants
+        if: hashFiles('checker.diff') != ''
+        run: |
+          if [ -s checker.diff ]; then cargo install cargo-mutants --locked; fi
+      - name: Mutants in the diff must be caught
+        run: |
+          set -euo pipefail
+          if [ ! -s checker.diff ]; then
+            echo "No checker changes in this PR — mutation gate not applicable."
+            exit 0
+          fi
+          cargo mutants -p kirra-trajectory --in-diff checker.diff \
+            --timeout 300 -j 1 --no-shuffle
+
   wcet-gate:
     name: WCET Gate (non-instrumented timing)
     runs-on: ubuntu-latest

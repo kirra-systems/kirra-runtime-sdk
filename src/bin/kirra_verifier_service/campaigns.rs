@@ -30,6 +30,12 @@ pub(crate) struct CreateCampaignRequest {
     cohorts: Vec<String>,
     /// Strictly-increasing rollout percentages within `1..=100`, ending at `100`.
     stages: Vec<u8>,
+    /// WP-12 — the governor artifact-release signature over `artifact_digest`
+    /// (base64 Ed25519, `kirra_release_token::artifact_release` domain).
+    /// Optional at create time (legacy campaigns); a key-provisioned node
+    /// refuses to stage an assignment without it.
+    #[serde(default)]
+    artifact_signature_b64: Option<String>,
 }
 
 /// The lifecycle-operation result surfaced from a `store.call` closure back to the
@@ -73,7 +79,10 @@ pub(crate) async fn create_campaign_handler(
         req.stages,
         now,
     ) {
-        Ok(c) => c,
+        Ok(c) => match req.artifact_signature_b64.as_deref().map(str::trim) {
+            Some(sig) if !sig.is_empty() => c.with_artifact_signature(sig),
+            _ => c,
+        },
         Err(e) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -358,6 +367,7 @@ fn campaign_json(c: &Campaign) -> serde_json::Value {
     json!({
         "campaign_id": c.campaign_id,
         "artifact_digest": c.artifact_digest,
+        "artifact_signature_b64": c.artifact_signature_b64,
         "artifact_version": c.artifact_version,
         "cohorts": c.cohorts,
         "stages": c.stages,

@@ -55,6 +55,18 @@ pub const COURIER_RSS_LEAD_BRAKE_MAX_MPS2: f64 = 4.0;
 /// Courier maximum lateral acceleration (m/s²) for the side-RSS swerve term.
 pub const COURIER_RSS_LAT_ACCEL_MAX_MPS2: f64 = 1.0;
 
+/// WP-07 (#408 Option A) — the courier's minimum committed lateral braking
+/// (`a_lat,brake,min`). 0.7 × the accel-role budget: <= the accel role by
+/// construction, so the split bound is strictly conservative vs the legacy
+/// single-parameter form. VALIDATION-PENDING — a safety-case-derived value
+/// must replace this placeholder before deployment (docs/CONTRACT_PROFILES.md
+/// discipline).
+const COURIER_RSS_LAT_BRAKE_MIN_MPS2: f64 = 0.7 * COURIER_RSS_LAT_ACCEL_MAX_MPS2;
+
+/// WP-07 — the IEEE 2846 §5.2 lateral-fluctuation margin `mu` (m).
+/// VALIDATION-PENDING placeholder.
+const COURIER_RSS_MU_LATERAL_M: f64 = 0.2;
+
 /// Longitudinal velocity (m/s, ego frame) below which an object is treated as
 /// CLOSING head-on (its `vel.x` points back toward the ego). Such an object is
 /// routed through the head-on RSS bound (`oncoming = true`), never the
@@ -77,6 +89,8 @@ pub fn courier_rss_params(profile: &CourierPlatformProfile) -> RssParams {
         brake_min: profile.max_brake_mps2,
         brake_max: COURIER_RSS_LEAD_BRAKE_MAX_MPS2,
         lat_accel_max: COURIER_RSS_LAT_ACCEL_MAX_MPS2,
+        lat_brake_min: COURIER_RSS_LAT_BRAKE_MIN_MPS2,
+        mu_lateral_m: COURIER_RSS_MU_LATERAL_M,
     }
 }
 

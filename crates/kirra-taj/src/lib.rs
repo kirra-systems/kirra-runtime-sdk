@@ -35,6 +35,7 @@
 // ros2/tokio tree). The adapter is now a dev-dependency only (its `validate_trajectory_slow`
 // + `VehicleConfig` are used solely by the integration tests).
 use kirra_core::corridor::{CorridorSource, Point};
+use kirra_core::trajectory::PerceivedPedestrian;
 use kirra_core::trajectory::PerceivedObject;
 
 mod semantic_eval;
@@ -91,6 +92,32 @@ impl Default for TajConfig {
             corridor_station_m: 1.0,
             track_assoc_gate_m: 3.0,
         }
+    }
+}
+
+/// WP-10 — the VRU classifier's envelope parameters. Separate from
+/// [`TajConfig`] so its 11 existing literal constructors do not ripple.
+/// Every default is CONSERVATIVE-FIRST and **VALIDATION-PENDING** (per the
+/// CONTRACT_PROFILES discipline): deployment values must be safety-case
+/// derived per ODD.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VruClassifierConfig {
+    /// Max cluster extent (bbox diagonal, m) a pedestrian may present.
+    /// Default 1.2 — a person with gait/bag spread; bicycles fall near the
+    /// boundary and classify as pedestrians when slow (stricter bound, the
+    /// safe direction).
+    pub max_extent_m: f64,
+    /// Max tracked speed (m/s) within the pedestrian envelope. Default 3.5 —
+    /// above the checker's assumed `v_ped_max` (2.0, a brisk walk) so
+    /// measurement noise on a genuine pedestrian cannot demote it to
+    /// vehicle-only treatment; runners/cyclists-as-VRUs ODDs must raise both
+    /// together (PEDESTRIAN_RSS.md §5.1).
+    pub max_speed_mps: f64,
+}
+
+impl Default for VruClassifierConfig {
+    fn default() -> Self {
+        Self { max_extent_m: 1.2, max_speed_mps: 3.5 }
     }
 }
 
@@ -325,6 +352,14 @@ impl TajPhaseA {
     /// Run the full Phase-A pipeline: scan → corridor + objects + health.
     #[must_use]
     pub fn process(&self, scan: &LaserScan, now_ms: u64) -> TajPerception {
+        self.process_parts(scan, now_ms).0
+    }
+
+    /// [`process`](Self::process) plus each object's cluster extent (parallel
+    /// to `TajPerception::objects` by index) — the WP-10 seam that keeps the
+    /// footprint scale alive long enough for VRU classification without
+    /// touching the lean `PerceivedObject`/`TajPerception` contracts.
+    fn process_parts(&self, scan: &LaserScan, now_ms: u64) -> (TajPerception, Vec<f64>) {
         let points = self.scan_to_points(scan);
         // Confidence = fraction of rays that produced a valid return. An empty /
         // all-invalid scan → 0.0 → the corridor is unhealthy → checker MRCs.
@@ -332,8 +367,14 @@ impl TajPhaseA {
         let confidence = (points.len() as f32 / total as f32).clamp(0.0, 1.0);
 
         let corridor = self.extract_corridor(&points, confidence, now_ms, scan.stamp_ms);
-        let objects = self.cluster_objects(&points);
-        TajPerception { corridor, objects, stamp_ms: scan.stamp_ms }
+        let with_extent = self.cluster_objects_with_extent(&points);
+        let mut objects = Vec::with_capacity(with_extent.len());
+        let mut extents = Vec::with_capacity(with_extent.len());
+        for (o, e) in with_extent {
+            objects.push(o);
+            extents.push(e);
+        }
+        (TajPerception { corridor, objects, stamp_ms: scan.stamp_ms }, extents)
     }
 
     /// Per-station drivable corridor: boundary vertices are placed every
@@ -387,7 +428,12 @@ impl TajPhaseA {
     /// so velocity is unknown → reported as `0.0` (Phase B / temporal tracking
     /// adds motion). Each run of consecutive points within `cluster_gap_m`, of at
     /// least `min_cluster_points`, becomes one [`PerceivedObject`] at its centroid.
-    fn cluster_objects(&self, points: &[(f64, f64)]) -> Vec<PerceivedObject> {
+    /// Cluster scan points into objects, also returning each
+    /// cluster's EXTENT (bounding-box diagonal, m) — the footprint scale the
+    /// lean `PerceivedObject` contract deliberately drops, needed by the
+    /// WP-10 VRU classifier ([`TajTracker::classify_pedestrians`]) before it
+    /// is lost at the contract boundary.
+    fn cluster_objects_with_extent(&self, points: &[(f64, f64)]) -> Vec<(PerceivedObject, f64)> {
         let mut objects = Vec::new();
         if points.is_empty() {
             return objects;
@@ -409,13 +455,25 @@ impl TajPhaseA {
                     let (sx, sy) = cluster
                         .iter()
                         .fold((0.0, 0.0), |(ax, ay), &(x, y)| (ax + x, ay + y));
-                    objects.push(PerceivedObject {
-                        id: next_id,
-                        pos: Point { x_m: sx / n, y_m: sy / n },
-                        velocity_mps: 0.0,
-                        heading_rad: 0.0,
-                        vel: Point { x_m: 0.0, y_m: 0.0 },
-                    });
+                    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+                    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+                    for &(x, y) in cluster {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                    let extent_m = (max_x - min_x).hypot(max_y - min_y);
+                    objects.push((
+                        PerceivedObject {
+                            id: next_id,
+                            pos: Point { x_m: sx / n, y_m: sy / n },
+                            velocity_mps: 0.0,
+                            heading_rad: 0.0,
+                            vel: Point { x_m: 0.0, y_m: 0.0 },
+                        },
+                        extent_m,
+                    ));
                     next_id += 1;
                 }
                 start = i;
@@ -436,6 +494,12 @@ struct Track {
     vel: Point,
     /// Latest estimated yaw rate (rad/s) from the heading change across frames.
     yaw_rate: f64,
+    /// Latest cluster extent (bbox diagonal, m) — the WP-10 VRU-classifier
+    /// footprint signal, captured before the lean contract drops it.
+    extent_m: f64,
+    /// Consecutive frames this track has been observed (1 = first sighting,
+    /// velocity not yet estimable).
+    frames_seen: u32,
 }
 
 /// A predicted future path for one tracked object (constant-turn-rate,
@@ -474,13 +538,14 @@ impl TajTracker {
     /// Process a scan with temporal association: returns Phase-A perception whose
     /// objects carry persistent ids and estimated velocity.
     pub fn track(&mut self, scan: &LaserScan, now_ms: u64) -> TajPerception {
-        let mut perception = self.phase_a.process(scan, now_ms);
+        let (mut perception, extents) = self.phase_a.process_parts(scan, now_ms);
         let gate = self.phase_a.cfg.track_assoc_gate_m;
 
         let mut next_tracks: Vec<Track> = Vec::with_capacity(perception.objects.len());
         let mut used = vec![false; self.tracks.len()];
 
-        for obj in &mut perception.objects {
+        for (obj_idx, obj) in perception.objects.iter_mut().enumerate() {
+            let extent_m = extents.get(obj_idx).copied().unwrap_or(f64::INFINITY);
             // Nearest unused prior track within the association gate.
             let mut best: Option<(usize, f64)> = None;
             for (j, tr) in self.tracks.iter().enumerate() {
@@ -523,6 +588,8 @@ impl TajTracker {
                         stamp_ms: now_ms,
                         vel: obj.vel,
                         yaw_rate,
+                        extent_m,
+                        frames_seen: tr.frames_seen.saturating_add(1),
                     });
                 }
                 None => {
@@ -539,12 +606,69 @@ impl TajTracker {
                         stamp_ms: now_ms,
                         vel: Point { x_m: 0.0, y_m: 0.0 },
                         yaw_rate: 0.0,
+                        extent_m,
+                        frames_seen: 1,
                     });
                 }
             }
         }
         self.tracks = next_tracks;
         perception
+    }
+
+    /// WP-10 (MGA G-4; docs/safety/PEDESTRIAN_RSS.md §6) — classify the
+    /// current tracks into [`PerceivedPedestrian`]s for the checker's
+    /// omnidirectional reachable-set bound. This is the PRODUCER the bound
+    /// was armed-but-unfed without.
+    ///
+    /// Heuristic, deliberately biased fail-closed — classification
+    /// UNCERTAINTY promotes TOWARD pedestrian (the stricter bound), never
+    /// away:
+    ///   - small footprint (`extent_m <= cfg.max_extent_m`) AND speed within
+    ///     the pedestrian envelope (`<= cfg.max_speed_mps`) → pedestrian;
+    ///   - a FIRST-SIGHTING track (one frame — velocity not yet estimable)
+    ///     with a small footprint → pedestrian too: we cannot yet rule the
+    ///     envelope out, so the stricter bound applies until tracking says
+    ///     otherwise;
+    ///   - a non-finite extent/speed on a track is a perception fault →
+    ///     pedestrian (the checker additionally fails closed on non-finite
+    ///     pedestrian fields).
+    ///
+    /// Large or fast objects are NOT pedestrians — and are NOT dropped: every
+    /// track stays in `TajPerception::objects` regardless, so the vehicle-RSS
+    /// bound always applies; the VRU bound is strictly ADDITIVE. `age_s` is
+    /// the track's measurement age at `now_ms` (#789 F8 — the reachable disc
+    /// has already grown for that long).
+    #[must_use]
+    pub fn classify_pedestrians(
+        &self,
+        now_ms: u64,
+        cfg: &VruClassifierConfig,
+    ) -> Vec<PerceivedPedestrian> {
+        self.tracks
+            .iter()
+            .filter(|tr| {
+                // Fail-closed on a non-finite extent: NaN compares false on
+                // BOTH orderings, so require the *large* proof explicitly —
+                // absent it, the track counts as small (the stricter bound).
+                let provably_large = tr.extent_m.partial_cmp(&cfg.max_extent_m)
+                    == Some(core::cmp::Ordering::Greater);
+                let small = !provably_large;
+                if !small {
+                    return false;
+                }
+                let speed = tr.vel.x_m.hypot(tr.vel.y_m);
+                let velocity_known = tr.frames_seen >= 2 && speed.is_finite();
+                // Unknown velocity cannot rule the pedestrian envelope out.
+                !velocity_known || speed <= cfg.max_speed_mps
+            })
+            .map(|tr| PerceivedPedestrian {
+                id: tr.id,
+                pos: tr.pos,
+                vel: tr.vel,
+                age_s: (now_ms.saturating_sub(tr.stamp_ms) as f64) / 1000.0,
+            })
+            .collect()
     }
 
     /// Predict each tracked object's future path over `horizon_s` (sampled every
@@ -667,6 +791,149 @@ mod tests {
         assert_eq!(o.velocity_mps, 0.0, "single-frame → velocity reported as 0");
     }
 
+// ---- WP-10: the VRU classifier (producer for the pedestrian-RSS bound) ----
+
+    /// Two-frame small slow blob → classified pedestrian, with the tracked
+    /// velocity carried through — and it REMAINS in `objects` (the VRU bound
+    /// is additive, never a reclassification out of vehicle RSS).
+    #[test]
+    fn classifier_small_slow_cluster_is_a_pedestrian_and_stays_an_object() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        // ±2° blob at 5 m → extent ≈ 0.35 m. Second frame shifted +0.1 m
+        // longitudinally over 100 ms → ~1 m/s, within the pedestrian envelope.
+        let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
+        let s2 = scan_from(10.0, 100, |t| if t.abs() < 0.035 { Some(5.1) } else { None });
+        tracker.track(&s1, 0);
+        let out = tracker.track(&s2, 100);
+
+        let peds = tracker.classify_pedestrians(100, &VruClassifierConfig::default());
+        assert_eq!(peds.len(), 1, "small slow blob must classify as a pedestrian");
+        assert!((peds[0].pos.x_m - 5.1).abs() < 0.5);
+        assert!(peds[0].vel.x_m.hypot(peds[0].vel.y_m) <= 3.5);
+        assert_eq!(peds[0].age_s, 0.0, "fresh measurement at classify time");
+        assert_eq!(out.objects.len(), 1, "the pedestrian is STILL an object (additive bound)");
+    }
+
+    /// FIRST sighting (velocity not yet estimable) with a small footprint →
+    /// pedestrian. Classification uncertainty promotes TOWARD the stricter
+    /// bound, never away.
+    #[test]
+    fn classifier_first_sighting_small_cluster_is_promoted_to_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
+        tracker.track(&s1, 0);
+        let peds = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
+        assert_eq!(
+            peds.len(),
+            1,
+            "an unknown-velocity small object cannot be ruled out of the pedestrian \
+             envelope — it must classify as one until tracking says otherwise"
+        );
+    }
+
+    /// A small object tracked ABOVE the pedestrian speed envelope is not a
+    /// pedestrian (vehicle RSS still applies — it stays in `objects`).
+    #[test]
+    fn classifier_fast_small_cluster_is_not_a_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        // +0.5 m over 100 ms → 5 m/s > 3.5 envelope.
+        let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
+        let s2 = scan_from(10.0, 100, |t| if t.abs() < 0.035 { Some(5.5) } else { None });
+        tracker.track(&s1, 0);
+        let out = tracker.track(&s2, 100);
+        let peds = tracker.classify_pedestrians(100, &VruClassifierConfig::default());
+        assert!(peds.is_empty(), "5 m/s is outside the pedestrian envelope: {peds:?}");
+        assert_eq!(out.objects.len(), 1, "still tracked as an object for vehicle RSS");
+    }
+
+    /// A LARGE cluster (car-scale footprint) is not a pedestrian even when slow.
+    #[test]
+    fn classifier_large_cluster_is_not_a_pedestrian() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        // ±20° at 5 m → extent ≈ 3.4 m ≫ 1.2 m.
+        let s1 = scan_from(10.0, 0, |t| if t.abs() < 0.35 { Some(5.0) } else { None });
+        tracker.track(&s1, 0);
+        let peds = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
+        assert!(peds.is_empty(), "a car-scale footprint must not classify as a pedestrian");
+    }
+
+    /// `age_s` reflects real measurement staleness at classify time (#789 F8:
+    /// the reachable disc has already grown for that long).
+    #[test]
+    fn classifier_age_reflects_measurement_staleness() {
+        let mut tracker = TajTracker::new(TajConfig::default());
+        let s1 = scan_from(10.0, 1_000, |t| if t.abs() < 0.035 { Some(5.0) } else { None });
+        tracker.track(&s1, 1_000);
+        let peds = tracker.classify_pedestrians(1_500, &VruClassifierConfig::default());
+        assert_eq!(peds.len(), 1);
+        assert!((peds[0].age_s - 0.5).abs() < 1e-9, "500 ms old at classify time");
+    }
+
+    /// END-TO-END (the WP-10 point): a Taj-classified pedestrian feeds the
+    /// checker's omnidirectional reachable-set bound and REFUSES a trajectory
+    /// driving through its reachable disc — a trajectory the object-RSS pass
+    /// alone admitted (the pedestrian starts laterally clear and the
+    /// stationary blob has no closing velocity). Without the VRU channel the
+    /// same trajectory is admitted: the producer is the deciding difference.
+    #[test]
+    fn classified_pedestrian_feeds_the_checker_reachable_set_bound() {
+        use kirra_trajectory::state::{Pose, TrajectoryPoint};
+        use kirra_trajectory::vru::{PedestrianScene, VruRssParams};
+        use kirra_core::frame_integrity::FrameTrust;
+        use kirra_trajectory::validation::validate_trajectory_slow_capped;
+        use kirra_trajectory::VehicleConfig;
+        use kirra_verifier::verifier::FleetPosture;
+
+        let mut tracker = TajTracker::new(TajConfig::default());
+        // A kerbside pedestrian: small blob at 6 m ahead, ~1.9 m to the left
+        // (bearing ~+17.5°) — outside the ego footprint path, no motion.
+        let bearing = 0.305_f64;
+        let s1 = scan_from(
+            10.0,
+            0,
+            |t| if (t - bearing).abs() < 0.03 { Some(6.3) } else { None },
+        );
+        tracker.track(&s1, 0);
+        let peds = tracker.classify_pedestrians(0, &VruClassifierConfig::default());
+        assert_eq!(peds.len(), 1, "the kerbside blob classifies as a pedestrian");
+
+        // A straight 8 m/s pass through the kerbside position's x. Starts at
+        // x = 5 so the REAR footprint overhang stays inside the corridor's
+        // x >= 0 span (a pose at x = 0 fails CONTAINMENT, not RSS — verified
+        // while writing this test).
+        let traj: Vec<TrajectoryPoint> = (0..10)
+            .map(|i| TrajectoryPoint {
+                pose: Pose { x_m: 5.0 + i as f64, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 8.0,
+                time_from_start_s: i as f64 * 0.125,
+            })
+            .collect();
+        let corridor = kirra_core::corridor::MockCorridorSource::straight_5m_half_width(200.0);
+        let cfg = VehicleConfig::default_urban();
+
+        let scene = PedestrianScene { pedestrians: &peds, params: VruRssParams::default() };
+        let with_vru = validate_trajectory_slow_capped(
+            &traj, &corridor, &[], &cfg, None, FleetPosture::Nominal,
+            None, None, None, Some(&scene), FrameTrust::Trusted,
+        );
+        let without_vru = validate_trajectory_slow_capped(
+            &traj, &corridor, &[], &cfg, None, FleetPosture::Nominal,
+            None, None, None, None, FrameTrust::Trusted,
+        );
+        assert_eq!(
+            with_vru,
+            kirra_trajectory::state::TrajectoryVerdict::MRCFallback,
+            "an 8 m/s pass through the pedestrian's reachable disc must be refused"
+        );
+        assert_ne!(
+            without_vru,
+            kirra_trajectory::state::TrajectoryVerdict::MRCFallback,
+            "without the VRU channel the same trajectory is admitted — the \
+             producer is the deciding difference"
+        );
+    }
+
+    
     #[test]
     fn taj_corridor_feeds_the_checker() {
         use kirra_trajectory::state::{Pose, TrajectoryPoint};

@@ -242,3 +242,33 @@ live producer:**
 | Params authority — loose params cannot weaken (F5, #789) | unit `loose_params_cannot_weaken_the_bound` |
 | Measurement-age disc growth (F8, #789) | unit `measurement_age_grows_the_reachable_disc` |
 | WCET input bound + hoist equivalence (F9, #789) | unit `too_many_pedestrians_fails_closed`, `hoisted_breach_matches_naive_reference` (proptest) |
+
+
+---
+
+## WP-10 status update (2026-07-07)
+
+The PRODUCER now exists: `kirra_taj::TajTracker::classify_pedestrians`
+(WP-10) classifies tracked lidar clusters into `PerceivedPedestrian`s —
+small footprint (cluster-extent, threaded through Phase-A before the lean
+contract drops it) within the pedestrian speed envelope, with
+classification UNCERTAINTY promoted TOWARD pedestrian (a first-sighting
+track with unknown velocity classifies as one until tracking rules it
+out); classified pedestrians are ADDITIVE (they remain vehicle-RSS
+objects). The contract type moved to `kirra_core::trajectory::
+PerceivedPedestrian` (re-exported from `kirra_trajectory::vru` unchanged)
+so producer and checker share it through the lean contract crate, like
+`PerceivedObject`. End-to-end proof: a Taj-classified kerbside pedestrian
+makes the checker refuse an 8 m/s pass that is admitted without the VRU
+channel (`classified_pedestrian_feeds_the_checker_reachable_set_bound`).
+The adapter's `AdaptorState` carries the channel
+(`update_pedestrians`/`snapshot_pedestrians`) with enabled-but-silent/
+stale/poisoned → fail-closed semantics (the channel-B precedent).
+
+**Remaining before the bound is LIVE on the Autoware node** (ros2-gated
+`node.rs`, buildable only in the CI ros2 lane): the `~/input/pedestrians`
+subscription (message-type mapping), the `KIRRA_VRU_RSS_ENABLED` env gate
+(default off — byte-identical), the `snapshot_pedestrians` → MRC-on-None
+consumption at the `validate_trajectory_slow_capped` call, replacing the
+`None` at the WS-2 comment. All classifier params are VALIDATION-PENDING
+(`kirra_taj::VruClassifierConfig`).

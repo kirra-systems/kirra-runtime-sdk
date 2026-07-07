@@ -183,9 +183,17 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // decel-to-stop MRC is the frame-trust-minimal maneuver. Composes with the
     // others (any → Degraded); auto-recovers when the flag clears.
     // SAFETY: SG2 | REQ: frame-integrity-posture-coupling | TEST: test_frame_degraded_active_escalates_nominal,test_frame_degraded_active_locked_out_stays_locked_out,test_frame_and_rss_compose,test_frame_degraded_clears_auto_recovers_to_nominal
+    // S-DG1 governor-divergence coupling: a posture-significant disagreement
+    // between the two diverse governors escalates Nominal → Degraded exactly
+    // like RSS/flood/frame — one of the two safety authorities is wrong and we
+    // cannot tell which, so decel-to-stop is the only defensible disposition.
+    // Composes with the others (any → Degraded); auto-recovers when agreeing
+    // ticks clear the flag.
+    // SAFETY: SG9 | REQ: governor-divergence-posture-coupling | TEST: test_divergence_degraded_active_escalates_nominal,test_divergence_lockout_active_forces_locked_out,test_divergence_flags_default_inert
     let escalate = (app.rss_active_violation.load(std::sync::atomic::Ordering::SeqCst)
         || app.flood_condition_active.load(std::sync::atomic::Ordering::SeqCst)
-        || app.frame_degraded_active.load(std::sync::atomic::Ordering::SeqCst))
+        || app.frame_degraded_active.load(std::sync::atomic::Ordering::SeqCst)
+        || app.divergence_degraded_active.load(std::sync::atomic::Ordering::SeqCst))
         && dag_posture == FleetPosture::Nominal;
     // C2 supervisor escalation has ABSOLUTE priority over the DAG and the
     // operational (rss/flood) escalation: if a critical background safety loop is
@@ -199,6 +207,7 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
     // human-reset conditions that override the DAG and the operational escalation.
     let new_posture = if app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst)
         || app.frame_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
+        || app.divergence_lockout_active.load(std::sync::atomic::Ordering::SeqCst)
     {
         FleetPosture::LockedOut
     } else if empty_live_set {
@@ -396,6 +405,9 @@ pub fn recalculate_and_broadcast(app: &Arc<AppState>, cache: &SharedPostureCache
         .load(std::sync::atomic::Ordering::SeqCst)
         || app
             .frame_lockout_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        || app
+            .divergence_lockout_active
             .load(std::sync::atomic::Ordering::SeqCst);
     let cache_written = replace_cache_if_newer(cache, new_cached, sticky_lockout);
 
@@ -1049,6 +1061,47 @@ mod posture_engine_tests {
     }
 
     // --- S-FI1d: frame-integrity posture coupling --------------------------
+
+    // ---- S-DG1 governor-divergence composition (mirror the frame coupling) ----
+
+    /// divergence_degraded_active + DAG Nominal → Degraded (same clause as
+    /// RSS/flood/frame).
+    #[test]
+    fn test_divergence_degraded_active_escalates_nominal() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.divergence_degraded_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Degraded),
+            "divergence_degraded_active + DAG Nominal must escalate to Degraded");
+    }
+
+    /// divergence_lockout_active shares the absolute LockedOut priority with
+    /// supervisor_tripped / frame_lockout_active and rides the same sticky
+    /// downgrade guard.
+    #[test]
+    fn test_divergence_lockout_active_forces_locked_out() {
+        let app = active_app();
+        let cache = empty_cache();
+        app.divergence_lockout_active.store(true, Ordering::SeqCst);
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut),
+            "divergence_lockout_active must force LockedOut over a healthy DAG");
+        // Sticky: a subsequent healthy recalc must NOT downgrade it.
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::LockedOut));
+    }
+
+    /// Default-false flags are inert — byte-identical prior behavior until the
+    /// comparator sink is wired (the S-DG1 asymmetry requirement).
+    #[test]
+    fn test_divergence_flags_default_inert() {
+        let app = active_app();
+        let cache = empty_cache();
+        recalculate_and_broadcast(&app, &cache);
+        assert_eq!(cache_posture(&cache), Some(FleetPosture::Nominal),
+            "unwired divergence flags must not perturb a healthy fleet");
+    }
 
     #[test]
     fn test_frame_degraded_active_escalates_nominal() {

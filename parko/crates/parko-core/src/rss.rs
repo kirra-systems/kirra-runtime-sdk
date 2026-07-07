@@ -108,37 +108,23 @@ fn finite_positive(x: f64) -> bool {
 /// defence is validating the asset profile at load time (see module-level
 /// note about the absence of a profile loader as of this writing).
 ///
-/// # IEEE 2846 fidelity notes (tracked: #408 — safety-case decisions pending)
+/// # IEEE 2846 fidelity notes (#408 — RESOLVED by the split primitive; WP-07)
 ///
-/// These are documented limitations of the lateral primitive, NOT bugs: the
-/// math below is internally correct and fail-closed. They are recorded here so
-/// each is an EXPLICIT safety-case decision rather than an implicit gap.
-///
-/// 1. **A single `lat_accel_max` collapses the two IEEE 2846-2022 §5.2 lateral
-///    parameters.** The standard distinguishes `a_lat,accel,max` (max lateral
-///    accel *during* the response phase) from `a_lat,brake,min` (min lateral
-///    *braking* decel *after* it). This function uses one value for both the
-///    accel role (`d_reaction`, `v_after`) and the brake role (`d_brake`). The
-///    conservative worst case wants the LARGEST value for the accel role (max
-///    drift toward the other actor) but the SMALLEST for the brake role (weakest
-///    braking -> larger required distance), so no single value is worst-case for
-///    both. The per-actor stop distance
-///    `total(v) = 2*v*rt + a*rt^2 + v^2/(2a)`   (a = lat_accel_max, rt = reaction_time)
-///    is NON-MONOTONIC in `a`: `d(total)/da = rt^2 - v^2/(2*a^2)`, which is zero
-///    at `a = v/(rt*sqrt(2))`. Below that threshold, INCREASING `a` DECREASES the
-///    required distance — so a value chosen to be conservative for the accel role
-///    can be non-conservative for the brake role, and vice-versa. Resolving this
-///    by splitting the signature into (`lat_accel_max`, `lat_brake_min`) with
-///    each used in its phase (#408 Option A) needs a safety-case-derived
-///    `lat_brake_min`; until then the single-parameter regime — which role the
-///    value represents and why the other role's under-estimate is bounded — must
-///    be justified in the safety case.
-///
-/// 2. **No lateral position-uncertainty margin (`mu = 0`).** IEEE 2846 lateral
-///    RSS adds a `mu` term for lateral-fluctuation uncertainty; the per-actor sum
-///    here omits it, making the required separation slightly SMALLER (less
-///    conservative). The omission is likely intentional and small, but must be an
-///    explicit safety-case decision rather than an implicit `mu = 0`.
+/// The two documented limitations of this single-parameter form — (1) one
+/// `lat_accel_max` collapsing the standard's distinct `a_lat,accel,max`
+/// (response-phase drift) and `a_lat,brake,min` (post-response braking) roles,
+/// whose per-actor stop distance is NON-MONOTONIC in the shared value
+/// (`d(total)/da = rt^2 - v^2/(2a^2)`), so no single value is worst-case for
+/// both; and (2) the implicit `mu = 0` lateral-fluctuation margin — are now
+/// resolved by [`lateral_safe_distance_split`] (#408 Option A), which takes
+/// the two roles separately plus an explicit additive `mu`. Every production
+/// caller uses the split; THIS single-parameter form is retained as the exact
+/// legacy semantics (`split(a, a, rt, mu=0)`) for comparison tests and any
+/// integrator not yet carrying a split profile. The split with
+/// `lat_brake_min <= lat_accel_max` and `mu >= 0` is STRICTLY >= this form on
+/// every input (property-tested), so migrating callers is always
+/// conservative-or-equal. Role values remain safety-case parameters
+/// (VALIDATION-PENDING at the call sites).
 // SAFETY: SG1 SG9 | REQ: rss-lateral-distance-failsafe | TEST: test_lat_zero_accel_is_failsafe,test_lat_nan_input_is_failsafe,test_rss_zero_ego_velocity,test_rss_result_is_finite_and_nonnegative
 // (≅ Occy SG1 RSS over horizon. Non-finite or non-positive input returns
 //  RSS_FAILSAFE_DISTANCE_M — defence-in-depth fail-closed for SG9.)
@@ -165,14 +151,79 @@ pub fn lateral_safe_distance(
         return RSS_FAILSAFE_DISTANCE_M;
     }
 
+    // Legacy single-parameter semantics == the split with both roles equal
+    // and no fluctuation margin (see the fidelity note above).
+    lateral_safe_distance_split(
+        ego_lat_vel,
+        obj_lat_vel,
+        lat_accel_max,
+        lat_accel_max,
+        reaction_time,
+        0.0,
+    )
+}
+
+/// Computes the lateral RSS safe-distance per IEEE 2846-2022 §5.2 with the
+/// standard's two lateral roles taken SEPARATELY (#408 Option A / WP-07),
+/// plus the explicit lateral-fluctuation margin `mu_lateral_m`.
+///
+/// Per actor: during the response time each actor is assumed to drift TOWARD
+/// the other with up to `lat_accel_max` (`a_lat,accel,max` — worst-case
+/// drift), then laterally brake with at least `lat_brake_min`
+/// (`a_lat,brake,min` — weakest committed braking):
+///
+/// ```text
+/// d_reaction = v*rt + 0.5*a_accel*rt^2
+/// v_after    = v + a_accel*rt
+/// d_brake    = v_after^2 / (2*a_brake_min)
+/// required   = d(ego) + d(obj) + mu_lateral_m
+/// ```
+///
+/// Conservatism: with `lat_brake_min <= lat_accel_max` and
+/// `mu_lateral_m >= 0` this is >= the legacy single-parameter
+/// [`lateral_safe_distance`] on EVERY input (the brake denominator can only
+/// shrink and `mu` only adds) — property-tested below. The two role values
+/// and `mu` are safety-case parameters; the shipped defaults at the call
+/// sites are VALIDATION-PENDING.
+///
+/// Fail-closed guards: non-finite velocities, a non-finite OR NEGATIVE
+/// `reaction_time` (a negative reaction time would shrink both the response
+/// distance and the braking start speed — the opposite of defence-in-depth),
+/// non-positive `lat_accel_max` or `lat_brake_min`, or a non-finite/negative
+/// `mu_lateral_m` all return `RSS_FAILSAFE_DISTANCE_M` (a hostile/corrupt
+/// parameter must never shrink the bound), as does a non-finite sum.
+// SAFETY: SG1 SG9 | REQ: rss-lateral-distance-failsafe | TEST: test_lat_split_conservative_vs_legacy,test_lat_split_mu_is_additive,test_lat_split_invalid_brake_is_failsafe,test_lat_split_negative_mu_is_failsafe
+pub fn lateral_safe_distance_split(
+    ego_lat_vel: f64,
+    obj_lat_vel: f64,
+    lat_accel_max: f64,
+    lat_brake_min: f64,
+    reaction_time: f64,
+    mu_lateral_m: f64,
+) -> f64 {
+    if !(finite_positive(lat_accel_max)
+        && finite_positive(lat_brake_min)
+        && ego_lat_vel.is_finite()
+        && obj_lat_vel.is_finite()
+        && reaction_time.is_finite()
+        && reaction_time >= 0.0
+        && mu_lateral_m.is_finite()
+        && mu_lateral_m >= 0.0)
+    {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+
     let lateral_stop_distance = |lat_vel: f64| -> f64 {
         let v = lat_vel.abs();
+        // Response phase: worst-case drift toward the other actor.
         let d_reaction = v * reaction_time + 0.5 * lat_accel_max * reaction_time.powi(2);
         let v_after = v + lat_accel_max * reaction_time;
-        let d_brake = v_after.powi(2) / (2.0 * lat_accel_max);
+        // Braking phase: weakest committed lateral braking.
+        let d_brake = v_after.powi(2) / (2.0 * lat_brake_min);
         d_reaction + d_brake
     };
-    let margin = lateral_stop_distance(ego_lat_vel) + lateral_stop_distance(obj_lat_vel);
+    let margin =
+        lateral_stop_distance(ego_lat_vel) + lateral_stop_distance(obj_lat_vel) + mu_lateral_m;
     if !margin.is_finite() {
         return RSS_FAILSAFE_DISTANCE_M;
     }
@@ -449,7 +500,17 @@ pub struct RssParams {
     /// Maximum lead-vehicle braking deceleration (m/s²); must be > 0.
     pub brake_max: f64,
     /// Maximum lateral acceleration / deceleration (m/s²); must be > 0.
+    /// With the WP-07 split this is the RESPONSE-PHASE role only
+    /// (`a_lat,accel,max` — worst-case drift toward the other actor).
     pub lat_accel_max: f64,
+    /// Minimum committed lateral BRAKING deceleration after the response
+    /// phase (`a_lat,brake,min`, m/s²); must be > 0 and <= `lat_accel_max`
+    /// for the split to be conservative vs the legacy single-parameter form
+    /// (WP-07 / #408 Option A). VALIDATION-PENDING at every call site.
+    pub lat_brake_min: f64,
+    /// Additive lateral-fluctuation margin (IEEE 2846 §5.2 `mu`, metres);
+    /// must be finite and >= 0. VALIDATION-PENDING.
+    pub mu_lateral_m: f64,
 }
 
 /// One perceived agent's measured state for a pairwise RSS check.
@@ -693,6 +754,105 @@ mod tests {
 
     /// lat_accel_max = 0 with stationary actors (raw numerator would be 0)
     /// must fail safe — the 0/0 NaN would otherwise collapse to 0.0 m.
+    // ── lateral_safe_distance_split (WP-07 / #408) ─────────────────────────
+
+    /// STRICT CONSERVATISM: the split with `lat_brake_min <= lat_accel_max`
+    /// and `mu >= 0` is >= the legacy single-parameter form on every input.
+    /// Property-tested over the realistic parameter space; the legacy form is
+    /// exactly `split(a, a, rt, 0)`, so equality holds iff brake==accel and
+    /// mu==0.
+    #[test]
+    fn test_lat_split_conservative_vs_legacy() {
+        use proptest::prelude::*;
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(
+                &(
+                    -40.0f64..40.0,   // ego_lat_vel
+                    -40.0f64..40.0,   // obj_lat_vel
+                    0.1f64..10.0,     // lat_accel_max
+                    0.05f64..1.0,     // brake fraction (brake_min = f * accel_max)
+                    0.05f64..2.0,     // reaction_time
+                    0.0f64..1.0,      // mu
+                ),
+                |(e, o, a, f, rt, mu)| {
+                    let legacy = lateral_safe_distance(e, o, a, rt);
+                    let split = lateral_safe_distance_split(e, o, a, f * a, rt, mu);
+                    prop_assert!(
+                        split >= legacy - 1e-12,
+                        "split must never be less conservative: split={split} legacy={legacy}"
+                    );
+                    // And monotone in mu / anti-monotone in brake_min:
+                    let weaker_brake = lateral_safe_distance_split(e, o, a, 0.5 * f * a, rt, mu);
+                    prop_assert!(weaker_brake >= split - 1e-12);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    /// `mu` is exactly additive on the finite path.
+    #[test]
+    fn test_lat_split_mu_is_additive() {
+        let base = lateral_safe_distance_split(3.0, 1.0, 4.0, 2.8, 0.5, 0.0);
+        let with_mu = lateral_safe_distance_split(3.0, 1.0, 4.0, 2.8, 0.5, 0.2);
+        assert!((with_mu - base - 0.2).abs() < 1e-12);
+    }
+
+    /// A non-positive / non-finite `lat_brake_min` fails safe — never a small
+    /// bound from a corrupt braking parameter.
+    #[test]
+    fn test_lat_split_invalid_brake_is_failsafe() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                lateral_safe_distance_split(3.0, 1.0, 4.0, bad, 0.5, 0.0),
+                RSS_FAILSAFE_DISTANCE_M
+            );
+        }
+    }
+
+    /// A negative or non-finite `mu` fails safe (a margin must only ever ADD).
+    #[test]
+    fn test_lat_split_negative_mu_is_failsafe() {
+        for bad in [-0.1, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(
+                lateral_safe_distance_split(3.0, 1.0, 4.0, 2.8, 0.5, bad),
+                RSS_FAILSAFE_DISTANCE_M
+            );
+        }
+    }
+
+    /// A negative-but-finite reaction time fails safe (Copilot #855): it would
+    /// otherwise shrink both the response distance and the braking start speed,
+    /// producing a SMALLER bound — the opposite of defence-in-depth. The legacy
+    /// wrapper delegates through the split, so it is covered too.
+    #[test]
+    fn test_lat_split_negative_reaction_time_is_failsafe() {
+        assert_eq!(
+            lateral_safe_distance_split(3.0, 1.0, 4.0, 2.8, -0.5, 0.0),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+        assert_eq!(
+            lateral_safe_distance(3.0, 1.0, 4.0, -0.5),
+            RSS_FAILSAFE_DISTANCE_M,
+            "the legacy wrapper inherits the negative-reaction-time guard"
+        );
+    }
+
+    /// The legacy wrapper is EXACTLY `split(a, a, rt, 0)` — the delegation
+    /// cannot drift.
+    #[test]
+    fn test_lat_legacy_equals_split_with_equal_roles() {
+        for (e, o, a, rt) in
+            [(5.0, -5.0, 4.0, 0.5), (0.0, 0.0, 4.0, 0.5), (30.0, -25.0, 6.0, 0.5)]
+        {
+            assert_eq!(
+                lateral_safe_distance(e, o, a, rt),
+                lateral_safe_distance_split(e, o, a, a, rt, 0.0)
+            );
+        }
+    }
+
     #[test]
     fn test_lat_zero_accel_is_failsafe() {
         let r = lateral_safe_distance(0.0, 0.0, 0.0, 0.5);

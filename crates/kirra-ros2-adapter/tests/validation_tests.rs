@@ -314,6 +314,78 @@ fn snapshot_rss_uses_velocity_vector_not_orientation_dc1() {
 }
 
 #[test]
+fn snapshot_rss_lateral_rotation_is_frame_correct_at_nonzero_heading() {
+    // MUTATION-KILL (WP-08; mutants.out survivors at validation.rs:496): the
+    // ego-frame lateral object velocity is `-sin_h·vx + cos_h·vy`. Every prior
+    // cut-in test used ego heading 0 (sin_h = 0), so arithmetic corruptions of
+    // the rotation (delete `-`, `*`→`+`, `+`→`-`, ...) survived the whole
+    // suite. Two cases at heading π/4 where the rotation is load-bearing:
+    //
+    //  A. a PARALLEL traveler (world velocity along the ego heading): true
+    //     lateral component is exactly 0 → no cut-in → Accept. Every
+    //     corrupted rotation reads ≥ ~1 m/s of phantom lateral motion →
+    //     spurious cut-in → MRC (the mutant flips Accept→MRC).
+    //  B. a TRUE diagonal cut-in (world velocity perpendicular to the ego
+    //     heading, closing): true lateral ≈ −2.83 m/s → MRC. The delete-`-`
+    //     corruption reads it as 0 → no cut-in → Accept (flips MRC→Accept).
+    let heading = std::f64::consts::FRAC_PI_4;
+    let (sin_h, cos_h) = heading.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: heading },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    // Ego-frame offset (dx = 3 ahead, dy = 1.5 left) → world frame.
+    let (dx_ego, dy_ego) = (3.0, 1.5);
+    let pos = Point {
+        x_m: 10.0 + dx_ego * cos_h - dy_ego * sin_h,
+        y_m: dx_ego * sin_h + dy_ego * cos_h,
+    };
+
+    // A: moving WITH the ego heading (pure longitudinal, pulling away from the
+    // stopped ego) — zero true lateral component.
+    let parallel = PerceivedObject {
+        id: 1,
+        pos,
+        velocity_mps: (2.0f64).hypot(2.0),
+        heading_rad: heading,
+        vel: Point { x_m: 2.0, y_m: 2.0 },
+    };
+    let v = validate_trajectory_slow(
+        &ego, &corridor, std::slice::from_ref(&parallel), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        v,
+        TrajectoryVerdict::Accept,
+        "a parallel traveler at 45° ego heading has zero lateral motion and must be \
+         admitted — a phantom cut-in here means the frame rotation is corrupted; got {v:?}"
+    );
+
+    // B: moving PERPENDICULAR to the ego heading, closing on the ego path.
+    let cutting_in = PerceivedObject {
+        id: 2,
+        pos,
+        velocity_mps: (2.0f64).hypot(2.0),
+        heading_rad: heading - std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 2.0, y_m: -2.0 },
+    };
+    let v = validate_trajectory_slow(
+        &ego, &corridor, std::slice::from_ref(&cutting_in), &cfg, None, FleetPosture::Nominal,
+    );
+    assert_eq!(
+        v,
+        TrajectoryVerdict::MRCFallback,
+        "a true diagonal cut-in at 45° ego heading must be refused — reading its \
+         lateral motion as ~0 means the frame rotation is corrupted; got {v:?}"
+    );
+}
+
+#[test]
 fn snapshot_rss_catches_a_forward_facing_lateral_cut_in_dc1() {
     // An object FACING forward (heading 0) but MOVING laterally into the ego path
     // must be refused. The orientation-based form read its lateral motion as ~0
@@ -813,6 +885,245 @@ fn predictive_rss_catches_a_predicted_cut_in() {
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
+}
+
+/// A stopped ego held at a 45° heading (`sin_h = cos_h ≈ 0.707`), so the
+/// predictive-pass ego-frame ROTATION (`dx_ego = cos_h·dx + sin_h·dy`,
+/// `dy_ego = -sin_h·dx + cos_h·dy`, and the object-velocity projections
+/// `obj_lon_v` / `obj_lat_v`) is fully load-bearing — every prior predictive
+/// test used a heading-0 ego where `sin_h = 0`, so `* → /` corruptions of the
+/// rotation multiplies were invisible (mutants at validation.rs:769/770/783/817).
+///
+/// TWO cases pin it (mirroring the snapshot rotation kill):
+///  - a PREDICTED DIAGONAL CUT-IN (world velocity perpendicular to the ego
+///    heading, closing) is, in the CORRECT ego frame, a lateral cut-in → MRC;
+///    a corrupted rotation scrambles the projection so the cut-in vanishes → admit;
+///  - a PREDICTED PARALLEL traveler (world velocity along the ego heading, held
+///    at a clear mid-band lateral offset) is, correctly, laterally clear → admit;
+///    a corrupted rotation pulls it into the path / reads phantom lateral
+///    closing → MRC.
+#[test]
+fn predictive_rss_rotation_is_frame_correct_at_nonzero_ego_heading() {
+    use std::f64::consts::FRAC_PI_4;
+    let (s, c) = FRAC_PI_4.sin_cos();
+    // A stopped ego held at (10,10) facing 45°, spanning t=0..0.2 (the early
+    // predicted windows match it within PREDICTIVE_TIME_MATCH_TOLERANCE_S).
+    // Ego at y=0 (inside the corridor) but FACING 45°, so the ego-frame
+    // rotation is load-bearing while containment stays satisfied.
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+
+    // ego-frame (dx_ego, dy_ego) → world, about the ego at (10,0) facing 45°.
+    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+
+    // CUT-IN: 3 m ahead, sweeping the lateral band 4.0 → 0.0 (closing) at fixed
+    // longitudinal distance — a mid-band lateral cut-in in the ego frame.
+    let cut_in: Vec<PredictedSample> = [4.0, 3.0, 2.0, 1.0, 0.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &dy)| PredictedSample {
+            pos: to_world(3.0, dy),
+            time_from_start_s: i as f64 * 0.5,
+        })
+        .collect();
+    let modes = [PredictedMode { object_id: 1, samples: &cut_in }];
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a predicted diagonal cut-in at a 45° ego heading must be refused — a \
+         corrupted frame rotation reads its lateral closing as ~0 and admits it; got {verdict:?}"
+    );
+
+    // PARALLEL: held at a clear mid-band offset (dy_ego = 3.5), moving ALONG the
+    // ego heading (ego-frame velocity (1,0) → world (c, s)). Laterally clear,
+    // not cutting in → admitted.
+    let parallel: Vec<PredictedSample> = (0..5)
+        .map(|i| {
+            let t = i as f64 * 0.5;
+            let base = to_world(3.0, 3.5);
+            PredictedSample {
+                pos: Point { x_m: base.x_m + c * t, y_m: base.y_m + s * t },
+                time_from_start_s: t,
+            }
+        })
+        .collect();
+    let modes = [PredictedMode { object_id: 2, samples: &parallel }];
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a parallel traveler at a 45° ego heading is laterally clear and must be \
+         admitted — a corrupted rotation reads phantom lateral motion and MRCs it; got {verdict:?}"
+    );
+}
+
+/// The lateral-brake PARAMETER in the predictive pass is load-bearing
+/// (`RSS_LAT_BRAKE_FRACTION * max_lateral_accel_mps2` at validation.rs:827):
+/// a weak mid-band cut-in whose lateral gap is SAFE under the correct
+/// brake-min (0.7·3.5 = 2.45 m/s²) but UNSAFE if the `*` is corrupted to `/`
+/// (0.7/3.5 = 0.2 m/s² — a far weaker brake blows the required separation up).
+/// So the correct code ADMITS and the mutant MRCs — the verdict flips on the
+/// brake parameter alone. (Held at a 45° ego heading so the rotation feeding
+/// this branch is also exercised.)
+#[test]
+fn predictive_rss_lateral_brake_parameter_is_load_bearing() {
+    use std::f64::consts::FRAC_PI_4;
+    let (s, c) = FRAC_PI_4.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+
+    // 3 m ahead; a WEAK lateral closure — dy_ego 3.5 → 3.1 over the windows
+    // (~0.2 m/s), staying in the mid-band [2.5, 4.0). Cut-in fires (0.2 > the
+    // 0.1 eps), so the lateral branch is the sole deciding gate; its required
+    // separation (~2.6 m correct) is below dy_ego (admit), but the corrupted
+    // weak brake blows it past dy_ego (breach).
+    let samples: Vec<PredictedSample> = [3.5, 3.4, 3.3, 3.2, 3.1]
+        .iter()
+        .enumerate()
+        .map(|(i, &dy)| PredictedSample { pos: to_world(3.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .collect();
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a weak mid-band cut-in is admissible under the correct lateral brake; a \
+         corrupted (weaker) brake would over-reject it — got {verdict:?}"
+    );
+}
+
+/// SNAPSHOT lateral brake parameter is load-bearing (validation.rs:518,
+/// `RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2`, `* → +`
+/// mutant). A moderate cut-in whose lateral gap is UNSAFE under the correct
+/// brake-min (2.45 m/s²) but would be admitted if `*` became `+` (brake-min
+/// 0.7+3.5 = 4.2 m/s² — a STRONGER brake shrinks the required separation).
+/// Correct MRCs, mutant admits. 45° ego heading (rotation exercised).
+#[test]
+fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
+    use std::f64::consts::FRAC_PI_4;
+    let (s, c) = FRAC_PI_4.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    // Object at ego-frame (dx=3, dy=3.4), lateral-closing at 1 m/s (ego-frame
+    // velocity (0,-1) → world (s, -c)). obj_lat_vel = -1.0, cut-in fires;
+    // lat_required ≈ 3.74 m (correct) > 3.4 → MRC; ≈ 2.84 m (brake 4.2) < 3.4 → admit.
+    let obj = PerceivedObject {
+        id: 1,
+        pos: Point { x_m: 10.0 + 3.0 * c - 3.4 * s, y_m: 3.0 * s + 3.4 * c },
+        velocity_mps: 1.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: s, y_m: -c },
+    };
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, std::slice::from_ref(&obj), &cfg, None, FleetPosture::Nominal,
+        None, None, None, None, FrameTrust::Trusted,
+    );
+    assert_eq!(
+        verdict, TrajectoryVerdict::MRCFallback,
+        "a moderate snapshot cut-in must be refused under the correct lateral \
+         brake; a too-strong brake would wrongly admit it — got {verdict:?}"
+    );
+}
+
+/// The predictive lateral CONJUNCTION gate (validation.rs:822,
+/// `dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in)`,
+/// `&& → ||` mutant). An object cutting in but FAR ahead — beyond the 8 m
+/// conflict window for a stopped ego — is correctly OUT of scope (`&&` false
+/// because `dx_ego > window`), so it is admitted; the `||` mutant enters the
+/// lateral branch on the cut-in alone and MRCs it. Correct admits, mutant MRCs.
+#[test]
+fn predictive_rss_far_cut_in_is_gated_by_the_conflict_window() {
+    use std::f64::consts::FRAC_PI_4;
+    let (s, c) = FRAC_PI_4.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    // 10 m ahead (> the 8 m window) but cutting in hard: dy_ego 2.5 → 0.5 (~2 m/s).
+    let samples: Vec<PredictedSample> = [2.5, 1.5, 0.5]
+        .iter()
+        .enumerate()
+        .map(|(i, &dy)| PredictedSample { pos: to_world(10.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .collect();
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert!(
+        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a cut-in beyond the longitudinal conflict window is out of scope and must \
+         be admitted — the && gate must not fire on the cut-in alone; got {verdict:?}"
+    );
+}
+
+/// The predictive lateral brake parameter must not be OVER-relaxed
+/// (validation.rs:827, `* → +` mutant). A moderate cut-in inside the window
+/// that is correctly a breach (brake-min 2.45 m/s²) must stay a breach; a
+/// `* → +` corruption (brake-min 4.2 m/s²) shrinks the required separation
+/// enough to wrongly admit it. Correct MRCs, mutant admits.
+#[test]
+fn predictive_rss_lateral_brake_over_relaxation_still_rejects() {
+    use std::f64::consts::FRAC_PI_4;
+    let (s, c) = FRAC_PI_4.sin_cos();
+    let ego: Vec<TrajectoryPoint> = (0..3)
+        .map(|i| TrajectoryPoint {
+            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            velocity_mps: 0.0,
+            time_from_start_s: (i as f64) * 0.1,
+        })
+        .collect();
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    // 3 m ahead (inside the window), cutting in ~1 m/s: dy_ego 3.4 → 2.9 → ...
+    // lat_required ≈ 3.74 m (correct) > 3.4 → MRC; ≈ 2.84 m (brake 4.2) < 3.4 → admit.
+    let samples: Vec<PredictedSample> = [3.4, 2.9, 2.4]
+        .iter()
+        .enumerate()
+        .map(|(i, &dy)| PredictedSample { pos: to_world(3.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .collect();
+    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let verdict = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+    );
+    assert_eq!(
+        verdict, TrajectoryVerdict::MRCFallback,
+        "a moderate predicted cut-in inside the window must be refused; an \
+         over-relaxed (too-strong) lateral brake would wrongly admit it — got {verdict:?}"
+    );
 }
 
 #[test]

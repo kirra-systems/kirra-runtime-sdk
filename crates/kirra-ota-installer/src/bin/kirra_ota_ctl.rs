@@ -430,6 +430,11 @@ struct PullOpts {
     /// Content-addressed artifact store base URL; the artifact is fetched from
     /// `{artifact_base}/{digest}`.
     artifact_base: String,
+    /// WP-12 — path to the governor artifact-release PUBLIC key (32-byte raw
+    /// Ed25519, hex or raw file). When set, staging REQUIRES a valid release
+    /// signature on the assignment (fail-closed); unset = legacy hash-only
+    /// mode (pre-provisioning), with a loud warning.
+    release_pubkey: Option<String>,
 }
 
 impl PullOpts {
@@ -438,6 +443,7 @@ impl PullOpts {
         let mut node_id = std::env::var("KIRRA_NODE_ID").ok();
         let mut cohorts = std::env::var("KIRRA_NODE_COHORTS").ok().unwrap_or_default();
         let mut artifact_base = std::env::var("KIRRA_OTA_ARTIFACT_BASE").ok();
+        let mut release_pubkey = std::env::var("KIRRA_OTA_RELEASE_PUBKEY").ok();
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -451,6 +457,7 @@ impl PullOpts {
                 "--node-id" => node_id = Some(next("--node-id")?),
                 "--cohorts" => cohorts = next("--cohorts")?,
                 "--artifact-base" => artifact_base = Some(next("--artifact-base")?),
+                "--release-pubkey" => release_pubkey = Some(next("--release-pubkey")?),
                 other => return Err(format!("unknown pull flag {other:?}")),
             }
         }
@@ -466,6 +473,7 @@ impl PullOpts {
             cohorts,
             artifact_base: artifact_base
                 .ok_or("pull requires --artifact-base <url> (or KIRRA_OTA_ARTIFACT_BASE)")?,
+            release_pubkey,
         })
     }
 }
@@ -538,6 +546,7 @@ fn cmd_pull(args: &[String]) -> Result<(), String> {
         }
         PullAction::Stage {
             digest,
+            signature_b64,
             version,
             campaign_id,
         } => {
@@ -547,6 +556,26 @@ fn cmd_pull(args: &[String]) -> Result<(), String> {
                 version.as_deref().unwrap_or("?"),
                 campaign_id.as_deref().unwrap_or("?")
             );
+            // WP-12: with a provisioned release key the assignment MUST carry
+            // a valid release signature over the digest — verified BEFORE the
+            // download (a forged assignment costs nothing). No key = legacy
+            // hash-only mode, warned loudly so provisioning debt is visible.
+            match load_release_pubkey(opts.release_pubkey.as_deref())? {
+                Some(vk) => {
+                    let sig = signature_b64.as_deref().ok_or(
+                        "release key provisioned but the assignment carries no \
+                         artifact signature — refusing to stage (fail-closed)",
+                    )?;
+                    kirra_ota_installer_release_verify(&digest, sig, &vk)?;
+                    println!("artifact release signature verified");
+                }
+                None => eprintln!(
+                    "WARNING: no release public key provisioned \
+                     (--release-pubkey / KIRRA_OTA_RELEASE_PUBKEY) — staging on \
+                     digest alone (legacy mode); provision the key to enforce \
+                     release signatures"
+                ),
+            }
             // 4. Download the content-addressed artifact to a temp file.
             let tmp = cfg.record.with_file_name("kirra-ota-pull.tmp");
             let art_url = format!("{}/{}", opts.artifact_base.trim_end_matches('/'), digest);
@@ -888,4 +917,45 @@ fn print_usage() {
          \n\
          ENV: KIRRA_OTA_SLOT_A KIRRA_OTA_SLOT_B KIRRA_OTA_BOOT_RECORD KIRRA_OTA_GOVERNOR_BIN KIRRA_OTA_UNIT"
     );
+}
+
+/// WP-12 — load the governor artifact-release PUBLIC key: a file containing
+/// either 32 raw bytes or 64 hex chars. `None` path → legacy mode (no key).
+/// A path that is SET but unreadable/malformed is a hard error — a node told
+/// to enforce signatures must never silently fall back to hash-only.
+fn load_release_pubkey(
+    path: Option<&str>,
+) -> Result<Option<ed25519_dalek::VerifyingKey>, String> {
+    let Some(path) = path else { return Ok(None) };
+    let raw = std::fs::read(path).map_err(|e| format!("read release pubkey {path}: {e}"))?;
+    let bytes: [u8; 32] = if raw.len() == 32 {
+        raw.as_slice().try_into().expect("length checked")
+    } else {
+        let text = String::from_utf8_lossy(&raw);
+        let text = text.trim();
+        let mut buf = [0u8; 32];
+        if text.len() != 64 {
+            return Err(format!(
+                "release pubkey {path} must be 32 raw bytes or 64 hex chars"
+            ));
+        }
+        for i in 0..32 {
+            buf[i] = u8::from_str_radix(&text[2 * i..2 * i + 2], 16)
+                .map_err(|e| format!("release pubkey {path} hex: {e}"))?;
+        }
+        buf
+    };
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(Some)
+        .map_err(|e| format!("release pubkey {path} invalid: {e}"))
+}
+
+/// WP-12 — thin adapter over the shared verify seam with a ctl-friendly error.
+fn kirra_ota_installer_release_verify(
+    digest: &str,
+    signature_b64: &str,
+    vk: &ed25519_dalek::VerifyingKey,
+) -> Result<(), String> {
+    kirra_release_token::artifact_release::verify_artifact_release(digest, signature_b64, vk)
+        .map_err(|e| format!("artifact release signature REFUSED ({e:?}) — not staging"))
 }

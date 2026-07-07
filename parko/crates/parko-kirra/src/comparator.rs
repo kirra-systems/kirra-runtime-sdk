@@ -137,6 +137,28 @@ pub struct DivergenceEvent {
 /// tests and development; production deployments MUST wire a sink that
 /// persists to `AuditChainLinker::append_audit_event_tx` (event type
 /// `"ComparatorDivergence"`, JSON-serialised body).
+/// S-DG1 (STAGE_S-DG1_DIVERGENCE_POSTURE.md) — the OPTIONAL fleet-posture
+/// signal seam, dependency-injected exactly like [`DivergenceEventSink`].
+///
+/// Called once per [`GovernorComparator::evaluate`] tick with the comparator's
+/// OWN posture-relevant state — reused, never reimplemented:
+///   - `significant` — this tick's divergence state is posture-relevant:
+///     `true` on every divergent tick AND on agreement ticks while the
+///     leaky-bucket accumulator is still draining (the comparator's existing
+///     Degraded-recommendation hysteresis); `false` only once fully drained
+///     (an agreeing, recovered tick — the integrator's recovery streak feeds
+///     on these).
+///   - `escalated` — the comparator's own sustained-divergence escalation
+///     (`escalated_to_lockout`) fired this tick.
+///
+/// Integrators wire this to the verifier's posture engine (see the
+/// `verifier-sink` feature's `PostureEngineSenderSink`); `None` (the default)
+/// is byte-for-byte today's audit-only behavior. Implementations MUST be
+/// non-blocking: this is called on the per-command evaluate path.
+pub trait PostureSignalSink: Send + Sync {
+    fn divergence_posture_tick(&self, significant: bool, escalated: bool);
+}
+
 pub trait DivergenceEventSink: Send + Sync {
     fn record(&self, event: DivergenceEvent);
 }
@@ -294,6 +316,9 @@ pub struct GovernorComparator<S: SafetyGovernor = DiverseKirraGovernor> {
     shadow: S,
     state: Mutex<DivState>,
     sink: Arc<dyn DivergenceEventSink>,
+    /// S-DG1 — optional fleet-posture signal seam. `None` = audit-only
+    /// (today's behavior, byte-identical).
+    posture_sink: Option<Arc<dyn PostureSignalSink>>,
 }
 
 /// Reconcile two governor output velocities to a single most-restrictive
@@ -390,7 +415,16 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             shadow,
             state: Mutex::new(DivState::default()),
             sink,
+            posture_sink: None,
         }
+    }
+
+    /// S-DG1c — attach the optional fleet-posture signal sink (builder-style;
+    /// see [`PostureSignalSink`]). Without it the comparator is audit-only.
+    #[must_use]
+    pub fn with_posture_sink(mut self, posture_sink: Arc<dyn PostureSignalSink>) -> Self {
+        self.posture_sink = Some(posture_sink);
+        self
     }
 
     /// Evaluate a command through both governors and reconcile.
@@ -447,6 +481,15 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             } else {
                 SafetyPosture::Degraded
             };
+            // S-DG1b: an agreeing tick is posture-significant only while the
+            // accumulator is still draining (the comparator's own hysteresis —
+            // one source of truth); a fully-drained agreeing tick feeds the
+            // integrator's recovery streak.
+            let still_draining = state.accumulator > 0;
+            drop(state);
+            if let Some(ps) = &self.posture_sink {
+                ps.divergence_posture_tick(still_draining, false);
+            }
             return primary_out;
         }
 
@@ -558,6 +601,14 @@ impl<S: SafetyGovernor> GovernorComparator<S> {
             escalated_to_lockout: may_lockout,
             recommended_posture: if may_lockout { "locked_out" } else { "degraded" },
         });
+
+        // S-DG1b: every divergent tick is posture-significant; `escalated`
+        // mirrors the comparator's own sustained-divergence lockout decision.
+        // Emission is AFTER the audit record so the asymmetry invariant holds:
+        // every divergence is audited; posture is the additional consequence.
+        if let Some(ps) = &self.posture_sink {
+            ps.divergence_posture_tick(true, may_lockout);
+        }
 
         action
     }
@@ -1151,7 +1202,80 @@ mod tests {
         );
     }
 
-    /// Persistent divergence once the vehicle is at a safe speed should
+// ---- S-DG1b: PostureSignalSink emission mapping (test matrix rows) ----
+
+    /// Records every posture tick for assertion.
+    #[derive(Default)]
+    struct RecordingPostureSink {
+        ticks: Mutex<Vec<(bool, bool)>>,
+    }
+    impl PostureSignalSink for RecordingPostureSink {
+        fn divergence_posture_tick(&self, significant: bool, escalated: bool) {
+            self.ticks.lock().unwrap().push((significant, escalated));
+        }
+    }
+
+    /// Emission mapping over a full divergence episode:
+    /// - every divergent tick is (significant=true, escalated=comparator's own
+    ///   lockout decision);
+    /// - agreement while the accumulator drains stays significant (the
+    ///   comparator's hysteresis is the single source of truth);
+    /// - a drained agreeing tick is (false, false) — the recovery feed.
+    #[test]
+    fn test_posture_sink_emission_mapping_over_episode() {
+        let (primary, shadow) = diverging_pair();
+        let sink = Arc::new(RecordingPostureSink::default());
+        let comparator =
+            GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
+
+        let fast_prev = cmd(10.0); // above SAFE_LOCKOUT_SPEED — no lockout
+        // Two divergent ticks: significant, not escalated (at speed).
+        for _ in 0..2 {
+            comparator.evaluate(&cmd(10.0), Some(&fast_prev), 0.05, SafetyPosture::Nominal);
+        }
+        // Agreement ticks: zero-velocity commands agree trivially; the
+        // accumulator (2 ticks × INC=2 = 4) drains at DECAY=1 per tick, so the
+        // first agreeing ticks are still significant, the tail is not.
+        for _ in 0..6 {
+            comparator.evaluate(&cmd(0.0), Some(&cmd(0.0)), 0.05, SafetyPosture::Nominal);
+        }
+
+        let ticks = sink.ticks.lock().unwrap().clone();
+        assert_eq!(ticks.len(), 8, "every evaluate tick emits exactly once: {ticks:?}");
+        assert_eq!(&ticks[..2], &[(true, false), (true, false)], "divergent ticks");
+        assert!(
+            ticks[2..].iter().take_while(|(s, _)| *s).all(|&(s, e)| s && !e),
+            "draining agreement stays significant, never escalated: {ticks:?}"
+        );
+        assert_eq!(
+            ticks.last(),
+            Some(&(false, false)),
+            "a drained agreeing tick must emit the recovery signal: {ticks:?}"
+        );
+        // The drain boundary exists (some draining ticks, then recovered ones).
+        assert!(ticks[2..].iter().any(|&(s, _)| !s), "the accumulator must drain: {ticks:?}");
+    }
+
+    /// The comparator's own lockout escalation is mirrored on the sink.
+    #[test]
+    fn test_posture_sink_reports_escalation() {
+        let (primary, shadow) = diverging_pair();
+        let sink = Arc::new(RecordingPostureSink::default());
+        let comparator =
+            GovernorComparator::new(primary, shadow).with_posture_sink(sink.clone());
+        let slow_prev = cmd(3.0); // below SAFE_LOCKOUT_SPEED (5.0)
+        for _ in 0..10 {
+            comparator.evaluate(&cmd(10.0), Some(&slow_prev), 0.05, SafetyPosture::Nominal);
+        }
+        let ticks = sink.ticks.lock().unwrap().clone();
+        assert!(
+            ticks.iter().any(|&(s, e)| s && e),
+            "the sink must mirror the comparator's escalated_to_lockout: {ticks:?}"
+        );
+        assert!(ticks.iter().all(|&(s, _)| s), "all ticks in a divergence run are significant");
+    }
+
+        /// Persistent divergence once the vehicle is at a safe speed should
     /// escalate to LockedOut.
     #[test]
     fn test_persistent_divergence_when_slow_escalates_to_lockout() {

@@ -31,7 +31,7 @@ use kirra_core::posture_tracker::PostureTracker;
 // The lean trajectory/perception data types live in `kirra-core` (de-monolith
 // Stage 6a); re-exported here so every existing `crate::state::*` /
 // `kirra_ros2_adapter::state::*` path keeps the SAME type.
-pub use kirra_core::trajectory::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict};
+pub use kirra_core::trajectory::{PerceivedObject, PerceivedPedestrian, Pose, TrajectoryPoint, TrajectoryVerdict};
 
 // R1: the trajectory CHECKER contract types `AcceptedTrajectory` / `EgoOdom` (+
 // `DEFAULT_MAX_AGE_MS`) were relocated to the lean `kirra-trajectory` crate so the
@@ -100,6 +100,12 @@ pub struct AdaptorState {
     /// `objects_cache` when the divergence monitor is enabled. Empty/never-written when no
     /// redundant channel is configured (the monitor stays inert).
     pub objects_cache_b: Arc<RwLock<Vec<PerceivedObject>>>,
+    /// WP-10 — the pedestrian/VRU perception channel (`PerceivedPedestrian`s
+    /// from a producer such as kirra-taj's `classify_pedestrians`). OPT-IN
+    /// like channel B: empty/never-written when no VRU source is wired; once
+    /// the integrator enables the VRU gate, a silent or stale channel FAILS
+    /// CLOSED (see [`snapshot_pedestrians`](AdaptorState::snapshot_pedestrians)).
+    pub pedestrians_cache: Arc<RwLock<Vec<PerceivedPedestrian>>>,
     /// Per-object **turn-rate** estimates `(object_id, yaw_rate_rad_s)` from the tracker — the
     /// SAME CTRV estimate the planner consumes as `MotionState`, supplied to the checker so the
     /// multi-modal predictive RSS (gap #3) can add the CTRV turn-in hypothesis, not just CV.
@@ -124,6 +130,8 @@ pub struct AdaptorState {
     /// (0 = none yet). The slow loop checks it against the staleness timeout: a configured
     /// redundant channel that goes silent is a redundancy loss → fail closed.
     pub last_objects_b_ms:  Arc<AtomicU64>,
+    /// Monotonic stamp of the last pedestrian-channel write (0 = never seen).
+    pub last_pedestrians_ms: Arc<AtomicU64>,
     /// Wall-clock-ms when the LAST per-object yaw-rate estimate arrived (0 = none yet). A STALE
     /// yaw feed degrades the predictive pass to CV-only (the estimate would keep predicting a
     /// turn-in after the object straightened) — an enhancement dropped, NOT a fault.
@@ -189,12 +197,14 @@ impl AdaptorState {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
+            pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
@@ -213,12 +223,14 @@ impl AdaptorState {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
+            pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
@@ -240,12 +252,14 @@ impl AdaptorState {
             by_asset: DashMap::new(),
             objects_cache: Arc::new(RwLock::new(Vec::new())),
             objects_cache_b: Arc::new(RwLock::new(Vec::new())),
+            pedestrians_cache: Arc::new(RwLock::new(Vec::new())),
             object_yaw_rates: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(config),
             latest_odom: Arc::new(RwLock::new(None)),
             last_trajectory_ms: Arc::new(AtomicU64::new(0)),
             last_objects_ms:    Arc::new(AtomicU64::new(0)),
             last_objects_b_ms:  Arc::new(AtomicU64::new(0)),
+            last_pedestrians_ms: Arc::new(AtomicU64::new(0)),
             last_object_yaw_ms: Arc::new(AtomicU64::new(0)),
             last_odom_ms:       Arc::new(AtomicU64::new(0)),
             posture_tracker:    Arc::new(RwLock::new(
@@ -444,6 +458,54 @@ impl AdaptorState {
             .unwrap_or_default()
     }
 
+    /// WP-10 — replace the pedestrian/VRU snapshot and stamp its arrival at `now_ms`
+    /// (the slow loop's staleness check reads that stamp). Mirrors
+    /// [`update_objects_secondary`](Self::update_objects_secondary) including the
+    /// fail-closed RwLock-poisoning handling.
+    pub fn update_pedestrians(&self, pedestrians: Vec<PerceivedPedestrian>, now_ms: u64) {
+        self.last_pedestrians_ms.store(now_ms, Ordering::Relaxed);
+        if let Ok(mut guard) = self.pedestrians_cache.write() {
+            *guard = pedestrians;
+        } else {
+            tracing::error!("pedestrians_cache RwLock POISONED — VRU snapshot dropped");
+        }
+    }
+
+    /// WP-10 — read the pedestrian channel with fail-closed freshness semantics
+    /// (for a slow loop running with the VRU gate ENABLED):
+    ///   - fresh (written within `staleness_budget_ms`) → `Some(pedestrians)`
+    ///     (`Some(vec![])` = genuinely none in view — the bound is trivially clear);
+    ///   - NEVER seen, STALE, or POISONED → `None` — the caller MUST fail closed
+    ///     (MRC), never treat it as "no pedestrians": an enabled-but-silent VRU
+    ///     source is a lost perception channel, exactly like redundancy channel B.
+    /// Integrators with the gate DISABLED never call this (the checker's
+    /// `pedestrians: None` no-op path is byte-identical prior behavior).
+    pub fn snapshot_pedestrians(
+        &self,
+        now_ms: u64,
+        staleness_budget_ms: u64,
+    ) -> Option<Vec<PerceivedPedestrian>> {
+        let stamp = self.last_pedestrians_ms.load(Ordering::Relaxed);
+        if stamp == 0 || now_ms.saturating_sub(stamp) > staleness_budget_ms {
+            tracing::error!(
+                stamp,
+                now_ms,
+                staleness_budget_ms,
+                "VRU pedestrian channel silent/stale with the gate enabled — failing closed"
+            );
+            return None;
+        }
+        match self.pedestrians_cache.read() {
+            Ok(guard) => Some(guard.clone()),
+            Err(_) => {
+                tracing::error!(
+                    "pedestrians_cache RwLock POISONED — failing slow loop closed (MRC)"
+                );
+                None
+            }
+        }
+    }
+
     /// Replace the per-object yaw-rate estimates `(object_id, yaw_rate_rad_s)` and stamp arrival
     /// at `now_ms`. Called by the integrator's tracker feed (the same CTRV estimate the planner
     /// gets as `MotionState`); the slow loop reads it to add CTRV modes to the predictive RSS.
@@ -545,6 +607,48 @@ impl AdaptorState {
 
 #[cfg(test)]
 mod tests {
+    // ---- WP-10: the pedestrian/VRU channel (fail-closed freshness) ----
+
+    #[test]
+    fn pedestrian_channel_fresh_snapshot_returns_the_scene() {
+        let st = AdaptorState::new();
+        let ped = PerceivedPedestrian {
+            id: 7,
+            pos: kirra_core::corridor::Point { x_m: 5.0, y_m: 1.0 },
+            vel: kirra_core::corridor::Point { x_m: 0.0, y_m: 0.0 },
+            age_s: 0.0,
+        };
+        st.update_pedestrians(vec![ped], 1_000);
+        let snap = st.snapshot_pedestrians(1_200, 500).expect("fresh channel");
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, 7);
+    }
+
+    #[test]
+    fn pedestrian_channel_fresh_empty_means_genuinely_clear() {
+        let st = AdaptorState::new();
+        st.update_pedestrians(Vec::new(), 1_000);
+        let snap = st.snapshot_pedestrians(1_100, 500).expect("fresh channel");
+        assert!(snap.is_empty(), "a fresh empty write is 'no pedestrians in view'");
+    }
+
+    /// Enabled-but-NEVER-SEEN fails closed — an enabled VRU gate with no
+    /// producer is a lost perception channel, not a clear scene.
+    #[test]
+    fn pedestrian_channel_never_seen_fails_closed() {
+        let st = AdaptorState::new();
+        assert!(st.snapshot_pedestrians(10_000, 500).is_none());
+    }
+
+    /// A stale channel (producer died mid-run) fails closed too.
+    #[test]
+    fn pedestrian_channel_stale_fails_closed() {
+        let st = AdaptorState::new();
+        st.update_pedestrians(Vec::new(), 1_000);
+        assert!(st.snapshot_pedestrians(1_501, 500).is_none(), "1 ms past the budget");
+        assert!(st.snapshot_pedestrians(1_500, 500).is_some(), "at the budget is fresh");
+    }
+
     use super::*;
 
     #[test]

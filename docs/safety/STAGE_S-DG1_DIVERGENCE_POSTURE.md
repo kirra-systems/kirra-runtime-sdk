@@ -1,8 +1,22 @@
 # Stage S-DG1 — Governor-Divergence → Fleet Posture
 
-> **STATUS: PROPOSED.** Design of record only — **no implementation**, and **not a safety
-> claim** until ACCEPTED via a future ADR. The RTM / TRACEABILITY_MATRIX must NOT list
-> S-DG1 as ENFORCED until S-DG1c lands. (Same governance as S-FI1.)
+> **STATUS: SUBSTANTIALLY IMPLEMENTED (WP-09, 2026-07-07) — pending safety-engineer
+> sign-off.** S-DG1a (verifier: `LockoutReason::GovernorDivergence`,
+> `PostureRecalcTrigger::GovernorDivergence`, `apply_governor_divergence_state`,
+> composition into the Degraded/LockedOut clauses AND the #688 sticky-downgrade guard),
+> S-DG1b (parko-kirra: `PostureSignalSink` DI seam on `GovernorComparator`, emission
+> reusing the comparator's own accumulator/escalation state — `None` = byte-identical
+> audit-only), and the S-DG1c ADAPTER (`PostureEngineSenderSink`, `verifier-sink`
+> feature: non-blocking `try_send`, fail-safe drop semantics) are LIVE with the full
+> §5 test matrix (see below) plus an end-to-end worker test
+> (`governor_divergence_trigger_drives_fleet_posture_through_worker`).
+>
+> **Remaining before ENFORCED:** the live parko-ros2 NODE wiring. The node reaches the
+> verifier via `StoreHandle` (remote topology), not an embedded posture engine, so
+> wiring `with_posture_sink(PostureEngineSenderSink)` there needs either an embedded
+> engine or a remote trigger transport — follow-up. An integrator embedding the engine
+> can wire it today with the shipped pieces. The RTM must NOT list S-DG1 as ENFORCED
+> until that lands. (Same governance as S-FI1.)
 
 ## 1. Motivation
 

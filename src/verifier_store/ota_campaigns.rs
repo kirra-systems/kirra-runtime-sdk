@@ -30,8 +30,8 @@ impl VerifierStore {
             "INSERT INTO ota_campaigns
                  (campaign_id, artifact_digest, artifact_version, cohorts_json,
                   stages_json, stage_index, rollout_percent, state, halt_reason,
-                  created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  created_at_ms, updated_at_ms, artifact_signature_b64)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 campaign.campaign_id,
                 campaign.artifact_digest,
@@ -44,6 +44,7 @@ impl VerifierStore {
                 campaign.halt_reason.map(|r| r.as_str()),
                 campaign.created_at_ms as i64,
                 campaign.updated_at_ms as i64,
+                campaign.artifact_signature_b64,
             ],
         )?;
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
@@ -105,7 +106,7 @@ impl VerifierStore {
             .query_row(
                 "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                         stages_json, stage_index, rollout_percent, state, halt_reason,
-                        created_at_ms, updated_at_ms
+                        created_at_ms, updated_at_ms, artifact_signature_b64
                  FROM ota_campaigns WHERE campaign_id = ?1",
                 params![campaign_id],
                 Self::map_campaign_row,
@@ -118,7 +119,7 @@ impl VerifierStore {
         let mut stmt = self.conn.prepare(
             "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                     stages_json, stage_index, rollout_percent, state, halt_reason,
-                    created_at_ms, updated_at_ms
+                    created_at_ms, updated_at_ms, artifact_signature_b64
              FROM ota_campaigns ORDER BY created_at_ms DESC, campaign_id ASC",
         )?;
         let rows = stmt.query_map([], Self::map_campaign_row)?;
@@ -134,7 +135,7 @@ impl VerifierStore {
         let mut stmt = self.conn.prepare(
             "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                     stages_json, stage_index, rollout_percent, state, halt_reason,
-                    created_at_ms, updated_at_ms
+                    created_at_ms, updated_at_ms, artifact_signature_b64
              FROM ota_campaigns
              WHERE state IN ('staged', 'rolling')
              ORDER BY created_at_ms ASC, campaign_id ASC",
@@ -252,6 +253,7 @@ impl VerifierStore {
             halt_reason,
             created_at_ms: row.get::<_, i64>(9)? as u64,
             updated_at_ms: row.get::<_, i64>(10)? as u64,
+            artifact_signature_b64: row.get(11)?,
         })
     }
 }

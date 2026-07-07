@@ -700,10 +700,21 @@ impl VerifierStore {
                 state             TEXT    NOT NULL,
                 halt_reason       TEXT,
                 created_at_ms     INTEGER NOT NULL,
-                updated_at_ms     INTEGER NOT NULL
+                updated_at_ms     INTEGER NOT NULL,
+                artifact_signature_b64 TEXT
             )",
             [],
         )?;
+        // WP-12 ADD-COLUMN migration for a pre-existing ota_campaigns table
+        // (same tolerate-duplicate convention as the nodes/clearance ALTERs;
+        // runs AFTER the CREATE so a fresh database is never "no such table").
+        if let Err(e) =
+            conn.execute("ALTER TABLE ota_campaigns ADD COLUMN artifact_signature_b64 TEXT", [])
+        {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
 
         // WS-4 / Track 3 — node artifact adoption reports. Each node reports the
         // digest it is actually RUNNING (after an OTA commit); the fleet summary

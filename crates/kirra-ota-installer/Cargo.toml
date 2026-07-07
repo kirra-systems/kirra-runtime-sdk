@@ -37,4 +37,8 @@ serde_json = "1.0"
 # with the node's Ed25519 attestation key (PKCS#8 PEM) so the verifier can attribute
 # it unforgeably. Same Ed25519 primitive as the root crate; pure safe Rust.
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+# WP-12 (MGA G-7): the governor ARTIFACT release-signature verify seam — the
+# SAME domain-separated crypto the campaign signer uses (one source of truth,
+# never a duplicated payload constant). Lean (contract-channel + dalek + sha2).
+kirra-release-token = { path = "../kirra-release-token" }
 base64 = "0.22"

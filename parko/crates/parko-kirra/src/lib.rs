@@ -50,7 +50,7 @@ use kirra_core::FleetPosture;
 
 use parko_core::commands::ControlCommand;
 use parko_core::rss::{
-    lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed,
+    lateral_safe_distance_split, longitudinal_safe_distance, occlusion_limited_speed,
     opposite_direction_safe_distance, RSS_LATERAL_MOTION_EPS_MPS, RSS_LONGITUDINAL_CONFLICT_M,
     RSS_LONGITUDINAL_OVERLAP_M,
 };
@@ -79,6 +79,7 @@ pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 #[cfg(feature = "verifier-sink")]
 pub use audit_sink::{
     select_audit_client, select_divergence_sink, select_impact_sink, AuditChainLinkerAuditClient,
+    PostureEngineSenderSink,
     AuditChainLinkerDivergenceSink, FatalAuditConfig, ImpactAuditSink,
     ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,
     ImpactEscalationPayload, ImpactEventSink, InMemoryImpactSink, RecordedClearanceLoop,
@@ -86,7 +87,7 @@ pub use audit_sink::{
     IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE, PARKO_DECISION_EVENT_TYPE,
     PARKO_FAULT_EVENT_TYPE, PARKO_HEALTH_EVENT_TYPE, PARKO_OVERRIDE_EVENT_TYPE,
 };
-pub use comparator::{GovernorComparator, RssAwareGovernor};
+pub use comparator::{GovernorComparator, PostureSignalSink, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
 
 /// MRC (Minimum Risk Condition) velocity ceiling — the decel-trajectory
@@ -240,11 +241,13 @@ pub fn compute_scene_rss(scene: &AgentScene, params: &RssParams) -> RssState {
                 params.brake_max,
             )
         };
-        let required_lat = lateral_safe_distance(
+        let required_lat = lateral_safe_distance_split(
             a.ego_lat_vel,
             a.obj_lat_vel,
             params.lat_accel_max,
+            params.lat_brake_min,
             params.reaction_time,
+            params.mu_lateral_m,
         );
 
         // NaN-safe: a non-finite ACTUAL gap makes `>=` false (NaN comparisons
@@ -1901,6 +1904,8 @@ mod scene_rss_tests {
             brake_min: 6.0,
             brake_max: 6.0,
             lat_accel_max: 2.0,
+            lat_brake_min: 1.4, // 0.7 × lat_accel_max (WP-07 split)
+            mu_lateral_m: 0.2,
         }
     }
 
