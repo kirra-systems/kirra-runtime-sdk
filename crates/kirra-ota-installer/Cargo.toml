@@ -40,5 +40,5 @@ ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 # WP-12 (MGA G-7): the governor ARTIFACT release-signature verify seam — the
 # SAME domain-separated crypto the campaign signer uses (one source of truth,
 # never a duplicated payload constant). Lean (contract-channel + dalek + sha2).
-kirra-release-token = { path = "../kirra-release-token" }
+kirra-release-token = { path = "../kirra-release-token", features = ["serde"] }
 base64 = "0.22"
