@@ -216,7 +216,7 @@ its marker must flip to ✓, and a claimed test must actually exist.
 | SG-016 | C | 3 (TR-016, TR-016a, TR-016b) | src/dds_bridge.rs, src/startup_sentinel.rs | 1+ |
 
 **Total Technical Requirements:** 48
-**Total Test Suite Size:** 306 passing (as of v1.5.0)
+**Total Test Suite Size:** 2,476 passing workspace tests (`cargo test --workspace`, 2026-07-07; excludes the detached loom/fuzz/QNX harnesses, which run in their own CI lanes). The v1.5.0-era "306 passing" figure was stale — see `RTM_GAP_REPORT.md` for the reconciliation history; re-derive this count from `cargo test --workspace`, never carry it forward by hand.
 
 ---
 

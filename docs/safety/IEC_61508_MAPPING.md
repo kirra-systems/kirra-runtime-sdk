@@ -135,7 +135,7 @@ IEC 61508-2 Table 2 and 3 define architectural constraints for SIL claims based 
 | Defensive programming | Fail-closed semantics on all error paths; no unwrap() on safety-critical paths per AEGIS-CG-001 | Compliant |
 | Error detection | All f64 inputs checked for finiteness before arithmetic; posture cache TTL enforced | Compliant |
 | Static analysis | Rust compiler (borrow checker, lifetime analysis) provides strong static analysis guarantees | Compliant |
-| Dynamic analysis / testing | 306 passing unit and property-based tests; proptest generates counterexample-guided test cases | Partial — MC/DC coverage not yet measured |
+| Dynamic analysis / testing | 2,476 passing workspace unit/property/integration tests (as of 2026-07-07; live count via `cargo test --workspace`); proptest generates counterexample-guided test cases | Partial — MC/DC coverage not yet measured |
 
 ### Avoidance of Systematic Failures (IEC 61508-3 Clause 7.4.4)
 
