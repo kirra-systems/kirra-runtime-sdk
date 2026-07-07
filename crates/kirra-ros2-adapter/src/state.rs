@@ -804,6 +804,108 @@ mod tests {
             "after max_age_ms elapses the slot must fail closed");
     }
 
+    /// WS-6 detector-latency-spike drill (the two-loop isolation guarantee). A
+    /// stall in the slow / perception loop — e.g. a heavy WS-6 detector inference
+    /// spike — must age BOTH the accepted-trajectory slot AND the objects
+    /// subscription past their staleness budgets, so the fast path resolves to MRC
+    /// from state ALONE (no waiting on, and no back-pressure from, the stalled slow
+    /// loop) and recovers the instant a fresh frame lands. This is the test-level
+    /// witness for the "heavy detector upstream, fast path fails closed on its own
+    /// clock" claim.
+    #[test]
+    fn detector_latency_spike_ages_slot_and_subscription_then_recovers() {
+        let state = AdaptorState::new();
+        let t0 = 10_000;
+
+        // --- Steady state: a fresh Accept + all three required subscriptions
+        //     fresh. The fast loop conforms to a real accepted plan. ---
+        state.install(AcceptedTrajectory::new_accepted(
+            "av_01",
+            1,
+            vec![pt(0.0, 0.0, 1.0, 0.0)],
+            t0,
+        ));
+        state.touch_trajectory(t0);
+        state.touch_objects(t0);
+        state.touch_odom(t0);
+        assert_eq!(
+            state.current_verdict("av_01", t0),
+            TrajectoryVerdict::Accept,
+            "steady state: a fresh Accept conforms"
+        );
+        assert!(
+            !state.any_subscription_stale(t0, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+            "steady state: all subscriptions fresh"
+        );
+
+        // --- The slot's OWN budget (DEFAULT_MAX_AGE_MS) is TIGHTER than the
+        //     subscription budget (SUBSCRIPTION_STALENESS_TIMEOUT_MS). Just past the
+        //     slot's max-age the fast path already fails closed on the slot — the
+        //     tighter of the two bounds wins. (Guarded below so this stays true if
+        //     the constants are ever re-tuned.) ---
+        assert!(
+            DEFAULT_MAX_AGE_MS < SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+            "this drill assumes the slot budget is the tighter of the two bounds"
+        );
+        let slot_aged = t0 + DEFAULT_MAX_AGE_MS + 1;
+        assert_eq!(
+            state.current_verdict("av_01", slot_aged),
+            TrajectoryVerdict::MRCFallback,
+            "the slot's {DEFAULT_MAX_AGE_MS} ms max-age fails closed before the \
+             {SUBSCRIPTION_STALENESS_TIMEOUT_MS} ms subscription budget"
+        );
+        assert!(
+            !state.any_subscription_stale(slot_aged, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+            "just past the slot's {DEFAULT_MAX_AGE_MS} ms max-age the subscription is still \
+             inside its {SUBSCRIPTION_STALENESS_TIMEOUT_MS} ms budget — the slot is the tighter bound"
+        );
+
+        // --- Full detector spike: past BOTH budgets, no new install/touch (the
+        //     slow loop produced nothing). Both mechanisms now read fail-closed. ---
+        let spike = t0 + SUBSCRIPTION_STALENESS_TIMEOUT_MS + 1;
+        assert_eq!(
+            state.current_verdict("av_01", spike),
+            TrajectoryVerdict::MRCFallback,
+            "detector spike: the aged slot fails closed to MRC"
+        );
+        assert!(
+            state.any_subscription_stale(spike, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+            "detector spike: the stalled objects/trajectory feed reads stale"
+        );
+
+        // --- Zero back-pressure: the verdict is a pure function of (state, now). It
+        //     stays MRC no matter HOW long the slow loop stays stalled — the fast
+        //     path never blocks waiting for it, even a far-future read resolves
+        //     synchronously to the same safe verdict. ---
+        assert_eq!(
+            state.current_verdict("av_01", spike + 10_000_000),
+            TrajectoryVerdict::MRCFallback,
+            "the fast path resolves from state alone regardless of slow-loop progress"
+        );
+
+        // --- Recovery: one fresh frame restores conformance immediately — the fast
+        //     path latched no residual MRC state waiting on the slow loop. ---
+        let recover = spike + 5;
+        state.install(AcceptedTrajectory::new_accepted(
+            "av_01",
+            2,
+            vec![pt(0.1, 0.0, 1.0, 0.0)],
+            recover,
+        ));
+        state.touch_trajectory(recover);
+        state.touch_objects(recover);
+        state.touch_odom(recover);
+        assert_eq!(
+            state.current_verdict("av_01", recover),
+            TrajectoryVerdict::Accept,
+            "recovery: a single fresh frame restores conformance with no residual MRC latch"
+        );
+        assert!(
+            !state.any_subscription_stale(recover, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
+            "recovery: all subscriptions fresh again"
+        );
+    }
+
     /// Documented contract: an asset with no trajectory must be treated as
     /// MRCFallback by every caller — there is no other safe disposition.
     /// This test pins the contract; if any caller of `current_verdict`
