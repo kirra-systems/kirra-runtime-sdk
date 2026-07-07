@@ -352,12 +352,14 @@ pub fn quantize_over_corpus(
     planner: &LearnedPlanner,
     corpus: &[EvalScenario],
 ) -> QuantizedLearnedPlanner {
-    quantize_over_refs(planner, &corpus.iter().collect::<Vec<_>>())
+    let scenarios: Vec<&EvalScenario> = corpus.iter().collect();
+    quantize_over_refs(planner, &scenarios)
 }
 
-/// [`quantize_over_corpus`] over a NON-contiguous subset (the calibration
-/// partition of a [`split_corpus`]). The one place PTQ scales are fit from a
-/// proper subset rather than the whole corpus.
+/// Fit the int8 PTQ scales over an arbitrary set of scenarios (by reference, so a
+/// NON-contiguous subset works — e.g. the calibration partition of a
+/// [`split_corpus`]). The shared calibration core: [`quantize_over_corpus`] passes
+/// the whole corpus, [`generalization_report`] passes only the calibration partition.
 #[must_use]
 fn quantize_over_refs(
     planner: &LearnedPlanner,
