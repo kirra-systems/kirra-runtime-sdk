@@ -107,6 +107,7 @@ pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
 /// Background-task supervisor (review finding C2): re-spawns dead safety loops and
 /// escalates the fleet to fail-closed LockedOut if a critical loop is wedged.
 pub mod supervisor;
+pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod kinematics_sim;
 
 #[cfg(test)]

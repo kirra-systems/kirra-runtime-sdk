@@ -161,6 +161,12 @@ src/
 ├── dds_bridge.rs             — CDR encapsulation, Volatile durability
 ├── standby_monitor.rs        — HA heartbeat writer and promotion monitor
 ├── startup_sentinel.rs       — Pre-flight invariant checks at startup
+├── execution_manager.rs      — WP-20/G-11 declarative execution manager: TASK_MANIFEST
+│                               (the 7 supervised loops as data + deps + criticality +
+│                               scheduling intent + deadline), resolve_startup_order
+│                               (topological sort, FAIL-CLOSED on cycle/missing/dup),
+│                               deadline_missed + DeadlineStats. Pure core — main()
+│                               adoption + SCHED_FIFO/affinity syscalls are follow-up
 ├── config.rs                 — Configuration loading helpers (Modbus gateway
 │                               file-config: KirraRuntimeConfig, versioned+validated)
 ├── env_config.rs             — WP-17/G-17 unified verifier ENV config: KIRRA_ENV_KEYS
