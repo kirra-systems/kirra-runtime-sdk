@@ -166,10 +166,22 @@ Reuse the deterministic scenario worlds that exist today:
 `crates/kirra-mick/tests/scenario_suite.rs` (grounded-then-checked scenarios) and
 the hand-built `world()` fixtures in the `kirra-planner` tests. Design-note §11
 already flags "need a held-out set" — Q-1 **inherits** that gap, it does not create
-it; the in-Rust PTQ is validated on the same corpus it calibrates on for Q-1a, with
-a `TODO` to split a held-out set before any quality number is treated as a release
-gate. Call this out explicitly rather than letting a train==test number read as a
-guarantee.
+it; the in-Rust PTQ is validated on the same corpus it calibrates on for Q-1a.
+
+**Held-out split — LANDED.** The train==test caveat above is now closed by
+`kirra_doer_eval::{split_corpus, generalization_report}`: `split_corpus` partitions
+a corpus deterministically (by index — no RNG) into a calibration set and a
+DISJOINT held-out set, and `generalization_report` calibrates the int8 PTQ on the
+calibration partition ONLY, then measures argmax-agreement + admissibility on the
+held-out partition (`GeneralizationReport::agreement_gap` surfaces overfit). The CI
+gate `heldout_argmax_agreement_meets_the_release_floor` holds a **held-out** number
+(not a train==test one) at/above the same 0.75 floor. Note the *shipped artifact*
+(`export_artifacts`) still calibrates over the WHOLE corpus by design — more
+calibration data is strictly better for the deployed model; the split is the
+overfit *measurement*, not a reason to discard calibration data. At the current
+tanh scale the gap is ~0 (the quantization generalizes trivially); the measurement
+earns its keep when the scorer scales up / moves off tanh (`DOER_MODEL_SCALEUP.md`;
+design-note §11 quantization-sensitivity).
 
 ## 6. Non-goals (unchanged from the design note)
 
