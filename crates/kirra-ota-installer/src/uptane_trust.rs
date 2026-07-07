@@ -82,7 +82,7 @@ impl UptaneTrustStore {
                 "trust state already provisioned",
             )));
         }
-        verify_root_self(&anchor.meta, &anchor.sig_by_current_root_b64)?;
+        verify_root_self(&anchor.meta, &anchor.sig_by_new_root_b64)?;
         let state = TrustState { root: anchor.clone(), versions: TrustedVersions::default() };
         self.write(&state)?;
         Ok(state)
@@ -96,9 +96,14 @@ impl UptaneTrustStore {
         let text = std::fs::read_to_string(&self.path)?;
         let state: TrustState = serde_json::from_str(&text)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        // Re-verify the stored root against itself: a hostile edit of the
-        // persisted role keys must not silently become trusted.
-        verify_root_self(&state.root.meta, &state.root.sig_by_current_root_b64)?;
+        // Re-verify the stored root against the key EMBEDDED in its own meta —
+        // that key is the trust anchor for this root. Use `sig_by_new_root_b64`
+        // (the incoming-root signature): for the self-signed anchor both bundle
+        // signatures are equal, and for a root-KEY rotation `sig_by_current` is
+        // by the OUTGOING key and would NOT verify against the new `meta.root_key`
+        // (Copilot #856 — that path would brick trust on restart). A hostile edit
+        // of any persisted role key breaks this signature → fail closed.
+        verify_root_self(&state.root.meta, &state.root.sig_by_new_root_b64)?;
         Ok(state)
     }
 
@@ -283,6 +288,50 @@ mod tests {
         // ...while the NEW key verifies.
         let new_t_sig = sign_targets(&targets, &new_targets_sk);
         assert!(verify_update(&v2.root.meta, v2.versions, NOW, &tsm, &ts_sig, &snap, &s_sig, &targets, &new_t_sig).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ROOT-KEY rotation must survive a reload (Copilot #856 regression guard).
+    /// This is the case that broke `load`: after adopting a root whose ROOT key
+    /// changed, the persisted `sig_by_current` is by the OUTGOING key and does
+    /// NOT verify against the new `meta.root_key` — a reload verifying with that
+    /// signature would fail closed and brick trust. `load` verifies with
+    /// `sig_by_new_root_b64`, so the adopted new root reloads cleanly, and a
+    /// FURTHER rotation still chains from it (proving the new key is trusted).
+    #[test]
+    fn adopted_root_key_rotation_survives_a_reload() {
+        let r = Repo::new();
+        let path = tmp_path("rootrot");
+        let _ = std::fs::remove_file(&path);
+        let store = UptaneTrustStore::new(&path);
+        store.provision(&author_initial_root(r.root(1), &r.root_sk)).expect("provision");
+
+        // Rotate the ROOT key itself to a fresh one at v2 (signed by outgoing
+        // old root + incoming new root), adopt + persist.
+        let new_root_sk = SigningKey::from_bytes(&[42u8; 32]);
+        let mut m2 = r.root(2);
+        m2.root_key = new_root_sk.verifying_key().to_bytes();
+        let rotation = author_root_rotation(m2, &r.root_sk, &new_root_sk);
+        store.adopt_rotation(&rotation).expect("adopt root-key rotation");
+
+        // RELOAD must SUCCEED and trust the NEW root key.
+        let reloaded = store.load().expect("root-key rotation must reload cleanly");
+        assert_eq!(reloaded.root.meta.version, 2);
+        assert_eq!(reloaded.root.meta.root_key, new_root_sk.verifying_key().to_bytes());
+
+        // A further rotation must chain from the NEW root: the old root key can
+        // no longer authorize a rotation (it is not the trusted outgoing key).
+        let mut m3 = r.root(3);
+        m3.root_key = new_root_sk.verifying_key().to_bytes();
+        m3.targets_key = SigningKey::from_bytes(&[77u8; 32]).verifying_key().to_bytes();
+        let by_stale_old = author_root_rotation(m3.clone(), &r.root_sk, &new_root_sk);
+        assert!(
+            store.adopt_rotation(&by_stale_old).is_err(),
+            "a rotation authored by the stale OLD root key must be refused after the root-key rotation"
+        );
+        let by_new = author_root_rotation(m3, &new_root_sk, &new_root_sk);
+        store.adopt_rotation(&by_new).expect("the new root authorizes the next rotation");
+        assert_eq!(store.load().unwrap().root.meta.version, 3);
         let _ = std::fs::remove_file(&path);
     }
 
