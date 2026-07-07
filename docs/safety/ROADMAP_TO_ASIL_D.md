@@ -60,7 +60,7 @@ Establish the safety case foundation documents that define the item, identify ha
 - Three-layer safety architecture documented with mechanism IDs M-001 to M-013: complete
 - 48 technical requirements traced to implementation and tests: complete
 - 13 security invariants codified in coding guidelines: complete
-- 306 passing tests as baseline: established
+- Workspace test baseline: established (2,476 passing as of 2026-07-07 — derive the live figure from `cargo test --workspace`, do not carry counts forward by hand)
 
 ### 3.4 Exit Criteria
 

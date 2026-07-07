@@ -22,6 +22,10 @@
 //!     `frame_lockout_active` sticky flag just before the write) AND the sticky
 //!     downgrade guard in `replace_cache_if_newer`. See
 //!     `sticky_lockout_never_downgraded_under_recalc_race`.
+//!   * The HVCHAN-001 odd/even seqlock (`crates/kirra-contract-channel/src/seqlock.rs`)
+//!     — an accepted cross-partition snapshot is never torn, weak-memory outcomes
+//!     included; models the driver's two fences (WP-01 / MGA G-13). See
+//!     `seqlock_accepted_snapshot_is_never_torn`.
 
 // The whole crate is loom-only; keep it out of non-loom builds entirely.
 #![cfg(loom)]
@@ -208,5 +212,117 @@ fn sticky_lockout_never_downgraded_under_recalc_race() {
             Posture::LockedOut,
             "a racing recalc must never downgrade a forced supervisor LockedOut"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// HVCHAN-001 §3 odd/even seqlock (WP-01 / MGA G-13)
+// ---------------------------------------------------------------------------
+
+use loom::sync::atomic::fence;
+use loom::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+
+/// The shared contract region reduced to what the invariant needs: the seqlock
+/// `generation` plus a two-field body carrying the cross-field consistency
+/// invariant `b == 2 * a`. Orderings mirror the production bindings
+/// (`crates/kirra-contract-channel/src/reference.rs::InProcessRegion` and the
+/// `kirra-hv-carrier` POSIX-SHM regions): generation Acquire/Release, body
+/// fields Relaxed.
+struct SeqlockRegion {
+    generation: AtomicU64,
+    a: AtomicU64,
+    b: AtomicU64,
+}
+
+/// Faithful mirror of `kirra_contract_channel::publish`
+/// (`crates/kirra-contract-channel/src/seqlock.rs`), including the WP-01
+/// release fence (ordering edge 3): odd marker → release fence → Relaxed body
+/// stores → even commit (Release).
+fn seqlock_publish(region: &SeqlockRegion, committed: u64, a: u64, b: u64) -> u64 {
+    region.generation.store(committed + 1, Release); // odd: write in progress
+    fence(Release); // edge 3 — body stores must not float above the odd marker
+    region.a.store(a, Relaxed);
+    region.b.store(b, Relaxed);
+    let next = committed + 2;
+    region.generation.store(next, Release); // even: commit
+    next
+}
+
+/// Faithful mirror of `kirra_contract_channel::read_coherent_snapshot`
+/// (`crates/kirra-contract-channel/src/seqlock.rs`), including the WP-01
+/// acquire fence (ordering edge 4): g1 (Acquire) → Relaxed body copy →
+/// acquire fence → g2 re-read; accept iff even and unchanged; bounded
+/// retries fail closed (`None` = the `SnapshotFault::RetryExhausted` reject).
+fn seqlock_read(region: &SeqlockRegion, max_retries: u32) -> Option<(u64, u64, u64)> {
+    let mut failures = 0u32;
+    loop {
+        let g1 = region.generation.load(Acquire);
+        if g1 & 1 == 0 {
+            let a = region.a.load(Relaxed);
+            let b = region.b.load(Relaxed);
+            fence(Acquire); // edge 4 — body loads must not sink below the re-read
+            let g2 = region.generation.load(Acquire);
+            if g2 == g1 {
+                return Some((g1, a, b));
+            }
+        }
+        if failures >= max_retries {
+            return None; // fail-closed: never a stale/torn accept
+        }
+        failures += 1;
+    }
+}
+
+/// INV (HVCHAN-001 §3 steps 2-3): a snapshot the reader ACCEPTS is never torn —
+/// under every interleaving AND every weak-memory outcome loom can construct
+/// (loom models Relaxed loads observing stale values, which is exactly the
+/// aarch64 hazard the seqlock's two fences exist to close). The writer
+/// publishes two sessions whose fields satisfy `b == 2 * a`; a torn mix of two
+/// sessions (or of a session with the zeroed initial state) breaks the
+/// invariant. Rejection (`None`) is always a legal outcome — fail-closed —
+/// but an accepted snapshot must be internally consistent and even-generation.
+///
+/// This models the exact protocol shipped in
+/// `crates/kirra-contract-channel/src/seqlock.rs` INCLUDING its two fences;
+/// dropping either fence from the mirrors above makes this model fail (loom
+/// finds the torn outcome), which is how the fences' necessity was
+/// established — the model is not vacuous. (Verified 2026-07: removing edge 3
+/// or edge 4 makes loom report `b != 2 * a`.)
+///
+/// The search is preemption-bounded (loom's standard state-space control,
+/// cf. tokio's `LOOM_MAX_PREEMPTIONS=2`): exhaustive within 2 preemptions per
+/// thread, which is where seqlock tear counterexamples live (verified: the
+/// fence-removal counterexamples above are found WITHIN this bound).
+#[test]
+fn seqlock_accepted_snapshot_is_never_torn() {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(|| {
+        let region = Arc::new(SeqlockRegion {
+            generation: AtomicU64::new(0),
+            a: AtomicU64::new(0),
+            b: AtomicU64::new(0),
+        });
+
+        let w = Arc::clone(&region);
+        let writer = thread::spawn(move || {
+            let committed = seqlock_publish(&w, 0, 1, 2);
+            seqlock_publish(&w, committed, 2, 4);
+        });
+
+        let r = Arc::clone(&region);
+        let reader = thread::spawn(move || {
+            if let Some((g, a, b)) = seqlock_read(&r, 2) {
+                assert_eq!(g % 2, 0, "accepted snapshot must be even-generation");
+                assert_eq!(b, 2 * a, "torn snapshot accepted: a={a} b={b} g={g}");
+                assert!(
+                    matches!((a, b), (0, 0) | (1, 2) | (2, 4)),
+                    "snapshot must be one whole published session: a={a} b={b}"
+                );
+            }
+        });
+
+        writer.join().unwrap();
+        reader.join().unwrap();
     });
 }

@@ -3,11 +3,14 @@
 //! hands a caller an unverified payload. All trust/codec logic lives in the crate
 //! root ([`crate`]); this module is transport only.
 
+use std::sync::Mutex;
+
 use zenoh::Session;
 
 use kirra_fleet_types::federation_reconciliation::FederatedTrustReportV2;
 use kirra_fleet_types::store::FleetTrustStore;
 
+use crate::ingress_limit::IngressRateLimiter;
 use crate::{
     accept_report, encode_report, ingest_clearance_grant, key_clearance_grant, key_posture,
     key_trust_report, FleetPosture, PostureSummary, RejectReason, RejectionCounter,
@@ -178,61 +181,157 @@ impl FleetPublisher {
     }
 }
 
+/// Default ingest rate limits (WS-4 transport hardening). Trust reports and
+/// clearance grants are low-rate control-plane traffic (heartbeat-cadence, not
+/// telemetry), so the steady-state allowances are deliberately far above any
+/// legitimate rate while still bounding a signature-verify flood to a trickle:
+/// a source is allowed a 20-message burst refilling at 10/s; the global
+/// backstop admits a 200-message burst refilling at 100/s across all sources;
+/// at most 1024 sources are tracked before unknown sources fall through to the
+/// global bucket alone (the memory bound). Tune per deployment via
+/// [`FleetSubscriber::declare_with_limiter`] / [`GrantIngest::declare_with_limiter`].
+pub const INGRESS_PER_SOURCE_BURST: u32 = 20;
+pub const INGRESS_PER_SOURCE_REFILL_PER_SEC: f64 = 10.0;
+pub const INGRESS_GLOBAL_BURST: u32 = 200;
+pub const INGRESS_GLOBAL_REFILL_PER_SEC: f64 = 100.0;
+pub const INGRESS_MAX_TRACKED_SOURCES: usize = 1024;
+
+fn default_ingress_limiter(now_ms: u64) -> IngressRateLimiter {
+    IngressRateLimiter::new(
+        INGRESS_GLOBAL_BURST,
+        INGRESS_GLOBAL_REFILL_PER_SEC,
+        INGRESS_PER_SOURCE_BURST,
+        INGRESS_PER_SOURCE_REFILL_PER_SEC,
+        INGRESS_MAX_TRACKED_SOURCES,
+        now_ms,
+    )
+}
+
+/// The rate-limit bucketing source for a sample: the node-id segment of the
+/// fleet key expression (`kirra/v1/fleet/{node}/trust-report`,
+/// `kirra/v1/ops/{node}/clearance-grant` → segment 3). A key that does not
+/// have that shape buckets under its whole expression — never a panic, and a
+/// malformed key cannot escape bucketing. The id is untrusted; spoofing many
+/// ids only degrades to the global backstop (see `ingress_limit`).
+fn bucket_source_from_key(key_expr: &str) -> &str {
+    key_expr.split('/').nth(3).filter(|s| !s.is_empty()).unwrap_or(key_expr)
+}
+
+/// Gate one ingest through the shared limiter BEFORE any decode/verify work.
+/// Denial counts and returns [`RejectReason::RateLimited`] — fail-closed drop.
+/// A poisoned limiter lock is recovered (`into_inner`): the limiter is a DoS
+/// shield, and losing it to a one-off panic elsewhere must not wedge ingest —
+/// matching the store-handle poison policy.
+fn gate_ingest(
+    limiter: &Mutex<IngressRateLimiter>,
+    source: &str,
+    now_ms: u64,
+    counter: &RejectionCounter,
+) -> Result<(), RejectReason> {
+    let allowed = limiter
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(source, now_ms);
+    if allowed {
+        Ok(())
+    } else {
+        counter.record(&RejectReason::RateLimited);
+        Err(RejectReason::RateLimited)
+    }
+}
+
 /// Fleet-side subscriber for a node's signed trust reports. `recv_report`
-/// **verifies the signature before returning** — an unsigned / bad-sig / malformed
-/// payload is rejected and counted, never surfaced.
+/// **rate-limits, then verifies the signature before returning** — a flood is
+/// dropped cheaply as [`RejectReason::RateLimited`] before the Ed25519 verify
+/// (WS-4: a signature-verify DoS cannot ride the carrier), and an unsigned /
+/// bad-sig / malformed payload is rejected and counted, never surfaced.
 pub struct FleetSubscriber {
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    limiter: Mutex<IngressRateLimiter>,
 }
 
 impl FleetSubscriber {
-    /// Declare a subscriber on `kirra/v1/fleet/{node_id}/trust-report`.
-    pub async fn declare(session: &Session, node_id: &str) -> Result<Self, String> {
+    /// Declare a subscriber on `kirra/v1/fleet/{node_id}/trust-report` with the
+    /// default ingest limits. `now_ms` seeds the limiter clock (the limiter is
+    /// pure/clock-injected; every `recv_report` call supplies the current time).
+    pub async fn declare(session: &Session, node_id: &str, now_ms: u64) -> Result<Self, String> {
+        Self::declare_with_limiter(session, node_id, default_ingress_limiter(now_ms)).await
+    }
+
+    /// As [`declare`](Self::declare), with deployment-tuned ingest limits.
+    pub async fn declare_with_limiter(
+        session: &Session,
+        node_id: &str,
+        limiter: IngressRateLimiter,
+    ) -> Result<Self, String> {
         let subscriber = session
             .declare_subscriber(key_trust_report(node_id))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self { subscriber })
+        Ok(Self { subscriber, limiter: Mutex::new(limiter) })
     }
 
-    /// Receive the next payload, **verify it against `public_key_b64`**, and return
-    /// the verified report. Rejections increment `counter`.
+    /// Receive the next payload, gate it through the ingest rate limiter, then
+    /// **verify it against `public_key_b64`** and return the verified report.
+    /// Rejections (including [`RejectReason::RateLimited`], which is decided
+    /// BEFORE the expensive signature verify) increment `counter`.
     pub async fn recv_report(
         &self,
         public_key_b64: &str,
         counter: &RejectionCounter,
+        now_ms: u64,
     ) -> Result<FederatedTrustReportV2, RejectReason> {
         let sample = self
             .subscriber
             .recv_async()
             .await
             .map_err(|e| RejectReason::Decode(format!("recv: {e}")))?;
+        gate_ingest(
+            &self.limiter,
+            bucket_source_from_key(sample.key_expr().as_str()),
+            now_ms,
+            counter,
+        )?;
         let bytes = sample.payload().to_bytes();
         accept_report(&bytes, public_key_b64, counter)
     }
 }
 
 /// Vehicle-side subscriber for DOWN-lane clearance grants. `recv_and_ingest`
-/// verifies the signature then writes the grant through the EXISTING Phase-A store
-/// path (a `PENDING` row Phase-B consumes) — never a second release path.
+/// rate-limits, verifies the signature, then writes the grant through the
+/// EXISTING Phase-A store path (a `PENDING` row Phase-B consumes) — never a
+/// second release path.
 pub struct GrantIngest {
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    limiter: Mutex<IngressRateLimiter>,
 }
 
 impl GrantIngest {
-    /// Declare a subscriber on `kirra/v1/ops/{node_id}/clearance-grant`.
-    pub async fn declare(session: &Session, node_id: &str) -> Result<Self, String> {
+    /// Declare a subscriber on `kirra/v1/ops/{node_id}/clearance-grant` with the
+    /// default ingest limits (`now_ms` seeds the limiter clock).
+    pub async fn declare(session: &Session, node_id: &str, now_ms: u64) -> Result<Self, String> {
+        Self::declare_with_limiter(session, node_id, default_ingress_limiter(now_ms)).await
+    }
+
+    /// As [`declare`](Self::declare), with deployment-tuned ingest limits.
+    pub async fn declare_with_limiter(
+        session: &Session,
+        node_id: &str,
+        limiter: IngressRateLimiter,
+    ) -> Result<Self, String> {
         let subscriber = session
             .declare_subscriber(key_clearance_grant(node_id))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self { subscriber })
+        Ok(Self { subscriber, limiter: Mutex::new(limiter) })
     }
 
-    /// Receive the next grant, verify it against `public_key_b64`, and on success
-    /// write it to `store` via the Phase-A path. Returns the store rowid.
+    /// Receive the next grant, gate it through the ingest rate limiter (a flood
+    /// drops as [`RejectReason::RateLimited`] before any decode/verify), verify
+    /// it against `public_key_b64`, and on success write it to `store` via the
+    /// Phase-A path. Returns the store rowid.
     pub async fn recv_and_ingest<S: FleetTrustStore>(
         &self,
         store: &mut S,
@@ -245,6 +344,12 @@ impl GrantIngest {
             .recv_async()
             .await
             .map_err(|e| RejectReason::Decode(format!("recv: {e}")))?;
+        gate_ingest(
+            &self.limiter,
+            bucket_source_from_key(sample.key_expr().as_str()),
+            now_ms,
+            counter,
+        )?;
         let bytes = sample.payload().to_bytes();
         let grant: SignedClearanceGrant = serde_json::from_slice(&bytes).map_err(|e| {
             let r = RejectReason::Decode(e.to_string());
@@ -342,7 +447,7 @@ mod transport_tests {
 
         // Subscriber session listens; publisher session connects to it.
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let subscriber = FleetSubscriber::declare(&sub_session, "robot-01")
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-01", 1_000)
             .await
             .unwrap();
 
@@ -356,7 +461,7 @@ mod transport_tests {
         let counter = RejectionCounter::new();
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            subscriber.recv_report(&pk, &counter),
+            subscriber.recv_report(&pk, &counter, 1_000),
         )
         .await
         .expect("recv timed out — the carrier did not deliver")
@@ -399,7 +504,7 @@ mod transport_tests {
         let sub_session = zenoh::open(fleet_peer_config(Some(&ep), None, Some(&server_tls)).unwrap())
             .await
             .unwrap();
-        let subscriber = FleetSubscriber::declare(&sub_session, "robot-tls")
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-tls", 1_000)
             .await
             .unwrap();
 
@@ -415,7 +520,7 @@ mod transport_tests {
         let counter = RejectionCounter::new();
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            subscriber.recv_report(&pk, &counter),
+            subscriber.recv_report(&pk, &counter, 1_000),
         )
         .await
         .expect("recv timed out — the TLS carrier did not deliver")
@@ -435,7 +540,7 @@ mod transport_tests {
         let ep = format!("127.0.0.1:{}", free_port());
 
         let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let subscriber = FleetSubscriber::declare(&sub_session, "robot-02")
+        let subscriber = FleetSubscriber::declare(&sub_session, "robot-02", 1_000)
             .await
             .unwrap();
         let pub_session = zenoh::open(peer_config(None, Some(&ep))).await.unwrap();
@@ -454,7 +559,7 @@ mod transport_tests {
         let counter = RejectionCounter::new();
         let err = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            subscriber.recv_report(&pk, &counter),
+            subscriber.recv_report(&pk, &counter, 1_000),
         )
         .await
         .expect("recv timed out")
@@ -475,7 +580,7 @@ mod transport_tests {
 
         // Vehicle side declares the grant-ingest subscriber + owns the store.
         let veh_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
-        let ingest = GrantIngest::declare(&veh_session, "robot-03")
+        let ingest = GrantIngest::declare(&veh_session, "robot-03", 1_000)
             .await
             .unwrap();
         let mut store = VerifierStore::new(":memory:").unwrap();
@@ -509,5 +614,73 @@ mod transport_tests {
             .take_pending_clearance_grant("robot-03", 1_600)
             .unwrap()
             .is_none());
+    }
+
+    /// Bucketing source extraction: node-id segment for both fleet key shapes;
+    /// a malformed key buckets under its whole expression (never a panic).
+    #[test]
+    fn bucket_source_extracts_the_node_segment() {
+        assert_eq!(bucket_source_from_key("kirra/v1/fleet/robot-9/trust-report"), "robot-9");
+        assert_eq!(bucket_source_from_key("kirra/v1/ops/robot-9/clearance-grant"), "robot-9");
+        assert_eq!(bucket_source_from_key("weird"), "weird");
+        assert_eq!(bucket_source_from_key("a/b/c//d"), "a/b/c//d");
+    }
+
+    /// FLOOD over the wire is dropped by the ingest rate limiter BEFORE the
+    /// Ed25519 verify (WS-4: a signature-verify DoS cannot ride the carrier).
+    /// The limiter admits a burst of 2 from one source with zero refill; three
+    /// messages arrive at the same `now_ms`, the third carrying a DELIBERATELY
+    /// BAD signature. If the limiter is wired, the third rejects as
+    /// `RateLimited`; if it were not, the verify would run and the reject would
+    /// be `BadSignature` — so the observed reason proves the verify was never
+    /// reached. (Multi-source spoofing → the global backstop is covered by the
+    /// `ingress_limit` unit tests; this subscriber is keyed to one node.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flood_is_rate_limited_before_the_signature_verify() {
+        let (sk, pk) = keypair();
+        let ep = format!("127.0.0.1:{}", free_port());
+
+        let sub_session = zenoh::open(peer_config(Some(&ep), None)).await.unwrap();
+        let limiter = crate::ingress_limit::IngressRateLimiter::new(
+            100, 0.0, // global: ample burst, no refill needed at one instant
+            2, 0.0, // per-source: admit exactly 2 at now_ms, then dry
+            16, 1_000,
+        );
+        let subscriber =
+            FleetSubscriber::declare_with_limiter(&sub_session, "robot-flood", limiter)
+                .await
+                .unwrap();
+        let pub_session = zenoh::open(peer_config(None, Some(&ep))).await.unwrap();
+        let publisher = FleetPublisher::new(pub_session);
+        settle().await;
+
+        // Two well-signed reports, then a bad-signature third (the flood excess).
+        publisher.publish_report(&signed_report(&sk, "robot-flood")).await.unwrap();
+        publisher.publish_report(&signed_report(&sk, "robot-flood")).await.unwrap();
+        let mut forged = signed_report(&sk, "robot-flood");
+        forged.signature_b64 = B64.encode([0u8; 64]);
+        publisher.publish_report(&forged).await.unwrap();
+
+        let counter = RejectionCounter::new();
+        let recv = |c| {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                subscriber.recv_report(&pk, c, 1_000),
+            )
+        };
+        recv(&counter).await.expect("recv 1").expect("first report admitted + verified");
+        recv(&counter).await.expect("recv 2").expect("second report admitted + verified");
+        let third = recv(&counter).await.expect("recv 3");
+        assert_eq!(
+            third.unwrap_err(),
+            RejectReason::RateLimited,
+            "flood excess must be dropped by the limiter BEFORE the verify \
+             (BadSignature here would mean the limiter is not wired)"
+        );
+
+        let snap = counter.snapshot();
+        assert_eq!(snap.accepted, 2);
+        assert_eq!(snap.rate_limited, 1);
+        assert_eq!(snap.bad_signature, 0, "the forged payload was never verified");
     }
 }

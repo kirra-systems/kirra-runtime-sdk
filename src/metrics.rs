@@ -96,6 +96,114 @@ pub struct FleetMetricsSnapshot {
     pub command_source_write_failures: u64,
 }
 
+/// WP-05 (MGA G-10) — a lock-free fixed-bucket latency histogram in the
+/// Prometheus text format. FIXED buckets and NO dynamic labels (the same
+/// cardinality discipline as the counter families): recording is three
+/// relaxed atomic adds (`_count`, `_sum`, one bucket), allocation-free, safe
+/// on any request path. Bounds span the
+/// control plane's realistic range (100 µs .. 1 s); an observation past the
+/// last bound lands in `+Inf` only. `le` values are emitted in SECONDS per
+/// the Prometheus convention; `_sum` is converted from the accumulated
+/// microseconds at format time.
+#[derive(Debug)]
+pub struct LatencyHistogram {
+    /// NON-cumulative per-bucket counts; index i counts observations with
+    /// `value_micros <= LATENCY_BUCKET_BOUNDS_MICROS[i]` and greater than the
+    /// previous bound. Cumulation happens at format time (cheaper than
+    /// cumulative `fetch_add` fan-out on the record path).
+    buckets: [AtomicU64; LATENCY_BUCKET_BOUNDS_MICROS.len()],
+    /// Observations above the last bound (the `+Inf`-only tail).
+    overflow: AtomicU64,
+    sum_micros: AtomicU64,
+    count: AtomicU64,
+}
+
+/// Bucket upper bounds in microseconds, paired with their Prometheus `le`
+/// label rendering in seconds. Kept as literals so the exposition is exact
+/// (no float formatting drift).
+const LATENCY_BUCKET_BOUNDS_MICROS: [(u64, &str); 11] = [
+    (100, "0.0001"),
+    (250, "0.00025"),
+    (500, "0.0005"),
+    (1_000, "0.001"),
+    (2_500, "0.0025"),
+    (5_000, "0.005"),
+    (10_000, "0.01"),
+    (25_000, "0.025"),
+    (50_000, "0.05"),
+    (100_000, "0.1"),
+    (1_000_000, "1"),
+];
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: core::array::from_fn(|_| AtomicU64::new(0)),
+            overflow: AtomicU64::new(0),
+            sum_micros: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    /// Record one observation. Three relaxed atomic adds — no locks, no
+    /// allocation, monotonic-duration input (`Instant::elapsed`).
+    ///
+    /// ORDER MATTERS for scrape validity: `_count` is bumped FIRST, the
+    /// bucket LAST, so a concurrent scrape can never observe a finite
+    /// `_bucket{le=...}` exceeding `+Inf`/`_count` (an invalid histogram).
+    /// The benign inverse — `_count` momentarily ahead of the bucket sums
+    /// for in-flight observations — is tolerated by Prometheus and heals on
+    /// the next scrape (see `append_prometheus`).
+    pub fn record_micros(&self, micros: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
+        match LATENCY_BUCKET_BOUNDS_MICROS.iter().position(|(b, _)| micros <= *b) {
+            Some(i) => self.buckets[i].fetch_add(1, Ordering::Relaxed),
+            None => self.overflow.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    /// Total observations recorded (equals the `+Inf` bucket / `_count`).
+    /// A cheap public accessor — used by tests and available to health/debug
+    /// surfaces without parsing the exposition.
+    pub fn observation_count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Append the Prometheus exposition for this histogram: HELP/TYPE, the
+    /// CUMULATIVE `_bucket{le=...}` series ending in `+Inf`, then `_sum`
+    /// (seconds) and `_count`. `node_id` must already be label-escaped (the
+    /// caller escapes once for the whole scrape).
+    pub fn append_prometheus(&self, out: &mut String, name: &str, desc: &str, node_id: &str) {
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "# HELP kirra_{name} {desc}");
+        let _ = writeln!(out, "# TYPE kirra_{name} histogram");
+        let mut cumulative = 0u64;
+        for (i, (_, le)) in LATENCY_BUCKET_BOUNDS_MICROS.iter().enumerate() {
+            cumulative += self.buckets[i].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "kirra_{name}_bucket{{node_id=\"{node_id}\",le=\"{le}\"}} {cumulative}"
+            );
+        }
+        // `+Inf` must equal `_count`; read `count` once and reuse so the two
+        // lines cannot disagree within one scrape. Under concurrent recording
+        // the per-bucket sums may LAG `_count` by in-flight observations
+        // (never exceed it — `record_micros` bumps `_count` first), which
+        // Prometheus tolerates: counters are re-read next scrape.
+        let count = self.count.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "kirra_{name}_bucket{{node_id=\"{node_id}\",le=\"+Inf\"}} {count}"
+        );
+        let sum_seconds = self.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let _ = writeln!(out, "kirra_{name}_sum{{node_id=\"{node_id}\"}} {sum_seconds}");
+        let _ = writeln!(out, "kirra_{name}_count{{node_id=\"{node_id}\"}} {count}");
+    }
+}
+
 /// WS-0.5 — the fleet-safety counter set behind `GET /metrics` on the
 /// verifier binary. Lock-free atomics, incremented on the paths they
 /// observe; formatted with [`format_prometheus`](Self::format_prometheus).
@@ -117,6 +225,18 @@ pub struct FleetSafetyMetrics {
     denials_ha_fenced: AtomicU64,
     /// Completed standby→Active promotions (HA failover).
     ha_promotions: AtomicU64,
+    /// WP-05 (MGA G-10) — end-to-end HTTP request latency on the verifier
+    /// plane (recorded by the binary's request-observability middleware,
+    /// OUTSIDE the pure verdict kernel; includes posture-gate denials and
+    /// load-shed 429s, which is the point — overload is when latency
+    /// observability matters most).
+    pub http_request_latency: LatencyHistogram,
+    /// WP-05 (MGA G-10) — duration of the actuator safety-envelope
+    /// evaluation on the deployed HTTP path (`enforce_actuator_safety_envelope`:
+    /// posture resolve + contract selection + verdict + body rewrite). This is
+    /// the deployed-path observability the WCET gate's host microbench cannot
+    /// provide; it is NOT a WCET claim (async runtime jitter included).
+    pub actuator_envelope_latency: LatencyHistogram,
 }
 
 impl FleetSafetyMetrics {
@@ -320,6 +440,23 @@ impl FleetSafetyMetrics {
             &[("", snap.command_source_write_failures)],
         );
 
+        // --- latency histograms (WP-05) ---
+        self.http_request_latency.append_prometheus(
+            &mut out,
+            "http_request_duration_seconds",
+            "End-to-end verifier HTTP request latency (includes posture-gate \
+             denials and load-shed 429s; recorded outside the verdict kernel)",
+            node_id,
+        );
+        self.actuator_envelope_latency.append_prometheus(
+            &mut out,
+            "actuator_envelope_duration_seconds",
+            "Actuator safety-envelope evaluation latency on the deployed HTTP \
+             path (posture resolve + contract + verdict + body rewrite; \
+             deployed-path observability, NOT a WCET claim)",
+            node_id,
+        );
+
         out
     }
 }
@@ -370,6 +507,69 @@ impl LockFreeMetricsAggregator {
         write_metric(&mut out, "active_worker_threads", "gauge", "Concurrent thread saturation within worker pools", self.active_worker_threads.load(Ordering::Relaxed));
 
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WP-05 tests — the latency histogram.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod latency_histogram_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_are_cumulative_and_inf_equals_count() {
+        let h = LatencyHistogram::default();
+        h.record_micros(50); // <= 100
+        h.record_micros(100); // boundary is inclusive: <= 100
+        h.record_micros(900); // <= 1_000
+        h.record_micros(2_000_000); // past the last bound → +Inf only
+
+        let mut out = String::new();
+        h.append_prometheus(&mut out, "t_seconds", "test", "n1");
+
+        // Cumulative: le="0.0001" sees 2, le="0.001" sees 3, le="1" still 3.
+        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.0001\"} 2"), "{out}");
+        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"0.001\"} 3"), "{out}");
+        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"1\"} 3"), "{out}");
+        // +Inf carries every observation and equals _count.
+        assert!(out.contains("kirra_t_seconds_bucket{node_id=\"n1\",le=\"+Inf\"} 4"), "{out}");
+        assert!(out.contains("kirra_t_seconds_count{node_id=\"n1\"} 4"), "{out}");
+        assert_eq!(h.observation_count(), 4);
+    }
+
+    #[test]
+    fn sum_is_converted_to_seconds() {
+        let h = LatencyHistogram::default();
+        h.record_micros(500_000);
+        h.record_micros(1_500_000);
+        let mut out = String::new();
+        h.append_prometheus(&mut out, "t_seconds", "test", "n1");
+        assert!(out.contains("kirra_t_seconds_sum{node_id=\"n1\"} 2"), "{out}");
+    }
+
+    #[test]
+    fn histograms_ride_the_fleet_exposition() {
+        let m = FleetSafetyMetrics::new();
+        m.http_request_latency.record_micros(1_000);
+        m.actuator_envelope_latency.record_micros(200);
+        let snap = FleetMetricsSnapshot {
+            effective_posture: FleetPosture::Nominal,
+            posture_cache_stale: false,
+            posture_generation: 1,
+            mode_active: true,
+            audit_write_drops: 0,
+            capture_drops: 0,
+            post_incident_write_failures: 0,
+            incident_durability_failures: 0,
+            command_source_write_failures: 0,
+        };
+        let out = m.format_prometheus("node-1", &snap);
+        assert!(out.contains("# TYPE kirra_http_request_duration_seconds histogram"), "{out}");
+        assert!(out.contains("kirra_http_request_duration_seconds_count{node_id=\"node-1\"} 1"));
+        assert!(out.contains("# TYPE kirra_actuator_envelope_duration_seconds histogram"));
+        assert!(out.contains("kirra_actuator_envelope_duration_seconds_count{node_id=\"node-1\"} 1"));
     }
 }
 

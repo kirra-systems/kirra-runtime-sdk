@@ -1,0 +1,31 @@
+# WP-04 (MGA G-6) — coverage ratchet.
+#
+# The coverage lane (ci.yml `coverage`) measures branch/MC-DC coverage and
+# uploads lcov to Codecov, but nothing GATED on it: coverage could silently
+# regress. This makes the project status BLOCKING with a ratchet semantics —
+# `target: auto` compares against the base commit, `threshold: 0.5%` tolerates
+# instrumentation noise. A PR that drops workspace coverage by more than half
+# a percent fails the codecov/project status check.
+#
+# `patch` stays informational: new-code coverage is a review signal, not a
+# hard gate (a one-line fail-closed guard with no practical negative test
+# should not red CI). Tighten later if the team wants it.
+#
+# The upload step keeps `fail_ci_if_error: false` — a Codecov OUTAGE must not
+# red the lane; the gating is this status check, which simply stays pending
+# when no report arrives.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0.5%
+        informational: false
+    patch:
+      default:
+        informational: true
+
+# Comment noise control: one comment, updated in place.
+comment:
+  behavior: default
+  require_changes: true

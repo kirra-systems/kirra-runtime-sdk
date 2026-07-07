@@ -104,6 +104,18 @@ mod auth;
 // serve path unchanged; fail-closed on partial config; ring provider only.
 #[path = "kirra_verifier_service/tls.rs"]
 mod tls;
+// WP-03 (MGA G-10) — control-plane backpressure (load-shed + shared
+// concurrency pools + body cap); wiring in `build_app`, semantics + tests in
+// the module.
+#[path = "kirra_verifier_service/backpressure.rs"]
+mod backpressure;
+use backpressure::{env_limit_or, with_backpressure};
+// WP-05 (MGA G-10) — request observability: correlation id + tracing span +
+// end-to-end latency histogram. Mounted outermost in `build_app`; makes no
+// admission decisions.
+#[path = "kirra_verifier_service/observability.rs"]
+mod observability;
+use observability::request_observability;
 use attestation::*;
 use fleet::*;
 use audit::*;
@@ -1800,18 +1812,37 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         // under its own authority — the console never touches the actuator.
         .route("/console/estop-requests", post(console_estop_request));
 
+    // WP-03 (MGA G-10) — control-plane backpressure. TWO isolated pools so a
+    // flood of API traffic cannot starve the operator console (the LockedOut
+    // recovery surface: clearance grants + the ADR-0013 e-stop request), and a
+    // console flood cannot starve the API. Probe routes (`/health`, `/ready`,
+    // `/metrics`) are EXEMPT — liveness and the Prometheus scrape must survive
+    // overload exactly as they survive LockedOut. The posture gate below stays
+    // outermost on everything, probes included (it has its own exempt list).
+    let api_max = env_limit_or("KIRRA_HTTP_MAX_CONCURRENCY", 512);
+    let console_max = env_limit_or("KIRRA_HTTP_CONSOLE_MAX_CONCURRENCY", 64);
+    let body_max = env_limit_or("KIRRA_HTTP_MAX_BODY_BYTES", 256 * 1024);
+
+    let api_routes = with_backpressure(
+        Router::new()
+            .merge(identity_gated_routes)
+            .merge(admin_routes)
+            .merge(auditor_routes)
+            .merge(actuator_routes)
+            .merge(attestation_routes)
+            .merge(read_routes),
+        api_max,
+        body_max,
+    );
+    let console_routes = with_backpressure(console_routes, console_max, body_max);
+
     Router::new()
         .merge(probe_routes)
-        .merge(identity_gated_routes)
-        .merge(admin_routes)
-        .merge(auditor_routes)
-        .merge(actuator_routes)
-        .merge(attestation_routes)
-        .merge(read_routes)
+        .merge(api_routes)
         .merge(console_routes)
         .with_state(svc_state.clone())
         .layer(cors)
-        // Outermost layer: command-classification + posture-routing gate.
+        // Outermost GATE: command-classification + posture-routing gate.
         // Runs BEFORE auth and the actuator envelope on every request;
         // is_posture_exempt allowlists liveness / observability paths so
         // probes stay reachable regardless of fleet posture. Returns 503
@@ -1820,6 +1851,15 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc_state),
             enforce_posture_routing,
+        ))
+        // WP-05: request observability wraps EVERYTHING, the posture gate
+        // included, so denials and sheds are observed too. It makes NO
+        // admission decision — the posture gate above remains the outermost
+        // *gate*; this layer only stamps a request id, opens the tracing
+        // span, and records the latency histogram.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&svc_state),
+            request_observability,
         ))
 }
 

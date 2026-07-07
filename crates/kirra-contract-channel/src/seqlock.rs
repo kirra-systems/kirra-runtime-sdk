@@ -13,13 +13,39 @@
 //! ADR-0006 Clause 3 integration shim, *outside* this crate), while the protocol
 //! itself stays `#![forbid(unsafe_code)]` and host-testable against atomics.
 
+use core::sync::atomic::{fence, Ordering};
+
 use crate::view::GovernorContractView;
+
+// Memory-ordering contract (the four edges that make the seqlock sound on
+// weakly-ordered targets — aarch64 is the deployment ISA, so TSO intuition
+// does not apply; this is the canonical seqlock shape, cf. Boehm, "Can
+// seqlocks get along with programming language memory models?", MSPC 2012):
+//
+//   1. writer even-commit store  = Release   (impl: `store_generation`)
+//   2. reader first gen load g1  = Acquire   (impl: `load_generation`)
+//      → edges 1+2 make a committed body visible when g1 observes it.
+//   3. writer `fence(Release)` AFTER the odd store, BEFORE the body stores
+//      (owned by [`publish`]) — without it the Relaxed body stores may become
+//      visible BEFORE the odd marker, so a reader could copy new bytes while
+//      both its generation reads still see the old even value.
+//   4. reader `fence(Acquire)` AFTER the body copy, BEFORE the g2 re-read
+//      (owned by [`read_coherent_snapshot`]) — an Acquire *load* of g2 alone
+//      is a one-way barrier that does NOT stop the earlier Relaxed body loads
+//      from being observed after it; the fence pairs with edge 3 so that if
+//      the copy overlapped a write session, g2 is forced to observe the odd
+//      (or later) generation and the snapshot is rejected.
+//
+// Edges 3 and 4 live HERE, in the shared driver, so every region binding
+// (in-process reference, POSIX-SHM read-write and read-only, future
+// hypervisor/iceoryx2 shims) inherits them; implementations only owe edges
+// 1 and 2 plus Relaxed (data-race-free) body accesses.
 
 /// Read access to the shared contract region (the governor side).
 ///
 /// Implementors MUST make [`load_generation`](Self::load_generation) an
-/// acquire-ordered read of the seqlock counter, so that a successful
-/// generation re-read also makes the copied body bytes visible.
+/// acquire-ordered read of the seqlock counter (ordering edge 2 above; the
+/// driver supplies the post-copy acquire fence, edge 4).
 pub trait ContractReader {
     /// Acquire-load the seqlock `generation` counter.
     fn load_generation(&self) -> u64;
@@ -64,6 +90,13 @@ pub fn read_coherent_snapshot<R: ContractReader>(
         if g1 & 1 == 0 {
             // Even: no write in progress as of this read. Copy, then re-check.
             let view = reader.copy_view();
+            // Ordering edge 4: the body copy above uses Relaxed loads; without
+            // this fence a weakly-ordered CPU may satisfy those loads AFTER the
+            // g2 re-read below (an Acquire load only bars later ops from moving
+            // up, not earlier ones from moving down), admitting a torn snapshot
+            // that g2 == g1 cannot detect. Pairs with the writer's release
+            // fence in [`publish`].
+            fence(Ordering::Acquire);
             let g2 = reader.load_generation();
             if g2 == g1 {
                 // Unchanged and even ⇒ the copy did not race a writer.
@@ -94,6 +127,13 @@ pub fn publish<W: ContractWriter>(
 ) -> u64 {
     let writing = committed_gen.wrapping_add(1); // odd: write in progress
     writer.store_generation(writing);
+    // Ordering edge 3: the body stores below are Relaxed; without this fence a
+    // weakly-ordered CPU may make them visible BEFORE the odd marker above (a
+    // Release store only orders EARLIER accesses before itself), so a reader
+    // could copy new body bytes while both its generation reads still return
+    // the old even value. Pairs with the reader's acquire fence in
+    // [`read_coherent_snapshot`].
+    fence(Ordering::Release);
     writer.store_body(body);
     let next = committed_gen.wrapping_add(2); // even: commit
     writer.store_generation(next);

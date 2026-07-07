@@ -137,7 +137,7 @@ These invariants are verified by proptest properties in `src/gateway/kinematics_
 
 | F3269 Requirement | Kirra Claim | Evidence |
 |-------------------|-------------|----------|
-| RTA.1: The RTA monitor shall detect when the primary function exceeds the safe set | validate_vehicle_command() detects speed, acceleration, steering, and NaN/Inf exceedances synchronously on every command | src/gateway/kinematics_contract.rs, 306 passing tests |
+| RTA.1: The RTA monitor shall detect when the primary function exceeds the safe set | validate_vehicle_command() detects speed, acceleration, steering, and NaN/Inf exceedances synchronously on every command | src/gateway/kinematics_contract.rs; kinematics unit + 51-property proptest suite (live count via `cargo test --workspace`) |
 | RTA.2: The RTA monitor shall switch to the backup control law within the fault tolerant time interval | Posture transition to Degraded applies MRC profile to next command (synchronous, per-command FTTI) | FTTI for kinematic enforcement: per-command (< 1ms); FTTI for posture: AV_TELEMETRY_TIMEOUT_MS = 2000ms |
 | RTA.3: The backup control law shall keep the system within the recovery region | MRC Fallback Profile max_speed = 5.0 m/s is within the proven-safe region for all vehicle types | VehicleKinematicsContract::mrc_fallback_profile() |
 | RTA.4: The RTA monitor shall be independent of the primary function | Kirra is a separate process; primary function has no write access to Kirra state; admin token required for all mutations | Architectural separation; require_admin_token on all mutation routes |

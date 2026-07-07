@@ -10,6 +10,14 @@ Date: 2026-05-23
 
 ## 1. Document Registry
 
+> **Identifier scheme.** `AEGIS-*` document IDs are DELIBERATELY retained
+> across the Aegis→Kirra product rename — they are immutable
+> cert-configuration lineage, not an incomplete rebrand (newer documents mint
+> `KIRRA-*` IDs). Document IDs are never goal IDs: kernel safety goals are
+> `SG-001`…`SG-016` (SAFETY_GOALS.md) and Occy planner goals are `SG1`…`SG9`
+> (OCCY_SAFETY_GOALS.md, whose §6.2 cross-mapping is authoritative). See the
+> "Canonical Identifier Scheme" section of SAFETY_GOALS.md for the full rule.
+
 | Doc ID | Title | Version | Status | File | Last Updated |
 |--------|-------|---------|--------|------|--------------|
 | AEGIS-SC-000 | Safety Case Index | 1.0.0 | Draft | docs/safety/SAFETY_CASE_INDEX.md | 2026-05-23 |
@@ -119,7 +127,7 @@ Supporting evidence:
 - SG-002 (ASIL D): Lateral acceleration clamp Priority 6 in validate_vehicle_command (TR-002, TR-002a)
 - SG-004 (ASIL C): NaN/Inf guard Priority 0 in validate_vehicle_command (TR-004)
 - SG-006 (ASIL D): Unknown command denied before posture check in should_route_command (TR-006)
-- Test evidence: proptest suite (306 passing), unit tests for each kinematic check
+- Test evidence: the kinematics proptest suite (51 properties in `src/gateway/kinematics_proptest.rs`) + unit tests for each kinematic check (live count: `cargo test --workspace`; the historical "306 passing" figure was stale, see RTM_GAP_REPORT.md)
 
 **G-L3-1:** `validate_vehicle_command` Priority 0 (NaN/Inf guard) executes before all other checks (SG-004).
 **G-L3-2:** `validate_vehicle_command` Priority 2 (velocity clamp) executes before the rate-of-change limiter (SG-001, INV-08).

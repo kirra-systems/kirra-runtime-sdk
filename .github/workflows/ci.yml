@@ -54,12 +54,25 @@ jobs:
           arguments: --locked
           # parko/deny.toml is a symlink to the root deny.toml — one policy.
           manifest-path: ./parko/Cargo.toml
-      - name: Advisories (non-gating — external-event signal, not a PR gate)
-        continue-on-error: true
+      # WP-04 (MGA G-6): advisories are now GATING. A new RUSTSEC advisory on a
+      # locked dependency reds the PR until it is either bumped (the normal
+      # path — cf. the crossbeam-epoch RUSTSEC-2026-0204 bump) or explicitly
+      # triaged into the deny.toml `[advisories].ignore` allowlist with a
+      # written justification + expiry. The allowlist is the pressure-relief
+      # valve that makes a hard gate operable: an advisory that fires while a
+      # fix is unreleased gets a scoped, dated ignore entry — never
+      # `continue-on-error`, which let EVERY advisory pass unseen.
+      - name: Advisories (gating — triage via deny.toml [advisories].ignore)
         uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check advisories
           arguments: --locked
+      - name: Advisories — parko workspace (gating, same policy)
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        with:
+          command: check advisories
+          arguments: --locked
+          manifest-path: ./parko/Cargo.toml
 
   # #775 F2 — enforce the M-6 action-pinning policy (SECURITY.md): every
   # third-party action reference MUST be a 40-hex commit SHA, never a mutable
@@ -298,17 +311,19 @@ jobs:
         # --locked: build the committed lockfile exactly; fail if it would drift.
         run: cd crates/kirra-loom-models && RUSTFLAGS="--cfg loom" cargo test --release --locked
 
-  # M5 — fuzz-target BUILD guard. Compiles every cargo-fuzz target in `fuzz/`
-  # against the current decoder APIs so the harnesses cannot bitrot as the
-  # untrusted-input decoders evolve. It does NOT run-to-fuzz here (fuzzing is
-  # non-deterministic and unbounded — that belongs in dedicated/scheduled infra);
-  # this lane just keeps the corpus of targets compiling and linkable. cargo-fuzz
-  # needs nightly, so `RUSTUP_TOOLCHAIN` forces it past the `rust-toolchain.toml`
-  # pin (same pattern as the coverage lane).
+  # M5 — fuzz-target build + bounded run guard. Compiles every cargo-fuzz
+  # target in `fuzz/` against the current decoder APIs so the harnesses cannot
+  # bitrot as the untrusted-input decoders evolve, then (WP-04 / MGA G-6) runs
+  # each target for a BOUNDED 60 s so the fail-closed "never panic over the
+  # byte space" properties are actually exercised on every PR — a regression
+  # that a minute of libFuzzer finds is a regression a PR gate should catch.
+  # Unbounded/scheduled deep fuzzing still belongs in dedicated infra; this is
+  # the smoke tier. cargo-fuzz needs nightly, so `RUSTUP_TOOLCHAIN` forces it
+  # past the `rust-toolchain.toml` pin (same pattern as the coverage lane).
   fuzz-build:
-    name: Fuzz targets build (M5)
+    name: Fuzz targets build + 60s run (M5)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
@@ -322,8 +337,20 @@ jobs:
         # its committed lock WITHOUT building (no libFuzzer link), so a drifted
         # lockfile reds the lane deterministically before the build step.
         run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
-      - name: Build all fuzz targets (bitrot guard — not run-to-fuzz)
+      - name: Build all fuzz targets (bitrot guard)
         run: cargo fuzz build
+      - name: Run each target 60s (smoke fuzz — any panic/crash reds the lane)
+        # Targets enumerated from `cargo fuzz list` so a new target is picked up
+        # automatically (adding a target without it being run is the silent-cap
+        # failure mode this plan forbids). -max_total_time bounds wall clock;
+        # a found crash artifact fails the step via cargo-fuzz's exit code.
+        run: |
+          set -euo pipefail
+          for t in $(cargo fuzz list); do
+            echo "::group::fuzz $t"
+            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
 
   wcet-gate:
     name: WCET Gate (non-instrumented timing)
