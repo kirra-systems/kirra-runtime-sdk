@@ -14,9 +14,13 @@
   the surviving-mutant snapshot only shrinks — targeted-kill PRs retire
   clusters and update the snapshot; a full re-baseline that GROWS the list
   needs the growth explained (usually new code that predates the gate).
-- **Test scope** (pinned in `.cargo/mutants.toml`): the checker's own tests PLUS
-  `kirra-ros2-adapter`'s validation suite, where the checker's deepest tests
-  live. This is load-bearing — see §2.
+- **Test scope** (pinned in `.cargo/mutants.toml` via `test_package`): the
+  checker's own tests PLUS `kirra-ros2-adapter`'s validation suite, where the
+  checker's deepest tests live. This is load-bearing — see §2. NOTE: the scope
+  MUST use cargo-mutants' `test_package` key; the earlier
+  `additional_cargo_test_args = ["--package", ...]` did NOT change which
+  package's tests ran (cargo-mutants defaults to the mutated package's own
+  tests only), so the adapter suite silently never executed under the harness.
 
 ## 2. The scoping lesson (measured)
 
@@ -24,6 +28,13 @@
 |---|---|---:|---:|---:|---:|
 | run 1 | `kirra-trajectory` own tests only | 799 | 454 | **318** | 27 |
 | run 2 | + `kirra-ros2-adapter` suite | 799 | 570 | **202** | 27 |
+
+**CAVEAT (2026-07-07):** runs 1 and 2 were measured by invoking `cargo test`
+directly with the two `--package` flags — which DOES run both suites. The CI
+`mutation-gate` lane, however, drove cargo-mutants whose `test_package` scope
+was mis-configured (see §1), so until that fix the LANE effectively measured
+own-tests-only. The run-2 (202-survivor) numbers are the correct target once
+`test_package` is in force; re-baseline under the fixed harness will confirm.
 
 116 "survivors" in run 1 were scoping artifacts — killed by the adapter suite
 (e.g. the `posture == LockedOut` short-circuit at `validation.rs:213`, whose

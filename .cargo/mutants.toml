@@ -1,17 +1,21 @@
 # cargo-mutants configuration (WP-08 / MGA G-6 — mutation-testing gate).
 #
 # SCOPE. Mutation runs target the CHECKER crate (`-p kirra-trajectory`,
-# passed on the command line by the CI lane / the baseline scripts), and the
-# test scope below ALWAYS includes the ros2-adapter's validation suite: the
-# checker's deepest tests live in `crates/kirra-ros2-adapter/tests/
-# validation_tests.rs` (the Option-B re-export wiring), so running only the
-# mutated package's own tests understates kill rates badly — measured on the
-# 2026-07-07 baseline: 318 survivors with own-tests-only vs 202 with the
-# adapter suite included (see docs/testing/MUTATION_BASELINE.md).
-additional_cargo_test_args = [
-    "--package", "kirra-trajectory",
-    "--package", "kirra-ros2-adapter",
-]
+# passed on the command line by the CI lane / the baseline scripts). The
+# checker's DEEPEST tests live in `crates/kirra-ros2-adapter/tests/
+# validation_tests.rs` (the Option-B re-export wiring), so the mutation
+# harness MUST run that package's tests too — otherwise it understates kill
+# rates badly (measured 2026-07-07: 318 survivors own-tests-only vs 202 with
+# the adapter suite; see docs/testing/MUTATION_BASELINE.md).
+#
+# `test_package` is the CORRECT mechanism for this. cargo-mutants defaults to
+# running ONLY the mutated package's own tests; `test_package` (CLI
+# `--test-package`) tells it which packages' test suites to run for every
+# mutant. (An earlier config used `additional_cargo_test_args = ["--package",
+# ...]` — that does NOT change which package's tests cargo-mutants runs, so
+# the adapter suite never executed and adapter-killed mutants showed as
+# survivors. `test_package` is the fix.)
+test_package = ["kirra-trajectory", "kirra-ros2-adapter"]
 
 # Generous per-mutant timeout: some mutations turn bounded loops degenerate;
 # the suite itself runs in seconds, so 300 s cleanly separates "hung mutant"
