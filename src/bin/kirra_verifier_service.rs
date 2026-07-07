@@ -997,6 +997,66 @@ async fn main() {
         kirra_verifier::audit_writer::spawn_audit_writer(Arc::clone(&app_state));
     app_state.install_audit_writer(audit_tx);
 
+    // WP-17 (MGA G-17) — unified env configuration: (1) WARN on any KIRRA_* env var
+    // the schema registry does not know (a typo / stale var an operator believes is
+    // in effect), and (2) commit the effective boot-config SHA-256 digest to the
+    // tamper-evident audit chain, so an operator can prove what configuration this
+    // instance booted under and detect drift across restarts. Observability only —
+    // the sweep never fails startup (a future var on an older binary is legitimate).
+    {
+        use kirra_verifier::env_config::{unknown_kirra_env_vars, EffectiveConfig};
+        let env_names: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+        let unknown = unknown_kirra_env_vars(env_names.iter().map(String::as_str));
+        if !unknown.is_empty() {
+            tracing::warn!(
+                unknown_vars = %unknown.join(","),
+                "unrecognized KIRRA_* environment variable(s) — a typo or a stale var \
+                 that is NOT taking effect; see the env schema registry"
+            );
+        }
+        let cfg = EffectiveConfig::from_env();
+        let digest = cfg.effective_digest();
+        let now = now_ms();
+        let unknown_count = unknown.len();
+        let digest_for_log = digest.clone();
+        let mode_for_log = cfg.mode.clone();
+        let version_for_log = cfg.config_version;
+        // Non-failing (observability), but do NOT silently claim it was committed:
+        // warn if the store task OR the append fails, so a missing on-chain digest is
+        // visible rather than a phantom "committed" (Copilot #862).
+        match app_state
+            .store
+            .call(move |store| {
+                store.append_clearance_audit_event(
+                    "EffectiveConfigDigest",
+                    &json!({
+                        "config_version": cfg.config_version,
+                        "digest": digest,
+                        "mode": cfg.mode,
+                        "vehicle_class": cfg.vehicle_class,
+                        "tls_enabled": cfg.tls_enabled,
+                        "mtls_enabled": cfg.mtls_enabled,
+                        "unknown_kirra_var_count": unknown_count,
+                    })
+                    .to_string(),
+                    now,
+                )
+            })
+            .await
+        {
+            Ok(Ok(())) => tracing::info!(
+                config_version = version_for_log,
+                effective_config_digest = %digest_for_log,
+                mode = %mode_for_log,
+                "effective boot configuration digested + committed to the audit chain (WP-17)"
+            ),
+            Ok(Err(e)) => tracing::warn!(error = %e,
+                "WP-17: effective-config digest append FAILED — no on-chain config proof this boot"),
+            Err(_) => tracing::warn!(
+                "WP-17: effective-config digest store task failed — no on-chain config proof this boot"),
+        }
+    }
+
     // Learning-loop capture writer (Phase 1, #190) — DEFAULT OFF. Only spawned +
     // installed when KIRRA_CAPTURE_ENABLED is set; unset → no writer, and the
     // gateway emit is a pure no-op (capture_writer_tx stays None). Non-safety
