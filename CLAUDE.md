@@ -112,6 +112,12 @@ src/
 ├── scenario_runner.rs        — ScenarioRunner, ScenarioEvent, PostureAssertion, AssertionResult
 ├── standby_monitor.rs        — spawn_heartbeat_writer, spawn_promotion_monitor,
 │                               HEARTBEAT_INTERVAL_MS (2s), PROMOTION_TIMEOUT_MS (10s)
+├── lease.rs                  — WP-19/G-21 lease-based failover TIMING model (pure):
+│                               LeaseParams::from_ttl (renew at half-life, promote at
+│                               ttl+ttl/2), DEFAULT_LEASE_TTL_MS (3s → ≤5s failover,
+│                               ≤ POSTURE_CACHE_TTL_MS); demote_before_promote split-
+│                               brain invariant. Model only — live-loop wiring is
+│                               follow-up (epoch fence + heartbeat writer unchanged)
 ├── federation.rs             — FederatedTrustReport, Ed25519 verify, evaluate_federated_report
 ├── federation_reconciliation.rs — FederatedTrustReportV2, reconcile_reports,
 │                               ReconciliationOutcome, authoritative_posture
