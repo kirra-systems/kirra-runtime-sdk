@@ -234,8 +234,12 @@ pub enum PostureRecalcTrigger {
     /// tick (posture-relevant disagreement — NOT every nonzero clamp delta);
     /// it sets the divergence-degraded flag immediately. `escalated==true`
     /// mirrors the comparator's own sustained-divergence escalation and sets
-    /// the STICKY lockout flag. `significant==false` is an agreeing tick and
-    /// advances the recovery streak.
+    /// the STICKY lockout flag. `significant==false` is emitted ONLY once the
+    /// comparator's accumulator has fully DRAINED — i.e. an agreeing tick with
+    /// no residual divergence (an agreeing tick WHILE the accumulator is still
+    /// draining stays `significant==true`, per the comparator's hysteresis, so
+    /// posture holds Degraded through the drain). A `false` tick advances the
+    /// recovery streak.
     GovernorDivergence { significant: bool, escalated: bool },
     /// Periodic liveness refresh — recompute and re-stamp the cache so it
     /// never idles past POSTURE_CACHE_TTL_MS. Not tied to any state change.
@@ -434,9 +438,13 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
 ///     `divergence_lockout_active` (→ LockedOut, human reset). The
 ///     sustained-ness judgment is the comparator's own accumulator
 ///     escalation — reused, not reimplemented (one source of truth).
-///   - `significant==false` → an agreeing tick; advance the recovery streak
-///     and clear `divergence_degraded_active` once
-///     `AV_RECOVERY_STREAK_THRESHOLD` consecutive agreeing ticks land within
+///   - `significant==false` → a FULLY-DRAINED agreeing tick (the comparator
+///     emits `false` only once its accumulator reaches 0 — an agreeing tick
+///     while the accumulator is still draining is reported `significant==true`
+///     by the comparator's own hysteresis, so posture holds Degraded through
+///     the drain and recovery does not start early). A `false` tick advances
+///     the recovery streak and clears `divergence_degraded_active` once
+///     `AV_RECOVERY_STREAK_THRESHOLD` consecutive land within
 ///     `AV_RECOVERY_WINDOW_MS`. The sticky lockout flag is NOT cleared here —
 ///     matching LockedOut semantics.
 ///

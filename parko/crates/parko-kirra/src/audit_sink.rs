@@ -1333,34 +1333,67 @@ mod tests {
 /// anyway (the outer fail-closed backstop).
 pub struct PostureEngineSenderSink {
     tx: kirra_verifier::posture_engine_v2::PostureEngineSender,
+    /// Count of ticks dropped because the coalescing worker was saturated
+    /// (`TrySendError::Full`). A relaxed counter, NOT an stderr write: the
+    /// evaluate path must stay non-blocking (Copilot #855 — an `eprintln!`
+    /// here takes the stdio lock and can both block and spam under sustained
+    /// saturation). Observability reads this via [`dropped_full`]; the drop
+    /// itself is fail-safe (a significant tick re-signals next tick, so a
+    /// dropped one only delays, never loses, the posture consequence).
+    dropped_full: std::sync::atomic::AtomicU64,
+    /// Set once the channel is observed CLOSED (engine gone). A terminal,
+    /// at-most-once transition — not a per-tick event — so it does not spam;
+    /// exposed via [`channel_closed`] for a health surface to alarm on.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl PostureEngineSenderSink {
     #[must_use]
     pub fn new(tx: kirra_verifier::posture_engine_v2::PostureEngineSender) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            dropped_full: std::sync::atomic::AtomicU64::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Ticks dropped so far because the posture-engine channel was full
+    /// (fail-safe drops — the divergence persists and re-signals next tick).
+    #[must_use]
+    pub fn dropped_full(&self) -> u64 {
+        self.dropped_full.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `true` once the posture-engine channel has been observed closed (the
+    /// engine is gone; the stale-cache TTL backstop is the only fail-closed
+    /// path remaining). Terminal — a health surface should alarm on it.
+    #[must_use]
+    pub fn channel_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 impl crate::comparator::PostureSignalSink for PostureEngineSenderSink {
     fn divergence_posture_tick(&self, significant: bool, escalated: bool) {
         use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
+        use std::sync::atomic::Ordering;
         match self.tx.try_send(PostureRecalcTrigger::GovernorDivergence { significant, escalated }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Coalescing worker is saturated; next tick re-signals.
-                eprintln!(
-                    "parko-kirra: posture engine channel FULL — divergence tick \
-                     (significant={significant}, escalated={escalated}) dropped; \
-                     re-sent next tick"
-                );
+                // Coalescing worker saturated; next tick re-signals. Count it —
+                // no stderr write on the hot path (non-blocking, no spam).
+                self.dropped_full.fetch_add(1, Ordering::Relaxed);
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                eprintln!(
-                    "parko-kirra: posture engine channel CLOSED — divergence posture \
-                     signal (significant={significant}, escalated={escalated}) lost; \
-                     the stale-cache TTL backstop is now the only fail-closed path"
-                );
+                // Terminal: latch once. `swap` makes the eprintln at-most-once
+                // (the engine does not un-close), so no per-tick spam.
+                if !self.closed.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "parko-kirra: posture engine channel CLOSED — divergence \
+                         posture signal lost; the stale-cache TTL backstop is now \
+                         the only fail-closed path"
+                    );
+                }
             }
         }
     }
@@ -1387,14 +1420,30 @@ mod posture_sink_tests {
     }
 
     /// A full channel drops rather than blocks (the evaluate path must not
-    /// stall), and the sink survives to forward the next tick.
+    /// stall), counts the drop (no stderr on the hot path — Copilot #855), and
+    /// the sink survives to forward the next tick.
     #[test]
     fn full_channel_drops_without_blocking() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = PostureEngineSenderSink::new(tx);
         sink.divergence_posture_tick(true, false); // fills the channel
         sink.divergence_posture_tick(true, true); // dropped, no block/panic
+        assert_eq!(sink.dropped_full(), 1, "the dropped tick is counted");
+        assert!(!sink.channel_closed(), "a full channel is not a closed one");
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err(), "second tick was dropped by design");
+    }
+
+    /// A CLOSED channel latches `channel_closed` (terminal, at-most-once — no
+    /// per-tick spam) and does not panic.
+    #[test]
+    fn closed_channel_latches_terminal_state() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let sink = PostureEngineSenderSink::new(tx);
+        drop(rx); // engine gone
+        sink.divergence_posture_tick(true, false);
+        sink.divergence_posture_tick(false, false);
+        assert!(sink.channel_closed());
+        assert_eq!(sink.dropped_full(), 0, "closed is not counted as full-drop");
     }
 }

@@ -186,8 +186,10 @@ pub fn lateral_safe_distance(
 /// and `mu` are safety-case parameters; the shipped defaults at the call
 /// sites are VALIDATION-PENDING.
 ///
-/// Fail-closed guards: non-finite velocities/reaction time, non-positive
-/// `lat_accel_max` or `lat_brake_min`, or a non-finite/negative
+/// Fail-closed guards: non-finite velocities, a non-finite OR NEGATIVE
+/// `reaction_time` (a negative reaction time would shrink both the response
+/// distance and the braking start speed — the opposite of defence-in-depth),
+/// non-positive `lat_accel_max` or `lat_brake_min`, or a non-finite/negative
 /// `mu_lateral_m` all return `RSS_FAILSAFE_DISTANCE_M` (a hostile/corrupt
 /// parameter must never shrink the bound), as does a non-finite sum.
 // SAFETY: SG1 SG9 | REQ: rss-lateral-distance-failsafe | TEST: test_lat_split_conservative_vs_legacy,test_lat_split_mu_is_additive,test_lat_split_invalid_brake_is_failsafe,test_lat_split_negative_mu_is_failsafe
@@ -204,6 +206,7 @@ pub fn lateral_safe_distance_split(
         && ego_lat_vel.is_finite()
         && obj_lat_vel.is_finite()
         && reaction_time.is_finite()
+        && reaction_time >= 0.0
         && mu_lateral_m.is_finite()
         && mu_lateral_m >= 0.0)
     {
@@ -817,6 +820,23 @@ mod tests {
                 RSS_FAILSAFE_DISTANCE_M
             );
         }
+    }
+
+    /// A negative-but-finite reaction time fails safe (Copilot #855): it would
+    /// otherwise shrink both the response distance and the braking start speed,
+    /// producing a SMALLER bound — the opposite of defence-in-depth. The legacy
+    /// wrapper delegates through the split, so it is covered too.
+    #[test]
+    fn test_lat_split_negative_reaction_time_is_failsafe() {
+        assert_eq!(
+            lateral_safe_distance_split(3.0, 1.0, 4.0, 2.8, -0.5, 0.0),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+        assert_eq!(
+            lateral_safe_distance(3.0, 1.0, 4.0, -0.5),
+            RSS_FAILSAFE_DISTANCE_M,
+            "the legacy wrapper inherits the negative-reaction-time guard"
+        );
     }
 
     /// The legacy wrapper is EXACTLY `split(a, a, rt, 0)` — the delegation
