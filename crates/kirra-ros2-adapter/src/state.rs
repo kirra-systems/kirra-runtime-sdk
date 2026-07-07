@@ -838,18 +838,26 @@ mod tests {
             "steady state: all subscriptions fresh"
         );
 
-        // --- The slot's OWN budget (DEFAULT_MAX_AGE_MS = 200) is TIGHTER than the
-        //     subscription budget (500). At 201 ms the fast path already fails
-        //     closed on the slot — the tighter of the two bounds wins. ---
+        // --- The slot's OWN budget (DEFAULT_MAX_AGE_MS) is TIGHTER than the
+        //     subscription budget (SUBSCRIPTION_STALENESS_TIMEOUT_MS). Just past the
+        //     slot's max-age the fast path already fails closed on the slot — the
+        //     tighter of the two bounds wins. (Guarded below so this stays true if
+        //     the constants are ever re-tuned.) ---
+        assert!(
+            DEFAULT_MAX_AGE_MS < SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+            "this drill assumes the slot budget is the tighter of the two bounds"
+        );
         let slot_aged = t0 + DEFAULT_MAX_AGE_MS + 1;
         assert_eq!(
             state.current_verdict("av_01", slot_aged),
             TrajectoryVerdict::MRCFallback,
-            "the slot's 200 ms max-age fails closed before the 500 ms subscription budget"
+            "the slot's {DEFAULT_MAX_AGE_MS} ms max-age fails closed before the \
+             {SUBSCRIPTION_STALENESS_TIMEOUT_MS} ms subscription budget"
         );
         assert!(
             !state.any_subscription_stale(slot_aged, SUBSCRIPTION_STALENESS_TIMEOUT_MS),
-            "at 201 ms the subscription is still inside its 500 ms budget — the slot is the tighter bound"
+            "just past the slot's {DEFAULT_MAX_AGE_MS} ms max-age the subscription is still \
+             inside its {SUBSCRIPTION_STALENESS_TIMEOUT_MS} ms budget — the slot is the tighter bound"
         );
 
         // --- Full detector spike: past BOTH budgets, no new install/touch (the
