@@ -614,9 +614,10 @@ pub enum CalibrationMethod {
     /// coarsening the resolution of the in-distribution bulk.
     #[default]
     AbsMax,
-    /// Clip at the given quantile of |activation| in `(0.0, 1.0]` (nearest-rank). A
-    /// rare outlier SATURATES gracefully to `±127` while the bulk keeps tight bins
-    /// (and precision). `Percentile(1.0)` is exactly [`AbsMax`](Self::AbsMax). The
+    /// Clip at the given quantile of |activation| in `[0.0, 1.0]` (nearest-rank; the
+    /// value is clamped into that range). A rare outlier SATURATES gracefully to
+    /// `±127` while the bulk keeps tight bins (and precision). `Percentile(1.0)` is
+    /// exactly [`AbsMax`](Self::AbsMax) and `Percentile(0.0)` is the min. The
     /// pre-emptive graduation path for when the scorer moves off tanh / grows
     /// (design-note §9/§11); absmax remains the default until a model fails the PTQ
     /// quality gate.
@@ -624,14 +625,16 @@ pub enum CalibrationMethod {
 }
 
 /// Nearest-rank quantile of the |activation| magnitudes `xs` at fraction `frac`
-/// (sorts in place). `frac >= 1.0` returns the max, so `Percentile(1.0)` coincides
-/// with `AbsMax`; an empty set returns `0.0` (→ the degenerate unit scale, guarded
-/// by [`int8_scale`]). NaNs sort last but a finite calibration set has none.
+/// (sorts in place). `frac` is clamped to `[0.0, 1.0]`: `>= 1.0` returns the max
+/// (so `Percentile(1.0)` coincides with `AbsMax`), `0.0` the min; an empty set
+/// returns `0.0` (→ the degenerate unit scale, guarded by [`int8_scale`]). Sorted
+/// by [`f64::total_cmp`] for a genuine total order — NaNs sort last, though a
+/// finite calibration set (the only caller) has none.
 pub(crate) fn percentile_nearest_rank(xs: &mut [f64], frac: f64) -> f64 {
     if xs.is_empty() {
         return 0.0;
     }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    xs.sort_by(f64::total_cmp);
     let n = xs.len();
     let frac = frac.clamp(0.0, 1.0);
     // 1-based nearest rank = ceil(frac * n), clamped to [1, n]; index = rank - 1.
@@ -681,8 +684,10 @@ impl LearnedPlanner {
                 (ax, ah)
             }
             CalibrationMethod::Percentile(frac) => {
-                let mut xs = Vec::new();
-                let mut hs = Vec::new();
+                // Sizes are predictable: one magnitude per input feature / hidden
+                // unit per calibration scenario — reserve up front, no re-growth.
+                let mut xs = Vec::with_capacity(calibration.len() * IN);
+                let mut hs = Vec::with_capacity(calibration.len() * H);
                 for input in calibration {
                     let x = featurize(&scene_of(input));
                     for &xi in &x {
