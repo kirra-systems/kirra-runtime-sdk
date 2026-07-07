@@ -305,10 +305,23 @@ pub fn evaluate_corpus(
     candidate: &dyn ScoredPlanner,
     reference: &dyn ScoredPlanner,
 ) -> DoerEvalSummary {
+    evaluate_scenarios(corpus.iter(), candidate, reference)
+}
+
+/// The ref-taking core of [`evaluate_corpus`]: score `candidate` (argmax-compared
+/// to `reference`) over any iterator of scenarios. Reused by the held-out
+/// generalization producer, where the calibration and held-out partitions are
+/// NON-contiguous subsets (`&EvalScenario` refs, not a slice), so a slice-taking
+/// signature would not fit.
+fn evaluate_scenarios<'a>(
+    scenarios: impl IntoIterator<Item = &'a EvalScenario>,
+    candidate: &dyn ScoredPlanner,
+    reference: &dyn ScoredPlanner,
+) -> DoerEvalSummary {
     let mut admissibility = AdmissibilityTally::default();
     let mut quality = QualityTally::default();
 
-    for sc in corpus {
+    for sc in scenarios {
         let input = sc.plan_input();
         // One scorer pass gives BOTH the candidate's plan and its argmax.
         let (cand_choice, plan) = candidate.plan_with_chosen_index(&input);
@@ -326,22 +339,37 @@ pub fn evaluate_corpus(
 
 /// Int8-quantize `planner` (PTQ), calibrating over `corpus` — a convenience wrapper
 /// that builds the `&[PlanInput]` calibration set from the scenarios' worlds and
-/// calls [`kirra_planner::LearnedPlanner::quantize_int8`]. The corpus doubles as the
-/// calibration set here; splitting a held-out calibration set from the eval set is a
-/// tracked follow-up (Q1 scope §5).
+/// calls [`kirra_planner::LearnedPlanner::quantize_int8`].
+///
+/// This calibrates over the WHOLE corpus by design: the *shipped* artifact should
+/// use every scenario available (more calibration data is strictly better for the
+/// deployed model). The train==test hazard that used to live here — reporting a
+/// quality number computed on the same scenarios the calibration saw — is now
+/// guarded separately by [`generalization_report`], which measures argmax-agreement
+/// on a HELD-OUT partition the calibration never touched (Q1 scope §5).
 #[must_use]
 pub fn quantize_over_corpus(
     planner: &LearnedPlanner,
     corpus: &[EvalScenario],
 ) -> QuantizedLearnedPlanner {
-    // `<'_>` makes the borrow-from-corpus explicit (the elided form compiles too).
-    let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
+    quantize_over_refs(planner, &corpus.iter().collect::<Vec<_>>())
+}
+
+/// [`quantize_over_corpus`] over a NON-contiguous subset (the calibration
+/// partition of a [`split_corpus`]). The one place PTQ scales are fit from a
+/// proper subset rather than the whole corpus.
+#[must_use]
+fn quantize_over_refs(
+    planner: &LearnedPlanner,
+    scenarios: &[&EvalScenario],
+) -> QuantizedLearnedPlanner {
+    let inputs: Vec<PlanInput<'_>> = scenarios.iter().map(|s| s.plan_input()).collect();
     planner.quantize_int8(&inputs)
 }
 
 /// The v2 sibling of [`quantize_over_corpus`] (M-2): int8-quantize the N-layer
-/// v2 planner, calibrating over the scenarios' worlds. Same corpus-doubles-as-
-/// calibration-set caveat as v1 (Q1 scope §5).
+/// v2 planner, calibrating over the whole corpus (same shipped-artifact rationale;
+/// the held-out overfit guard is [`generalization_report`], v1 today — Q1 scope §5).
 #[must_use]
 pub fn quantize_v2_over_corpus(
     planner: &LearnedPlannerV2,
@@ -349,6 +377,94 @@ pub fn quantize_v2_over_corpus(
 ) -> QuantizedLearnedPlannerV2 {
     let inputs: Vec<PlanInput<'_>> = corpus.iter().map(EvalScenario::plan_input).collect();
     planner.quantize_int8(&inputs)
+}
+
+// ---------------------------------------------------------------------------
+// Held-out calibration/eval split (Q1 scope §5 — no train==test masquerade)
+// ---------------------------------------------------------------------------
+
+/// A deterministic partition of a corpus into a CALIBRATION set (where the PTQ
+/// scales are fit) and a disjoint HELD-OUT set (where quality is measured). Closes
+/// the Q1 scope §5 caveat: a quantization quality number computed on the same
+/// scenarios the calibration saw is a train==test number and must never be read as
+/// a release gate. Holds `&EvalScenario` (the scenario owns a non-`Clone` world),
+/// so the split is by reference, never a copy.
+pub struct CorpusSplit<'a> {
+    /// The scenarios the PTQ calibration is fit over.
+    pub calibration: Vec<&'a EvalScenario>,
+    /// The disjoint scenarios quality is measured over — never seen by calibration.
+    pub holdout: Vec<&'a EvalScenario>,
+}
+
+/// Partition `corpus` so every `holdout_every_n`-th scenario (the last of each
+/// block) lands in the held-out set and the rest form the calibration set. By
+/// INDEX, so the split is reproducible and order-preserving — no RNG, matching the
+/// crate's determinism ethos. Disjoint and covering by construction.
+///
+/// # Panics
+/// Panics if `holdout_every_n < 2`: `n == 1` would hold out every scenario, leaving
+/// no calibration data (a fail-loud misuse, not a silent empty calibration).
+#[must_use]
+pub fn split_corpus(corpus: &[EvalScenario], holdout_every_n: usize) -> CorpusSplit<'_> {
+    assert!(
+        holdout_every_n >= 2,
+        "holdout_every_n must be >= 2 (n=1 holds out everything, leaving no calibration data)"
+    );
+    let mut calibration = Vec::new();
+    let mut holdout = Vec::new();
+    for (i, sc) in corpus.iter().enumerate() {
+        if i % holdout_every_n == holdout_every_n - 1 {
+            holdout.push(sc);
+        } else {
+            calibration.push(sc);
+        }
+    }
+    CorpusSplit { calibration, holdout }
+}
+
+/// The held-out generalization measurement (Q1 scope §5). Calibrates the int8 PTQ
+/// on the `split.calibration` partition ONLY, then scores argmax-agreement +
+/// admissibility (vs the FP32 reference) on the calibration partition AND the
+/// disjoint held-out partition. The held-out numbers are the ones a release gate
+/// may trust; the calibration-vs-held-out gap surfaces overfit to the calibration
+/// distribution (the SOTIF corpus-variance risk made measurable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneralizationReport {
+    pub calibration_scenarios: usize,
+    pub holdout_scenarios: usize,
+    /// Int8 argmax-agreement with FP32, measured ON the calibration partition.
+    pub calib_argmax_agreement: f64,
+    /// Int8 argmax-agreement with FP32, measured ON the disjoint held-out partition.
+    pub holdout_argmax_agreement: f64,
+    pub calib_admissibility: f64,
+    pub holdout_admissibility: f64,
+}
+
+impl GeneralizationReport {
+    /// Calibration-minus-held-out argmax agreement. Positive ⇒ the int8 model
+    /// agrees with FP32 *less* on unseen scenarios than on calibrated ones — the
+    /// overfit signal. Near-zero ⇒ the quantization generalizes.
+    #[must_use]
+    pub fn agreement_gap(&self) -> f64 {
+        self.calib_argmax_agreement - self.holdout_argmax_agreement
+    }
+}
+
+/// Produce the [`GeneralizationReport`] for `fp32` under `split`: quantize on the
+/// calibration partition, evaluate the resulting int8 planner on both partitions.
+#[must_use]
+pub fn generalization_report(fp32: &LearnedPlanner, split: &CorpusSplit<'_>) -> GeneralizationReport {
+    let int8 = quantize_over_refs(fp32, &split.calibration);
+    let calib = evaluate_scenarios(split.calibration.iter().copied(), &int8, fp32);
+    let holdout = evaluate_scenarios(split.holdout.iter().copied(), &int8, fp32);
+    GeneralizationReport {
+        calibration_scenarios: split.calibration.len(),
+        holdout_scenarios: split.holdout.len(),
+        calib_argmax_agreement: calib.quality.argmax_agreement_rate(),
+        holdout_argmax_agreement: holdout.quality.argmax_agreement_rate(),
+        calib_admissibility: calib.admissibility.admissibility_rate(),
+        holdout_admissibility: holdout.admissibility.admissibility_rate(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +772,147 @@ mod tests {
             evaluate_corpus(&corpus, &a, &fp32),
             evaluate_corpus(&corpus, &b, &fp32),
             "same planner + same calibration ⇒ identical eval"
+        );
+    }
+
+    // ---- Held-out calibration/eval split (Q1 scope §5) ----
+
+    /// A larger deterministic corpus (16 scenarios) spanning clear roads at a range
+    /// of ego speeds/goals and hazards across a spread of distances — big enough to
+    /// split into a calibration and a disjoint held-out partition meaningfully.
+    fn varied_corpus() -> Vec<EvalScenario> {
+        let road = || MockCorridorSource::straight_5m_half_width(100.0);
+        let mut v = Vec::new();
+        for (i, (spd, goal)) in [(2.0, 40.0), (3.0, 50.0), (4.0, 60.0), (1.5, 35.0)]
+            .into_iter()
+            .enumerate()
+        {
+            v.push(EvalScenario::new(format!("clear_{i}"), road(), vec![], 5.0, spd, goal));
+        }
+        for (i, dist) in
+            [15.0, 18.0, 22.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 28.0]
+                .into_iter()
+                .enumerate()
+        {
+            v.push(EvalScenario::new(
+                format!("hazard_{i}"),
+                road(),
+                vec![stopped_car(1, dist)],
+                5.0,
+                2.0,
+                65.0,
+            ));
+        }
+        v
+    }
+
+    /// The split is disjoint, covering, and deterministic — the structural
+    /// guarantees a held-out measurement rests on.
+    #[test]
+    fn split_is_disjoint_covering_and_deterministic() {
+        let corpus = varied_corpus();
+        let split = split_corpus(&corpus, 4);
+
+        // Covering: every scenario lands in exactly one partition.
+        assert_eq!(split.calibration.len() + split.holdout.len(), corpus.len());
+        // Every 4th scenario is held out → 16/4 = 4.
+        assert_eq!(split.holdout.len(), 4);
+        assert_eq!(split.calibration.len(), 12);
+
+        // Disjoint by name: no held-out scenario appears in calibration.
+        let calib_names: std::collections::HashSet<&str> =
+            split.calibration.iter().map(|s| s.name.as_str()).collect();
+        for h in &split.holdout {
+            assert!(
+                !calib_names.contains(h.name.as_str()),
+                "held-out scenario {} leaked into calibration",
+                h.name
+            );
+        }
+
+        // Deterministic: same partition on a re-split.
+        let again = split_corpus(&corpus, 4);
+        let names = |s: &CorpusSplit| -> Vec<String> {
+            s.holdout.iter().map(|x| x.name.clone()).collect()
+        };
+        assert_eq!(names(&split), names(&again));
+    }
+
+    /// `split_corpus(_, 1)` would leave no calibration data — fail loud, not silent.
+    #[test]
+    #[should_panic(expected = "holdout_every_n must be >= 2")]
+    fn split_rejects_holding_out_everything() {
+        let _ = split_corpus(&varied_corpus(), 1);
+    }
+
+    /// The report measures the DISJOINT held-out partition, not the calibration set.
+    /// Proven with a split whose two partitions have genuinely different
+    /// admissibility: calibration = all clear road (admissibility 1.0), held-out =
+    /// a near hazard the progress-only distillation is derated on. The report's
+    /// held-out admissibility must equal an INDEPENDENT eval of the held-out set —
+    /// which would fail if the producer accidentally re-scored the calibration set.
+    #[test]
+    fn generalization_report_scores_the_holdout_not_the_calibration_set() {
+        let road = || MockCorridorSource::straight_5m_half_width(100.0);
+        // 3 clear-road calibration scenarios + 1 near-hazard held-out (index 3 with
+        // stride 4 → the 4th is held out).
+        let corpus = vec![
+            EvalScenario::new("clear_a", road(), vec![], 5.0, 2.0, 40.0),
+            EvalScenario::new("clear_b", road(), vec![], 5.0, 3.0, 50.0),
+            EvalScenario::new("clear_c", road(), vec![], 5.0, 2.5, 45.0),
+            EvalScenario::new("hazard_near", road(), vec![stopped_car(1, 16.0)], 5.0, 2.0, 40.0),
+        ];
+        let split = split_corpus(&corpus, 4);
+        assert_eq!(split.calibration.len(), 3);
+        assert_eq!(split.holdout.len(), 1);
+        assert_eq!(split.holdout[0].name, "hazard_near");
+
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+        let report = generalization_report(&fp32, &split);
+
+        // Independently evaluate the same int8 (calibrated on the calibration
+        // partition) over ONLY the held-out scenario, and confirm the report used it.
+        let int8 = quantize_over_refs(&fp32, &split.calibration);
+        let independent =
+            evaluate_scenarios(split.holdout.iter().copied(), &int8, &fp32);
+        assert_eq!(
+            report.holdout_admissibility,
+            independent.admissibility.admissibility_rate(),
+            "the report must score the held-out partition, not re-score calibration"
+        );
+        assert_eq!(report.holdout_scenarios, 1);
+        assert_eq!(report.calibration_scenarios, 3);
+    }
+
+    /// The GATE (Q1 scope §5): the int8 planner calibrated on the calibration
+    /// partition keeps its argmax-agreement with FP32 at/above a documented floor
+    /// ON THE HELD-OUT partition — a held-out number, never a train==test one. The
+    /// generalization gap stays within budget (the quantization does not overfit the
+    /// calibration distribution at this scale).
+    #[test]
+    fn heldout_argmax_agreement_meets_the_release_floor() {
+        let corpus = varied_corpus();
+        let split = split_corpus(&corpus, 4);
+        let fp32 = LearnedPlanner::trained(SEED, Teacher::SafetyAware);
+
+        let report = generalization_report(&fp32, &split);
+
+        assert!(report.holdout_scenarios >= 1, "the held-out partition is non-empty");
+        // Held-out floor: a genuinely unseen argmax-agreement, the release-trustable
+        // number. Matches the whole-corpus int8 floor used elsewhere (0.75).
+        assert!(
+            report.holdout_argmax_agreement >= 0.75,
+            "held-out int8 argmax agreement below floor: {} (calib {})",
+            report.holdout_argmax_agreement,
+            report.calib_argmax_agreement
+        );
+        // Overfit budget: calibration should not agree *much* more than held-out.
+        assert!(
+            report.agreement_gap() <= 0.25,
+            "calibration-vs-held-out overfit gap too large: {} (calib {}, holdout {})",
+            report.agreement_gap(),
+            report.calib_argmax_agreement,
+            report.holdout_argmax_agreement
         );
     }
 
