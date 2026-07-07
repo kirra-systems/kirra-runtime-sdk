@@ -106,6 +106,35 @@ TLS on, set `KIRRA_TLS_CLIENT_CA_PATH` (PEM) to REQUIRE + verify client certific
 - Live tests (`tls::tests`): a CA-verified client cert handshake injects the correct
   fingerprint; a client presenting no cert is rejected at the handshake.
 
+**Cert LIFECYCLE — expiry, renewal, revocation (WP-15 / MGA G-19).** A pinned cert
+is not a permanent on/off switch — it is a lifecycle credential with a valid window:
+
+- **Expiry.** `POST /system/cert-principals` accepts an optional `not_after_ms` (the
+  cert's X.509 notAfter, computed offline alongside the fingerprint; it must be in the
+  future). It is persisted on `cert_principals.not_after_ms` (nullable — an omitted /
+  legacy value = no expiry tracked, never ages out). At resolution the auth layer
+  fail-closes a cert at/past its `not_after_ms` (inclusive bound) exactly as it does a
+  revoked one → **401**, with a distinct WARN so a lapse is not a mystery. Proven end
+  to end in `tests/cert_lifecycle.rs` (valid before → Allow; at/after notAfter → 401).
+- **Renewal (no restart).** Renewing is re-pinning the SAME principal with the renewed
+  leaf's fingerprint + a later `not_after_ms` (`POST /system/cert-principals` rotates
+  in place and clears any revocation). The very next resolution honors it — no process
+  restart, and the old (lapsed) leaf no longer resolves
+  (`renewal_restores_authorization_without_a_restart`).
+- **Revocation** is honored on the next resolution (a fresh handshake) via
+  `POST /system/cert-principals/{id}/revoke` — unchanged, and independent of expiry
+  (`revocation_is_honored_on_the_next_resolution`).
+- **Observability.** A background monitor (`cert_expiry_monitor`, hourly) censuses the
+  registry and WARN-logs + hash-chain-audits (`CertPrincipalExpiryWarning`) when a cert
+  has lapsed or is within the 14-day renewal window — "warn before it bites." The same
+  census rides `/metrics` as the `kirra_cert_principals{state="active|revoked|expired|
+  expiring_soon|no_expiry"}` gauge family (posture-exempt, so it survives LockedOut).
+- **CRL:** a file-based CRL at the TLS verifier callback is the recorded follow-up; the
+  explicit-revocation + expiry gates above are the live lifecycle-enforcement path
+  today (a revoked/expired pin stops authorizing at the next handshake regardless).
+- `GET /system/cert-principals` surfaces `not_after_ms`, `expired`, and `valid` per
+  principal (evaluated at request time).
+
 ## 5. Test traceability
 
 | Property | Test (`verifier::transport_security_tests`) |

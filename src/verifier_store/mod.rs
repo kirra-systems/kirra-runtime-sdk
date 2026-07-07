@@ -177,6 +177,68 @@ impl ApiPrincipalRecord {
     }
 }
 
+/// A registered mTLS cert principal (WS-1 · G7 · Track 1.2 · WP-15). A client cert
+/// — CA-verified by rustls — pinned to a principal by the SHA-256 hex of its leaf
+/// DER. Distinct from [`ApiPrincipalRecord`] because a cert carries an EXPIRY
+/// (`not_after_ms`, the X.509 notAfter) whereas a bearer token does not: a cert is
+/// a lifecycle credential (issued → valid-window → renewed/expired), and the
+/// resolution path fail-closes past its expiry exactly as it does on revocation.
+#[derive(Debug, Clone)]
+pub struct CertPrincipalRecord {
+    pub principal_id: String,
+    pub role: String,
+    pub created_at_ms: u64,
+    pub revoked_at_ms: Option<u64>,
+    /// The pinned cert's X.509 notAfter, in ms. `None` = no expiry tracked (a
+    /// legacy pin, or one registered without an expiry) — never expires on age.
+    pub not_after_ms: Option<u64>,
+}
+
+impl CertPrincipalRecord {
+    /// True iff not explicitly revoked. (Expiry is a SEPARATE, time-relative gate —
+    /// see [`is_expired`](Self::is_expired) — so this stays a pure record predicate.)
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.revoked_at_ms.is_none()
+    }
+
+    /// True iff an expiry is tracked AND `now_ms` is at or past it. `notAfter` is an
+    /// inclusive upper bound, so `now_ms >= not_after_ms` is expired (fail-closed:
+    /// the boundary instant is already out of the valid window).
+    #[must_use]
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        self.not_after_ms.is_some_and(|exp| now_ms >= exp)
+    }
+
+    /// True iff the credential is VALID at `now_ms`: registered, not revoked, and
+    /// not past its expiry. This is the single question the auth path asks.
+    #[must_use]
+    pub fn is_valid_at(&self, now_ms: u64) -> bool {
+        self.is_active() && !self.is_expired(now_ms)
+    }
+}
+
+/// WP-15 (MGA G-19) — a point-in-time census of the cert-principal registry by
+/// lifecycle state, for the `/metrics` expiry gauges and the periodic warning
+/// sweep. Every principal falls in exactly ONE of {revoked, expired, active}; the
+/// active set is further split by whether it is within the warning window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CertExpirySummary {
+    /// All registered cert principals.
+    pub total: u64,
+    /// Not revoked AND not expired at the census instant.
+    pub active: u64,
+    /// Explicitly revoked (revocation takes precedence over expiry in the census).
+    pub revoked: u64,
+    /// Not revoked but at/past `not_after_ms` — a live pin that no longer authorizes.
+    pub expired: u64,
+    /// Active AND with a tracked expiry falling inside the warning window
+    /// (`not_after_ms - now_ms <= warn_window_ms`) — renew before it lapses.
+    pub expiring_soon: u64,
+    /// Active but with NO expiry tracked (a legacy pin — cannot be aged out).
+    pub no_expiry: u64,
+}
+
 /// The latest clearance grant's delivery state for a node (console read surface).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClearanceGrantState {
@@ -671,16 +733,32 @@ impl VerifierStore {
         // the SHA-256 hex of its leaf DER (UNIQUE, looked up by fingerprint). Same
         // role/revocation shape as `api_principals` — a cert is just another
         // least-privilege sub-credential on top of the `KIRRA_ADMIN_TOKEN` root.
+        // WP-15 (MGA G-19) — `not_after_ms` records the pinned cert's X.509 notAfter
+        // (the admin supplies it, computed offline alongside the fingerprint). NULL =
+        // no expiry tracked (back-compat). A resolution past `not_after_ms` fail-closes
+        // exactly like a revocation — a cert lifecycle, not just an on/off pin.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS cert_principals (
                 principal_id   TEXT    PRIMARY KEY,
                 cert_sha256    TEXT    NOT NULL UNIQUE,
                 role           TEXT    NOT NULL,
                 created_at_ms  INTEGER NOT NULL,
-                revoked_at_ms  INTEGER
+                revoked_at_ms  INTEGER,
+                not_after_ms   INTEGER
             )",
             [],
         )?;
+        // WP-15 ADD-COLUMN migration for a pre-existing cert_principals table (same
+        // tolerate-duplicate convention as the ota_campaigns/nodes ALTERs; runs AFTER
+        // the CREATE so a fresh database is never "no such table"). An older row keeps
+        // a NULL `not_after_ms` (no expiry tracked) until it is re-registered.
+        if let Err(e) =
+            conn.execute("ALTER TABLE cert_principals ADD COLUMN not_after_ms INTEGER", [])
+        {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(e);
+            }
+        }
 
         // WS-4 / Track 3 (Fleet Plane) — OTA governor-artifact campaigns. One row
         // per campaign; the control-plane state machine + fail-closed
