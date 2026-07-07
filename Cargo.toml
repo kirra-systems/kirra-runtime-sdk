@@ -160,10 +160,6 @@ kirra-ota-installer = { path = "crates/kirra-ota-installer" }
 # per-connection, so tampering a row written by one connection from a second
 # connection (the audit-chain tamper scenario, SG-010) requires an on-disk file.
 tempfile = "3"
-# WP-18 schema-migration drill (tests/schema_migration.rs) opens a raw connection to
-# a store's DB file to simulate a pre-framework (user_version 0) / future
-# (user_version > SCHEMA_VERSION) database. Same crate + features as the prod dep.
-rusqlite = { version = "0.31", features = ["bundled"] }
 # R5: the demo-seed test exercises parko-kirra's `VerifierStore`-backed clearance
 # delivery, so it needs the opt-in `verifier-sink` feature.
 parko-kirra = { path = "parko/crates/parko-kirra", features = ["verifier-sink"] }

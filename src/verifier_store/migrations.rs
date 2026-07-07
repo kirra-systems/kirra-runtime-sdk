@@ -85,16 +85,18 @@ fn set_user_version(conn: &Connection, v: i64) -> rusqlite::Result<()> {
     conn.execute_batch(&format!("PRAGMA user_version = {v};"))
 }
 
-/// Build the fail-closed "future schema" error (carries an operator-readable reason).
+/// Build a fail-closed migration error carrying an operator-readable reason.
+fn migration_error(reason: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some(reason))
+}
+
+/// The fail-closed "future schema" error (a DB migrated past this binary).
 fn future_schema_error(db_version: i64, target: i64) -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
-        Some(format!(
-            "database schema version {db_version} is newer than this binary supports \
-             (max {target}) — refusing to open (fail-closed downgrade protection); run a \
-             binary at schema version {db_version} or higher"
-        )),
-    )
+    migration_error(format!(
+        "database schema version {db_version} is newer than this binary supports \
+         (max {target}) — refusing to open (fail-closed downgrade protection); run a \
+         binary at schema version {db_version} or higher"
+    ))
 }
 
 /// FAIL-CLOSED gate — call BEFORE running the schema DDL. Refuses (does not open) a
@@ -119,23 +121,51 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<i64> {
 }
 
 /// The engine behind [`run_migrations`], with the step list + target injected so it
-/// is unit-tested with synthetic migrations. Steps MUST be ascending by version and
-/// each `> 1` (version 1 is the baseline). Fail-closed on a future DB; applies each
-/// pending step in order (stamping after each); finally stamps to `target` so a
-/// fresh/pre-framework DB with no steps still lands on the baseline version.
+/// is unit-tested with synthetic migrations.
+///
+/// - **Ordering is ENFORCED, not just documented** (Copilot #863): the registry must
+///   be strictly ascending by version and every step `> 1` (version 1 is the
+///   unconditional baseline) — a misordered/duplicate/≤-baseline registry is a
+///   fail-closed error, so it can never silently skip or double-apply a migration.
+/// - **Each step is ATOMIC with its version stamp** (Copilot #863): the `apply` DDL
+///   and the `user_version` bump commit in ONE transaction, so a crash between them
+///   rolls back cleanly — the step is never left applied-but-unstamped (which would
+///   re-run it on restart, corrupting a non-idempotent migration).
+///
+/// Fail-closed on a future DB; applies each pending step in `(start, target]` in
+/// order; finally stamps to `target` so a fresh/pre-framework DB with no pending
+/// step still lands on the baseline version (that stamp is its own transaction).
 fn run_migrations_with(
     conn: &Connection,
     steps: &[Migration],
     target: i64,
 ) -> rusqlite::Result<i64> {
+    // Enforce the registry contract before touching the DB.
+    let mut prev = 1i64; // the baseline; the first registered step must exceed it
+    for m in steps {
+        if m.version <= prev {
+            return Err(migration_error(format!(
+                "migration registry is malformed: version {} is not strictly greater than \
+                 the previous ({prev}) — steps must be ascending and above the v1 baseline",
+                m.version
+            )));
+        }
+        prev = m.version;
+    }
+
     let start = read_user_version(conn)?;
     if start > target {
         return Err(future_schema_error(start, target));
     }
     let mut applied = start;
     for m in steps.iter().filter(|m| m.version > start && m.version <= target) {
-        (m.apply)(conn)?;
-        set_user_version(conn, m.version)?;
+        // Atomic: the step's DDL AND its version stamp commit together (or neither).
+        // `unchecked_transaction` because we hold only `&Connection` at open time;
+        // startup is single-threaded on this connection.
+        let tx = conn.unchecked_transaction()?;
+        (m.apply)(&tx)?;
+        set_user_version(&tx, m.version)?;
+        tx.commit()?;
         applied = m.version;
     }
     // Stamp the baseline version even when no step ran (fresh / pre-framework DB).
@@ -219,6 +249,47 @@ mod tests {
         }
         // Re-running is a no-op (already at target); an older step is never re-applied.
         assert_eq!(run_migrations_with(&c, &steps, 3).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_malformed_registry_is_refused_fail_closed() {
+        fn noop(_c: &Connection) -> rusqlite::Result<()> {
+            Ok(())
+        }
+        let c = mem();
+        // Not strictly ascending.
+        let descending = [Migration { version: 3, apply: noop }, Migration { version: 2, apply: noop }];
+        assert!(run_migrations_with(&c, &descending, 5).is_err(), "descending registry refused");
+        // Duplicate version.
+        let dup = [Migration { version: 2, apply: noop }, Migration { version: 2, apply: noop }];
+        assert!(run_migrations_with(&c, &dup, 5).is_err(), "duplicate version refused");
+        // At/below the v1 baseline (versions ≤ 1 are the baseline, not steps).
+        let at_baseline = [Migration { version: 1, apply: noop }];
+        assert!(run_migrations_with(&c, &at_baseline, 5).is_err(), "a step at the baseline is refused");
+    }
+
+    #[test]
+    fn a_failing_step_rolls_back_atomically_and_does_not_stamp() {
+        // The step writes a table THEN fails — proving the DDL and the version stamp
+        // commit together: on failure BOTH roll back, so a restart re-runs a clean
+        // step (never applied-but-unstamped). Copilot #863 atomicity guard.
+        fn write_then_fail(c: &Connection) -> rusqlite::Result<()> {
+            c.execute_batch("CREATE TABLE m2 (x INTEGER)")?;
+            Err(rusqlite::Error::ExecuteReturnedResults) // synthetic mid-step failure
+        }
+        let steps = [Migration { version: 2, apply: write_then_fail }];
+        let c = mem();
+        set_user_version(&c, 1).unwrap();
+        assert!(run_migrations_with(&c, &steps, 2).is_err(), "the failing step propagates");
+        assert_eq!(read_user_version(&c).unwrap(), 1, "version not advanced on a failed step");
+        let tables: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='m2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "the failed step's DDL rolled back with the stamp (atomic)");
     }
 
     #[test]
