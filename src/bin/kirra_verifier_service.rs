@@ -110,6 +110,12 @@ mod tls;
 #[path = "kirra_verifier_service/backpressure.rs"]
 mod backpressure;
 use backpressure::{env_limit_or, with_backpressure};
+// WP-05 (MGA G-10) — request observability: correlation id + tracing span +
+// end-to-end latency histogram. Mounted outermost in `build_app`; makes no
+// admission decisions.
+#[path = "kirra_verifier_service/observability.rs"]
+mod observability;
+use observability::request_observability;
 use attestation::*;
 use fleet::*;
 use audit::*;
@@ -1836,7 +1842,7 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .merge(console_routes)
         .with_state(svc_state.clone())
         .layer(cors)
-        // Outermost layer: command-classification + posture-routing gate.
+        // Outermost GATE: command-classification + posture-routing gate.
         // Runs BEFORE auth and the actuator envelope on every request;
         // is_posture_exempt allowlists liveness / observability paths so
         // probes stay reachable regardless of fleet posture. Returns 503
@@ -1845,6 +1851,15 @@ fn build_app(svc_state: Arc<ServiceState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&svc_state),
             enforce_posture_routing,
+        ))
+        // WP-05: request observability wraps EVERYTHING, the posture gate
+        // included, so denials and sheds are observed too. It makes NO
+        // admission decision — the posture gate above remains the outermost
+        // *gate*; this layer only stamps a request id, opens the tracing
+        // span, and records the latency histogram.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&svc_state),
+            request_observability,
         ))
 }
 

@@ -263,6 +263,25 @@ pub async fn enforce_actuator_safety_envelope(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // WP-05 (MGA G-10) — deployed-path envelope latency (posture resolve +
+    // contract selection + verdict + body rewrite, through to the inner
+    // service's response), recorded on EVERY exit path via the drop guard —
+    // denials included, which is the point. Recording is two relaxed atomic
+    // adds; the pure verdict kernel itself is untouched. Observability only —
+    // NOT a WCET measurement (async runtime jitter is included).
+    struct EnvelopeLatencyGuard {
+        svc: Arc<ServiceState>,
+        started: std::time::Instant,
+    }
+    impl Drop for EnvelopeLatencyGuard {
+        fn drop(&mut self) {
+            let micros = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            self.svc.app.fleet_metrics.actuator_envelope_latency.record_micros(micros);
+        }
+    }
+    let _latency_guard =
+        EnvelopeLatencyGuard { svc: Arc::clone(&svc), started: std::time::Instant::now() };
+
     let posture = resolve_posture(&svc);
 
     // SAFETY: SG8 | REQ: posture-to-contract-mrc-selection | TEST: test_degraded_posture_selects_mrc_contract,test_degraded_posture_clamps_high_speed_to_mrc_limit,test_locked_out_posture_has_no_contract,test_locked_out_rejects_zero_motion_command
