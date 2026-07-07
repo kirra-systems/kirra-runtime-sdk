@@ -1,10 +1,13 @@
 //! WP-03 (MGA G-10) — control-plane HTTP backpressure.
 //!
 //! Fail-fast overload protection for the verifier's axum plane: a route group
-//! wrapped by [`with_backpressure`] gets (outermost-first) a 429 error mapper,
-//! `LoadShedLayer` (reject-at-capacity instead of queueing without bound), a
-//! `GlobalConcurrencyLimitLayer` (ONE shared semaphore across every route in
-//! the group — not per-route), and a request-body cap.
+//! wrapped by [`with_backpressure`] gets, outermost-first, `DefaultBodyLimit`
+//! (added after the `ServiceBuilder`, so it wraps it — position is immaterial
+//! though: it only sets the request-extension cap that body-consuming
+//! extractors enforce, it is not an active gate), then a 429 error mapper,
+//! `LoadShedLayer` (reject-at-capacity instead of queueing without bound),
+//! and a `GlobalConcurrencyLimitLayer` (ONE shared semaphore across every
+//! route in the group — not per-route).
 //!
 //! Wiring lives in `build_app` (the entry point): the API plane and the
 //! operator console get TWO ISOLATED pools, so an API flood cannot starve the
@@ -12,7 +15,8 @@
 //! e-stop request) and vice versa. Probe routes (`/health`, `/ready`,
 //! `/metrics`) are exempt: liveness and the Prometheus scrape must survive
 //! overload exactly as they survive LockedOut. The posture gate remains the
-//! outermost layer on everything.
+//! outermost *gate* on everything (the WP-05 request-observability layer
+//! wraps it as the outermost *layer*, but makes no admission decisions).
 //!
 //! Shedding is fail-closed by construction: for the actuator route a 429 is a
 //! DENIED command, and the consumer already treats any non-200 as safe-stop

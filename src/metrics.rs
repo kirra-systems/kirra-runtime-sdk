@@ -98,8 +98,9 @@ pub struct FleetMetricsSnapshot {
 
 /// WP-05 (MGA G-10) — a lock-free fixed-bucket latency histogram in the
 /// Prometheus text format. FIXED buckets and NO dynamic labels (the same
-/// cardinality discipline as the counter families): recording is two relaxed
-/// `fetch_add`s, allocation-free, safe on any request path. Bounds span the
+/// cardinality discipline as the counter families): recording is three
+/// relaxed atomic adds (`_count`, `_sum`, one bucket), allocation-free, safe
+/// on any request path. Bounds span the
 /// control plane's realistic range (100 µs .. 1 s); an observation past the
 /// last bound lands in `+Inf` only. `le` values are emitted in SECONDS per
 /// the Prometheus convention; `_sum` is converted from the accumulated
@@ -146,15 +147,22 @@ impl Default for LatencyHistogram {
 }
 
 impl LatencyHistogram {
-    /// Record one observation. Two relaxed atomic adds + one indexed add —
-    /// no locks, no allocation, monotonic-duration input (`Instant::elapsed`).
+    /// Record one observation. Three relaxed atomic adds — no locks, no
+    /// allocation, monotonic-duration input (`Instant::elapsed`).
+    ///
+    /// ORDER MATTERS for scrape validity: `_count` is bumped FIRST, the
+    /// bucket LAST, so a concurrent scrape can never observe a finite
+    /// `_bucket{le=...}` exceeding `+Inf`/`_count` (an invalid histogram).
+    /// The benign inverse — `_count` momentarily ahead of the bucket sums
+    /// for in-flight observations — is tolerated by Prometheus and heals on
+    /// the next scrape (see `append_prometheus`).
     pub fn record_micros(&self, micros: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
         match LATENCY_BUCKET_BOUNDS_MICROS.iter().position(|(b, _)| micros <= *b) {
             Some(i) => self.buckets[i].fetch_add(1, Ordering::Relaxed),
             None => self.overflow.fetch_add(1, Ordering::Relaxed),
         };
-        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Total observations recorded (equals the `+Inf` bucket / `_count`).
@@ -181,9 +189,10 @@ impl LatencyHistogram {
             );
         }
         // `+Inf` must equal `_count`; read `count` once and reuse so the two
-        // lines cannot disagree within one scrape even under concurrent
-        // recording (per-bucket sums may lag it by in-flight observations,
-        // which Prometheus tolerates — counters are re-read next scrape).
+        // lines cannot disagree within one scrape. Under concurrent recording
+        // the per-bucket sums may LAG `_count` by in-flight observations
+        // (never exceed it — `record_micros` bumps `_count` first), which
+        // Prometheus tolerates: counters are re-read next scrape.
         let count = self.count.load(Ordering::Relaxed);
         let _ = writeln!(
             out,
