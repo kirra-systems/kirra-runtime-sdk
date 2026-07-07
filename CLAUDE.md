@@ -154,7 +154,7 @@ src/
 │                               file-config: KirraRuntimeConfig, versioned+validated)
 ├── env_config.rs             — WP-17/G-17 unified verifier ENV config: KIRRA_ENV_KEYS
 │                               canonical registry (single source of truth for every
-│                               KIRRA_* var), unknown_kirra_env_vars fail-closed sweep,
+│                               KIRRA_* var), unknown_kirra_env_vars warn-only sweep,
 │                               versioned EffectiveConfig + effective_digest (SHA-256);
 │                               startup WARNs on unknown vars + commits an
 │                               EffectiveConfigDigest audit event (drift-detectable)

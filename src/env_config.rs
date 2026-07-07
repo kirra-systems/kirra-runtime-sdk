@@ -125,7 +125,7 @@ pub fn unknown_kirra_env_vars<'a>(env_keys: impl Iterator<Item = &'a str>) -> Ve
 /// Captures the stable boot knobs (not secrets — never the admin token or key
 /// bytes; only whether a key source is configured). v1 is the service spine; the
 /// captured set expands under a version bump as more reads fold in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EffectiveConfig {
     pub config_version: u32,
     pub verifier_addr: String,
@@ -223,24 +223,15 @@ impl EffectiveConfig {
     }
 
     /// A deterministic, canonical serialization of the snapshot — the exact bytes
-    /// hashed for the digest. Field order is fixed here (NOT reflection), so the
-    /// digest is stable across compilers/runs. No secret bytes ever appear.
-    fn canonical_bytes(&self) -> String {
-        format!(
-            "v={}\naddr={}\ndb={}\nmode={}\nclass={}\ntls={}\nmtls={}\ningress={}\nsecure={}\nquote_default={}\nship={}\nsigning={}",
-            self.config_version,
-            self.verifier_addr,
-            self.db_path,
-            self.mode,
-            self.vehicle_class,
-            self.tls_enabled,
-            self.mtls_enabled,
-            self.trusted_ingress,
-            self.require_secure_transport,
-            self.require_tpm_quote_default,
-            self.audit_shipping_enabled,
-            self.audit_signing_key_configured,
-        )
+    /// hashed for the digest. Uses `serde_json` (fields in declaration order, control
+    /// chars escaped) so the encoding is INJECTIVE: two distinct `EffectiveConfig`
+    /// values can never collide (a hand-rolled `k=v\n` format could, if a value
+    /// contained `\nkey=`, undermining drift detection — Copilot #862). No secret
+    /// bytes ever appear (the struct stores booleans like `audit_signing_key_configured`,
+    /// never key material). Serialization of a primitives-only struct is infallible;
+    /// the `unwrap_or_default` is a panic-free guard that never triggers in practice.
+    fn canonical_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
     }
 
     /// The SHA-256 hex digest of the canonical snapshot (64 chars). Deterministic
@@ -249,7 +240,7 @@ impl EffectiveConfig {
     #[must_use]
     pub fn effective_digest(&self) -> String {
         let mut h = Sha256::new();
-        h.update(self.canonical_bytes().as_bytes());
+        h.update(self.canonical_json().as_bytes());
         hex::encode(h.finalize())
     }
 }
@@ -384,8 +375,34 @@ mod tests {
             None, None, None, None, None, None, None, None,
         );
         assert_ne!(a.effective_digest(), c.effective_digest(), "mode change → different digest");
+    }
 
-        // The secret bytes never enter the digest — only WHETHER a signing key is set.
-        assert!(!a.canonical_bytes().contains("seedbytes"));
+    #[test]
+    fn signing_key_bytes_never_enter_the_digest_input() {
+        // Construct WITH a signing-key secret present (Copilot #862: the prior test
+        // passed a None key, so it could not have caught an accidental leak). Only the
+        // `audit_signing_key_configured` boolean is captured — the bytes must be absent
+        // from the exact input the digest hashes.
+        let with_secret = EffectiveConfig::from_values(
+            Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
+            None, None, None, None, None, None, None, Some("SUPER_SECRET_SEED_BYTES"),
+        );
+        assert!(with_secret.audit_signing_key_configured, "the key IS registered as configured");
+        assert!(
+            !with_secret.canonical_json().contains("SUPER_SECRET_SEED_BYTES"),
+            "the signing-key bytes must NEVER appear in the digest input"
+        );
+        // And the digest reflects only the boolean: a config that differs ONLY by a
+        // present-vs-absent key still moves the digest (configured is captured), but a
+        // config with a DIFFERENT key value hashes identically (bytes not captured).
+        let other_secret = EffectiveConfig::from_values(
+            Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
+            None, None, None, None, None, None, None, Some("A_DIFFERENT_SEED"),
+        );
+        assert_eq!(
+            with_secret.effective_digest(),
+            other_secret.effective_digest(),
+            "two different key VALUES hash the same — only 'configured' is captured"
+        );
     }
 }

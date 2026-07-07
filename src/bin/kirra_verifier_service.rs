@@ -1016,15 +1016,15 @@ async fn main() {
         }
         let cfg = EffectiveConfig::from_env();
         let digest = cfg.effective_digest();
-        tracing::info!(
-            config_version = cfg.config_version,
-            effective_config_digest = %digest,
-            mode = %cfg.mode,
-            "effective boot configuration digested (WP-17)"
-        );
         let now = now_ms();
         let unknown_count = unknown.len();
-        let _ = app_state
+        let digest_for_log = digest.clone();
+        let mode_for_log = cfg.mode.clone();
+        let version_for_log = cfg.config_version;
+        // Non-failing (observability), but do NOT silently claim it was committed:
+        // warn if the store task OR the append fails, so a missing on-chain digest is
+        // visible rather than a phantom "committed" (Copilot #862).
+        match app_state
             .store
             .call(move |store| {
                 store.append_clearance_audit_event(
@@ -1042,7 +1042,19 @@ async fn main() {
                     now,
                 )
             })
-            .await;
+            .await
+        {
+            Ok(Ok(())) => tracing::info!(
+                config_version = version_for_log,
+                effective_config_digest = %digest_for_log,
+                mode = %mode_for_log,
+                "effective boot configuration digested + committed to the audit chain (WP-17)"
+            ),
+            Ok(Err(e)) => tracing::warn!(error = %e,
+                "WP-17: effective-config digest append FAILED — no on-chain config proof this boot"),
+            Err(_) => tracing::warn!(
+                "WP-17: effective-config digest store task failed — no on-chain config proof this boot"),
+        }
     }
 
     // Learning-loop capture writer (Phase 1, #190) — DEFAULT OFF. Only spawned +
