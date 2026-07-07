@@ -26,6 +26,10 @@ serde_json = "1"
 # only used by the `verifier-sink` modules, so gated with the feature.
 ed25519-dalek = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
+# S-DG1c PostureEngineSenderSink: the verifier's PostureEngineSender is a tokio
+# mpsc sender, so the adapter needs the tokio TYPES (sync only — no runtime,
+# no time driver; try_send works without an executor). Gated with the feature.
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
 
 [features]
 default = []
@@ -33,7 +37,7 @@ default = []
 # (hash-chained, signed ledger). OFF by default so the parko ML core stays lean;
 # enabled by the parko-ros2 integration node and any deployment that persists
 # divergence/clearance. Not on the governor hot path.
-verifier-sink = ["dep:kirra-verifier", "dep:ed25519-dalek", "dep:base64"]
+verifier-sink = ["dep:kirra-verifier", "dep:ed25519-dalek", "dep:base64", "dep:tokio"]
 
 [dev-dependencies]
 proptest = "1"

@@ -1312,3 +1312,89 @@ mod tests {
         assert!(!recorded.is_immobilized());
     }
 }
+
+// ---------------------------------------------------------------------------
+// S-DG1c — the posture-engine adapter for `PostureSignalSink`.
+// ---------------------------------------------------------------------------
+
+/// Wires the comparator's [`crate::comparator::PostureSignalSink`] to the
+/// verifier's posture engine: each tick becomes a typed
+/// `PostureRecalcTrigger::GovernorDivergence` on the engine's coalescing
+/// channel (S-DG1c; docs/safety/STAGE_S-DG1_DIVERGENCE_POSTURE.md).
+///
+/// Non-blocking by construction: `try_send`, never `send().await` — the
+/// evaluate path must not stall on a busy engine. A FULL channel drops the
+/// tick, which is fail-safe in both directions: a dropped SIGNIFICANT tick is
+/// re-sent on the next tick (the divergence persists, and the comparator's
+/// reconciliation already bounded THIS command regardless); a dropped
+/// AGREEMENT tick merely delays recovery earn-back. A CLOSED channel (engine
+/// gone) is logged loudly — with no engine the fleet's posture cache goes
+/// stale within POSTURE_CACHE_TTL_MS and every gated route fails closed
+/// anyway (the outer fail-closed backstop).
+pub struct PostureEngineSenderSink {
+    tx: kirra_verifier::posture_engine_v2::PostureEngineSender,
+}
+
+impl PostureEngineSenderSink {
+    #[must_use]
+    pub fn new(tx: kirra_verifier::posture_engine_v2::PostureEngineSender) -> Self {
+        Self { tx }
+    }
+}
+
+impl crate::comparator::PostureSignalSink for PostureEngineSenderSink {
+    fn divergence_posture_tick(&self, significant: bool, escalated: bool) {
+        use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
+        match self.tx.try_send(PostureRecalcTrigger::GovernorDivergence { significant, escalated }) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Coalescing worker is saturated; next tick re-signals.
+                eprintln!(
+                    "parko-kirra: posture engine channel FULL — divergence tick \
+                     (significant={significant}, escalated={escalated}) dropped; \
+                     re-sent next tick"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                eprintln!(
+                    "parko-kirra: posture engine channel CLOSED — divergence posture \
+                     signal (significant={significant}, escalated={escalated}) lost; \
+                     the stale-cache TTL backstop is now the only fail-closed path"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod posture_sink_tests {
+    use super::*;
+    use crate::comparator::PostureSignalSink as _;
+    use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
+
+    /// The adapter forwards the tick as the typed trigger, non-blocking.
+    #[test]
+    fn adapter_forwards_typed_trigger_via_try_send() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let sink = PostureEngineSenderSink::new(tx);
+        sink.divergence_posture_tick(true, true);
+        match rx.try_recv().expect("trigger forwarded") {
+            PostureRecalcTrigger::GovernorDivergence { significant, escalated } => {
+                assert!(significant && escalated);
+            }
+            other => panic!("wrong trigger: {other}"),
+        }
+    }
+
+    /// A full channel drops rather than blocks (the evaluate path must not
+    /// stall), and the sink survives to forward the next tick.
+    #[test]
+    fn full_channel_drops_without_blocking() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = PostureEngineSenderSink::new(tx);
+        sink.divergence_posture_tick(true, false); // fills the channel
+        sink.divergence_posture_tick(true, true); // dropped, no block/panic
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err(), "second tick was dropped by design");
+    }
+}

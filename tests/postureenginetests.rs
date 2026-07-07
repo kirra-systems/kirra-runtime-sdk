@@ -161,3 +161,58 @@ async fn posture_dag_recalc_completes_under_dashmap_contention() {
     .await
     .expect("contention run should finish without deadlock");
 }
+
+
+/// S-DG1 end-to-end through the REAL worker: a GovernorDivergence trigger
+/// (as the parko `PostureEngineSenderSink` sends it) drives the fleet cache to
+/// Degraded on the first significant tick, to LockedOut on an escalated tick,
+/// and the lockout survives subsequent healthy recalcs (sticky, human reset).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn governor_divergence_trigger_drives_fleet_posture_through_worker() {
+    let app = app();
+    let cache = cache();
+    // A trusted node so the DAG itself is Nominal (not the M-9 empty-set lockout).
+    app.persist_and_insert_node(node("robot-01")).expect("insert node");
+    let tx = start_posture_engine_worker(Arc::clone(&app), Arc::clone(&cache));
+
+    let posture = |cache: &SharedPostureCache| {
+        cache.read().expect("cache lock").as_ref().map(|c| c.posture)
+    };
+    let wait_for = |cache: SharedPostureCache, want: FleetPosture| async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if cache.read().expect("cache lock").as_ref().map(|c| c.posture) == Some(want) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+    };
+
+    // First significant tick → Degraded, immediately (no grace period).
+    tx.send(PostureRecalcTrigger::GovernorDivergence { significant: true, escalated: false })
+        .await
+        .expect("send");
+    wait_for(Arc::clone(&cache), FleetPosture::Degraded)
+        .await
+        .expect("significant divergence must degrade the fleet");
+
+    // Escalated tick (the comparator's own sustained-divergence decision) →
+    // sticky LockedOut.
+    tx.send(PostureRecalcTrigger::GovernorDivergence { significant: true, escalated: true })
+        .await
+        .expect("send");
+    wait_for(Arc::clone(&cache), FleetPosture::LockedOut)
+        .await
+        .expect("escalated divergence must lock the fleet out");
+
+    // Sticky: a healthy periodic refresh must NOT downgrade it.
+    tx.send(PostureRecalcTrigger::PeriodicRefresh).await.expect("send");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        posture(&cache),
+        Some(FleetPosture::LockedOut),
+        "the divergence lockout is human-reset sticky — a healthy recalc must not clear it"
+    );
+}

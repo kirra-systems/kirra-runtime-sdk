@@ -79,6 +79,7 @@ pub use clearance_delivery::{ClearanceDelivery, DeliveryOutcome};
 #[cfg(feature = "verifier-sink")]
 pub use audit_sink::{
     select_audit_client, select_divergence_sink, select_impact_sink, AuditChainLinkerAuditClient,
+    PostureEngineSenderSink,
     AuditChainLinkerDivergenceSink, FatalAuditConfig, ImpactAuditSink,
     ImpactClearanceRejectedPayload, ImpactClearedPayload, ImpactDetectedPayload,
     ImpactEscalationPayload, ImpactEventSink, InMemoryImpactSink, RecordedClearanceLoop,
@@ -86,7 +87,7 @@ pub use audit_sink::{
     IMPACT_DETECTED_EVENT_TYPE, IMPACT_ESCALATION_RAISED_EVENT_TYPE, PARKO_DECISION_EVENT_TYPE,
     PARKO_FAULT_EVENT_TYPE, PARKO_HEALTH_EVENT_TYPE, PARKO_OVERRIDE_EVENT_TYPE,
 };
-pub use comparator::{GovernorComparator, RssAwareGovernor};
+pub use comparator::{GovernorComparator, PostureSignalSink, RssAwareGovernor};
 pub use diverse::DiverseKirraGovernor;
 
 /// MRC (Minimum Risk Condition) velocity ceiling — the decel-trajectory

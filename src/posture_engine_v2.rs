@@ -36,6 +36,11 @@ pub enum LockoutReason {
     /// S-FI1d — frame/localization integrity was `Untrusted` for a sustained
     /// run (sensor failure / possible GNSS spoofing). Sticky human-reset lockout.
     FrameIntegrityUntrusted,
+    /// S-DG1 — the two diverse governors sustained a significant disagreement
+    /// (the parko comparator's own `escalated_to_lockout`). One of the two
+    /// safety authorities is wrong and we cannot tell which — a genuine fault,
+    /// not a transient. Sticky human-reset lockout.
+    GovernorDivergence,
 }
 
 impl fmt::Display for LockoutReason {
@@ -49,6 +54,7 @@ impl fmt::Display for LockoutReason {
             Self::WatchdogTimeout       => "WATCHDOG_TIMEOUT",
             Self::ManualLockout         => "MANUAL_LOCKOUT",
             Self::FrameIntegrityUntrusted => "FRAME_INTEGRITY_UNTRUSTED",
+            Self::GovernorDivergence      => "GOVERNOR_DIVERGENCE",
         };
         write!(f, "{code}")
     }
@@ -222,6 +228,15 @@ pub enum PostureRecalcTrigger {
     /// `Degraded`/`Untrusted` activate the frame-degraded flag (→ Degraded);
     /// sustained `Untrusted` escalates to LockedOut; `Trusted` advances recovery.
     FrameIntegrityChanged { trust: FrameTrust },
+    /// S-DG1 — a diverse-governor comparator tick (via the parko
+    /// `PostureSignalSink`). `significant==true` means the comparator's
+    /// leaky-bucket accumulator is at/above its significance threshold this
+    /// tick (posture-relevant disagreement — NOT every nonzero clamp delta);
+    /// it sets the divergence-degraded flag immediately. `escalated==true`
+    /// mirrors the comparator's own sustained-divergence escalation and sets
+    /// the STICKY lockout flag. `significant==false` is an agreeing tick and
+    /// advances the recovery streak.
+    GovernorDivergence { significant: bool, escalated: bool },
     /// Periodic liveness refresh — recompute and re-stamp the cache so it
     /// never idles past POSTURE_CACHE_TTL_MS. Not tied to any state change.
     /// A no-change recompute produces no transition (no broadcast) but DOES
@@ -246,6 +261,8 @@ impl fmt::Display for PostureRecalcTrigger {
                     rss.safe, rss.longitudinal_margin, rss.lateral_margin),
             Self::FrameIntegrityChanged { trust } =>
                 write!(f, "FrameIntegrityChanged({trust:?})"),
+            Self::GovernorDivergence { significant, escalated } =>
+                write!(f, "GovernorDivergence(significant={significant}, escalated={escalated})"),
             Self::PeriodicRefresh =>
                 write!(f, "PeriodicRefresh"),
         }
@@ -406,6 +423,78 @@ pub fn apply_frame_integrity_state(app: &Arc<AppState>, trust: FrameTrust, now_m
     }
 }
 
+/// Applies a diverse-governor comparator tick to `AppState` (S-DG1).
+///
+/// Posture mapping (docs/safety/STAGE_S-DG1_DIVERGENCE_POSTURE.md §3,
+/// mirroring S-FI1 / SS-002):
+///   - `significant==true`  → set `divergence_degraded_active` IMMEDIATELY
+///     (→ Degraded decel-to-stop MRC). No grace period: the first
+///     posture-significant tick drops posture. Resets the recovery streak.
+///   - `escalated==true`    → additionally set the STICKY
+///     `divergence_lockout_active` (→ LockedOut, human reset). The
+///     sustained-ness judgment is the comparator's own accumulator
+///     escalation — reused, not reimplemented (one source of truth).
+///   - `significant==false` → an agreeing tick; advance the recovery streak
+///     and clear `divergence_degraded_active` once
+///     `AV_RECOVERY_STREAK_THRESHOLD` consecutive agreeing ticks land within
+///     `AV_RECOVERY_WINDOW_MS`. The sticky lockout flag is NOT cleared here —
+///     matching LockedOut semantics.
+///
+/// Defense-in-depth unchanged: the comparator still reconciles every command
+/// to the safe output regardless of posture; this is an ADDITIONAL fail-closed
+/// consequence, never a replacement for reconciliation.
+// SAFETY: SG9 | REQ: governor-divergence-escalates-posture | TEST: test_divergence_significant_escalates_immediately,test_divergence_escalated_sets_sticky_lockout,test_divergence_agreement_recovery_clears_degraded,test_divergence_lockout_is_sticky_across_agreement
+pub fn apply_governor_divergence_state(
+    app: &Arc<AppState>,
+    significant: bool,
+    escalated: bool,
+    now_ms: u64,
+) {
+    if significant {
+        // Immediate Degraded; any in-progress recovery restarts from scratch.
+        app.divergence_degraded_active.store(true, Ordering::SeqCst);
+        if let Ok(mut s) = app.divergence_recovery_streak.lock() {
+            s.count = 0;
+            s.start_ms = 0;
+        }
+        if escalated {
+            app.divergence_lockout_active.store(true, Ordering::SeqCst);
+            tracing::error!(
+                reason = %LockoutReason::GovernorDivergence,
+                "Sustained diverse-governor disagreement (comparator escalation) — \
+                 escalating fleet to LockedOut (human reset)"
+            );
+        }
+    } else {
+        // Agreement tick: only meaningful while a divergence is active.
+        if app.divergence_degraded_active.load(Ordering::SeqCst) {
+            if let Ok(mut streak) = app.divergence_recovery_streak.lock() {
+                if streak.start_ms > 0
+                    && now_ms.saturating_sub(streak.start_ms) >= AV_RECOVERY_WINDOW_MS
+                {
+                    streak.count = 0;
+                    streak.start_ms = 0;
+                }
+                if streak.start_ms == 0 {
+                    streak.start_ms = now_ms;
+                }
+                streak.count += 1;
+                if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
+                    app.divergence_degraded_active.store(false, Ordering::SeqCst);
+                    streak.count = 0;
+                    streak.start_ms = 0;
+                    tracing::info!(
+                        threshold = AV_RECOVERY_STREAK_THRESHOLD,
+                        "Governor-divergence recovery confirmed — divergence degradation cleared"
+                    );
+                }
+            }
+        }
+        // NOTE: `divergence_lockout_active` is sticky (human reset) and is NOT
+        // cleared by agreement — matching LockedOut semantics.
+    }
+}
+
 /// Starts the posture engine worker task.
 pub fn start_posture_engine_worker(
     app: Arc<AppState>,
@@ -515,6 +604,9 @@ pub fn start_posture_engine_worker(
                                 PostureRecalcTrigger::FrameIntegrityChanged { trust } => {
                                     apply_frame_integrity_state(&app_b, trust, now);
                                 }
+                                PostureRecalcTrigger::GovernorDivergence { significant, escalated } => {
+                                    apply_governor_divergence_state(&app_b, significant, escalated, now);
+                                }
                                 _ => {}
                             }
                         }
@@ -557,6 +649,7 @@ mod posture_engine_v2_tests {
         assert_eq!(LockoutReason::WatchdogTimeout.to_string(),      "WATCHDOG_TIMEOUT");
         assert_eq!(LockoutReason::ManualLockout.to_string(),        "MANUAL_LOCKOUT");
         assert_eq!(LockoutReason::FrameIntegrityUntrusted.to_string(), "FRAME_INTEGRITY_UNTRUSTED");
+        assert_eq!(LockoutReason::GovernorDivergence.to_string(),   "GOVERNOR_DIVERGENCE");
     }
 
     /// #774 F1+F5 — the silent scrape resolver agrees with the logging gate
@@ -612,6 +705,78 @@ mod posture_engine_v2_tests {
         let store = VerifierStore::new(":memory:").unwrap();
         Arc::new(AppState::new(store, VerifierOperationMode::Active))
     }
+
+    // ---- S-DG1 governor-divergence tests (mirror the S-FI1 frame matrix) ----
+
+    /// The FIRST posture-significant divergence tick drops posture — no grace
+    /// period; hysteresis governs only recovery and the lockout escalation.
+    #[test]
+    fn test_divergence_significant_escalates_immediately() {
+        let app = frame_app();
+        apply_governor_divergence_state(&app, true, false, 1_000);
+        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
+        assert!(!app.divergence_lockout_active.load(Ordering::SeqCst),
+            "a significant-but-not-escalated tick is the transient decel-to-stop MRC, not LockedOut");
+    }
+
+    /// The comparator's own sustained-divergence escalation maps to the STICKY
+    /// lockout flag — the sustained-ness judgment is reused, not reimplemented.
+    #[test]
+    fn test_divergence_escalated_sets_sticky_lockout() {
+        let app = frame_app();
+        apply_governor_divergence_state(&app, true, true, 1_000);
+        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
+        assert!(app.divergence_lockout_active.load(Ordering::SeqCst));
+    }
+
+    /// A full agreeing streak within the window clears the degradation
+    /// (auto-recovery, Degraded → Nominal at the next recalc).
+    #[test]
+    fn test_divergence_agreement_recovery_clears_degraded() {
+        let app = frame_app();
+        apply_governor_divergence_state(&app, true, false, 1_000);
+        assert!(app.divergence_degraded_active.load(Ordering::SeqCst));
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
+        }
+        assert!(!app.divergence_degraded_active.load(Ordering::SeqCst),
+            "a full agreeing recovery streak must clear divergence_degraded_active");
+    }
+
+    /// An expired window restarts the earn-back: agreeing ticks spread past
+    /// AV_RECOVERY_WINDOW_MS never accumulate to a recovery.
+    #[test]
+    fn test_divergence_recovery_streak_window_expiry_resets() {
+        let app = frame_app();
+        apply_governor_divergence_state(&app, true, false, 1_000);
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD * 2 {
+            // Each agreeing tick lands AFTER the window relative to the last.
+            apply_governor_divergence_state(
+                &app,
+                false,
+                false,
+                2_000 + i as u64 * (AV_RECOVERY_WINDOW_MS + 1),
+            );
+        }
+        assert!(app.divergence_degraded_active.load(Ordering::SeqCst),
+            "agreeing ticks spread past the window must never clear the degradation");
+    }
+
+    /// The lockout flag is sticky: agreement — even a full recovery streak that
+    /// clears the DEGRADED flag — never clears LockedOut (human reset only).
+    #[test]
+    fn test_divergence_lockout_is_sticky_across_agreement() {
+        let app = frame_app();
+        apply_governor_divergence_state(&app, true, true, 1_000);
+        for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
+            apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
+        }
+        assert!(!app.divergence_degraded_active.load(Ordering::SeqCst),
+            "the degraded flag earn-back still works under a sticky lockout");
+        assert!(app.divergence_lockout_active.load(Ordering::SeqCst),
+            "agreement must never clear the sticky divergence lockout");
+    }
+
 
     #[test]
     fn test_frame_degraded_escalates_immediately() {

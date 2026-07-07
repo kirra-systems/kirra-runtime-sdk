@@ -367,6 +367,23 @@ pub struct AppState {
     /// Inverted streak counting consecutive `Untrusted` ticks toward the
     /// `frame_lockout_active` escalation (sustained-fault detection).
     pub frame_untrusted_streak: Arc<Mutex<RssRecoveryStreak>>,
+    /// S-DG1 — a posture-significant governor divergence is ACTIVE (the parko
+    /// comparator's leaky-bucket accumulator crossed its significance
+    /// threshold): two independently-derived safety governors disagree and we
+    /// cannot tell which is wrong. Escalates Nominal → Degraded
+    /// (decel-to-stop MRC) immediately; auto-recovers via the recovery
+    /// streak once agreeing ticks resume. Defaults false (inert until the
+    /// comparator's `PostureSignalSink` is wired).
+    pub divergence_degraded_active: Arc<AtomicBool>,
+    /// S-DG1 — the comparator's own sustained-divergence escalation
+    /// (`escalated_to_lockout`) was reported: a persistent disagreement is a
+    /// genuine fault (a real governor bug or corrupted input), not a
+    /// transient. STICKY like `supervisor_tripped` / `frame_lockout_active` —
+    /// recovery is an explicit human/HA reset. Defaults false.
+    pub divergence_lockout_active: Arc<AtomicBool>,
+    /// Recovery streak for clearing `divergence_degraded_active` (consecutive
+    /// agreeing ticks within the recovery window).
+    pub divergence_recovery_streak: Arc<Mutex<RssRecoveryStreak>>,
     /// #104 — the currently-open post-incident forensic sequence (correlation id
     /// + ordinal), or `None` when no incident is open. Volatile; the durable
     /// forensic record lives in the signed audit chain.
@@ -445,6 +462,9 @@ impl AppState {
             frame_lockout_active: Arc::new(AtomicBool::new(false)),
             frame_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            divergence_degraded_active: Arc::new(AtomicBool::new(false)),
+            divergence_lockout_active: Arc::new(AtomicBool::new(false)),
+            divergence_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
             incident_durability_failures: Arc::new(AtomicU64::new(0)),
