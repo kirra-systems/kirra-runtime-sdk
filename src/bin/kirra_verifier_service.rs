@@ -547,6 +547,16 @@ fn resolve_require_tpm_quote(explicit: Option<bool>, fleet_default: bool) -> boo
     explicit.unwrap_or(fleet_default)
 }
 
+/// WP-16 (MGA G-8) — true iff `s` is a SHA-256 PCR16 value: exactly 64 hex chars
+/// (32 bytes). The TPM-quote parser enforces the SHA-256 PCR bank (`sha256:16`), so
+/// a quote-required node's expected PCR16 value must be 64 hex — any other length
+/// could never match a real quote's `pcrDigest`. Used to reject a quote-required
+/// registration that carries an unusable expectation (Copilot #861).
+fn is_valid_pcr16_sha256_hex(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 #[derive(Deserialize)]
 struct RegisterDependenciesRequest {
     node_id: String,
@@ -3212,10 +3222,11 @@ mod attestation_nonce_handler_tests {
 
     // ---- Hardware TPM quote enforcement (live wiring) ---------------------
 
-    /// The 32-byte PCR16 VALUE a quote node attests, in hex. The quote carries a
-    /// HASH OVER this (`SHA256(value)`); the self-report proof carries the value.
+    /// The 32-byte PCR16 VALUE a quote node attests, in hex (exactly 64 chars — a
+    /// real SHA-256 PCR value). The quote carries a HASH OVER this (`SHA256(value)`);
+    /// the self-report proof carries the value.
     const PCR16_VALUE_HEX: &str =
-        "ababababababababababababababababababababababababababababababababab";
+        "abababababababababababababababababababababababababababababababcd";
 
     /// A node enrolled with an expected PCR16 AND `require_tpm_quote = true` in
     /// the policy table, mirroring `svc_with_pcr16_node`.
@@ -3407,7 +3418,15 @@ mod attestation_nonce_handler_tests {
         node_id: &str,
         require: Option<bool>,
     ) -> bool {
-        let mut body = serde_json::json!({ "node_id": node_id });
+        // Always carry a valid AK + 64-hex PCR16 so the quote-required guard (a node
+        // that could never attest is rejected) is satisfied — this helper exercises
+        // the POLICY resolution, not the missing-material guard (tested separately).
+        let ak = public_key_to_pem(&SigningKey::from_bytes(&[5u8; 32]).verifying_key());
+        let mut body = serde_json::json!({
+            "node_id": node_id,
+            "ak_public_pem": ak,
+            "expected_pcr16_digest_hex": PCR16_VALUE_HEX,
+        });
         if let Some(r) = require {
             body["require_tpm_quote"] = serde_json::json!(r);
         }
@@ -3454,6 +3473,45 @@ mod attestation_nonce_handler_tests {
             !register_and_policy(&svc, "node-nopt", Some(false)).await,
             "explicit require_tpm_quote:false is honored (a TPM-less node can still enroll)"
         );
+    }
+
+    /// The pure PCR16-SHA256 validator: exactly 64 hex chars, trimmed.
+    #[test]
+    fn is_valid_pcr16_sha256_hex_requires_64_hex() {
+        assert!(super::is_valid_pcr16_sha256_hex(&"ab".repeat(32)), "64 hex chars ok");
+        assert!(super::is_valid_pcr16_sha256_hex(&format!("  {}  ", "cd".repeat(32))), "trimmed");
+        assert!(!super::is_valid_pcr16_sha256_hex(&"ab".repeat(31)), "62 chars rejected");
+        assert!(!super::is_valid_pcr16_sha256_hex(&"ab".repeat(33)), "66 chars rejected");
+        assert!(!super::is_valid_pcr16_sha256_hex(""), "empty rejected");
+        assert!(!super::is_valid_pcr16_sha256_hex(&format!("xy{}", "ab".repeat(31))), "non-hex rejected");
+    }
+
+    /// Copilot #861 fail-closed: a quote-required registration MISSING its AK or a
+    /// valid PCR16 is rejected 400 — a node that could never attest is never minted.
+    #[tokio::test]
+    async fn register_quote_required_without_material_is_400() {
+        let svc = active_svc_no_nodes();
+        let ak = public_key_to_pem(&SigningKey::from_bytes(&[5u8; 32]).verifying_key());
+
+        // require=true but NO ak + NO pcr16 → 400.
+        let no_material: RegisterNodeRequest = serde_json::from_value(serde_json::json!({
+            "node_id": "n1", "require_tpm_quote": true,
+        }))
+        .unwrap();
+        let s = register_node(State(Arc::clone(&svc)), Json(no_material)).await.into_response().status();
+        assert_eq!(s, StatusCode::BAD_REQUEST, "quote-required with no AK/PCR16 → 400");
+
+        // require=true, AK present but PCR16 the wrong length → 400.
+        let bad_pcr: RegisterNodeRequest = serde_json::from_value(serde_json::json!({
+            "node_id": "n2", "require_tpm_quote": true,
+            "ak_public_pem": ak, "expected_pcr16_digest_hex": "abab",
+        }))
+        .unwrap();
+        let s = register_node(State(Arc::clone(&svc)), Json(bad_pcr)).await.into_response().status();
+        assert_eq!(s, StatusCode::BAD_REQUEST, "a non-64-hex PCR16 under require_tpm_quote → 400");
+
+        // Neither node was minted.
+        assert!(!svc.app.nodes.contains_key("n1") && !svc.app.nodes.contains_key("n2"));
     }
 
     /// WP-16 end-to-end: ENROLL a node through the real `register_node` handler with

@@ -16,6 +16,37 @@ pub(crate) async fn register_node(
                 Json(json!({ "error": "instance is in passive standby mode" }))).into_response();
     }
     let now = now_ms();
+
+    // WP-16 (MGA G-8): resolve the EFFECTIVE quote requirement first — an omitted
+    // `require_tpm_quote` defers to the KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT fleet gate
+    // (measured-boot fleets flip the default to quote-required); an explicit value in
+    // the request wins.
+    let fleet_default = require_tpm_quote_fleet_default(
+        std::env::var("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT").ok().as_deref(),
+    );
+    let require = resolve_require_tpm_quote(req.require_tpm_quote, fleet_default);
+
+    // Copilot #861 fail-closed: a quote-required node MUST carry what a quote is
+    // verified against — its AK (to check the quote signature) and a 64-hex (SHA-256)
+    // expected PCR16 value (to check the pcrDigest). Without both it could NEVER
+    // attest (Unknown forever). Reject at registration (400) rather than mint a
+    // permanently-unattestable node that still 201s. This guard fires whether the
+    // requirement is explicit OR came from the fleet gate.
+    if require {
+        let ak_ok = req.ak_public_pem.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let pcr_ok = req
+            .expected_pcr16_digest_hex
+            .as_deref()
+            .is_some_and(is_valid_pcr16_sha256_hex);
+        if !ak_ok || !pcr_ok {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": "require_tpm_quote demands ak_public_pem and a 64-hex-char \
+                          (SHA-256) expected_pcr16_digest_hex — a quote-required node \
+                          without both could never attest"
+            }))).into_response();
+        }
+    }
+
     let node = RegisteredNode {
         node_id: req.node_id.clone(),
         status: NodeTrustState::Unknown,
@@ -34,13 +65,6 @@ pub(crate) async fn register_node(
     {
         // SAFETY: SG-HA-3 — durable write off the async worker pool.
         let node_id_p = req.node_id.clone();
-        // WP-16 (MGA G-8): an omitted `require_tpm_quote` defers to the
-        // KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT fleet gate (measured-boot fleets flip
-        // the default to quote-required); an explicit value in the request wins.
-        let fleet_default = require_tpm_quote_fleet_default(
-            std::env::var("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT").ok().as_deref(),
-        );
-        let require = resolve_require_tpm_quote(req.require_tpm_quote, fleet_default);
         let policy_err = !matches!(
             svc.app.store.call(move |store| {
                 store.set_node_attestation_policy(&node_id_p, require)

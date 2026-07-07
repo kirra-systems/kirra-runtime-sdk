@@ -850,13 +850,17 @@ impl EnrollOpts {
     }
 }
 
-/// Normalize + validate an expected-PCR16 hex value: non-empty, even-length, hex.
-/// (The verifier hashes it to the quote's pcrDigest — length is bank-dependent; a
-/// SHA-256 PCR is 64 hex chars, but this stays lenient about the digest width.)
+/// Normalize + validate an expected-PCR16 hex value: exactly 64 hex chars (a
+/// SHA-256 PCR value, 32 bytes). The verifier's quote parser enforces the SHA-256
+/// PCR bank (`sha256:16`), so any other length is an expectation a real quote could
+/// never satisfy (Copilot #861) — reject it here rather than enroll a dead node.
 fn validate_pcr16_hex(v: &str) -> Result<String, String> {
     let v = v.trim().to_ascii_lowercase();
-    if v.is_empty() || !v.len().is_multiple_of(2) || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("--pcr16 must be a non-empty even-length hex string (got {v:?})"));
+    if v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "--pcr16 must be a SHA-256 PCR16 value: exactly 64 hex chars (sha256:16); got {} chars",
+            v.len()
+        ));
     }
     Ok(v)
 }
@@ -919,9 +923,15 @@ fn cmd_enroll(args: &[String]) -> Result<(), String> {
     let opts = EnrollOpts::parse(args)?;
 
     // Resolve the AK PUBLIC PEM: a supplied SPKI PEM, else derived from the PKCS#8
-    // private key. Exactly one source is required (the private key never ships).
+    // private key. EXACTLY ONE source is required — both set is rejected (Copilot
+    // #861: silently preferring one could enroll a different key than intended).
     let ak_public_pem = match (&opts.ak_pub, &opts.ak_key) {
-        (Some(pub_path), _) => std::fs::read_to_string(pub_path)
+        (Some(_), Some(_)) => {
+            return Err("give exactly one of --ak-pub <spki.pem> / --ak-key <pkcs8.pem>, \
+                        not both (they may name different keys)"
+                .to_string())
+        }
+        (Some(pub_path), None) => std::fs::read_to_string(pub_path)
             .map_err(|e| format!("read AK public PEM {}: {e}", pub_path.display()))?,
         (None, Some(key_path)) => ak_public_pem_from_pkcs8(key_path)?,
         (None, None) => {
@@ -1183,13 +1193,14 @@ mod enroll_tests {
     }
 
     #[test]
-    fn pcr16_hex_is_validated_and_normalized() {
-        assert_eq!(validate_pcr16_hex("  ABAB  ").unwrap(), "abab", "trimmed + lowercased");
+    fn pcr16_hex_requires_64_sha256_chars() {
+        // A real SHA-256 PCR16 value (exactly 64 hex chars) is accepted, trimmed + lowered.
+        assert_eq!(validate_pcr16_hex(&format!("  {}  ", "AB".repeat(32))).unwrap(), "ab".repeat(32));
         assert!(validate_pcr16_hex("").is_err(), "empty refused");
-        assert!(validate_pcr16_hex("abc").is_err(), "odd length refused");
-        assert!(validate_pcr16_hex("xyzz").is_err(), "non-hex refused");
-        // A real SHA-256 PCR16 value (64 hex chars) is accepted.
-        assert!(validate_pcr16_hex(&"ab".repeat(32)).is_ok());
+        assert!(validate_pcr16_hex("abab").is_err(), "short (non-64) refused");
+        assert!(validate_pcr16_hex(&"ab".repeat(31)).is_err(), "62 chars refused");
+        assert!(validate_pcr16_hex(&"ab".repeat(33)).is_err(), "66 chars refused");
+        assert!(validate_pcr16_hex(&format!("xy{}", "ab".repeat(31))).is_err(), "non-hex refused");
     }
 
     /// The AK public PEM derived from a PKCS#8 private key round-trips to the same
@@ -1232,6 +1243,20 @@ mod enroll_tests {
         let mut args2 = args.clone();
         args2.push("--no-require-quote".to_string());
         assert!(!EnrollOpts::parse(&args2).unwrap().require_quote);
+    }
+
+    #[test]
+    fn cmd_enroll_rejects_both_ak_sources() {
+        // Both --ak-pub and --ak-key set → hard error BEFORE any network/file IO
+        // (the ak-source match returns early), so this runs offline.
+        let pcr = "ab".repeat(32);
+        let args: Vec<String> = vec![
+            "--verifier".into(), "https://v".into(), "--node-id".into(), "n".into(),
+            "--pcr16".into(), pcr, "--ak-pub".into(), "/a.pem".into(),
+            "--ak-key".into(), "/b.pem".into(),
+        ];
+        let err = cmd_enroll(&args).expect_err("both AK sources must be rejected");
+        assert!(err.contains("exactly one"), "got: {err}");
     }
 
     #[test]
