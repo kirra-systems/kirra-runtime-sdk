@@ -269,8 +269,10 @@ type SpawnAction<C> = Box<dyn Fn(&C)>;
 
 /// A registry of spawn actions keyed by manifest task name, invoked in the
 /// manifest's resolved dependency order by [`dispatch_in_order`]. Generic over the
-/// spawn context `C` (the live path passes `&Arc<ServiceState>`; tests pass a mock),
-/// so the ordering + drift logic is unit-tested without a runtime.
+/// spawn context type `C` — each action receives `&C`, and [`dispatch_in_order`]
+/// takes `ctx: &C`. The live path uses `C = Arc<ServiceState>` (actions receive
+/// `&Arc<ServiceState>`); tests use a mock `C`, so the ordering + drift logic is
+/// unit-tested without a runtime.
 pub struct SpawnRegistry<C> {
     actions: Vec<(&'static str, SpawnAction<C>)>,
 }
@@ -301,21 +303,29 @@ impl<C> SpawnRegistry<C> {
 pub enum DispatchError {
     /// The manifest itself is unresolvable (duplicate / unknown-dep / cycle).
     Manifest(ManifestError),
-    /// A covered task name is not in the manifest.
+    /// A `cover` task name is not in the manifest.
     UnknownTask(String),
-    /// A covered task has no registered spawner.
+    /// A registered spawner's task is not in `cover` (registry↔cover drift).
+    SpawnerNotCovered(String),
+    /// A `cover` task has no registered spawner.
     MissingSpawner(String),
     /// A task was registered more than once.
     DuplicateSpawner(String),
+    /// A `cover` name appears more than once.
+    DuplicateCover(String),
 }
 
 impl std::fmt::Display for DispatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DispatchError::Manifest(e) => write!(f, "manifest unresolvable: {e}"),
-            DispatchError::UnknownTask(n) => write!(f, "covered task {n:?} is not in the manifest"),
-            DispatchError::MissingSpawner(n) => write!(f, "covered task {n:?} has no registered spawner"),
+            DispatchError::UnknownTask(n) => write!(f, "cover task {n:?} is not in the manifest"),
+            DispatchError::SpawnerNotCovered(n) => {
+                write!(f, "registered spawner {n:?} is not in the cover set")
+            }
+            DispatchError::MissingSpawner(n) => write!(f, "cover task {n:?} has no registered spawner"),
             DispatchError::DuplicateSpawner(n) => write!(f, "task {n:?} registered more than once"),
+            DispatchError::DuplicateCover(n) => write!(f, "cover task {n:?} listed more than once"),
         }
     }
 }
@@ -346,10 +356,18 @@ pub fn dispatch_in_order<C>(
         }
     }
 
-    let manifest_names: BTreeSet<&str> = manifest.iter().map(|t| t.name).collect();
-    let cover_set: BTreeSet<&str> = cover.iter().copied().collect();
+    // No duplicate cover entries (the "registry keys EXACTLY equal cover" contract
+    // is meaningless if cover itself has dups — they would silently collapse).
+    let mut cover_set: BTreeSet<&str> = BTreeSet::new();
+    for c in cover {
+        if !cover_set.insert(*c) {
+            return Err(DispatchError::DuplicateCover((*c).to_string()));
+        }
+    }
 
-    // Every covered task must be a real manifest task, and registry keys == cover.
+    let manifest_names: BTreeSet<&str> = manifest.iter().map(|t| t.name).collect();
+
+    // Every covered task must be a real manifest task with a registered spawner.
     for c in &cover_set {
         if !manifest_names.contains(c) {
             return Err(DispatchError::UnknownTask((*c).to_string()));
@@ -358,9 +376,10 @@ pub fn dispatch_in_order<C>(
             return Err(DispatchError::MissingSpawner((*c).to_string()));
         }
     }
+    // Every registered spawner must be in cover (registry↔cover drift).
     for r in &registered {
         if !cover_set.contains(r) {
-            return Err(DispatchError::UnknownTask((*r).to_string()));
+            return Err(DispatchError::SpawnerNotCovered((*r).to_string()));
         }
     }
 
@@ -516,13 +535,13 @@ mod tests {
             Err(DispatchError::MissingSpawner("a".into()))
         );
 
-        // A spawner for a task not in `cover`.
+        // A spawner for a task not in `cover` (registry↔cover drift).
         let mut reg = SpawnRegistry::<Recorder>::new();
         reg.register("a", record("a"));
         reg.register("b", record("b"));
         assert_eq!(
             dispatch_in_order(&reg, &m, &["a"], &Recorder::default()),
-            Err(DispatchError::UnknownTask("b".into()))
+            Err(DispatchError::SpawnerNotCovered("b".into()))
         );
 
         // A covered task that is not in the manifest.
@@ -540,6 +559,14 @@ mod tests {
         assert_eq!(
             dispatch_in_order(&reg, &m, &["a"], &Recorder::default()),
             Err(DispatchError::DuplicateSpawner("a".into()))
+        );
+
+        // A duplicate `cover` entry.
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("a", record("a"));
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["a", "a"], &Recorder::default()),
+            Err(DispatchError::DuplicateCover("a".into()))
         );
     }
 

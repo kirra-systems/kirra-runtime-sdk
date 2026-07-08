@@ -396,7 +396,7 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     ) {
         tracing::error!(
             error = %e,
-            "execution manager: supervised-monitor dispatch failed (manifest/registry drift) — aborting (fail-closed)"
+            "execution manager: supervised-monitor dispatch failed (unresolvable manifest or registry/cover drift) — aborting (fail-closed)"
         );
         std::process::exit(1);
     }
