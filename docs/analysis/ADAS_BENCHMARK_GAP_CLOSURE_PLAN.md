@@ -9,6 +9,8 @@
 
 ## 0. Verified-status re-baseline (2026-07-08) — READ THIS FIRST
 
+> **Forward plan:** the executable successor program derived from the DD review — dependency graph, EP-xx work packages, milestones M1–M5, and the retirement list — is `docs/analysis/ENGINEERING_EXECUTION_PROGRAM.md`. New work is scheduled THERE; this document remains the WP-01…24 historical record + verified statuses.
+
 An independent, evidence-based due-diligence review (`docs/analysis/ADAS_BENCHMARK_DD_REVIEW.md`) verified every WP claim below against the actual code, tests, and CI — not this document. Its corrections are AUTHORITATIVE over the per-WP status rows:
 
 - **"DONE" below means "CORE DONE" for six items** whose implementations exist and are tested but have **no live consumer yet**: WP-19's lease (the live promotion loop still runs the legacy 10 s heartbeat — the ≤5 s failover property is NOT yet delivered), WP-22's EVT/pWCET (zero callers), WP-24's `model_lineage`/`ood`/`model_targets`, WP-18's `EpochFence`/`NodeStore` traits (not consumed generically) and the Postgres migration backend (mock executor only — no real PG driver exists).
