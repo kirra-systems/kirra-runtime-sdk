@@ -218,6 +218,40 @@ jobs:
         # never silently rot if the unification path changes.
         run: cargo test -p kirra-core --features capture --locked
 
+  miri:
+    name: Miri — seqlock UB/memory-model check (EP-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Miri interprets the program against Rust's memory model, catching UB and
+    # (with many seeds) weak-memory/data-race bugs the type system cannot. The
+    # lane covers the Clause-2 CONTRACT PROTOCOL — the seqlock trust chain in
+    # kirra-contract-channel, including the concurrent writer/reader torn-read
+    # test (iteration count auto-scaled under cfg(miri)).
+    #
+    # kirra-hv-carrier is EXCLUDED, deliberately: Miri cannot interpret the
+    # `shm_open`/`mmap` FFI its mapping needs ("can't call foreign function
+    # `shm_open`"). Its unsafe budget is bounded + enumerated (ADR-0030 Clause
+    # A), its AtomicView layout is compile-time-asserted against the frozen
+    # contract, and its atomic ORDERINGS reproduce InProcessRegion's exactly —
+    # which is what this lane Miri-checks. The mapping itself is exercised by
+    # the cross-process tests in the inline-governor job.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+        with:
+          components: miri
+      - name: Contract-channel under Miri (lib + integration + doctests)
+        run: cargo miri test -p kirra-contract-channel --locked
+      - name: Seqlock writer/reader race under many seeds
+        # -Zmiri-many-seeds re-runs the nondeterministic schedule with 16
+        # different seeds, exploring distinct interleavings of the concurrent
+        # torn-read test — the closest Miri gets to a schedule sweep.
+        env:
+          MIRIFLAGS: "-Zmiri-many-seeds=0..16"
+        run: cargo miri test -p kirra-contract-channel --lib --locked concurrent
+
   inline-governor:
     name: In-line governor loop (EP-01) — fault matrix + cross-process demo
     runs-on: ubuntu-latest
