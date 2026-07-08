@@ -105,7 +105,14 @@ src/
 │                               migrations_postgres.rs: PostgresBackend<E: PgExecutor> —
 │                               the same engine over a kirra_schema_version table + injected
 │                               executor seam (no tokio-postgres dep; driver binding is
-│                               the integrator's ~10-line adapter)
+│                               the integrator's ~10-line adapter).
+│                               WP-18 3/3: epoch.rs also defines the EpochFence storage
+│                               trait (current_epoch/current_active_holder/try_claim_epoch
+│                               CAS/assert_actuator_epoch_held) — the first VerifierStorage-
+│                               family seam; VerifierStore impls it (inherent methods win
+│                               resolution → non-breaking), InMemoryEpochFence is the
+│                               portability-proof 2nd backend, a generic conformance test
+│                               runs the at-most-one-writer contract against both
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,
