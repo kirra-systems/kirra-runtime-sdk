@@ -122,6 +122,9 @@ pub fn spawn_campaign_monitor_with_clock(
                     sweep.tick().await;
                     let now = clock.now_ms();
                     let confirmed = confirmed_posture(&posture_cache);
+                    // EP-11: time this sweep against the manifest's deadline budget
+                    // (observability; NonCritical — never escalates).
+                    let sweep_start_ms = now;
                     // Store I/O off the async thread (StoreHandle::call → spawn_blocking).
                     match app
                         .store
@@ -140,6 +143,8 @@ pub fn spawn_campaign_monitor_with_clock(
                         }
                         Err(_) => tracing::error!("campaign monitor sweep task failed"),
                     }
+                    let elapsed_ms = clock.now_ms().saturating_sub(sweep_start_ms);
+                    app.deadline_registry.record("campaign_monitor", elapsed_ms);
                 }
             }
         },
