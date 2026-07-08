@@ -342,6 +342,121 @@ mod tests {
     }
 
     #[test]
+    fn every_non_finite_operand_position_yields_none() {
+        // `cumulative_arc` guards all four coordinates of each window; a NaN
+        // or Inf in ANY position must degrade to the tangent frame, so each
+        // operand's failing side is pinned individually (not just one).
+        let good = vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 10.0, y_m: -5.0 }];
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for (bx, by, gx, gy) in [
+                (bad, 5.0, 10.0, 5.0), // w[0].x
+                (0.0, bad, 10.0, 5.0), // w[0].y
+                (0.0, 5.0, bad, 5.0),  // w[1].x
+                (0.0, 5.0, 10.0, bad), // w[1].y
+            ] {
+                let poly = vec![Point { x_m: bx, y_m: by }, Point { x_m: gx, y_m: gy }];
+                assert!(
+                    CenterlineFrenet::from_boundaries(&poly, &good).is_none(),
+                    "non-finite left boundary ({bx},{by})→({gx},{gy}) must yield None"
+                );
+                assert!(
+                    CenterlineFrenet::from_boundaries(&good, &poly).is_none(),
+                    "non-finite right boundary ({bx},{by})→({gx},{gy}) must yield None"
+                );
+            }
+        }
+        // The short-boundary guard, each side individually.
+        let one = vec![Point { x_m: 0.0, y_m: 0.0 }];
+        assert!(CenterlineFrenet::from_boundaries(&one, &good).is_none());
+        assert!(CenterlineFrenet::from_boundaries(&good, &one).is_none());
+    }
+
+    #[test]
+    fn duplicate_vertices_are_skipped_not_divided_by() {
+        // A polyline may legally carry consecutive duplicate vertices (its
+        // total length stays positive, so `cumulative_arc` admits it); the
+        // resampler must step over the zero-length segments, never divide by
+        // them. Interior run of duplicates: the binary search lands inside it
+        // and the skip loop walks out.
+        let poly = vec![
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 16.0, y_m: 0.0 },
+        ];
+        let cum = cumulative_arc(&poly).unwrap();
+        assert_eq!(cum, vec![0.0, 4.0, 4.0, 4.0, 16.0]);
+        // frac 0.25 → target arc 4.0, exactly on the duplicate run.
+        let p = sample_at_fraction(&poly, &cum, 0.25);
+        assert!(p.x_m.is_finite() && p.y_m.is_finite());
+        assert!((p.x_m - 4.0).abs() < 1e-9 && p.y_m.abs() < 1e-9);
+        // Trailing duplicate: the skip loop cannot advance past the end, so
+        // the zero-length tail resolves to its start vertex (t = 0), finite.
+        let tail = vec![
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+        ];
+        let cum_t = cumulative_arc(&tail).unwrap();
+        let p = sample_at_fraction(&tail, &cum_t, 1.0);
+        assert!((p.x_m - 4.0).abs() < 1e-9 && p.y_m.abs() < 1e-9);
+        // End-to-end: boundaries carrying duplicates still build a frame whose
+        // projection matches the clean-geometry answer.
+        let dup_left: Vec<Point> = poly.iter().map(|p| Point { x_m: p.x_m, y_m: 3.0 }).collect();
+        let clean_right =
+            vec![Point { x_m: 0.0, y_m: -3.0 }, Point { x_m: 16.0, y_m: -3.0 }];
+        let f = CenterlineFrenet::from_boundaries(&dup_left, &clean_right).unwrap();
+        let c = f.project(Point { x_m: 8.0, y_m: 1.0 }).unwrap();
+        assert!((c.s - 8.0).abs() < 1e-9 && (c.d - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pinched_corridor_whose_midpoints_all_coincide_yields_none() {
+        // Left traced +x, right traced the OPPOSITE way: every matched-fraction
+        // midpoint lands on the same point, the duplicate collapse reduces the
+        // centerline to one vertex, and the constructor refuses (tangent-frame
+        // fallback) rather than emit a degenerate reference line.
+        let left = vec![Point { x_m: 0.0, y_m: 1.0 }, Point { x_m: 10.0, y_m: 1.0 }];
+        let right = vec![Point { x_m: 10.0, y_m: -1.0 }, Point { x_m: 0.0, y_m: -1.0 }];
+        assert!(CenterlineFrenet::from_boundaries(&left, &right).is_none());
+    }
+
+    #[test]
+    fn zero_length_interior_segment_is_stepped_over_defensively() {
+        // `from_boundaries` collapses duplicates, so a zero-length centerline
+        // segment cannot arise through the constructor — but the traversals
+        // (`total_heading_change_rad`, `project`) still guard it. Pin the
+        // defensive arms directly.
+        let f = CenterlineFrenet {
+            pts: vec![
+                Point { x_m: 0.0, y_m: 0.0 },
+                Point { x_m: 5.0, y_m: 0.0 },
+                Point { x_m: 5.0, y_m: 0.0 },
+                Point { x_m: 10.0, y_m: 0.0 },
+            ],
+            cum_s: vec![0.0, 5.0, 5.0, 10.0],
+        };
+        // The zero segment contributes no heading change: still straight.
+        assert!(f.total_heading_change_rad().abs() < 1e-12);
+        assert!(f.is_effectively_straight());
+        // Projection ignores the zero segment and answers from the real ones.
+        let c = f.project(Point { x_m: 7.0, y_m: 1.5 }).unwrap();
+        assert!((c.s - 7.0).abs() < 1e-9 && (c.d - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn projection_keeps_the_nearest_segment_not_the_last() {
+        // A point beside the FIRST segment of a long bent line: later segments
+        // are all farther, so the best-candidate branch must decline them (the
+        // "not better" side), and the answer stays on segment 0.
+        let (l, r) = arc_boundaries(30.0, 2.0, std::f64::consts::FRAC_PI_2, 40);
+        let f = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
+        let c = f.project(Point { x_m: 0.5, y_m: 0.2 }).unwrap();
+        assert!(c.s < 2.0, "nearest the arc start, s = {}", c.s);
+    }
+
+    #[test]
     fn mismatched_vertex_counts_still_center_the_lane() {
         // Left has 2 vertices, right has 7 (same geometry) — matched-fraction
         // resampling must not skew the centerline.

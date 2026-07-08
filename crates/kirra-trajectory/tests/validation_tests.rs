@@ -1,4 +1,4 @@
-// crates/kirra-ros2-adapter/tests/validation_tests.rs
+// crates/kirra-trajectory/tests/validation_tests.rs
 //
 // S131 Phase 2A — integration tests for the slow-loop validator.
 //
@@ -8,7 +8,7 @@
 // the corridor seam (Phase 2B replaces it with the real
 // Lanelet2CorridorSource).
 
-use kirra_ros2_adapter::{
+use kirra_trajectory::{
     config::VehicleConfig,
     corridor::{MockCorridorSource, Point},
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
@@ -654,18 +654,9 @@ fn degraded_with_corridor_breach_still_mrcs() {
         "Degraded + corridor breach must still MRC — most-restrictive-wins; got {verdict:?}");
 }
 
-#[test]
-fn nominal_behavior_matches_prior_default() {
-    // Regression: every prior test in this file passed Nominal explicitly
-    // (above). This test pins the rule that Nominal is the construction
-    // default for `AdaptorState::current_posture` — until M1b wires a
-    // live posture source, the slow-loop verdict is byte-for-byte the
-    // pre-M1 behaviour.
-    use kirra_ros2_adapter::state::AdaptorState;
-    let state = AdaptorState::new();
-    assert_eq!(state.current_posture(), FleetPosture::Nominal,
-        "AdaptorState must default to Nominal so pre-M1 callers see no behaviour change");
-}
+// (`nominal_behavior_matches_prior_default` — the AdaptorState construction-
+// default pin — stays in the adapter crate: `AdaptorState` is adapter-LOCAL,
+// so it lives in `kirra-ros2-adapter/tests/adaptor_state_default.rs`.)
 
 // ---------------------------------------------------------------------------
 // 7. H2 + M1 reconciliation — the proof test
@@ -728,7 +719,7 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
 // Limited-visibility / occlusion bound (RSS Rule 4)
 // ---------------------------------------------------------------------------
 
-use kirra_ros2_adapter::validation::validate_trajectory_slow_capped;
+use kirra_trajectory::validation::validate_trajectory_slow_capped;
 
 /// A decel-to-stop straight trajectory: starts at `v0`, brakes at `decel` to 0,
 /// then holds. Stays at y=0 from x=5 (inside the corridor).
@@ -824,7 +815,7 @@ fn occlusion_admits_a_decel_to_stop_within_visibility() {
 // Multi-modal predictive RSS (space-time over predicted modes)
 // ---------------------------------------------------------------------------
 
-use kirra_ros2_adapter::validation::{PredictedMode, PredictedSample};
+use kirra_trajectory::validation::{PredictedMode, PredictedSample};
 
 /// Build a predicted mode: an object moving in a straight line from `(x0,y0)` at
 /// `(vx,vy)` m/s, sampled every 0.5 s over `horizon_s`.
@@ -1167,7 +1158,7 @@ fn predictive_rss_catches_a_mid_band_lateral_cut_in() {
 // perceived objects into modes the checker then acts on — the bridge that makes the multi-modal
 // pass run against real perception instead of dormant `None`.
 
-use kirra_ros2_adapter::prediction::predicted_modes_from_objects;
+use kirra_trajectory::prediction::predicted_modes_from_objects;
 
 fn perceived(id: u64, x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
     PerceivedObject {
@@ -1542,8 +1533,8 @@ fn in_place_rotation_seq(omegas: &[f64], dt: f64) -> Vec<TrajectoryPoint> {
 }
 
 /// Ego odometry snapshot carrying a current yaw rate (linear stopped).
-fn odom_yaw(yaw_rate_rads: f64) -> kirra_ros2_adapter::state::EgoOdom {
-    kirra_ros2_adapter::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
+fn odom_yaw(yaw_rate_rads: f64) -> kirra_trajectory::state::EgoOdom {
+    kirra_trajectory::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
 }
 
 #[test]
