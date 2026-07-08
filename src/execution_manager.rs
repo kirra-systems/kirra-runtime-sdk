@@ -129,8 +129,11 @@ pub enum ManifestError {
     DuplicateTask(String),
     /// A task depends on a name not in the manifest.
     MissingDependency { task: String, dep: String },
-    /// The dependency graph has a cycle; the listed tasks are the unresolvable set.
-    DependencyCycle(Vec<String>),
+    /// A dependency CYCLE makes an ordering impossible. The payload is the full set
+    /// of tasks that could NOT be ordered — the cycle members AND any tasks that
+    /// (transitively) depend on the cycle (Kahn's algorithm leaves BOTH un-emitted),
+    /// so a listed task is not necessarily a cycle member itself.
+    Unorderable(Vec<String>),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -140,9 +143,11 @@ impl std::fmt::Display for ManifestError {
             ManifestError::MissingDependency { task, dep } => {
                 write!(f, "task {task:?} depends on unknown task {dep:?}")
             }
-            ManifestError::DependencyCycle(c) => {
-                write!(f, "dependency cycle among tasks {c:?}")
-            }
+            ManifestError::Unorderable(tasks) => write!(
+                f,
+                "unresolvable dependency cycle: these tasks could not be ordered \
+                 (a cycle among them and/or tasks blocked by one): {tasks:?}"
+            ),
         }
     }
 }
@@ -190,12 +195,14 @@ pub fn resolve_startup_order(manifest: &[TaskSpec]) -> Result<Vec<&'static str>,
         }
     }
     if order.len() != n {
-        // The un-emitted tasks are exactly those in (or fed only by) a cycle.
-        let cycle: Vec<String> = (0..n)
+        // Kahn's leaves un-emitted every task in a cycle AND every task that
+        // (transitively) depends on one — the full unorderable set, not just the
+        // cycle members. Report all of it (see `ManifestError::Unorderable`).
+        let unorderable: Vec<String> = (0..n)
             .filter(|&i| !emitted[i])
             .map(|i| manifest[i].name.to_string())
             .collect();
-        return Err(ManifestError::DependencyCycle(cycle));
+        return Err(ManifestError::Unorderable(unorderable));
     }
     Ok(order)
 }
@@ -282,10 +289,26 @@ mod tests {
     fn a_cycle_is_refused_fail_closed() {
         let m = [spec("a", &["c"]), spec("b", &["a"]), spec("c", &["b"])];
         match resolve_startup_order(&m) {
-            Err(ManifestError::DependencyCycle(cycle)) => {
-                assert_eq!(cycle.len(), 3, "all three tasks are in the cycle");
+            Err(ManifestError::Unorderable(tasks)) => {
+                assert_eq!(tasks.len(), 3, "all three tasks are in the cycle");
             }
-            other => panic!("expected a cycle error, got {other:?}"),
+            other => panic!("expected an unorderable error, got {other:?}"),
+        }
+    }
+
+    /// The unorderable set includes tasks merely BLOCKED by a cycle, not only the
+    /// cycle members (Copilot #865): `a↔b` is the 2-cycle; `d` depends on it and is
+    /// also un-emittable, so all three are reported.
+    #[test]
+    fn the_unorderable_set_includes_blocked_dependents() {
+        let m = [spec("a", &["b"]), spec("b", &["a"]), spec("d", &["a"])];
+        match resolve_startup_order(&m) {
+            Err(ManifestError::Unorderable(tasks)) => {
+                for t in ["a", "b", "d"] {
+                    assert!(tasks.contains(&t.to_string()), "{t} must be in the unorderable set");
+                }
+            }
+            other => panic!("expected an unorderable error, got {other:?}"),
         }
     }
 
