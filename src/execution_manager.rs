@@ -252,6 +252,80 @@ pub fn manifest_task_names() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// WP-20 slice 2c — deadline-miss observability
+//
+// slice 1 defined per-task `deadline_ms` budgets + a `DeadlineStats` counter but
+// left the wiring as follow-up. This registry closes the OBSERVABILITY half: one
+// `DeadlineStats` per manifest task that declares a budget, RECORDED by that
+// task's loop and EXPORTED on `/metrics` (`kirra_task_deadline_*`). Lock-free —
+// the map is built once at startup and the per-task counters mutate via atomics,
+// so the task loop records and the scrape reads without contention. (Feeding a
+// sustained miss into supervisor posture escalation is a control-path change,
+// recorded as follow-up; this is read-only observability.)
+// ---------------------------------------------------------------------------
+
+/// Per-task deadline-miss counters for every manifest task with a `deadline_ms`
+/// budget. Shared (`Arc`) between the task loops (which [`record`](Self::record))
+/// and `/metrics` (which reads via [`append_prometheus`](Self::append_prometheus)).
+#[derive(Debug)]
+pub struct DeadlineRegistry {
+    /// task name → (deadline budget ms, its `DeadlineStats` — cycles + misses).
+    tasks: BTreeMap<&'static str, (u64, DeadlineStats)>,
+}
+
+impl DeadlineRegistry {
+    /// One entry per manifest task that declares a `deadline_ms` budget.
+    #[must_use]
+    pub fn from_manifest(manifest: &[TaskSpec]) -> Self {
+        let tasks = manifest
+            .iter()
+            .filter_map(|t| t.deadline_ms.map(|d| (t.name, (d, DeadlineStats::default()))))
+            .collect();
+        Self { tasks }
+    }
+
+    /// Record one cycle of `task` against its declared deadline. Returns `true`
+    /// IFF this cycle MISSED (exceeded) the budget. `false` therefore covers BOTH
+    /// an on-time cycle of a budgeted task AND a task with no budget / not in the
+    /// manifest — the latter is a harmless no-op (an unbudgeted loop is never a
+    /// "miss"), so the return value is strictly "did this cycle overrun?", not
+    /// "was it recorded?".
+    pub fn record(&self, task: &str, elapsed_ms: u64) -> bool {
+        match self.tasks.get(task) {
+            Some((deadline_ms, stats)) => stats.record(elapsed_ms, *deadline_ms),
+            None => false,
+        }
+    }
+
+    /// The miss counter for a budgeted task (`None` if unbudgeted) — for tests +
+    /// direct observability.
+    #[must_use]
+    pub fn stats(&self, task: &str) -> Option<&DeadlineStats> {
+        self.tasks.get(task).map(|(_, s)| s)
+    }
+
+    /// Append the Prometheus deadline series — one labelled line per budgeted task
+    /// for cycles observed and cycles that missed. Counters (monotonic).
+    pub fn append_prometheus(&self, out: &mut String) {
+        use std::fmt::Write;
+        out.push_str(
+            "# HELP kirra_task_deadline_cycles_total Supervised-task cycles observed against a per-cycle deadline budget.\n\
+             # TYPE kirra_task_deadline_cycles_total counter\n",
+        );
+        for (name, (_, stats)) in &self.tasks {
+            let _ = writeln!(out, "kirra_task_deadline_cycles_total{{task=\"{name}\"}} {}", stats.cycles());
+        }
+        out.push_str(
+            "# HELP kirra_task_deadline_misses_total Supervised-task cycles that exceeded their deadline budget.\n\
+             # TYPE kirra_task_deadline_misses_total counter\n",
+        );
+        for (name, (_, stats)) in &self.tasks {
+            let _ = writeln!(out, "kirra_task_deadline_misses_total{{task=\"{name}\"}} {}", stats.misses());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WP-20 slice 2b — manifest-driven spawn dispatch
 //
 // slice 2a resolves the manifest at boot (a fail-closed gate); slice 2b makes the
@@ -586,5 +660,41 @@ mod tests {
     fn manifest_task_names_lists_every_task() {
         assert_eq!(manifest_task_names().len(), TASK_MANIFEST.len());
         assert!(manifest_task_names().contains(&"posture_engine_worker"));
+    }
+
+    // --- WP-20 slice 2c: deadline-miss observability ---
+
+    #[test]
+    fn deadline_registry_covers_only_budgeted_manifest_tasks() {
+        let reg = DeadlineRegistry::from_manifest(TASK_MANIFEST);
+        // telemetry_watchdog declares deadline_ms = Some(100); the rest are None.
+        assert!(reg.stats("telemetry_watchdog").is_some(), "the watchdog is budgeted");
+        assert!(reg.stats("posture_engine_worker").is_none(), "an unbudgeted task is not tracked");
+        assert!(reg.stats("not_a_task").is_none());
+    }
+
+    #[test]
+    fn deadline_registry_records_only_budgeted_tasks() {
+        let reg = DeadlineRegistry::from_manifest(TASK_MANIFEST);
+        // Under budget, then over budget (deadline is 100).
+        assert!(!reg.record("telemetry_watchdog", 50));
+        assert!(reg.record("telemetry_watchdog", 150), "over budget is a miss");
+        let s = reg.stats("telemetry_watchdog").unwrap();
+        assert_eq!(s.cycles(), 2);
+        assert_eq!(s.misses(), 1);
+        // Recording an unbudgeted / unknown task is a harmless no-op.
+        assert!(!reg.record("posture_engine_worker", 9_999));
+        assert!(!reg.record("ghost", 9_999));
+    }
+
+    #[test]
+    fn deadline_registry_prometheus_has_labelled_counters() {
+        let reg = DeadlineRegistry::from_manifest(TASK_MANIFEST);
+        reg.record("telemetry_watchdog", 150); // one miss
+        let mut out = String::new();
+        reg.append_prometheus(&mut out);
+        assert!(out.contains("# TYPE kirra_task_deadline_cycles_total counter"));
+        assert!(out.contains("kirra_task_deadline_cycles_total{task=\"telemetry_watchdog\"} 1"));
+        assert!(out.contains("kirra_task_deadline_misses_total{task=\"telemetry_watchdog\"} 1"));
     }
 }
