@@ -30,6 +30,13 @@ pub mod localization;
 // #G16 — model-integrity allow-list: SHA-256 the model file and reject a
 // substituted artifact against the operator allow-list before it can run.
 pub mod model_integrity;
+// WP-24 (G-15 software half, part a) — model lineage: rollback-to-last-good over
+// the integrity verdict (deny-by-default when there is no known-good artifact).
+pub mod model_lineage;
+// WP-24 (G-15 software half, part b) — OOD / input-shift monitor: confidence-
+// distribution drift vs a calibration baseline → an escalation-only posture
+// recommendation (derate-only, fail-closed).
+pub mod ood;
 pub mod rss;
 pub mod runtime;
 // SG4 — WATER_UNTRAVERSABLE governor veto (depth-free, bounded-worst-case, #98).
@@ -65,6 +72,13 @@ pub use backend::{
 pub use model_integrity::{
     sha256_file, verify_model_file, ModelAllowList, VerifiedModel, MODEL_ALLOWLIST_ENV,
     MODEL_ALLOWLIST_STRICT_ENV,
+};
+
+pub use model_lineage::{LineageDecision, ModelLineage};
+
+pub use ood::{
+    CalibrationBaseline, OodAssessment, OodError, OodMonitor, OodReason, DEFAULT_FAULT_PSI,
+    DEFAULT_MIN_WINDOW, DEFAULT_WARN_PSI, MIN_CALIBRATION_SAMPLES,
 };
 
 pub use backend_selector::{
