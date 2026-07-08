@@ -13,7 +13,10 @@
 //! promotes by claiming the next durable epoch, and the old primary is then FENCED
 //! out of writing.
 
-use kirra_verifier::lease::{lease_expired, should_promote, LeaseParams, DEFAULT_LEASE_TTL_MS};
+use kirra_verifier::lease::{
+    holder_must_self_demote, lease_expired, promotion_due_since_renew, should_promote, LeaseParams,
+    DEFAULT_LEASE_TTL_MS,
+};
 use kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS;
 use kirra_verifier::standby_monitor::{
     should_self_demote_on_heartbeat_failures, HEARTBEAT_INTERVAL_MS, HEARTBEAT_KEY,
@@ -147,4 +150,76 @@ fn lease_timing_leaves_no_split_brain_window_and_is_faster() {
         p.promote_after_ms,
         PROMOTION_TIMEOUT_MS
     );
+}
+
+/// WP-19 slice 2 — the DURABLE lease driving failover, end to end at the store
+/// level (the real `renew_lease` / `read_ha_lease` over the `ha_state` epoch row +
+/// the real `try_claim_epoch` CAS + `assert_actuator_epoch_held` fence over two
+/// connections to one file). Proves the lease is a faithful liveness signal AND
+/// that promotion-on-lease-expiry composes with the split-brain fence: a live
+/// holder keeps its lease fresh (challenger stays down); a dead holder's lease
+/// goes stale (challenger promotes); and a REVIVED old holder's renewal is refused
+/// by the same epoch+holder guard, forcing its self-demote. Deterministic — no
+/// async monitors, no wall-clock timers. Wiring these store ops into the live
+/// `standby_monitor` async loops (a renew sub-loop + the promotion-trigger flip) is
+/// the recorded final step, which needs a live multi-node drill to validate.
+#[test]
+fn lease_driven_failover_promotes_and_fences_using_the_durable_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("verifier.sqlite");
+    let path = db.to_str().unwrap();
+    let p = LeaseParams::default_params();
+
+    let mut a = VerifierStore::new(path).expect("open primary A");
+    let mut b = VerifierStore::new(path).expect("open standby B");
+
+    // --- A claims the epoch and establishes its lease (renew at claim time) ---
+    let e0 = a.current_epoch().unwrap();
+    let e1 = a.try_claim_epoch(e0, "A", 1_000).unwrap().expect("A claims the epoch");
+    assert!(a.renew_lease("A", e1, 1_000).unwrap(), "A holds the epoch → its renewal lands");
+
+    // --- A live holder keeps its lease fresh; the standby must NOT promote ---
+    let renew_at = 1_000 + p.renew_interval_ms; // A renews at half-life
+    assert!(a.renew_lease("A", e1, renew_at).unwrap(), "A renews at half-life");
+    let lease = b.read_ha_lease().unwrap();
+    assert_eq!(lease.epoch, e1);
+    assert_eq!(lease.holder.as_deref(), Some("A"));
+    assert_eq!(lease.last_renew_ms, renew_at, "B observes A's fresh renewal");
+    // Just after the renewal, B is not allowed to promote and A need not self-demote.
+    assert!(!promotion_due_since_renew(renew_at + 10, lease.last_renew_ms, &p));
+    assert!(!holder_must_self_demote(renew_at + 10, lease.last_renew_ms, &p));
+
+    // --- A dies (stops renewing). Time advances past the promote deadline ---
+    let now = renew_at + p.promote_after_ms;
+    let lease = b.read_ha_lease().unwrap();
+    assert!(
+        holder_must_self_demote(now, lease.last_renew_ms, &p),
+        "A's own lease has long expired → A must have self-demoted"
+    );
+    assert!(
+        promotion_due_since_renew(now, lease.last_renew_ms, &p),
+        "the stale durable lease is B's promotion trigger"
+    );
+
+    // --- B promotes by claiming the NEXT epoch (real CAS) and takes the lease ---
+    let observed = b.current_epoch().unwrap();
+    assert_eq!(observed, e1);
+    let e2 = b.try_claim_epoch(observed, "B", now).unwrap().expect("B wins the claim");
+    assert!(b.renew_lease("B", e2, now).unwrap(), "B now holds and renews the lease");
+    b.assert_actuator_epoch_held(e2).expect("B holds the epoch → its writes are admitted");
+
+    // --- SPLIT-BRAIN FENCE: the revived old holder A cannot renew NOR write ---
+    assert!(
+        !a.renew_lease("A", e1, now + 1).unwrap(),
+        "A's renewal at its STALE epoch is refused by the epoch+holder guard → A self-demotes"
+    );
+    assert!(
+        a.assert_actuator_epoch_held(e1).is_err(),
+        "the fenced old holder A cannot write (epoch superseded)"
+    );
+    // The lease still names B — A's refused renewal did not touch it.
+    let lease = a.read_ha_lease().unwrap();
+    assert_eq!(lease.epoch, e2);
+    assert_eq!(lease.holder.as_deref(), Some("B"), "B is the sole holder — no split brain");
+    assert_eq!(lease.last_renew_ms, now, "the lease carries B's renewal, not A's refused write");
 }
