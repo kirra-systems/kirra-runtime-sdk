@@ -12,18 +12,24 @@
 //! string — closing the "the allow-list is an operator ASSERTION, not a signed
 //! FACT" gap the #G16 allow-list left open.
 //!
-//! **Fail-closed composes end to end.** No verified manifest → the caller derives
-//! NO allow-list → an empty `KIRRA_MODEL_ALLOWLIST` under parko's STRICT mode
-//! denies every model (deny-by-default). This module is PURE: it never verifies a
-//! signature itself — the caller must present an already-verified
-//! [`VerifiedUpdate`](crate::uptane::VerifiedUpdate), which
-//! is ONLY obtainable from the fail-closed `verify_update`, so the type system
-//! guarantees that only a cryptographically-verified manifest can ever be
-//! projected onto an allow-list.
+//! **Type-enforced provenance.** These helpers take a
+//! [`VerifiedUpdate`](crate::uptane::VerifiedUpdate), whose fields are private and
+//! whose ONLY producer is the fail-closed `verify_update`. So the type itself
+//! proves the manifest was cryptographically verified — an external caller cannot
+//! forge one to derive an allow-list.
+//!
+//! **Deny-by-default is a STRICT-mode composition, not automatic.** A node that
+//! wants "no signed manifest ⇒ run nothing" MUST also set
+//! `KIRRA_MODEL_ALLOWLIST_STRICT` (parko's `ModelAllowList` strict flag): with
+//! strict ON, an empty/absent `KIRRA_MODEL_ALLOWLIST` denies EVERY model
+//! (deny-by-default), so only digests from a verified manifest ever load. WITHOUT
+//! strict, an EMPTY allow-list means enforcement is OFF (models are accepted) —
+//! so a node relying on fail-closed behaviour must enable strict. This module
+//! never decides that policy; it only projects the signed digests.
 //!
 //! Node wiring (the thin remaining step): after `verify_update`, call
 //! [`model_allowlist_env_value`](crate::model_targets::model_allowlist_env_value)
-//! and set `KIRRA_MODEL_ALLOWLIST` for the
+//! and set `KIRRA_MODEL_ALLOWLIST` (plus `KIRRA_MODEL_ALLOWLIST_STRICT=1`) for the
 //! co-located parko process. Wiring parko's backend `load_model` to the
 //! `ModelLineage` rollback and feeding the OOD monitor live per-tick confidences
 //! in `run_pipeline_tick` are the recorded parko-side follow-ups (hardware / ROS2
@@ -31,38 +37,51 @@
 
 use crate::uptane::{TargetEntry, VerifiedUpdate};
 
-/// The authorized model digests (lowercase SHA-256 hex) from a VERIFIED signed
-/// targets manifest — the signed allow-set, in manifest order.
+/// The authorized model digests from a VERIFIED signed targets manifest, verbatim
+/// (manifest order, original case). For a policy value use
+/// [`model_allowlist_env_value`], which canonicalizes to lowercase to match
+/// parko's case-insensitive allow-list parse.
 #[must_use]
 pub fn authorized_model_digests(verified: &VerifiedUpdate) -> Vec<&str> {
-    verified.targets.targets.iter().map(|t| t.digest_hex.as_str()).collect()
+    verified.targets().targets.iter().map(|t| t.digest_hex.as_str()).collect()
 }
 
 /// The `KIRRA_MODEL_ALLOWLIST` env value parko's `ModelAllowList::parse` consumes,
-/// DERIVED from the signed targets: the authorized digests, comma-separated. A
-/// node sets this for its co-located parko process AFTER `verify_update`, so the
-/// model allow-list is a signed fact, not an operator assertion. Empty when the
-/// manifest authorizes no targets (→ under parko strict mode, deny every model).
+/// DERIVED from the signed targets: the authorized digests, **lowercased** (parko
+/// parses digests case-insensitively, so canonicalizing here keeps the env policy
+/// and the [`is_model_authorized`] lookups consistent), comma-separated. A node
+/// sets this for its co-located parko process AFTER `verify_update`, so the model
+/// allow-list is a signed fact, not an operator assertion. Empty when the manifest
+/// authorizes no targets (→ under parko STRICT mode, deny every model).
 #[must_use]
 pub fn model_allowlist_env_value(verified: &VerifiedUpdate) -> String {
-    authorized_model_digests(verified).join(",")
+    verified
+        .targets()
+        .targets
+        .iter()
+        .map(|t| t.digest_hex.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The authorizing entry (digest + length + version) for `model_digest`, if the
 /// verified manifest authorizes it — the signed lineage record for a model the
-/// node is about to load.
+/// node is about to load. Case-INSENSITIVE (Uptane digests are lowercase hex, but
+/// this matches parko's case-insensitive allow-list parse so authorization is
+/// consistent regardless of the caller's digest case).
 #[must_use]
 pub fn authorized_model_entry<'a>(
     verified: &'a VerifiedUpdate,
     model_digest: &str,
 ) -> Option<&'a TargetEntry> {
-    verified.targets.find(model_digest)
+    verified.targets().targets.iter().find(|t| t.digest_hex.eq_ignore_ascii_case(model_digest))
 }
 
-/// Is `model_digest` authorized by the verified signed manifest?
+/// Is `model_digest` authorized by the verified signed manifest? Case-insensitive
+/// (see [`authorized_model_entry`]).
 #[must_use]
 pub fn is_model_authorized(verified: &VerifiedUpdate, model_digest: &str) -> bool {
-    verified.targets.find(model_digest).is_some()
+    authorized_model_entry(verified, model_digest).is_some()
 }
 
 #[cfg(test)]
@@ -84,14 +103,39 @@ mod tests {
         TargetEntry { digest_hex: digest.to_string(), length_bytes: 1024, version: version.to_string() }
     }
 
+    /// Mint a consistent role keyset + a signed `targets`/`snapshot`/`timestamp`
+    /// set carrying `models`, and return the `VerifiedUpdate` from the REAL
+    /// `verify_update`. `VerifiedUpdate` has no public constructor (sealed to prove
+    /// provenance), so every projection test obtains one only through verification
+    /// — the boundary is real, not mocked.
     fn verified_with(models: Vec<TargetEntry>) -> VerifiedUpdate {
-        // The projection functions take a VerifiedUpdate (whose fields are public);
-        // constructing one directly exercises the projection cleanly. The end-to-end
-        // signature→verify→derive path is proven separately below.
-        VerifiedUpdate {
-            targets: TargetsMetadata { version: 5, expires_at_ms: EXP, targets: models },
-            new_versions: TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 },
-        }
+        let root_sk = SigningKey::from_bytes(&[1u8; 32]);
+        let targets_sk = SigningKey::from_bytes(&[2u8; 32]);
+        let snapshot_sk = SigningKey::from_bytes(&[3u8; 32]);
+        let timestamp_sk = SigningKey::from_bytes(&[4u8; 32]);
+        let root = RootMetadata {
+            version: 1,
+            expires_at_ms: EXP,
+            root_key: root_sk.verifying_key().to_bytes(),
+            targets_key: targets_sk.verifying_key().to_bytes(),
+            snapshot_key: snapshot_sk.verifying_key().to_bytes(),
+            timestamp_key: timestamp_sk.verifying_key().to_bytes(),
+        };
+        let targets = TargetsMetadata { version: 5, expires_at_ms: EXP, targets: models };
+        let snapshot = SnapshotMetadata { version: 5, expires_at_ms: EXP, targets_version: 5 };
+        let timestamp = TimestampMetadata { version: 5, expires_at_ms: EXP, snapshot_version: 5 };
+        verify_update(
+            &root,
+            TrustedVersions::default(),
+            NOW,
+            &timestamp,
+            &sign_timestamp(&timestamp, &timestamp_sk),
+            &snapshot,
+            &sign_snapshot(&snapshot, &snapshot_sk),
+            &targets,
+            &sign_targets(&targets, &targets_sk),
+        )
+        .expect("a consistent signed manifest verifies")
     }
 
     #[test]
@@ -111,9 +155,19 @@ mod tests {
     }
 
     #[test]
+    fn authorization_and_env_value_are_case_insensitive_consistently() {
+        // A caller querying with an UPPERCASE digest must get the SAME answer parko
+        // would (parko lowercases both sides). The env value is canonicalized to
+        // lowercase so the env policy matches the lookup.
+        let v = verified_with(vec![model(D1, "v1")]);
+        assert!(is_model_authorized(&v, &D1.to_ascii_uppercase()), "uppercase query matches");
+        assert_eq!(model_allowlist_env_value(&v), D1, "env value is lowercase-canonical");
+    }
+
+    #[test]
     fn an_empty_manifest_yields_an_empty_allowlist() {
-        // Deny-by-default composition: no authorized model → empty KIRRA_MODEL_ALLOWLIST
-        // → parko strict mode denies every model.
+        // Deny-by-default composition (STRICT mode): no authorized model → empty
+        // KIRRA_MODEL_ALLOWLIST → under parko strict mode, deny every model.
         let v = verified_with(vec![]);
         assert_eq!(model_allowlist_env_value(&v), "");
         assert!(!is_model_authorized(&v, D1));

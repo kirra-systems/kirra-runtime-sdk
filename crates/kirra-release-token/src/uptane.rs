@@ -361,10 +361,30 @@ pub fn apply_root_rotation(
 
 /// A verified metadata update: the caller may now trust `targets` and should
 /// persist `new_versions` as its rollback floor.
+///
+/// Fields are PRIVATE and there is no public constructor — a `VerifiedUpdate` can
+/// ONLY be produced by [`verify_update`]. This is load-bearing for the WP-24
+/// model-manifest binding (`crate::model_targets`): the projection helpers take a
+/// `VerifiedUpdate`, so the type itself proves the manifest was cryptographically
+/// verified — an external caller cannot forge one to derive an allow-list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedUpdate {
-    pub targets: TargetsMetadata,
-    pub new_versions: TrustedVersions,
+    targets: TargetsMetadata,
+    new_versions: TrustedVersions,
+}
+
+impl VerifiedUpdate {
+    /// The verified `targets` metadata (the authorized artifacts).
+    #[must_use]
+    pub fn targets(&self) -> &TargetsMetadata {
+        &self.targets
+    }
+
+    /// The new trusted version floor to persist after adopting this update.
+    #[must_use]
+    pub fn new_versions(&self) -> TrustedVersions {
+        self.new_versions
+    }
 }
 
 /// The full timestamp → snapshot → targets verification, as a node performs it
