@@ -1348,6 +1348,34 @@ async fn main() {
         );
     }
 
+    // ── WP-20 s2: execution-manager boot gate (fail-closed) ──────────────
+    //
+    // The declarative task manifest (`execution_manager::TASK_MANIFEST`) is the
+    // reviewed source of truth for the supervised background loops and their
+    // dependency order. Resolve it into a startup order BEFORE any loop is
+    // spawned and ABORT if it is unorderable (duplicate / unknown-dep / cycle) —
+    // a malformed future manifest edit must never run tasks in an undefined
+    // order (the same fail-closed discipline as SG-008). The resolved order is
+    // logged so the boot record documents the canonical supervised-loop sequence.
+    // (Driving the actual spawn sites from this order + applying SchedulingClass
+    // as SCHED_FIFO/affinity syscalls + feeding DeadlineStats into /metrics are
+    // the recorded WP-20 follow-ups.)
+    match kirra_verifier::execution_manager::resolve_startup_order(
+        kirra_verifier::execution_manager::TASK_MANIFEST,
+    ) {
+        Ok(order) => tracing::info!(
+            startup_order = ?order,
+            "execution manager: task manifest resolved — supervised-loop startup order"
+        ),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "execution manager: task manifest is unorderable — aborting before spawn (fail-closed)"
+            );
+            std::process::exit(1);
+        }
+    }
+
     // ── Posture-cache freshness wiring (Active path only) ────────────────
     //
     // Without this, a fresh Active primary serves 503 for every functional
