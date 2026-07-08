@@ -1470,7 +1470,7 @@ impl Quaternion {
 
 /// One IMU observation. NOT the ROS message — that is the deferred shim's
 /// input. `orientation` is `None` when the sensor reports it unavailable
-/// (`sensor_msgs/Imu` covariance[0] = -1); it is NEVER fabricated as identity.
+/// (`sensor_msgs/Imu` `covariance[0]` = -1); it is NEVER fabricated as identity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImuSample {
     /// Linear acceleration, m/s², body frame. Includes gravity (raw
