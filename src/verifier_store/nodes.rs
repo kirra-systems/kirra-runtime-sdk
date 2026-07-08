@@ -245,6 +245,12 @@ impl NodeStore for VerifierStore {
 /// / count semantics WITHOUT a database, so the registry contract is exercised
 /// against two backends. Interior mutability (the trait's methods are `&self`,
 /// matching the SQLite `Connection`'s `&self` writes). Single-process only.
+///
+/// `Error = Infallible` is honest, not a shortcut: every method RECOVERS from a
+/// poisoned `Mutex` (`lock().unwrap_or_else(PoisonError::into_inner)`) rather than
+/// unwrapping, so a panic in another thread while holding the lock can never make
+/// a `NodeStore` op panic — the map is a plain `HashMap` with no cross-call
+/// invariant a torn write could break, so the recovered data is safe to use.
 #[derive(Debug, Default)]
 pub struct InMemoryNodeStore {
     nodes: std::sync::Mutex<std::collections::HashMap<String, RegisteredNode>>,
@@ -254,20 +260,20 @@ impl NodeStore for InMemoryNodeStore {
     type Error = std::convert::Infallible;
 
     fn save_node(&self, node: &RegisteredNode) -> std::result::Result<(), std::convert::Infallible> {
-        self.nodes.lock().unwrap().insert(node.node_id.clone(), node.clone());
+        self.nodes.lock().unwrap_or_else(|e| e.into_inner()).insert(node.node_id.clone(), node.clone());
         Ok(())
     }
     fn load_node(&self, node_id: &str) -> std::result::Result<Option<RegisteredNode>, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap().get(node_id).cloned())
+        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).get(node_id).cloned())
     }
     fn load_nodes(&self) -> std::result::Result<Vec<RegisteredNode>, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap().values().cloned().collect())
+        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect())
     }
     fn node_exists(&self, node_id: &str) -> std::result::Result<bool, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap().contains_key(node_id))
+        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).contains_key(node_id))
     }
     fn count_nodes(&self) -> std::result::Result<i64, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap().len() as i64)
+        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)
     }
 }
 
