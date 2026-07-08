@@ -308,6 +308,41 @@ jobs:
         # libkirra_verifier cdylib and runs it — keeps the C ABI examples from rotting.
         run: ./examples/c/build_and_run.sh
 
+  safety-constants:
+    name: Safety-constants provenance gate (EP-09)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Every VALIDATION-PENDING safety constant (RSS terms, redundancy
+    # tolerances, CTRV bounds, VRU caps, …) is pinned in
+    # ci/safety_constants_manifest.json with its provenance and sign-off
+    # status. This job verifies the declared values still match the manifest —
+    # a silent retune of a safety constant reds CI until the manifest is
+    # re-signed alongside it. The RELEASE path runs the same script with
+    # KIRRA_RELEASE_GATE=1, which additionally FAILS while any entry is still
+    # `pending` — no placeholder can reach a release.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: declared constants match the signed manifest
+        run: python3 ci/check_safety_constants.py
+      - name: release gate refuses pending constants (red-path self-test)
+        # Prove the release-blocking arm actually fires: with KIRRA_RELEASE_GATE=1
+        # the script must exit non-zero exactly when a `pending` entry exists.
+        # Once every constant is signed off this inverts automatically (release
+        # mode passes and this step asserts that instead).
+        run: |
+          set -euo pipefail
+          pending=$(python3 -c "import json; print(sum(1 for c in json.load(open('ci/safety_constants_manifest.json'))['constants'] if c['status'] == 'pending'))")
+          if [ "$pending" -gt 0 ]; then
+            if KIRRA_RELEASE_GATE=1 python3 ci/check_safety_constants.py; then
+              echo "release gate FAILED TO BLOCK with $pending pending constants" >&2
+              exit 1
+            fi
+            echo "release gate correctly blocks ($pending constants pending sign-off)"
+          else
+            KIRRA_RELEASE_GATE=1 python3 ci/check_safety_constants.py
+            echo "all constants signed off — release gate green"
+          fi
+
   checker-coverage:
     name: Checker decision coverage — gated floors (EP-07; true MC/DC toolchain-blocked, #65)
     runs-on: ubuntu-latest

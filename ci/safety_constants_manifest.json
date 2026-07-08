@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "description": "EP-09 — RSS / checker safety-constant provenance & sign-off manifest. Every entry is a declared `const` on a safety-relevant checker path. `status` is `pending` until a safety engineer records a sign-off (set `status` to `validated` and fill `provenance` with the evidence reference). ci/check_safety_constants.py verifies each declared value still matches this manifest on every CI run, and FAILS a release build (KIRRA_RELEASE_GATE=1) while any entry is `pending` — no silent placeholder can reach a release.",
+  "constants": [
+    {
+      "name": "RSS_REACTION_TIME_S",
+      "file": "crates/kirra-trajectory/src/validation.rs",
+      "value": "0.5",
+      "status": "pending",
+      "provenance": "IEEE 2846-2022 §5.1 canonical response time for SAE-L4 stacks (conservative end); awaiting #408 safety-case sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_LAT_BRAKE_FRACTION",
+      "file": "crates/kirra-trajectory/src/validation.rs",
+      "value": "0.7",
+      "status": "pending",
+      "provenance": "WP-07 (#408 Option A) placeholder; fraction form keeps deratings tightening-or-equal (parko-core test_lat_split_conservative_vs_legacy); deployed value must be safety-case-derived",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_MU_LATERAL_M",
+      "file": "crates/kirra-trajectory/src/validation.rs",
+      "value": "0.2",
+      "status": "pending",
+      "provenance": "IEEE 2846-2022 §5.2 lateral-fluctuation margin mu; additive so strictly conservative; placeholder pending #408 sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_LATERAL_MOTION_EPS_MPS",
+      "file": "crates/kirra-trajectory/src/validation.rs",
+      "value": "0.1",
+      "status": "pending",
+      "provenance": "Cut-in stillness threshold for the RSS §4 conjunction (admits a stationary queue, catches any real lateral closing); value needs track-data confirmation",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "OCCLUSION_SPEED_TOL_MPS",
+      "file": "crates/kirra-trajectory/src/validation.rs",
+      "value": "0.1",
+      "status": "pending",
+      "provenance": "Float-noise slack on the RSS-Rule-4 assured-clear-distance speed bound; sub-decimetre by construction, needs recorded sign-off that the slack is envelope-negligible",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M",
+      "file": "crates/kirra-trajectory/src/config.rs",
+      "value": "4.0",
+      "status": "pending",
+      "provenance": "Robotaxi lane-width-scale lateral-alignment band (per-class VehicleConfig field default; docs/CONTRACT_PROFILES.md); VALIDATION-PENDING like the other class numbers",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "DIVERGENCE_DEGRADE_MS",
+      "file": "crates/kirra-trajectory/src/perception_redundancy.rs",
+      "value": "1_000",
+      "status": "pending",
+      "provenance": "True-Redundancy divergence-to-Degraded debounce; balances phantom-flicker tolerance vs detection latency; needs FTTI-budget sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "DIVERGENCE_LOCKOUT_MS",
+      "file": "crates/kirra-trajectory/src/perception_redundancy.rs",
+      "value": "5_000",
+      "status": "pending",
+      "provenance": "Sustained-divergence-to-MRC escalation window; needs FTTI-budget sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "CTRV_YAW_EPS_RAD_S",
+      "file": "crates/kirra-trajectory/src/prediction.rs",
+      "value": "0.02",
+      "status": "pending",
+      "provenance": "Yaw-rate floor below which CTRV degrades to CV (numerical conditioning of the turn-radius division); needs tracker-noise-floor confirmation",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "CTRV_MAX_LATERAL_ACCEL_MPS2",
+      "file": "crates/kirra-trajectory/src/prediction.rs",
+      "value": "10.0",
+      "status": "pending",
+      "provenance": "Physical-plausibility cap on a predicted mode's implied lateral acceleration (~1g); needs recorded sign-off vs the object-class dynamics envelope",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "MAX_PREDICTION_STEPS",
+      "file": "crates/kirra-trajectory/src/prediction.rs",
+      "value": "512",
+      "status": "pending",
+      "provenance": "Boundedness cap on mode rollout length (WCET/memory argument, not a tuning value); sign-off = confirm it exceeds every horizon/step-size pairing in the ODD",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "LANE_FOLLOW_MIN_SPEED_MPS",
+      "file": "crates/kirra-trajectory/src/prediction.rs",
+      "value": "0.1",
+      "status": "pending",
+      "provenance": "Speed floor below which a lane-follow mode is not synthesized (heading unreliable at standstill); needs tracker-noise-floor confirmation",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "MAX_PEDESTRIANS",
+      "file": "crates/kirra-trajectory/src/vru.rs",
+      "value": "64",
+      "status": "pending",
+      "provenance": "Boundedness cap on the per-cycle VRU set (WCET argument); sign-off = confirm it exceeds the ODD's worst-case crossing crowd",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "V_PED_MAX_FLOOR_MPS",
+      "file": "crates/kirra-trajectory/src/vru.rs",
+      "value": "2.0",
+      "status": "pending",
+      "provenance": "Pedestrian worst-case-speed floor (brisk walk); deployment-tunable per ODD (vru.rs design note); needs ODD sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "VRU_STOP_EPSILON_CEILING_MPS",
+      "file": "crates/kirra-trajectory/src/vru.rs",
+      "value": "STOP_EPSILON_MPS",
+      "status": "pending",
+      "provenance": "Inherited by construction from the frozen gateway contract's STOP_EPSILON_MPS; sign-off = record the inheritance argument",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_FAILSAFE_DISTANCE_M",
+      "file": "parko/crates/parko-core/src/rss.rs",
+      "value": "1.0e6",
+      "status": "pending",
+      "provenance": "Fail-closed sentinel returned on invalid RSS inputs (NaN-division guard); sign-off = confirm it exceeds every finite safe-distance the ODD can produce",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_LONGITUDINAL_CONFLICT_M",
+      "file": "parko/crates/parko-core/src/rss.rs",
+      "value": "8.0",
+      "status": "pending",
+      "provenance": "FLOOR of the lateral-RSS longitudinal conflict window (#683/#684 — gates use max(floor, lon_required) so the window grows with closing speed); urban-minimum value needs ODD sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_LONGITUDINAL_OVERLAP_M",
+      "file": "parko/crates/parko-core/src/rss.rs",
+      "value": "2.5",
+      "status": "pending",
+      "provenance": "Passenger-vehicle footprint overlap (~two half-widths + fluctuation margin) gating longitudinal RSS; per-class values on VehicleConfig::rss_longitudinal_overlap_m (EP-08) derive from it; needs footprint-data sign-off",
+      "owner": "safety-engineering"
+    },
+    {
+      "name": "RSS_LATERAL_MOTION_EPS_MPS",
+      "file": "parko/crates/parko-core/src/rss.rs",
+      "value": "0.1",
+      "status": "pending",
+      "provenance": "Diverse-checker twin of the kirra-trajectory cut-in stillness threshold; must stay in lockstep with it; needs track-data confirmation",
+      "owner": "safety-engineering"
+    }
+  ]
+}
