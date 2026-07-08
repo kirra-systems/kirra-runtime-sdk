@@ -83,7 +83,7 @@ case is invariant to the doer; that is the whole game.
 
 ## 3. Where the Kirra stack leads
 
-1. **The assurance layer is first-class, separable, and portable.** the benchmark vendor's RSS is a
+1. **The assurance layer is first-class, separable, and portable.** The benchmark vendor's RSS is a
    peer idea but **bundled inside their vertical stack**; NVIDIA's SFF/Halos is bundled
    and proprietary to their silicon; Autoware has none (building one). KIRRA is the only
    one designed as a **vendor-neutral, planner-agnostic, fail-closed governor** that can
@@ -114,7 +114,7 @@ case is invariant to the doer; that is the whole game.
 
 1. **Occlusion / limited-visibility reasoning (RSS Rule 4) — missing.** KIRRA plans and
    checks against a perception *snapshot*; it does not reason about *occluded* space (a
-   pedestrian who could emerge from behind a parked car). the benchmark vendor's RSS Rule 4 mandates
+   pedestrian who could emerge from behind a parked car). The benchmark vendor's RSS Rule 4 mandates
    exactly this. **Fix:** a visibility-aware speed bound — treat occluded regions as
    potential worst-case agents and cap admissible speed accordingly. This is a
    *checker-shaped* improvement (lives in the RSS/containment layer, `validation.rs`), and
@@ -190,7 +190,7 @@ one. The right plays, in order:
 1. **Make the doer-swap literal** (P0) — bound a real learned/foundation planner; that is
    the demo that sells the thesis to anyone shipping Hydra-MDP/Alpamayo/Diffusion-Planner.
 2. **Close the RSS completeness gaps** (occlusion, multi-modal) so the bound is *correct*,
-   not just present — these are the credibility gaps a the Tier-1 ADAS benchmark vendor-literate reviewer will probe.
+   not just present — these are the credibility gaps a benchmark-literate reviewer will probe.
 3. **Lean into the governance moat** — it is genuinely unique and orthogonal to the
    planning race we should not try to win.
 4. **Mature certifiability** as the long-pole differentiator — a tiny deterministic
