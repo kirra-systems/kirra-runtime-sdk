@@ -243,9 +243,164 @@ impl DeadlineStats {
     }
 }
 
+/// The manifest task names, in declaration order — the canonical set every
+/// supervised loop must belong to (used to assert no spawn site drifts from the
+/// manifest, in either direction).
+#[must_use]
+pub fn manifest_task_names() -> Vec<&'static str> {
+    TASK_MANIFEST.iter().map(|t| t.name).collect()
+}
+
+// ---------------------------------------------------------------------------
+// WP-20 slice 2b — manifest-driven spawn dispatch
+//
+// slice 2a resolves the manifest at boot (a fail-closed gate); slice 2b makes the
+// resolved order DRIVE the actual spawns. A `SpawnRegistry` maps each covered
+// manifest task name to a spawn action; `dispatch_in_order` validates the registry
+// against the manifest (fail-closed on any drift) and invokes the actions in the
+// manifest's resolved dependency order — so the spawn ORDER is derived from the
+// declared deps, not hand-maintained, and a spawner can never silently diverge
+// from its manifest entry.
+// ---------------------------------------------------------------------------
+
+/// A single registered spawn action: invoked with the spawn context to start one
+/// supervised loop.
+type SpawnAction<C> = Box<dyn Fn(&C)>;
+
+/// A registry of spawn actions keyed by manifest task name, invoked in the
+/// manifest's resolved dependency order by [`dispatch_in_order`]. Generic over the
+/// spawn context type `C` — each action receives `&C`, and [`dispatch_in_order`]
+/// takes `ctx: &C`. The live path uses `C = Arc<ServiceState>` (actions receive
+/// `&Arc<ServiceState>`); tests use a mock `C`, so the ordering + drift logic is
+/// unit-tested without a runtime.
+pub struct SpawnRegistry<C> {
+    actions: Vec<(&'static str, SpawnAction<C>)>,
+}
+
+impl<C> Default for SpawnRegistry<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<C> SpawnRegistry<C> {
+    /// An empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { actions: Vec::new() }
+    }
+
+    /// Register the spawn `action` for the manifest task `name`.
+    pub fn register(&mut self, name: &'static str, action: impl Fn(&C) + 'static) -> &mut Self {
+        self.actions.push((name, Box::new(action)));
+        self
+    }
+}
+
+/// Why a [`dispatch_in_order`] could not proceed — every variant is fail-closed
+/// (the caller aborts startup rather than spawn from a drifted/ambiguous set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// The manifest itself is unresolvable (duplicate / unknown-dep / cycle).
+    Manifest(ManifestError),
+    /// A `cover` task name is not in the manifest.
+    UnknownTask(String),
+    /// A registered spawner's task is not in `cover` (registry↔cover drift).
+    SpawnerNotCovered(String),
+    /// A `cover` task has no registered spawner.
+    MissingSpawner(String),
+    /// A task was registered more than once.
+    DuplicateSpawner(String),
+    /// A `cover` name appears more than once.
+    DuplicateCover(String),
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DispatchError::Manifest(e) => write!(f, "manifest unresolvable: {e}"),
+            DispatchError::UnknownTask(n) => write!(f, "cover task {n:?} is not in the manifest"),
+            DispatchError::SpawnerNotCovered(n) => {
+                write!(f, "registered spawner {n:?} is not in the cover set")
+            }
+            DispatchError::MissingSpawner(n) => write!(f, "cover task {n:?} has no registered spawner"),
+            DispatchError::DuplicateSpawner(n) => write!(f, "task {n:?} registered more than once"),
+            DispatchError::DuplicateCover(n) => write!(f, "cover task {n:?} listed more than once"),
+        }
+    }
+}
+impl std::error::Error for DispatchError {}
+
+/// Dispatch `registry`'s spawn actions in `manifest`'s resolved dependency order,
+/// restricted to the `cover` task names (the subset this registry is responsible
+/// for — other lifecycle blocks spawn the rest). FAIL-CLOSED: the registry keys
+/// must EXACTLY equal `cover`, and every `cover` name must be a manifest task — an
+/// unknown task, a missing spawner, or a duplicate is a hard error, so a spawner
+/// and its manifest entry can never silently drift. Returns the resolved order
+/// actually dispatched (for the boot log). Covered tasks run in the FULL manifest's
+/// resolved order (so a covered task's dep on an uncovered task — already spawned
+/// by another block — is still honoured positionally).
+pub fn dispatch_in_order<C>(
+    registry: &SpawnRegistry<C>,
+    manifest: &[TaskSpec],
+    cover: &[&str],
+    ctx: &C,
+) -> Result<Vec<&'static str>, DispatchError> {
+    use std::collections::BTreeSet;
+
+    // No duplicate registrations.
+    let mut registered: BTreeSet<&str> = BTreeSet::new();
+    for (name, _) in &registry.actions {
+        if !registered.insert(name) {
+            return Err(DispatchError::DuplicateSpawner((*name).to_string()));
+        }
+    }
+
+    // No duplicate cover entries (the "registry keys EXACTLY equal cover" contract
+    // is meaningless if cover itself has dups — they would silently collapse).
+    let mut cover_set: BTreeSet<&str> = BTreeSet::new();
+    for c in cover {
+        if !cover_set.insert(*c) {
+            return Err(DispatchError::DuplicateCover((*c).to_string()));
+        }
+    }
+
+    let manifest_names: BTreeSet<&str> = manifest.iter().map(|t| t.name).collect();
+
+    // Every covered task must be a real manifest task with a registered spawner.
+    for c in &cover_set {
+        if !manifest_names.contains(c) {
+            return Err(DispatchError::UnknownTask((*c).to_string()));
+        }
+        if !registered.contains(c) {
+            return Err(DispatchError::MissingSpawner((*c).to_string()));
+        }
+    }
+    // Every registered spawner must be in cover (registry↔cover drift).
+    for r in &registered {
+        if !cover_set.contains(r) {
+            return Err(DispatchError::SpawnerNotCovered((*r).to_string()));
+        }
+    }
+
+    // Resolve the FULL manifest order, then dispatch the covered actions in it.
+    let order = resolve_startup_order(manifest).map_err(DispatchError::Manifest)?;
+    let mut dispatched = Vec::new();
+    for name in order {
+        if cover_set.contains(name) {
+            if let Some((_, action)) = registry.actions.iter().find(|(n, _)| *n == name) {
+                action(ctx);
+                dispatched.push(name);
+            }
+        }
+    }
+    Ok(dispatched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     fn spec(name: &'static str, deps: &'static [&'static str]) -> TaskSpec {
         TaskSpec {
@@ -342,5 +497,94 @@ mod tests {
         assert!(s.record(200, 100));
         assert_eq!(s.cycles(), 3);
         assert_eq!(s.misses(), 2);
+    }
+
+    // --- WP-20 slice 2b: manifest-driven spawn dispatch ---
+
+    /// A mock spawn context that records the ORDER its actions fire in, so the
+    /// dispatch order can be asserted without a runtime.
+    type Recorder = RefCell<Vec<&'static str>>;
+
+    fn record(name: &'static str) -> impl Fn(&Recorder) {
+        move |rec: &Recorder| rec.borrow_mut().push(name)
+    }
+
+    #[test]
+    fn dispatch_fires_covered_actions_in_the_manifests_resolved_order() {
+        // a → {b, c}; cover b and c only (a is "spawned elsewhere"). b and c fire in
+        // the resolved order, AFTER a's position, regardless of registration order.
+        let m = [spec("a", &[]), spec("b", &["a"]), spec("c", &["a"])];
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("c", record("c")); // registered c FIRST…
+        reg.register("b", record("b"));
+        let rec = Recorder::default();
+        let dispatched = dispatch_in_order(&reg, &m, &["b", "c"], &rec).unwrap();
+        // …but dispatch follows the manifest's resolved order (b before c).
+        assert_eq!(dispatched, vec!["b", "c"]);
+        assert_eq!(*rec.borrow(), vec!["b", "c"], "actions fired in resolved order, not registration order");
+    }
+
+    #[test]
+    fn dispatch_is_fail_closed_on_registry_manifest_drift() {
+        let m = [spec("a", &[]), spec("b", &[])];
+
+        // A covered task with no spawner.
+        let reg = SpawnRegistry::<Recorder>::new();
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["a"], &Recorder::default()),
+            Err(DispatchError::MissingSpawner("a".into()))
+        );
+
+        // A spawner for a task not in `cover` (registry↔cover drift).
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("a", record("a"));
+        reg.register("b", record("b"));
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["a"], &Recorder::default()),
+            Err(DispatchError::SpawnerNotCovered("b".into()))
+        );
+
+        // A covered task that is not in the manifest.
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("ghost", record("ghost"));
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["ghost"], &Recorder::default()),
+            Err(DispatchError::UnknownTask("ghost".into()))
+        );
+
+        // A duplicate registration.
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("a", record("a"));
+        reg.register("a", record("a"));
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["a"], &Recorder::default()),
+            Err(DispatchError::DuplicateSpawner("a".into()))
+        );
+
+        // A duplicate `cover` entry.
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("a", record("a"));
+        assert_eq!(
+            dispatch_in_order(&reg, &m, &["a", "a"], &Recorder::default()),
+            Err(DispatchError::DuplicateCover("a".into()))
+        );
+    }
+
+    #[test]
+    fn dispatch_propagates_an_unresolvable_manifest() {
+        let m = [spec("a", &["b"]), spec("b", &["a"])];
+        let mut reg = SpawnRegistry::<Recorder>::new();
+        reg.register("a", record("a"));
+        reg.register("b", record("b"));
+        assert!(matches!(
+            dispatch_in_order(&reg, &m, &["a", "b"], &Recorder::default()),
+            Err(DispatchError::Manifest(ManifestError::Unorderable(_)))
+        ));
+    }
+
+    #[test]
+    fn manifest_task_names_lists_every_task() {
+        assert_eq!(manifest_task_names().len(), TASK_MANIFEST.len());
+        assert!(manifest_task_names().contains(&"posture_engine_worker"));
     }
 }
