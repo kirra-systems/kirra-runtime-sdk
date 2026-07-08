@@ -155,24 +155,26 @@ fn spawn_instance(
     db: &Path,
     port: u16,
     mode: &str,
+    extra_env: &[(&str, String)],
 ) -> ChildGuard {
     let log = std::fs::File::create(dir.join(format!("{name}.log"))).expect("log file");
     let log_err = log.try_clone().expect("clone log handle");
     // env_clear: the drill must be hermetic — an ambient KIRRA_* var (CI, a
     // developer shell) silently changing HA timings would invalidate the
     // measurement. Everything the service needs is set explicitly.
-    let child = Command::new(env!("CARGO_BIN_EXE_kirra_verifier_service"))
-        .env_clear()
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_kirra_verifier_service"));
+    cmd.env_clear()
         .env("KIRRA_DB_PATH", db)
         .env("KIRRA_VERIFIER_ADDR", format!("127.0.0.1:{port}"))
         .env("KIRRA_VERIFIER_MODE", mode)
         .env("KIRRA_INSTANCE_ID", name)
         .env("KIRRA_ADMIN_TOKEN", "drill-admin-token")
         .env("KIRRA_VEHICLE_CLASS", "courier")
-        .env("KIRRA_HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL_MS.to_string())
-        .env("KIRRA_PROMOTION_TIMEOUT", PROMOTION_TIMEOUT_MS.to_string())
-        .env("KIRRA_PROMOTION_POLL", PROMOTION_POLL_MS.to_string())
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", "info");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let child = cmd
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()
@@ -199,23 +201,45 @@ fn durable_holder(db: &Path) -> (u64, Option<String>) {
     store.current_active_holder().expect("read ha_state")
 }
 
-fn drill_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kirra_ha_drill_{}", std::process::id()));
+fn drill_dir(tag: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("kirra_ha_drill_{}_{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create drill dir");
     dir
 }
 
-#[test]
-#[ignore = "two-process drill (real processes + real timers); run by the dedicated CI job with -- --ignored"]
-fn two_process_failover_drill() {
-    let dir = drill_dir();
+/// The legacy-path timing env (scaled down; see the constants above).
+fn legacy_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("KIRRA_HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL_MS.to_string()),
+        ("KIRRA_PROMOTION_TIMEOUT", PROMOTION_TIMEOUT_MS.to_string()),
+        ("KIRRA_PROMOTION_POLL", PROMOTION_POLL_MS.to_string()),
+    ]
+}
+
+/// EP-03 gate-on env: the lease trigger at its DEFAULT TTL (the ≤5 s product
+/// property is defined at the default), legacy timings left at THEIR defaults
+/// (10 s timeout) so a promotion inside 5 s can only have come from the lease
+/// path. Poll tightened so observation granularity doesn't eat the margin.
+fn lease_env() -> Vec<(&'static str, String)> {
+    vec![
+        ("KIRRA_HA_LEASE_ENABLED", "1".to_string()),
+        ("KIRRA_PROMOTION_POLL", "100".to_string()),
+    ]
+}
+
+/// One full drill run: boot A (active) + B (standby) on `env`, steady-window
+/// sample, SIGKILL A, measure promotion + first-served, check the durable
+/// handover, and assert `bound_ms`. Returns (kill→promotion, kill→first-served).
+fn run_drill(tag: &str, env: &[(&str, String)], steady_ms: u64, bound_ms: u64) -> (u64, u64) {
+    let dir = drill_dir(tag);
     let db = dir.join("ha-shared.sqlite");
     let port_a = free_port();
     let port_b = free_port();
 
     // --- Phase 1: boot the Active, then the standby, against ONE db file ---
-    let mut a = spawn_instance("drill-a", &dir, &db, port_a, "active");
+    let mut a = spawn_instance("drill-a", &dir, &db, port_a, "active", env);
     assert!(
         wait_until(BOOT_BUDGET, Duration::from_millis(100), || ready(port_a)),
         "instance A never became ready; log tail:\n{}",
@@ -229,7 +253,7 @@ fn two_process_failover_drill() {
         log_tail(&dir, "drill-a")
     );
 
-    let b = spawn_instance("drill-b", &dir, &db, port_b, "passive_standby");
+    let b = spawn_instance("drill-b", &dir, &db, port_b, "passive_standby", env);
     assert!(
         wait_until(BOOT_BUDGET, Duration::from_millis(100), || ready(port_b)),
         "instance B never became ready; log tail:\n{}",
@@ -250,10 +274,10 @@ fn two_process_failover_drill() {
     );
 
     // --- Phase 2: steady window — exactly one Active, no spurious promotion ---
-    // Sampled for > PROMOTION_TIMEOUT_MS so a broken freshness tracker (one
-    // that ignores the advancing token) would promote INSIDE this window and
-    // fail here rather than pass silently.
-    let steady_deadline = Instant::now() + Duration::from_millis(PROMOTION_TIMEOUT_MS * 2);
+    // Sampled for longer than the promotion deadline so a broken freshness
+    // tracker (one that ignores the advancing liveness signals) would promote
+    // INSIDE this window and fail here rather than pass silently.
+    let steady_deadline = Instant::now() + Duration::from_millis(steady_ms);
     while Instant::now() < steady_deadline {
         let a_active = mode_active(port_a);
         let b_active = mode_active(port_b);
@@ -337,16 +361,45 @@ fn two_process_failover_drill() {
 
     // --- The measurement (the drill's OUTPUT) + the bound ---
     println!(
-        "HA-DRILL-RESULT: kill→promotion {promoted_ms} ms, kill→first-served {first_served_ms} ms \
-         (heartbeat {HEARTBEAT_INTERVAL_MS} ms, timeout {PROMOTION_TIMEOUT_MS} ms, \
-         poll {PROMOTION_POLL_MS} ms; bound {PROMOTION_BOUND_MS} ms)"
+        "HA-DRILL-RESULT[{tag}]: kill→promotion {promoted_ms} ms, \
+         kill→first-served {first_served_ms} ms (bound {bound_ms} ms)"
     );
     assert!(
-        promoted_ms <= PROMOTION_BOUND_MS,
-        "promotion took {promoted_ms} ms — beyond the documented bound {PROMOTION_BOUND_MS} ms \
-         for these timings"
+        promoted_ms <= bound_ms,
+        "promotion took {promoted_ms} ms — beyond the documented bound {bound_ms} ms \
+         for the [{tag}] configuration"
     );
 
     drop(b);
     let _ = std::fs::remove_dir_all(&dir);
+    (promoted_ms, first_served_ms)
+}
+
+/// The legacy heartbeat-timeout path (scaled timings; see the constants).
+#[test]
+#[ignore = "two-process drill (real processes + real timers); run by the dedicated CI job with -- --ignored"]
+fn two_process_failover_drill() {
+    run_drill(
+        "legacy",
+        &legacy_env(),
+        PROMOTION_TIMEOUT_MS * 2,
+        PROMOTION_BOUND_MS,
+    );
+}
+
+/// EP-03 — the lease path at its DEFAULT TTL: the ≤5 s failover product
+/// property, measured end to end. Legacy timings stay at their defaults
+/// (10 s timeout), so a promotion inside 5 s proves the LEASE trigger fired
+/// (reason `LEASE_EXPIRED` in the standby's log). The steady window exceeds
+/// `promote_after_ms` so a live, renewing holder is never promoted over.
+#[test]
+#[ignore = "two-process drill (real processes + real timers); run by the dedicated CI job with -- --ignored"]
+fn two_process_failover_drill_lease_gate_on() {
+    let (promoted_ms, _) = run_drill(
+        "lease",
+        &lease_env(),
+        6_000, // > promote_after (4.5 s): a spurious lease promotion fails HERE
+        5_000, // THE product property: failover ≤ 5 s with the gate on
+    );
+    println!("HA-DRILL-RESULT[lease]: ≤5 s product property met ({promoted_ms} ms)");
 }

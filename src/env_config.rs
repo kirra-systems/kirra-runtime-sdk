@@ -70,6 +70,7 @@ pub const KIRRA_ENV_KEYS: &[EnvKeySpec] = &[
     EnvKeySpec { name: "KIRRA_HEARTBEAT_INTERVAL", required: false, purpose: "HA heartbeat write interval ms (rejects 0)" },
     EnvKeySpec { name: "KIRRA_PROMOTION_POLL", required: false, purpose: "Standby heartbeat poll interval ms" },
     EnvKeySpec { name: "KIRRA_PROMOTION_TIMEOUT", required: false, purpose: "Standby promotes if primary silent this long ms" },
+    EnvKeySpec { name: "KIRRA_HA_LEASE_ENABLED", required: false, purpose: "EP-03 lease-based failover trigger (1/true; default off = legacy heartbeat timeout)" },
     EnvKeySpec { name: "KIRRA_FORCE_PROMOTE", required: false, purpose: "Force this instance Active (break-glass)" },
     EnvKeySpec { name: "KIRRA_LOG_SIGNING_KEY", required: false, purpose: "base64 Ed25519 seed for the audit signing key" },
     EnvKeySpec { name: "KIRRA_LOG_SIGNING_KEY_ADOPT", required: false, purpose: "Adopt a new/rotated audit signing key (opt-in)" },

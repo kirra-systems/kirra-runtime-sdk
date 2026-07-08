@@ -17,6 +17,8 @@ An independent, evidence-based due-diligence review (`docs/analysis/ADAS_BENCHMA
 - **Never started:** WP-11 (curved-geometry RSS), WP-21 (the in-line SHM enforcement path — the software half of Critical gap G-1), WP-21b (zero-copy production adoption).
 - **Verified gap closure:** ✅ 3 fully (G-10, G-13, G-20) · 🟡 7 mostly · 🟠 9 partially · 🔴 3 open (G-2, G-5, G-22 — external by design). Weighted by severity: **≈ 45 % of the full gap set, ≈ 70 % of the in-repo software scope.**
 
+> **Progress update (2026-07-08, M1+M2-partial):** the six orphan cores are now WIRED (EP-04/05/06 + EP-21: lineage → live ORT load, OOD → live per-tick feed, model_targets → `kirra-ota-ctl model-allowlist`, EVT → wcet-bench). **WP-19 final is DELIVERED (EP-03):** the lease flip is live behind `KIRRA_HA_LEASE_ENABLED` and the two-process failover drill (`tests/ha_two_process_drill.rs`, EP-02) measures **≤5 s failover with the gate on** (≈4.6 s observed) plus the legacy path within its bound; the drill also caught and fixed a post-failover self-fence (every promoted standby demoted itself on its first heartbeat tick). Gate remains default-OFF pending a release decision. Items 2, 3, and 7 below are done; item 1 (WP-21/EP-01) is next.
+
 **Re-prioritized roadmap (supersedes the "Wave 3 remaining" line in §6a; ROI-ranked):**
 1. **WP-21 — in-line SHM enforcement path** (every prerequisite core exists; integration, not invention; unblocks G-1's software half and gives G-18 a consumer).
 2. **WP-19 final — live lease flip** behind an env gate, validated by a scripted two-process failover drill (epoch fence stays the backstop; never default-on without the drill).

@@ -131,12 +131,13 @@ src/
 ├── scenario_runner.rs        — ScenarioRunner, ScenarioEvent, PostureAssertion, AssertionResult
 ├── standby_monitor.rs        — spawn_heartbeat_writer, spawn_promotion_monitor,
 │                               HEARTBEAT_INTERVAL_MS (2s), PROMOTION_TIMEOUT_MS (10s)
-├── lease.rs                  — WP-19/G-21 lease-based failover TIMING model (pure):
+├── lease.rs                  — WP-19/G-21 lease-based failover timing model (pure):
 │                               LeaseParams::from_ttl (renew at half-life, promote at
 │                               ttl+ttl/2), DEFAULT_LEASE_TTL_MS (3s → ≤5s failover,
 │                               ≤ POSTURE_CACHE_TTL_MS); demote_before_promote split-
-│                               brain invariant. Model only — live-loop wiring is
-│                               follow-up (epoch fence + heartbeat writer unchanged)
+│                               brain invariant. EP-03: LIVE behind KIRRA_HA_LEASE_ENABLED
+│                               (standby_monitor renews + lease-triggers promotion;
+│                               epoch CAS stays the takeover authority; default off)
 ├── federation.rs             — FederatedTrustReport, Ed25519 verify, evaluate_federated_report
 ├── federation_reconciliation.rs — FederatedTrustReportV2, reconcile_reports,
 │                               ReconciliationOutcome, authoritative_posture
@@ -524,6 +525,7 @@ a new `KIRRA_*` read means adding its `EnvKeySpec` row.
 | `KIRRA_INSTANCE_ID` | No | hostname | Unique ID for HA deployments (heartbeat key) |
 | `KIRRA_HEARTBEAT_INTERVAL` | No | `2000` | HA heartbeat write interval (ms) |
 | `KIRRA_PROMOTION_TIMEOUT` | No | `10000` | Standby promotes if primary silent this long (ms) |
+| `KIRRA_HA_LEASE_ENABLED` | No | off | EP-03 lease-based failover trigger (`1`/`true`). Gate ON: the Active renews the durable `ha_state` lease at the half-life cadence (TTL 3 s → renew 1.5 s) and self-demotes on its own expiry; the standby promotes when BOTH the heartbeat token AND the lease stamp go unobserved-to-advance for `promote_after` (4.5 s) — ≤5 s failover, drill-proven (`tests/ha_two_process_drill.rs` gate-on test). Conjunctive trigger keeps a mixed-config fleet safe (a gate-off primary's advancing heartbeat blocks promotion). The durable epoch CAS remains the sole takeover authority. Default off = legacy ~12 s heartbeat-timeout path, byte-identical |
 | `KIRRA_SUPERVISOR_RESET_KEY` | Yes (reset ops) | — | Must be non-empty, ≤ 64 bytes |
 | `KIRRA_VEHICLE_CLASS` | Yes (#312) | — | Deployment vehicle class: `courier` \| `delivery-av` \| `robotaxi`. Selects the per-class kinematic contract in the actuator gate (`contract_for`/`mrc_fallback_for`, robotaxi = the frozen instance) AND the parko node's SG6 `impact_cfg_for_class`. **Fail-closed: there is no default class** — unset/empty/unknown aborts startup in BOTH the verifier service and the parko-ros2 node (a wrong class would select another class's envelope). See `docs/CONTRACT_PROFILES.md` |
 | `KIRRA_CANOPEN_NODE_MAP` | No | — | CANopen node-id → fleet-node-id map (#84), `canid:fleet_node` comma-separated (e.g. `5:robot-01,6:robot-02`). Unset → every NMT-offline is unattributed (fail-closed) |

@@ -228,8 +228,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - name: Run the drill (two kirra_verifier_service processes, one SQLite file)
-        run: cargo test --test ha_two_process_drill --locked -- --ignored --nocapture
+      - name: Run the drills (two kirra_verifier_service processes, one SQLite file; legacy + lease paths)
+        # --test-threads 1: each drill spawns two service processes and measures
+        # wall-clock failover; running them concurrently would contend the runner
+        # and skew the timing assertions.
+        run: cargo test --test ha_two_process_drill --locked -- --ignored --nocapture --test-threads 1
 
   docs-and-sdk:
     name: SDK docs + examples (G20)
