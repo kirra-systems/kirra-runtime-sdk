@@ -38,6 +38,11 @@ instrument = []
 # host campaigns and CI. Off by default so the crate stays `no_std` for the QNX
 # target, which supplies its own boundary-domain clock.
 std = []
+# `evt` (WP-22 / G-3) enables the EVT/MBPTA tail-fitting analysis module (`evt.rs`) —
+# host-analysis-only float math (GPD peaks-over-threshold, pWCET return levels,
+# i.i.d./stationarity diagnostics). Pulls `std` for the f64 math; OFF by default so
+# the certifiable no_std/zero-alloc/integer-only core compiles out entirely.
+evt = ["std"]
 
 [lints.rust]
 unsafe_code = "forbid"

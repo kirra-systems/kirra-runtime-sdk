@@ -68,6 +68,11 @@ mod channel;
 mod clock;
 mod env;
 pub mod report;
+// WP-22 (G-3): EVT/MBPTA tail-fitting — host-analysis only, needs f64/std. Compiled
+// under the `evt` feature (which pulls `std`) OR under `test` (so the workspace suite
+// exercises it); the production `no_std`/zero-alloc core is unaffected when off.
+#[cfg(any(test, feature = "evt"))]
+pub mod evt;
 
 pub use channel::{ChannelStats, WcetChannel};
 pub use clock::MonotonicClock;

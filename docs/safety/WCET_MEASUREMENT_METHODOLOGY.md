@@ -189,6 +189,29 @@ protocol; deviations are recorded.
   carries `wcet_status = TBD-QNX-TARGET`. **Only target-measured-under-FIFO numbers
   feed an FTTI claim.** This methodology generalizes that rule to every path in §6.
 
+### 4a. Probabilistic WCET (pWCET) via EVT/MBPTA — WP-22 (G-3 software half)
+
+The max/p99.9 above are ORDER STATISTICS of the observed set — a longer campaign
+can always exceed them. Measurement-based probabilistic timing analysis (MBPTA)
+instead fits the tail and **extrapolates** an execution time exceeded with only a
+target probability `p`. Implemented in `kirra_timing::evt` (feature-gated `evt`,
+host-analysis only — the certifiable `no_std`/zero-alloc core is untouched):
+
+- **Peaks-over-threshold (POT).** Choose a high threshold `u`; the exceedances
+  `x − u` are fit to a **Generalized Pareto Distribution** `(ξ, σ)` by method of
+  moments (`fit_gpd_pot`, valid `ξ < 0.5`, fail-closed on degenerate input).
+- **pWCET return level.** `pwcet_return_level` gives `x_p = u + (σ/ξ)[(p/ζ)^{−ξ}−1]`
+  (`ζ = n_exceed/n_total`), refused unless the target `p` is rarer than `ζ` (a true
+  extrapolation). Reported ALONGSIDE — never instead of — the HWM/p99.9.
+- **Representativity gates.** A fit is only meaningful on i.i.d., stationary data:
+  `lag1_autocorrelation` (≈0) and `stationarity_split_mean_ratio` (≈1) are computed
+  and reported with every estimate; `pwcet_converged` checks the estimate has
+  stabilized over a growing campaign. An unmet gate keeps the number INDICATIVE.
+- **The host-indicative rule is UNCHANGED.** A pWCET fitted from HOST samples is
+  still INDICATIVE — the evidence class is fixed by the measurement ENVIRONMENT
+  (`MeasurementEnv::is_certified_wcet`), not by the statistics. **The CI wcet-gate
+  keeps p99.9; no gate uses a pWCET curve until target-under-FIFO data exists.**
+
 ---
 
 ## 5. Precedent reconciliation — the existing S3 gateway evidence
