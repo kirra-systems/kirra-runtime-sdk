@@ -69,9 +69,13 @@ impl SplitMix64 {
         lo + (hi - lo) * self.next_f64()
     }
 
-    /// A uniform index in `[0, n)` (`n` must be `> 0`).
+    /// A uniform index in `[0, n)`. Panics (in every build, not just debug) if
+    /// `n == 0` — a zero range is a caller bug, and failing fast is safer than
+    /// the `n - 1` underflow it would otherwise hit. The `.min(n - 1)` guards the
+    /// half-open boundary; the residual mapping bias is ~2⁻⁵² for the small `n`
+    /// this campaign uses (2–3), i.e. negligible.
     pub fn below(&mut self, n: usize) -> usize {
-        debug_assert!(n > 0);
+        assert!(n > 0, "SplitMix64::below requires n > 0");
         ((self.next_f64() * n as f64) as usize).min(n - 1)
     }
 
@@ -354,6 +358,12 @@ mod tests {
         for _ in 0..10_000 {
             assert!(rng.below(3) < 3);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "requires n > 0")]
+    fn splitmix_below_zero_panics_in_every_build() {
+        SplitMix64::new(1).below(0);
     }
 
     #[test]
