@@ -576,6 +576,7 @@ mod av_subsystem;
 mod epoch;
 mod fabric;
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
+pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam
 
 impl VerifierStore {
     pub fn new(path: &str) -> Result<Self> {
