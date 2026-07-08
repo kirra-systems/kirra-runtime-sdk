@@ -70,6 +70,18 @@ pub struct VehicleConfig {
     /// (see `docs/CONTRACT_PROFILES.md`, the sibling rule).
     pub rss_lateral_alignment_tolerance_m: f64,
 
+    /// **RSS longitudinal-overlap half-window** (m): the lateral offset below which
+    /// the two FOOTPRINTS overlap (one is in the other's path) and the longitudinal
+    /// rear-end/head-on bound is a real conflict. EP-08 makes this **per-class**
+    /// (it was the global `RSS_LONGITUDINAL_OVERLAP_M` = 2.5 m — a car-width-scale
+    /// number a 0.6 m courier has no business using). Values preserve today's
+    /// EFFECTIVE geometry per class: the check nests inside the alignment band, so
+    /// each class gets `min(2.5, its band)` — robotaxi keeps the frozen 2.5 verbatim;
+    /// courier/delivery-AV, whose bands were narrower than 2.5, keep "the whole band
+    /// is overlap". Tuning BELOW the band is a future per-class footprint calibration
+    /// (VALIDATION-PENDING like the other class numbers).
+    pub rss_longitudinal_overlap_m: f64,
+
     /// **Differential-drive angular (yaw-rate) bound** (ADR-0029). `Some` only for a
     /// diff-drive class (`courier()`); the Ackermann profiles (`default_urban`,
     /// `delivery_av`) leave it **`None`**, so the per-pose path is **byte-identical**
@@ -181,12 +193,14 @@ impl VehicleConfig {
             max_steering_rad:   35.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(URBAN_ODD_SPEED_CAP_MPS),
             rss_lateral_alignment_tolerance_m: DEFAULT_RSS_LATERAL_ALIGNMENT_TOLERANCE_M,
+            // The frozen robotaxi footprint-overlap half-window, verbatim.
+            rss_longitudinal_overlap_m: parko_core::rss::RSS_LONGITUDINAL_OVERLAP_M,
             // Ackermann (robotaxi) — NO angular channel; per-pose path byte-identical.
             angular: None,
         }
     }
 
-    /// **Courier / small-robot class** (a sibling of [`default_urban`], per
+    /// **Courier / small-robot class** (a sibling of [`VehicleConfig::default_urban`], per
     /// `docs/CONTRACT_PROFILES.md`). Robot-scale footprint + kinematics + a tight RSS
     /// lateral band so the slow-loop checker judges a sidewalk/indoor robot, not a 4.8 m
     /// car. The checker LOGIC is identical to the robotaxi path — only these numbers differ,
@@ -208,6 +222,9 @@ impl VehicleConfig {
             max_steering_rad:   30.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(2.5),
             rss_lateral_alignment_tolerance_m: 0.6,
+            // Overlap == the band (the courier band is narrower than the old global
+            // 2.5 m constant, so every in-band object was — and stays — overlap).
+            rss_longitudinal_overlap_m: 0.6,
             // Differential-drive courier — the diff-drive yaw bound (ADR-0029),
             // a cited copy of parko's AngularVelocityBound (#136).
             angular: Some(CourierAngularBound::courier_reference()),
@@ -231,6 +248,8 @@ impl VehicleConfig {
             max_steering_rad:   33.0_f64.to_radians(),
             odd_speed_cap_mps:  Some(11.0),
             rss_lateral_alignment_tolerance_m: 2.0,
+            // Overlap == the band (narrower than the old global 2.5 m constant).
+            rss_longitudinal_overlap_m: 2.0,
             // Delivery-AV is Ackermann (road pod) — NO angular channel.
             angular: None,
         }

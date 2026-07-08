@@ -77,7 +77,7 @@ pub enum EquivalenceCheckResult {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// heading_difference(3.1, -3.1) ≈ 0.04 (both are ≈ π in opposite directions)
 /// heading_difference(0.0, π) = π (half turn)
 /// ```

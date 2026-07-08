@@ -16,6 +16,7 @@
 
 pub mod config;
 pub mod corridor;
+pub mod frenet;
 pub mod state;
 pub mod validation;
 // WS-2 — pedestrian / VRU RSS primitive (KIRRA-VRU-RSS-001).

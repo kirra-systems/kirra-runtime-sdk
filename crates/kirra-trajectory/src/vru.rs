@@ -125,7 +125,7 @@ impl VruRssParams {
     /// [`VRU_STOP_EPSILON_CEILING_MPS`] (the kernel stop-and-hold epsilon). Both
     /// clamps are MONOTONE-TIGHTENING — a caller may raise `v_ped_max` or lower
     /// `stop_epsilon`, never the reverse. Non-finite fields are left untouched for
-    /// [`params_valid`] to fail closed (an infinite requirement), never clamped
+    /// `params_valid` to fail closed (an infinite requirement), never clamped
     /// into a finite value that would admit a trajectory. (A full per-ODD
     /// derivation of `v_ped_max` — runners, children, cyclists-as-VRUs — remains a
     /// deployment tuning obligation on top of this floor; doc §5.)
