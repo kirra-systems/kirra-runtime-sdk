@@ -1,4 +1,4 @@
-// tests/audit_power_loss.rs
+// tests/audit_row_durability_on_abort.rs (renamed from audit_power_loss.rs, EP-23)
 //
 // WS-0.3 (#G10 audit axis) — incident-class audit rows survive an ungraceful
 // process death, proven by a REAL kill: a child process commits a posture

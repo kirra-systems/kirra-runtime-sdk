@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-08
 **Status:** Decision captured (see ADR-0001)
-**Purpose:** Full technical and strategic rationale behind the governor's platform and deployment decision. The concise decision of record lives in `ADR-0001-governor-deployment-platform.md`; this document is the supporting analysis, the comparative reasoning, and the cited evidence.
+**Purpose:** Full technical and strategic rationale behind the governor's platform and deployment decision. The concise decision of record lives in `0032-governor-deployment-platform.md`; this document is the supporting analysis, the comparative reasoning, and the cited evidence.
 
 ---
 
@@ -181,4 +181,4 @@ A customer already certified on one of these will not switch to QNX to adopt the
 
 ---
 
-*Companion document: `ADR-0001-governor-deployment-platform.md` (the decision of record).*
+*Companion document: `0032-governor-deployment-platform.md` (the decision of record).*

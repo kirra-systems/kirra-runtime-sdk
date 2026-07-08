@@ -113,4 +113,4 @@ KIRRA_GOVERNOR_ADDR=<qnx-target-ip>:9760 cargo run -p kirra-proposal-bench
 
 ---
 
-*Companion documents: `KIRRA_BRINGUP_RUNBOOK.md`, `ADR-0001-governor-deployment-platform.md`, `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`.*
+*Companion documents: `KIRRA_BRINGUP_RUNBOOK.md`, `0032-governor-deployment-platform.md`, `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`.*

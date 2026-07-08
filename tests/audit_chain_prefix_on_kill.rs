@@ -1,3 +1,4 @@
+// tests/audit_chain_prefix_on_kill.rs (renamed from audit_powerloss.rs, EP-23)
 //! Gate C criterion #2 — "audit chain survives a power-loss test."
 //!
 //! The SHA-256 hash-chained audit ledger lives in a WAL-mode SQLite DB; each entry

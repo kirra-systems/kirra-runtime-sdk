@@ -1,3 +1,10 @@
+> **ARCHIVED 2026-07-08 (EP-23) — HISTORICAL DOCUMENT.** This file tracks the
+> 2026-07-02 `INDUSTRY_BENCHMARK_GAP_ANALYSIS.md` taxonomy (G1–G20), which
+> **collides numerically** with the later MGA taxonomy (`MGA G-1…G-22`,
+> `ADAS_BENCHMARK_GAP_ANALYSIS.md`) used by the closure plan, the DD review, and
+> the Engineering Execution Program. **Do not cross-map gaps by number.**
+> Current status authority: `docs/analysis/ADAS_BENCHMARK_DD_REVIEW.md`.
+
 # Gap-Closure Status & Plan
 
 **Basis:** `INDUSTRY_BENCHMARK_GAP_ANALYSIS.md` (G1–G20, 2026-07-02), executed per

@@ -7,7 +7,7 @@
 | Owner | Project / safety-case owner |
 | Issue | #274 (EPIC #270, QNX governor lane). RTM tracing #272 (done). |
 | Scope | Cross-compile the no_std verdict **judge** (`tools/qnx-rtm-harness/kirra_judge.rs`) for a QNX target and measure its per-verdict WCET under `SCHED_FIFO`, replacing the harness placeholder `wcet_status = TBD-QNX-TARGET`. |
-| Companions | `tools/qnx-rtm-harness/` (README, `QNX_MAPPING.md`, `CMakeLists.txt`, **`qnx.toolchain.cmake`**, **`run_qnx_fdit.sh`**, `kirra_judge.rs`, `kirra_ffi.h`, `wcet_measure.cpp`), `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`, `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`, `src/wcet_gate.rs`, `ASSUMPTIONS_OF_USE.md` (AOU-HW-QNX-TARGET-001), ADR-0001. |
+| Companions | `tools/qnx-rtm-harness/` (README, `QNX_MAPPING.md`, `CMakeLists.txt`, **`qnx.toolchain.cmake`**, **`run_qnx_fdit.sh`**, `kirra_judge.rs`, `kirra_ffi.h`, `wcet_measure.cpp`), `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`, `docs/safety/WCET_MEASUREMENT_METHODOLOGY.md`, `src/wcet_gate.rs`, `ASSUMPTIONS_OF_USE.md` (AOU-HW-QNX-TARGET-001), ADR-0032. |
 
 ## TL;DR — run it
 
