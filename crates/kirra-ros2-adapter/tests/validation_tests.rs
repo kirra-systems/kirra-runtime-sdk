@@ -1012,12 +1012,16 @@ fn predictive_rss_lateral_brake_parameter_is_load_bearing() {
     );
 }
 
-/// SNAPSHOT lateral brake parameter is load-bearing (validation.rs:518,
-/// `RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2`, `* → +`
-/// mutant). A moderate cut-in whose lateral gap is UNSAFE under the correct
-/// brake-min (2.45 m/s²) but would be admitted if `*` became `+` (brake-min
-/// 0.7+3.5 = 4.2 m/s² — a STRONGER brake shrinks the required separation).
-/// Correct MRCs, mutant admits. 45° ego heading (rotation exercised).
+/// SNAPSHOT lateral brake parameter is load-bearing
+/// (`RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2`, `* → +`
+/// mutant). The ego is HELD (stopped poses), so the EP-08 stopped-pose rule
+/// applies the STATIONARY-EGO lateral form — which still charges the object's
+/// braking envelope through this parameter, keeping it load-bearing on the
+/// stopped path too. A moderate cut-in whose lateral gap (2.3 m) is UNSAFE
+/// under the correct brake-min (2.45 m/s² → requires ≈2.68 m) but would be
+/// admitted if `*` became `+` (brake-min 0.7+3.5 = 4.2 m/s² → requires
+/// ≈2.04 m — a STRONGER brake shrinks the required separation). Correct MRCs,
+/// mutant admits. 45° ego heading (rotation exercised).
 #[test]
 fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
     use std::f64::consts::FRAC_PI_4;
@@ -1031,12 +1035,13 @@ fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
         .collect();
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    // Object at ego-frame (dx=3, dy=3.4), lateral-closing at 1 m/s (ego-frame
-    // velocity (0,-1) → world (s, -c)). obj_lat_vel = -1.0, cut-in fires;
-    // lat_required ≈ 3.74 m (correct) > 3.4 → MRC; ≈ 2.84 m (brake 4.2) < 3.4 → admit.
+    // Object at ego-frame (dx=3, dy=2.3), lateral-closing at 1 m/s (ego-frame
+    // velocity (0,-1) → world (s, -c)). obj_lat_vel = -1.0, cut-in fires; the
+    // stopped ego takes the STATIONARY-EGO form: lat_required ≈ 2.68 m
+    // (correct) > 2.3 → MRC; ≈ 2.04 m (brake 4.2 mutant) < 2.3 → admit.
     let obj = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 10.0 + 3.0 * c - 3.4 * s, y_m: 3.0 * s + 3.4 * c },
+        pos: Point { x_m: 10.0 + 3.0 * c - 2.3 * s, y_m: 3.0 * s + 2.3 * c },
         velocity_mps: 1.0,
         heading_rad: 0.0,
         vel: Point { x_m: s, y_m: -c },

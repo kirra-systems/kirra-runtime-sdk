@@ -230,6 +230,53 @@ pub fn lateral_safe_distance_split(
     margin.max(0.0)
 }
 
+/// [`lateral_safe_distance_split`] for a **provably stationary ego** — the
+/// object's full worst-case lateral envelope plus the fluctuation margin, with
+/// the ego's hypothetical response-phase swerve term dropped.
+///
+/// Rationale (EP-08, the stopped-pose rule): the split form charges the ego a
+/// response-phase drift (`a·ρ²/2` + its braking tail) even at zero lateral
+/// velocity — the worst case for a vehicle whose future motion is UNKNOWN. A
+/// trajectory checker evaluating a pose at which the committed trajectory is
+/// STOPPED knows that hypothesis is false: a stationary vehicle drifts
+/// nowhere, and per RSS responsibility (Shalev-Shwartz §3.4) it has completed
+/// its proper response — only the OBJECT's closing envelope can create the
+/// conflict. Dropping the ego term is therefore not a relaxation of the
+/// object's bound: a cut-in that can reach the stopped ego is still rejected
+/// (its own reaction + brake envelope and `mu` are charged in full).
+///
+/// Same fail-closed guards as the split form; conservativeness relation:
+/// `stationary_ego(obj, …) <= split(0.0, obj, …)` on every valid input (the
+/// difference is exactly the zero-velocity ego term), property-tested below.
+// SAFETY: SG1 SG9 | REQ: rss-lateral-stationary-ego-failsafe | TEST: test_lat_stationary_ego_is_split_minus_ego_term,test_lat_stationary_ego_invalid_params_failsafe
+pub fn lateral_safe_distance_split_stationary_ego(
+    obj_lat_vel: f64,
+    lat_accel_max: f64,
+    lat_brake_min: f64,
+    reaction_time: f64,
+    mu_lateral_m: f64,
+) -> f64 {
+    if !(finite_positive(lat_accel_max)
+        && finite_positive(lat_brake_min)
+        && obj_lat_vel.is_finite()
+        && reaction_time.is_finite()
+        && reaction_time >= 0.0
+        && mu_lateral_m.is_finite()
+        && mu_lateral_m >= 0.0)
+    {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let v = obj_lat_vel.abs();
+    let d_reaction = v * reaction_time + 0.5 * lat_accel_max * reaction_time.powi(2);
+    let v_after = v + lat_accel_max * reaction_time;
+    let d_brake = v_after.powi(2) / (2.0 * lat_brake_min);
+    let margin = d_reaction + d_brake + mu_lateral_m;
+    if !margin.is_finite() {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    margin.max(0.0)
+}
+
 /// Computes the longitudinal RSS safe-distance per IEEE 2846-2022 §5.1.
 ///
 /// Returns the minimum required gap (metres) between ego and lead vehicle.
@@ -813,6 +860,43 @@ mod tests {
 
     /// A negative or non-finite `mu` fails safe (a margin must only ever ADD).
     #[test]
+    /// The stationary-ego form is exactly the split form minus the
+    /// zero-velocity ego term (the response-phase swerve + its braking tail).
+    #[test]
+    fn test_lat_stationary_ego_is_split_minus_ego_term() {
+        for obj_v in [0.0, 0.5, 1.5, 4.0] {
+            let (a, b, rho, mu) = (3.5, 2.45, 0.5, 0.2);
+            let split = lateral_safe_distance_split(0.0, obj_v, a, b, rho, mu);
+            let stationary = lateral_safe_distance_split_stationary_ego(obj_v, a, b, rho, mu);
+            let ego_zero_term = 0.5 * a * rho * rho + (a * rho) * (a * rho) / (2.0 * b);
+            assert!(
+                (split - stationary - ego_zero_term).abs() < 1e-12,
+                "obj_v={obj_v}: split {split} - stationary {stationary} != ego term {ego_zero_term}"
+            );
+            assert!(stationary <= split, "never larger than the split form");
+        }
+    }
+
+    #[test]
+    fn test_lat_stationary_ego_invalid_params_failsafe() {
+        assert_eq!(
+            lateral_safe_distance_split_stationary_ego(f64::NAN, 3.5, 2.45, 0.5, 0.2),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+        assert_eq!(
+            lateral_safe_distance_split_stationary_ego(1.0, 0.0, 2.45, 0.5, 0.2),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+        assert_eq!(
+            lateral_safe_distance_split_stationary_ego(1.0, 3.5, 2.45, -0.1, 0.2),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+        assert_eq!(
+            lateral_safe_distance_split_stationary_ego(1.0, 3.5, 2.45, 0.5, -0.2),
+            RSS_FAILSAFE_DISTANCE_M
+        );
+    }
+
     fn test_lat_split_negative_mu_is_failsafe() {
         for bad in [-0.1, f64::NAN, f64::NEG_INFINITY] {
             assert_eq!(

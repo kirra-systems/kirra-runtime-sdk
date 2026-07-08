@@ -572,22 +572,7 @@ pub fn validate_trajectory_slow_capped(
             // motion here — the orientation-based `sin(heading − ego)` form read it
             // as ~0 and could miss the cut-in. EP-08: from the same frame.
             let obj_lat_vel = frame.obj_lat_v;
-            // EP-08 refinement (RSS responsibility, Shalev-Shwartz §3.4 — the
-            // same principle behind the §4 stopped-queue admission): a pose at
-            // which the ego is STOPPED has completed its proper response on
-            // both axes. A laterally-CLOSING object can no longer be met by
-            // any ego action — the collision, if one occurs, is attributable
-            // to the closer, not the stationary ego — so the cut-in arm does
-            // not fire for a stopped pose. (Without this, a planner's smooth
-            // yield-to-a-stop short of a crossing vehicle is refused at its
-            // final stopped pose and replaced by an MRC stop at essentially
-            // the same spot — over-rejection with no safety gain.) The ABREAST
-            // arm (`lon_unsafe`) is deliberately kept even at v = 0
-            // (conservative: a stopped ego abreast-dangerously close is still
-            // flagged).
-            let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS
-                && traj_point.velocity_mps.abs()
-                    > kirra_core::kinematics_contract::STOP_EPSILON_MPS;
+            let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
             // #683/#684: scale the lateral-conflict longitudinal window by closing
             // SPEED (via `lon_required`), floored at the 8 m urban minimum. A FIXED 8 m
             // ceiling clipped (a) a high-speed cut-in originating farther ahead than 8 m — at the
@@ -603,15 +588,41 @@ pub fn validate_trajectory_slow_capped(
             // gate (overtaking) is untouched.
             let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
             if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
-                let ego_lat_vel = 0.0; // straight-following assumption per §3
-                let lat_required = lateral_safe_distance_split(
-                    ego_lat_vel,
-                    obj_lat_vel,
-                    kinematics.max_lateral_accel_mps2,
-                    RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
-                    RSS_REACTION_TIME_S,
-                    RSS_MU_LATERAL_M,
-                );
+                // EP-08 stopped-pose rule (RSS responsibility, Shalev-Shwartz
+                // §3.4 — the same principle behind the §4 stopped-queue
+                // admission): a pose at which the committed trajectory is
+                // STOPPED provably contributes no lateral motion — the split
+                // form's ego response-phase swerve term is a hypothesis the
+                // trajectory itself falsifies. Such a pose is charged the
+                // OBJECT's full closing envelope + mu only
+                // (`lateral_safe_distance_split_stationary_ego`): a cut-in
+                // that can actually reach the stopped ego is still rejected
+                // (the 0.3 m held-ego pins), while a smooth yield-to-a-stop
+                // short of a crossing vehicle is no longer refused at its
+                // final stopped pose (which would merely swap the planner's
+                // yield for an MRC stop at the same spot). Moving poses keep
+                // the full split form unchanged.
+                let ego_stopped = traj_point.velocity_mps.abs()
+                    <= kirra_core::kinematics_contract::STOP_EPSILON_MPS;
+                let lat_required = if ego_stopped {
+                    parko_core::rss::lateral_safe_distance_split_stationary_ego(
+                        obj_lat_vel,
+                        kinematics.max_lateral_accel_mps2,
+                        RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
+                        RSS_REACTION_TIME_S,
+                        RSS_MU_LATERAL_M,
+                    )
+                } else {
+                    let ego_lat_vel = 0.0; // straight-following assumption per §3
+                    lateral_safe_distance_split(
+                        ego_lat_vel,
+                        obj_lat_vel,
+                        kinematics.max_lateral_accel_mps2,
+                        RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
+                        RSS_REACTION_TIME_S,
+                        RSS_MU_LATERAL_M,
+                    )
+                };
                 if dy_ego.abs() < lat_required {
                     return TrajectoryVerdict::MRCFallback;
                 }

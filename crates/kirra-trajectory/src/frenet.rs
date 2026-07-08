@@ -213,7 +213,7 @@ impl CenterlineFrenet {
             let (cx, cy) = (ax + t * ex, ay + t * ey);
             let (dx, dy) = (p.x_m - cx, p.y_m - cy);
             let dist2 = dx * dx + dy * dy;
-            if best.map_or(true, |(b, _)| dist2 < b) {
+            if best.is_none_or(|(b, _)| dist2 < b) {
                 let len = len2.sqrt();
                 // Signed offset: positive on the LEFT of the travel direction
                 // (cross(tangent, delta) z-component).
