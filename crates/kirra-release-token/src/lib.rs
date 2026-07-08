@@ -55,6 +55,11 @@ pub mod provisioning;
 /// and key rotation. Pure metadata + verification core; see [`uptane`].
 pub mod uptane;
 
+/// WP-24 slice 2 (MGA G-15) — project a VERIFIED Uptane `targets` manifest onto
+/// the parko model-integrity vocabulary (the signed model allow-list); see
+/// [`model_targets`].
+pub mod model_targets;
+
 /// Crate-private standard-alphabet base64 (padding), shared by
 /// [`artifact_release`] and [`uptane`]. Inlined so the lean actuation-path
 /// crate pulls no `base64` dependency (see the manifest header).
