@@ -109,7 +109,7 @@ impl UptaneTrustStore {
 
     /// Apply a presented root ROTATION against the currently-trusted root and
     /// PERSIST the new trust state (rolling the version floor forward is the
-    /// caller's job via [`record_versions`]). Fail-closed: a rejected rotation
+    /// caller's job via [`record_versions`](Self::record_versions)). Fail-closed: a rejected rotation
     /// leaves the stored state untouched. Returns the adopted root.
     pub fn adopt_rotation(
         &self,

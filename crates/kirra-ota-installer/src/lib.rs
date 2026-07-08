@@ -39,6 +39,16 @@ pub use nvbootctrl::{NvbootctrlBootController, NvbootctrlRunner, SystemNvbootctr
 pub mod uptane_trust;
 pub use uptane_trust::{TrustState, TrustStoreError, UptaneTrustStore};
 
+// EP-06 (M1) — signed manifest → node model allow-list: verify a presented
+// Uptane metadata bundle through the durable trust state and render the
+// KIRRA_MODEL_ALLOWLIST(_STRICT) env file the co-located parko process
+// launches under (the non-test consumer of kirra_release_token::model_targets).
+pub mod model_allowlist;
+pub use model_allowlist::{
+    derive_model_allowlist, parse_metadata_bundle, render_allowlist_env_file,
+    ModelAllowlistError, ModelMetadataBundle,
+};
+
 /// One of the two governor-artifact slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,7 +223,7 @@ impl<B: BootController> Installer<B> {
     /// WP-12 — provision the governor artifact-release verifying key. From
     /// this point EVERY stage must carry a valid release signature
     /// ([`stage_verified_signed`](Self::stage_verified_signed)); the unsigned
-    /// [`stage_verified`](Self::stage_verified) path is refused
+    /// [`stage`](Self::stage) path is refused
     /// (`SignatureRequired`). Provisioning is one-way by design — an
     /// installer never downgrades to hash-only once it knows the key.
     #[must_use]
