@@ -99,6 +99,153 @@ fn future_schema_error(db_version: i64, target: i64) -> rusqlite::Error {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// WP-18 slice 2/3 — backend-agnostic migration engine
+//
+// The migration POLICY (registry ordering, fail-closed downgrade protection,
+// apply-in-order, atomic version stamp) is dialect-INDEPENDENT; only the
+// version-tracking primitive and the step DDL are backend-specific. This seam
+// lifts the policy off the concrete store so the SAME engine drives SQLite's
+// `PRAGMA user_version` AND, e.g., a Postgres `schema_version` table
+// (`migrations_postgres.rs`), with one set of fail-closed guarantees.
+// ---------------------------------------------------------------------------
+
+/// A backend-agnostic schema-version journal — the seam the migration engine
+/// ([`run_migrations_generic`]) drives. The engine owns the POLICY; each concrete
+/// store (SQLite `PRAGMA user_version`, a Postgres `schema_version` table, …)
+/// supplies these primitives. Migration STEP bodies stay per-backend ([`Step`]),
+/// because their DDL is dialect-specific — only the version policy is shared.
+///
+/// [`Step`]: SchemaBackend::Step
+pub trait SchemaBackend {
+    /// The backend's error type.
+    type Error;
+    /// A backend-specific migration step (carries its target version + DDL body).
+    type Step;
+
+    /// The version a step migrates the schema TO.
+    fn step_version(step: &Self::Step) -> i64;
+
+    /// The store's current schema version (`0` if never stamped).
+    fn read_version(&mut self) -> Result<i64, Self::Error>;
+
+    /// Atomically run `step`'s body AND stamp its version — both commit or neither
+    /// (a crash between them must never leave a step applied-but-unstamped, which
+    /// would re-run a non-idempotent migration on restart).
+    fn apply_and_stamp(&mut self, step: &Self::Step) -> Result<(), Self::Error>;
+
+    /// Stamp `version` with no step body (the baseline stamp for a fresh store).
+    fn stamp(&mut self, version: i64) -> Result<(), Self::Error>;
+
+    /// Build the fail-closed "database is newer than this binary" error.
+    fn future_error(db_version: i64, target: i64) -> Self::Error;
+
+    /// Build the fail-closed "migration registry is malformed" error.
+    fn malformed_error(reason: String) -> Self::Error;
+}
+
+/// Validate a migration registry: strictly ascending versions, all above the v1
+/// baseline. Pure — the dialect-independent half of the registry contract, shared
+/// by every backend. Returns the operator-readable reason on violation.
+pub fn validate_step_versions(versions: &[i64]) -> Result<(), String> {
+    let mut prev = 1i64; // the baseline; the first registered step must exceed it
+    for &v in versions {
+        if v <= prev {
+            return Err(format!(
+                "migration registry is malformed: version {v} is not strictly greater than \
+                 the previous ({prev}) — steps must be ascending and above the v1 baseline"
+            ));
+        }
+        prev = v;
+    }
+    Ok(())
+}
+
+/// The backend-agnostic migration engine. Validates the registry ordering,
+/// refuses a future DB (fail-closed), applies each pending step in `(start,
+/// target]` atomically in order, then stamps the baseline `target` (so a fresh
+/// store with no pending step still lands on the baseline version). Returns the
+/// store's schema version BEFORE this call ran.
+///
+/// This is the single implementation of the migration policy; [`run_migrations_with`]
+/// (SQLite) and the Postgres backend are thin wrappers that supply a [`SchemaBackend`].
+pub fn run_migrations_generic<B: SchemaBackend>(
+    backend: &mut B,
+    steps: &[B::Step],
+    target: i64,
+) -> Result<i64, B::Error> {
+    let versions: Vec<i64> = steps.iter().map(B::step_version).collect();
+    if let Err(reason) = validate_step_versions(&versions) {
+        return Err(B::malformed_error(reason));
+    }
+
+    let start = backend.read_version()?;
+    if start > target {
+        return Err(B::future_error(start, target));
+    }
+
+    let mut applied = start;
+    for step in steps.iter().filter(|s| {
+        let v = B::step_version(s);
+        v > start && v <= target
+    }) {
+        backend.apply_and_stamp(step)?;
+        applied = B::step_version(step);
+    }
+    // Stamp the baseline even when no step ran (fresh / pre-framework store).
+    if applied < target {
+        backend.stamp(target)?;
+    }
+    Ok(start)
+}
+
+/// The SQLite [`SchemaBackend`]: `PRAGMA user_version` for the version, and a
+/// per-step `unchecked_transaction` for the atomic apply+stamp. `unchecked_transaction`
+/// because startup holds only `&Connection` and is single-threaded on it.
+pub struct SqliteBackend<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> SqliteBackend<'a> {
+    /// Wrap a connection as a schema backend.
+    #[must_use]
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+}
+
+impl SchemaBackend for SqliteBackend<'_> {
+    type Error = rusqlite::Error;
+    type Step = Migration;
+
+    fn step_version(step: &Migration) -> i64 {
+        step.version
+    }
+
+    fn read_version(&mut self) -> rusqlite::Result<i64> {
+        read_user_version(self.conn)
+    }
+
+    fn apply_and_stamp(&mut self, step: &Migration) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        (step.apply)(&tx)?;
+        set_user_version(&tx, step.version)?;
+        tx.commit()
+    }
+
+    fn stamp(&mut self, version: i64) -> rusqlite::Result<()> {
+        set_user_version(self.conn, version)
+    }
+
+    fn future_error(db_version: i64, target: i64) -> rusqlite::Error {
+        future_schema_error(db_version, target)
+    }
+
+    fn malformed_error(reason: String) -> rusqlite::Error {
+        migration_error(reason)
+    }
+}
+
 /// FAIL-CLOSED gate — call BEFORE running the schema DDL. Refuses (does not open) a
 /// database whose `user_version` exceeds [`SCHEMA_VERSION`] (written by a newer
 /// binary). Returns the DB's current schema version on success (`0` for a
@@ -140,39 +287,10 @@ fn run_migrations_with(
     steps: &[Migration],
     target: i64,
 ) -> rusqlite::Result<i64> {
-    // Enforce the registry contract before touching the DB.
-    let mut prev = 1i64; // the baseline; the first registered step must exceed it
-    for m in steps {
-        if m.version <= prev {
-            return Err(migration_error(format!(
-                "migration registry is malformed: version {} is not strictly greater than \
-                 the previous ({prev}) — steps must be ascending and above the v1 baseline",
-                m.version
-            )));
-        }
-        prev = m.version;
-    }
-
-    let start = read_user_version(conn)?;
-    if start > target {
-        return Err(future_schema_error(start, target));
-    }
-    let mut applied = start;
-    for m in steps.iter().filter(|m| m.version > start && m.version <= target) {
-        // Atomic: the step's DDL AND its version stamp commit together (or neither).
-        // `unchecked_transaction` because we hold only `&Connection` at open time;
-        // startup is single-threaded on this connection.
-        let tx = conn.unchecked_transaction()?;
-        (m.apply)(&tx)?;
-        set_user_version(&tx, m.version)?;
-        tx.commit()?;
-        applied = m.version;
-    }
-    // Stamp the baseline version even when no step ran (fresh / pre-framework DB).
-    if applied < target {
-        set_user_version(conn, target)?;
-    }
-    Ok(start)
+    // SQLite is now just one [`SchemaBackend`]; the policy (ordering enforcement,
+    // fail-closed future protection, atomic apply+stamp) lives in the shared engine.
+    let mut backend = SqliteBackend::new(conn);
+    run_migrations_generic(&mut backend, steps, target)
 }
 
 #[cfg(test)]

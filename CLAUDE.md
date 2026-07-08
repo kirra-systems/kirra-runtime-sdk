@@ -97,7 +97,15 @@ src/
 │                               over PRAGMA user_version — SCHEMA_VERSION, fail-closed
 │                               assert_schema_not_future (refuse a newer-binary DB),
 │                               run_migrations (apply registered steps + stamp); new()
-│                               gates on it. VerifierStore::schema_version() reads it
+│                               gates on it. VerifierStore::schema_version() reads it.
+│                               WP-18 s2/3: the policy is now a dialect-agnostic engine
+│                               (SchemaBackend trait + run_migrations_generic +
+│                               validate_step_versions); SqliteBackend is one impl (the
+│                               live path delegates, behaviour-preserving).
+│                               migrations_postgres.rs: PostgresBackend<E: PgExecutor> —
+│                               the same engine over a schema_version table + an injected
+│                               executor seam (no tokio-postgres dep; driver binding is
+│                               the integrator's ~10-line adapter)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,
