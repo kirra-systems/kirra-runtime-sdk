@@ -193,11 +193,16 @@ fn log_tail(dir: &Path, name: &str) -> String {
 }
 
 /// The durable single-writer record: `(epoch, holder)` from the shared store.
-/// Opened read-only via the crate's own store type (same schema authority).
+/// Opened via the WAL READ-REPLICA (SQLITE_OPEN_READ_ONLY): `VerifierStore::new`
+/// would open a writer-capable connection and run PRAGMAs/DDL against the LIVE
+/// shared DB — a third writer-style connection that could contend with the two
+/// service processes and skew the drill's timing measurements. The replica open
+/// is the store's own non-contending read path.
 fn durable_holder(db: &Path) -> (u64, Option<String>) {
-    let store =
-        kirra_verifier::verifier_store::VerifierStore::new(db.to_str().expect("utf8 db path"))
-            .expect("open shared store from drill");
+    let store = kirra_verifier::verifier_store::VerifierStore::open_read_replica(
+        db.to_str().expect("utf8 db path"),
+    )
+    .expect("open read replica from drill");
     store.current_active_holder().expect("read ha_state")
 }
 

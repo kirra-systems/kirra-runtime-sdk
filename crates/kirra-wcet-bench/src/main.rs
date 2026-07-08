@@ -182,7 +182,17 @@ fn pwcet_line(stage_name: &str, samples_us: &[f64]) -> String {
                 "[kirra-wcet-bench] pWCET[{stage_name}]: not estimable ({e}) — reported honestly, \
                  never fabricated"
             );
-            format!("pwcet,{stage_name},NOT-ESTIMABLE,{e},,,,,,INDICATIVE\n")
+            // Sanitize the error into a single comma-free field so the row stays
+            // machine-parseable CSV regardless of the message (the full text is
+            // on stderr above).
+            let reason: String = format!("{e}")
+                .chars()
+                .map(|c| match c {
+                    ',' | '\n' | '\r' | '"' => ';',
+                    c => c,
+                })
+                .collect();
+            format!("pwcet,{stage_name},NOT-ESTIMABLE,{reason},,,,,,INDICATIVE\n")
         }
     }
 }
