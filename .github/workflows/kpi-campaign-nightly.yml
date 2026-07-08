@@ -1,0 +1,33 @@
+# WP-23 (G-16 software half) — the nightly full-corpus Monte-Carlo scenario
+# campaign. Kept in its OWN workflow so the `schedule` trigger does not fan the
+# whole ci.yml job graph out nightly: this file runs ONLY the campaign at the
+# full 10⁴–10⁵ sample size, whose tighter confidence intervals make the same
+# reviewed floors (ci/scenario_kpi_montecarlo.json) a stronger claim than the
+# per-PR sampled subset that gates every PR in ci.yml.
+name: KPI campaign (nightly)
+
+on:
+  schedule:
+    # 07:17 UTC daily (off the hour to dodge the top-of-hour scheduler surge).
+    - cron: "17 7 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kpi-campaign-nightly
+  cancel-in-progress: true
+
+jobs:
+  campaign:
+    name: Monte-Carlo scenario campaign (nightly full corpus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Full-corpus campaign (10⁴–10⁵ samples, 95% CI bounds)
+        env:
+          KIRRA_KPI_MC_PROFILE: nightly
+        run: cargo run --release --locked -p kirra-kpi-gate --bin scenario_kpi_gate

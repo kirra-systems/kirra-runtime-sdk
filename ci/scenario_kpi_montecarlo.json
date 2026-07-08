@@ -1,0 +1,11 @@
+{
+  "_comment": "WP-23 (G-16 software half) Monte-Carlo scenario-campaign policy (see crates/kirra-kpi-gate/src/montecarlo.rs). Unlike ci/scenario_kpi_thresholds.json (a deterministic closed-form sweep with EXACT rational KPIs), this drives a SEEDED procedural corpus and re-expresses each floor as a CONFIDENCE-INTERVAL bound so a pass is a statistical statement, not one draw: a must-be-small rate (unsafe_miss_rate) is gated on its 95% Wilson UPPER bound, a must-be-large rate (admissibility, hazard_recall) on its 95% Wilson LOWER bound. The seed is the reproducibility anchor (bumping it is a reviewed policy change). Observed at the per_pr size on the current tree (seed 424242424242): geometric admissibility wilson.lo 0.9636, learned 0.9156, unsafe_miss wilson.hi 0.0126 (seam-pinned mock — a smoke test, not a fielded rate), hazard_recall wilson.lo 0.9852; negative-control breaches wilson.lo 0.9852. Floors sit with margin BELOW/ABOVE those so a real regression breaches while sampling noise does not; the nightly profile's larger corpus tightens the interval, making the SAME floor a stronger claim. A KPI may only move past its bound with a reviewed justification in the PR that changes this file.",
+  "seed": 424242424242,
+  "per_pr": { "doer_samples": 500, "perception_samples": 300 },
+  "nightly": { "doer_samples": 40000, "perception_samples": 20000 },
+  "geometric_admissibility_lo_min": 0.93,
+  "learned_admissibility_lo_min": 0.88,
+  "unsafe_miss_rate_hi_max": 0.03,
+  "hazard_recall_lo_min": 0.95,
+  "negctl_breach_lo_min": 0.90
+}

@@ -37,6 +37,8 @@
 //! reviewed, versioned policy. The binary exits non-zero on any breach and
 //! prints the scorecard either way.
 
+pub mod confidence;
+pub mod montecarlo;
 pub mod sotif_coverage;
 
 use kirra_core::corridor::{MockCorridorSource, Point};
@@ -57,7 +59,7 @@ use serde::{Deserialize, Serialize};
 /// `PerceivedObject`s; the kinds differ in longitudinal motion so the RSS
 /// terms (stationary lead / slower lead / oncoming closer) are all exercised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HazardKind {
+pub(crate) enum HazardKind {
     /// Stationary object on the centerline (the stopped-queue case).
     Stopped,
     /// Lead vehicle moving away slowly (+1.0 m/s along +x).
@@ -66,7 +68,7 @@ enum HazardKind {
     Oncoming,
 }
 
-fn hazard(kind: HazardKind, id: u64, x_m: f64) -> PerceivedObject {
+pub(crate) fn hazard(kind: HazardKind, id: u64, x_m: f64) -> PerceivedObject {
     let (v, heading) = match kind {
         HazardKind::Stopped => (0.0, 0.0),
         HazardKind::LeadMoving => (1.0, 0.0),
@@ -133,7 +135,7 @@ pub fn generated_doer_corpus() -> Vec<EvalScenario> {
 /// the REAL checker (`validate_trajectory_slow` via `verdict_of`); the rate
 /// is `kirra_doer_eval::AdmissibilityTally::admissibility_rate` (fail-closed:
 /// an empty corpus scores 0.0, not 1.0).
-fn admissibility_over(corpus: &[EvalScenario], mut plan: impl FnMut(&EvalScenario) -> kirra_planner::PlanOutput) -> (f64, AdmissibilityTally) {
+pub(crate) fn admissibility_over(corpus: &[EvalScenario], mut plan: impl FnMut(&EvalScenario) -> kirra_planner::PlanOutput) -> (f64, AdmissibilityTally) {
     let mut tally = AdmissibilityTally::default();
     for sc in corpus {
         let out = plan(sc);
@@ -158,7 +160,7 @@ pub struct PerceptionCase {
 /// A wide-open ~20 m corridor built through the real Phase-A geometric
 /// pipeline (the same substrate the taj fusion tests use), so the binding
 /// hazard in each frame is the semantic one, never geometry.
-fn open_corridor() -> TajCorridor {
+pub(crate) fn open_corridor() -> TajCorridor {
     let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
     let n = 180usize;
     let mut ranges = vec![f32::INFINITY; n];
@@ -475,6 +477,129 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
 }
 
 // ---------------------------------------------------------------------------
+// WP-23 (G-16 software half) — the Monte-Carlo campaign gate
+// ---------------------------------------------------------------------------
+
+use confidence::{clopper_pearson_interval, wilson_interval, ALPHA_95, Z_95};
+use montecarlo::{
+    sample_doer_corpus, sample_perception_corpus, Bound, McGateReport, McKpiRow, MonteCarloPolicy,
+    Profile,
+};
+
+/// A Wilson (gated) + Clopper–Pearson (reported) interval pair from a count.
+fn intervals(successes: u64, trials: u64) -> (confidence::ConfidenceInterval, confidence::ConfidenceInterval) {
+    (
+        wilson_interval(successes, trials, Z_95),
+        clopper_pearson_interval(successes, trials, ALPHA_95),
+    )
+}
+
+/// Run the WP-23 Monte-Carlo campaign for a `profile`: sample the corpora at the
+/// policy's seed + size, score each KPI through the existing harnesses, and gate
+/// each on a [`confidence`] interval (a "must be small" rate on its UPPER bound,
+/// a "must be large" rate on its LOWER bound). The #777 F1 negative controls are
+/// re-run over the SAMPLED hazard frames so the oracle-discrimination evidence
+/// survives resampling. Deterministic: fixed `(seed, sizes)` ⇒ fixed verdict.
+#[must_use]
+pub fn run_montecarlo_gate(policy: &MonteCarloPolicy, profile: Profile) -> McGateReport {
+    let sizes = policy.sizes(profile);
+    let seed = policy.seed;
+
+    // --- Doer admissibility (geometric + seeded learned) over the sampled corpus.
+    let corpus = sample_doer_corpus(seed, sizes.doer_samples);
+    let (_, geo_tally) = admissibility_over(&corpus, |sc| {
+        GeometricPlanner::new(GeometricPlannerConfig::default()).plan(&sc.plan_input())
+    });
+    let learned = LearnedPlanner::trained(7, Teacher::SafetyAware);
+    let (_, learned_tally) = admissibility_over(&corpus, |sc| {
+        learned.plan_with_chosen_index(&sc.plan_input()).1
+    });
+
+    let geo_ok = (geo_tally.accept + geo_tally.clamp) as u64;
+    let (geo_w, geo_cp) = intervals(geo_ok, geo_tally.total() as u64);
+    let learned_ok = (learned_tally.accept + learned_tally.clamp) as u64;
+    let (learned_w, learned_cp) = intervals(learned_ok, learned_tally.total() as u64);
+
+    // --- Perception KPIs over the sampled frames.
+    let cases = sample_perception_corpus(seed, sizes.perception_samples);
+    let perc = score_perception(&cases);
+    let (miss_w, miss_cp) = intervals(perc.unsafe_miss as u64, perc.frames as u64);
+    let (recall_w, recall_cp) =
+        intervals(perc.true_hazards_caught as u64, perc.frames_with_true_hazard as u64);
+
+    let mut rows = vec![
+        McKpiRow::new(
+            "geometric_admissibility",
+            geo_w,
+            geo_cp,
+            Bound::CiLowerAtLeast(policy.geometric_admissibility_lo_min),
+        ),
+        McKpiRow::new(
+            "learned_admissibility",
+            learned_w,
+            learned_cp,
+            Bound::CiLowerAtLeast(policy.learned_admissibility_lo_min),
+        ),
+        McKpiRow::new(
+            "unsafe_miss_rate_seam_pinned",
+            miss_w,
+            miss_cp,
+            Bound::CiUpperAtMost(policy.unsafe_miss_rate_hi_max),
+        ),
+        McKpiRow::new(
+            "hazard_recall_seam_pinned",
+            recall_w,
+            recall_cp,
+            Bound::CiLowerAtLeast(policy.hazard_recall_lo_min),
+        ),
+    ];
+
+    // --- #777 F1 negative controls, re-run over the sampled hazard frames: each
+    // fault family must still breach unsafe_miss (CI lower bound over the floor).
+    for fault in [
+        DetectorFault::Dropout,
+        DetectorFault::RangeBiasFar,
+        DetectorFault::ClassConfusion,
+        DetectorFault::LateralShrink,
+    ] {
+        let s = score_perception(&negative_control_corpus(&cases, fault));
+        let (w, cp) = intervals(s.unsafe_miss as u64, s.frames as u64);
+        let name: &'static str = match fault {
+            DetectorFault::Dropout => "negctl_dropout_unsafe_miss",
+            DetectorFault::RangeBiasFar => "negctl_range_bias_far_unsafe_miss",
+            DetectorFault::ClassConfusion => "negctl_class_confusion_unsafe_miss",
+            DetectorFault::LateralShrink => "negctl_lateral_shrink_unsafe_miss",
+        };
+        rows.push(McKpiRow::new(name, w, cp, Bound::CiLowerAtLeast(policy.negctl_breach_lo_min)));
+    }
+
+    // --- Phantom control: over-conservative breach (statistical), and the HARD
+    // invariant that a phantom is NEVER scored unsafe (point == 0, no CI slack).
+    let ps = score_perception(&phantom_control_corpus(&cases));
+    let (over_w, over_cp) = intervals(ps.over_conservative as u64, ps.frames as u64);
+    rows.push(McKpiRow::new(
+        "negctl_phantom_over_conservative",
+        over_w,
+        over_cp,
+        Bound::CiLowerAtLeast(policy.negctl_breach_lo_min),
+    ));
+    let (pmiss_w, pmiss_cp) = intervals(ps.unsafe_miss as u64, ps.frames as u64);
+    rows.push(McKpiRow::new(
+        "negctl_phantom_no_unsafe_miss",
+        pmiss_w,
+        pmiss_cp,
+        Bound::PointAtMost(0.0),
+    ));
+
+    McGateReport {
+        seed,
+        doer_samples: corpus.len(),
+        perception_samples: cases.len(),
+        rows,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -611,6 +736,80 @@ mod tests {
             let row = report.rows.iter().find(|r| r.name == name)
                 .unwrap_or_else(|| panic!("gate must carry the {name} row: {report:#?}"));
             assert!(row.pass, "negative-control row {name} must pass (oracle discriminates the fault): {row:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WP-23 — Monte-Carlo campaign gate
+    // -----------------------------------------------------------------------
+
+    fn committed_mc_policy() -> montecarlo::MonteCarloPolicy {
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ci/scenario_kpi_montecarlo.json");
+        serde_json::from_str(&std::fs::read_to_string(p).expect("committed MC policy exists"))
+            .expect("MC policy parses")
+    }
+
+    /// THE WP-23 DoD (green half): the Monte-Carlo campaign PASSES against the
+    /// committed CI-bound policy at the per-PR size — the reviewed floors are
+    /// honest for the current tree.
+    #[test]
+    fn montecarlo_gate_passes_against_committed_policy() {
+        let report = run_montecarlo_gate(&committed_mc_policy(), montecarlo::Profile::PerPr);
+        assert!(
+            report.passed(),
+            "committed MC floors must hold at the per-PR sample size: {:#?}",
+            report.rows.iter().filter(|r| !r.pass).collect::<Vec<_>>()
+        );
+        // Every KPI + every negative-control row is present (no silent shrink).
+        assert_eq!(report.rows.len(), 4 + 4 + 2, "all KPI + negctl rows present");
+    }
+
+    /// THE WP-23 DoD (red half): a floor set past the measured interval reds the
+    /// campaign, and the breach is attributed to the right row. The wiring from
+    /// a confidence bound to a verdict is what is under test.
+    #[test]
+    fn montecarlo_gate_goes_red_on_an_unreachable_floor() {
+        let mut policy = committed_mc_policy();
+        policy.unsafe_miss_rate_hi_max = -0.001; // unreachable: an upper bound < 0
+        let report = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
+        assert!(!report.passed(), "an impossible CI bound must red the campaign");
+        assert!(
+            report.rows.iter().any(|r| r.name == "unsafe_miss_rate_seam_pinned" && !r.pass),
+            "the breach must attribute to the unsafe_miss row"
+        );
+    }
+
+    /// The campaign is deterministic by seed: the same policy yields byte-identical
+    /// verdicts (a red run is a real regression, never flake).
+    #[test]
+    fn montecarlo_gate_is_deterministic() {
+        let policy = committed_mc_policy();
+        let a = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
+        let b = run_montecarlo_gate(&policy, montecarlo::Profile::PerPr);
+        let fingerprint = |r: &montecarlo::McGateReport| -> Vec<(&'static str, bool, f64, f64)> {
+            r.rows.iter().map(|x| (x.name, x.pass, x.wilson.lo, x.wilson.hi)).collect()
+        };
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+    }
+
+    /// The negative-control rows survive resampling: an injected detector fault
+    /// still breaches the safety metric's CI lower bound over the SAMPLED hazard
+    /// frames (the #777 F1 oracle-discrimination evidence is not a fixed-corpus
+    /// artifact).
+    #[test]
+    fn montecarlo_negative_controls_still_breach_under_sampling() {
+        let report = run_montecarlo_gate(&committed_mc_policy(), montecarlo::Profile::PerPr);
+        for name in [
+            "negctl_dropout_unsafe_miss",
+            "negctl_range_bias_far_unsafe_miss",
+            "negctl_class_confusion_unsafe_miss",
+            "negctl_lateral_shrink_unsafe_miss",
+            "negctl_phantom_over_conservative",
+            "negctl_phantom_no_unsafe_miss",
+        ] {
+            let row = report.rows.iter().find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("campaign must carry {name}"));
+            assert!(row.pass, "negative-control row {name} must pass under sampling: {row:?}");
         }
     }
 

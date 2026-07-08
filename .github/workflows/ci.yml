@@ -105,6 +105,11 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: KPI gate (unsafe_miss_rate / admissibility / hazard_recall)
+        # WP-23: the deterministic sweep PLUS the seeded Monte-Carlo campaign at
+        # the per-PR sampled-subset size (95% CI bounds). The full 10⁴–10⁵ corpus
+        # runs nightly in kpi-campaign-nightly.yml.
+        env:
+          KIRRA_KPI_MC_PROFILE: per_pr
         run: cargo run --locked -p kirra-kpi-gate --bin scenario_kpi_gate
 
   # WS-5.1 — the QNX governor-judge cross-build: the EPIC-#270 no_std
