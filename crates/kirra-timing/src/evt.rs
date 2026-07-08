@@ -161,7 +161,7 @@ pub struct PwcetEstimate {
     pub gpd: GpdParams,
     /// Lag-1 autocorrelation of the full sample (≈0 supports i.i.d.).
     pub lag1_autocorr: f64,
-    /// First-half / second-half mean ratio (≈1 supports stationarity).
+    /// Second-half / first-half mean ratio (≈1 supports stationarity; >1 = drift up).
     pub stationarity_ratio: f64,
     pub target_prob: f64,
 }
@@ -232,9 +232,9 @@ pub fn lag1_autocorrelation(samples: &[f64]) -> f64 {
     numer / denom
 }
 
-/// First-half / second-half mean ratio — a coarse stationarity indicator. Near 1
-/// supports a stable mean; far from 1 signals drift (warm-up, thermal throttling).
-/// Returns 1.0 for a degenerate series.
+/// Second-half / first-half mean ratio — a coarse stationarity indicator. Near 1
+/// supports a stable mean; far from 1 signals drift (>1 = later samples larger, e.g.
+/// thermal throttling; <1 = warm-up settling). Returns 1.0 for a degenerate series.
 #[must_use]
 pub fn stationarity_split_mean_ratio(samples: &[f64]) -> f64 {
     let n = samples.len();
