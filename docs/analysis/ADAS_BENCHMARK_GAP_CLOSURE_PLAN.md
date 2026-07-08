@@ -1,9 +1,30 @@
-# Mobileye Gap-Closure Execution Plan — Claude Code Track
+# ADAS-Benchmark Gap-Closure Execution Plan — Claude Code Track
 
-**Date:** 2026-07-07
-**Basis:** `docs/analysis/MOBILEYE_GAP_ANALYSIS.md` (MGA G-1…G-22, 2026-07-06).
+**Date:** 2026-07-07 (re-baselined 2026-07-08 — see §0)
+**Basis:** `docs/analysis/ADAS_BENCHMARK_GAP_ANALYSIS.md` (MGA G-1…G-22, 2026-07-06; the historical `MGA` gap-ID prefix is retained — code and docs cross-reference `MGA G-x` throughout).
 **Scope rule:** this plan covers ONLY work executable with Claude Code in this repository — code, tests, CI, and evidence artifacts that build and verify in a Linux sandbox. **Certification-process items (ASIL-D assessment, TÜV engagement, IEEE/standards body work, Ferrocene licensing) and hardware/license-blocked items (QNX Hypervisor, target-silicon WCET, Jetson CI runner, sensor procurement) are separate tracks** and appear here only where a work package produces their *software half* so the external track starts unblocked.
 **Tracking:** on completion, each work package (WP) updates `docs/analysis/GAP_CLOSURE_STATUS.md` conventions — a row naming its evidence (test/fn/CI job), and the MGA gap it closes or partially closes.
+
+---
+
+## 0. Verified-status re-baseline (2026-07-08) — READ THIS FIRST
+
+An independent, evidence-based due-diligence review (`docs/analysis/ADAS_BENCHMARK_DD_REVIEW.md`) verified every WP claim below against the actual code, tests, and CI — not this document. Its corrections are AUTHORITATIVE over the per-WP status rows:
+
+- **"DONE" below means "CORE DONE" for six items** whose implementations exist and are tested but have **no live consumer yet**: WP-19's lease (the live promotion loop still runs the legacy 10 s heartbeat — the ≤5 s failover property is NOT yet delivered), WP-22's EVT/pWCET (zero callers), WP-24's `model_lineage`/`ood`/`model_targets`, WP-18's `EpochFence`/`NodeStore` traits (not consumed generically) and the Postgres migration backend (mock executor only — no real PG driver exists).
+- **Never started:** WP-11 (curved-geometry RSS), WP-21 (the in-line SHM enforcement path — the software half of Critical gap G-1), WP-21b (zero-copy production adoption).
+- **Verified gap closure:** ✅ 3 fully (G-10, G-13, G-20) · 🟡 7 mostly · 🟠 9 partially · 🔴 3 open (G-2, G-5, G-22 — external by design). Weighted by severity: **≈ 45 % of the full gap set, ≈ 70 % of the in-repo software scope.**
+
+**Re-prioritized roadmap (supersedes the "Wave 3 remaining" line in §6a; ROI-ranked):**
+1. **WP-21 — in-line SHM enforcement path** (every prerequisite core exists; integration, not invention; unblocks G-1's software half and gives G-18 a consumer).
+2. **WP-19 final — live lease flip** behind an env gate, validated by a scripted two-process failover drill (epoch fence stays the backstop; never default-on without the drill).
+3. **WP-24 wiring — the three orphan ML cores**: lineage → ORT `load_model` rollback; OOD fed per-tick confidences in `run_pipeline_tick`; node sets `KIRRA_MODEL_ALLOWLIST` (+`_STRICT`) from the verified signed manifest.
+4. **True MC/DC** (resolve issue #65; the coverage job currently falls back to branch coverage).
+5. **WP-11 + RSS constant validation** (the algebra is done; the certified *numbers* are not — needs a safety engineer in the loop).
+6. **One real Postgres driver adapter + PG service container in CI** — then STOP extracting store traits (wire-or-delete rule: no new domain trait without a consumer or the live-PG milestone).
+7. Small: consume EVT in `kirra-wcet-bench`; weekly deep-fuzz schedule; rename the two power-loss drills distinctly.
+
+**Retired from the roadmap (with cause):** `SchedulingClass`→syscalls under tokio (wrong layer — re-homed to the QNX/EPIC-#270 dedicated-thread lane; the enum stays as declarative metadata) · whole-store `VerifierStorage` trait over all ~130 methods (extract on demand only) · G-22 AUTOSAR (customer-driven; revisit on a signed requirement) · CRL-file at the TLS callback (revocation already works).
 
 ---
 
@@ -119,7 +140,7 @@ Next: Wave 2 complete (WP-12 → WP-16). Wave 3 (platform & scale) started.
 
 | WP-24 (slice 2a) | **DONE** 2026-07-08 (signed model manifest) | Bind the parko model-integrity allow-list to a **signed** manifest, reusing the WP-13 Uptane targets machinery — the headline of s2, delivered in the root workspace where the crypto (`kirra-release-token::uptane`) already lives, so there is NO cross-workspace crypto dep. A "model manifest" IS an Uptane `targets` metadata whose entries are the authorized model artifacts (SHA-256 digest + version); a node verifies it through the existing full chain (`verify_update` — timestamp→snapshot→targets: role separation, freshness, rollback floor, no mix-and-match), then DERIVES the authorized digest set. New pure `crates/kirra-release-token/src/model_targets.rs`: `authorized_model_digests` / `model_allowlist_env_value` (the comma-separated `KIRRA_MODEL_ALLOWLIST` value parko's `ModelAllowList::parse` already consumes) / `authorized_model_entry` / `is_model_authorized`. The projection takes an already-`VerifiedUpdate` (only obtainable from the fail-closed `verify_update`), so the type system guarantees ONLY a cryptographically-verified manifest can drive an allow-list; deny-by-default composes end to end (no verified manifest → empty allow-list → parko strict mode denies every model). This makes the allow-list a SIGNED FACT, not the operator ASSERTION the #G16 raw allow-list left it. Evidence: 4 new tests (allow-list = ordered signed digest set; digest-scoped authorization lookup; empty-manifest → empty allow-list; **the end-to-end signed-manifest → allow-list happy path + a manifest tampered AFTER signing is refused by the real chain**) + 45 release-token lib green; clippy clean. RECORDED FOLLOW-UP (parko-side, hardware/ros2-gated): the thin node step that sets `KIRRA_MODEL_ALLOWLIST` from the verified manifest for the co-located parko process; wire the backend `load_model` to the `ModelLineage` rollback; feed the OOD monitor live per-tick confidences in `run_pipeline_tick`; the Jetson CI runner (external). |
 
-Wave 3 remaining: WP-18 remaining store domains + live-PG binding (migration trait + PG migration backend + EpochFence storage trait DONE) · WP-19 live async-loop flip (durable lease mechanism + failover drill DONE; needs a live multi-node drill) · WP-20 residual (data-coupled + HA spawn driving; supervisor deadline-escalation; SCHED_FIFO blocked-by-tokio-model — boot gate + trailing-monitor dispatch + deadline /metrics DONE) · WP-24 parko-side wiring (node sets KIRRA_MODEL_ALLOWLIST from the verified manifest + backend load_model rollback + run_pipeline_tick OOD; signed model manifest DONE).
+Wave 3 remaining: SUPERSEDED by the §0 verified-status re-baseline (2026-07-08) — see the ROI-ranked roadmap there. Summary: WP-21 in-line path first; WP-19 live lease flip (behind a drill); WP-24 orphan-core wiring; true MC/DC; WP-11 + RSS constant validation; one real PG driver + CI container (then stop trait extraction). Retired: SchedulingClass syscalls under tokio; whole-store trait completion; G-22; CRL-file.
 
 ## 3. Wave 0 — Hardening sprint (6 WPs, ~1–2 weeks elapsed)
 

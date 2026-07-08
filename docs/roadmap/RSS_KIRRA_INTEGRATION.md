@@ -8,7 +8,7 @@
 
 - The author of this document has not read IEEE 2846-2022. The standard must be purchased and read before any code is written against it. The technical content below is based on public knowledge of RSS-style safety models and standards-body framing, not on the standard text itself.
 - "Improve on RSS" is explicitly NOT the goal. The goal is implementing IEEE 2846-conforming safety invariants in a vendor-neutral, auditable, integrable way that the market does not currently have. Fight on integration and transparency, not on the math.
-- Patent landscape around RSS is non-trivial. IEEE 2846 was developed with explicit IEEE patent policy commitments; it is the safe legal foundation. Implementing RSS-the-Mobileye-paper directly is not.
+- Patent landscape around RSS is non-trivial. IEEE 2846 was developed with explicit IEEE patent policy commitments; it is the safe legal foundation. Implementing RSS-the-original-paper directly is not.
 - All effort estimates are rough. Multiply by 1.5x if you've never integrated with AV perception output before.
 
 ---
@@ -248,7 +248,7 @@ Goals: the public artifact. See section 7 below for the outline.
 
 **The "improve on RSS" temptation.** Phase 0 will tempt you to identify "obvious improvements" to the IEEE 2846 math. Resist this. Your value proposition is *implementation fidelity and transparency*, not novel safety theory. If you genuinely find a gap in the standard, file it as a comment with the IEEE working group rather than implementing your own variant. Conforming-to-standard is your moat. Diverging-from-standard is a liability.
 
-**Mobileye patent surface.** IEEE 2846 was developed with patent policy commitments; conformant implementations should be safe. But: implementing equations that look very similar to specific RSS paper equations, even via IEEE 2846, may attract attention. Have legal counsel review the implementation before public release. This is genuine advice, not paranoia — Mobileye is a Goliath and they have lawyers.
+**RSS-originator patent surface.** IEEE 2846 was developed with patent policy commitments; conformant implementations should be safe. But: implementing equations that look very similar to specific RSS paper equations, even via IEEE 2846, may attract attention. Have legal counsel review the implementation before public release. This is genuine advice, not paranoia — the Tier-1 ADAS benchmark vendor is a Goliath and they have lawyers.
 
 **Multi-actor combinatorics.** Evaluating every actor against every other actor (for multi-agent interactions) is O(N²). For 30 actors that's 900 evaluations per cycle. At 100Hz that's 90,000 per second. Cache aggressively, evaluate only actors within reachable zones, profile early.
 
@@ -321,7 +321,7 @@ Target venue: blog post first, then a workshop submission to IV (Intelligent Veh
 ### What the writeup is NOT
 
 - Not a claim of novel safety theory
-- Not a critique of Mobileye or RSS
+- Not a critique of the Tier-1 ADAS benchmark vendor or RSS
 - Not a certification claim
 - Not a marketing piece — the honest limitations section is non-negotiable
 

@@ -5,7 +5,7 @@
 | Status | Analysis / living document |
 | Date | 2026-06-22 |
 | Lane | Robotics-build (Occy / `kirra-planner`). **Not** the Phase-I proposal lane. |
-| Scope | Position Occy against Autoware, Mobileye, and NVIDIA; identify gaps + a roadmap. |
+| Scope | Position Occy against Autoware, the Tier-1 ADAS benchmark vendor, and NVIDIA; identify gaps + a roadmap. |
 | Refs | #90 (Occy), ADR-0015 (Taj), the merged Occy capability set (#447–#457). |
 
 > Compares the **current** Occy planner (geometric reference proposer behind the
@@ -15,7 +15,7 @@
 
 Occy is **not** a production motion planner and is not trying to be one. It is a
 deliberately-simple, **verifiable proposer behind a separate formal safety layer
-(KIRRA)**. That separation is not a quirk — it is the same insight **Mobileye
+(KIRRA)**. That separation is not a quirk — it is the same insight **the Tier-1 ADAS benchmark vendor
 productized as RSS** (Responsibility-Sensitive Safety): a formal, transparent,
 *verifiable* safety model that sits **apart** from the (complex, possibly-learned)
 driving policy. KIRRA literally *is* an RSS-style checker — its
@@ -33,10 +33,10 @@ an NVIDIA-style planner as the doer.**
 
 ## 1. Where each one sits
 
-| Dimension | **Occy (today)** | **Autoware** | **Mobileye** | **NVIDIA (Hydra-MDP / E2E)** |
+| Dimension | **Occy (today)** | **Autoware** | **Tier-1 ADAS benchmark** | **NVIDIA (Hydra-MDP / E2E)** |
 |---|---|---|---|---|
 | Paradigm | Geometric, rule-based proposer | Modular classical (hierarchical) | RL driving policy + **RSS** formal safety | **Learned end-to-end**, rule-distilled |
-| Routing / map | Single free-space corridor; no map | **Lanelet2** HD lane graph + mission router | **REM** crowdsourced maps | BEV features, map-lite |
+| Routing / map | Single free-space corridor; no map | **Lanelet2** HD lane graph + mission router | crowdsourced HD maps | BEV features, map-lite |
 | Behavior planning | Longitudinal rules + lateral lane-line rules; no lane-change | Behavior path+velocity plugins (lane change, avoid, intersections) | Negotiation, "unwritten rules" in RSS | Learned, naturalistic |
 | Motion planning | Centerline + trapezoid speed; smoothstep lateral bump | **Jerk-limited trajectory optimization** + velocity smoother | Optimization under RSS | Single net, BEV → trajectory |
 | Prediction | Constant-velocity (tracker → RSS) | Multi-modal agent prediction | Prediction + worst-case RSS | Joint detection → prediction → planning |
@@ -55,7 +55,7 @@ an NVIDIA-style planner as the doer.**
    to take as hand-fed literals — so a commanded lane change is now gated by the
    *map's* line types (broken-permits / solid-blocks), end-to-end to KIRRA. Still
    missing: lane *selection* / a real router, intersections, and the actual map-file
-   parse (Autoware's Lanelet2 / Mobileye's REM). The adapter's feature-gated
+   parse (Autoware's Lanelet2 / the benchmark vendor's crowdsourced HD maps). The adapter's feature-gated
    `Lanelet2CorridorSource` (C++ `lanelet2_core`) remains the home for the parse
    that would *populate* this model.
 3. **No trajectory optimization / comfort.** Geometric centerline + trapezoid vs.
@@ -120,7 +120,7 @@ alongside conflict is still caught — these narrow the checker to RSS-correct, 
 do not open it.
 
 **Remaining:** in dense traffic, smartening Occy's policy is the orthogonal axis.
-Mobileye pairs RSS with a *sophisticated* policy **and** carefully-tuned RSS
+The Tier-1 ADAS benchmark vendor pairs RSS with a *sophisticated* policy **and** carefully-tuned RSS
 parameters — both levers, not one.
 
 ## 5. Recommended roadmap (in Kirra's grain)
@@ -211,7 +211,7 @@ parameters — both levers, not one.
 
 **Net:** Occy is a strong *reference proposer* and a deliberately-thin one; its
 planner-capability gaps vs. Autoware / NVIDIA are large but mostly orthogonal to
-Kirra's value, which mirrors Mobileye's RSS. The work that matters most is the
+Kirra's value, which mirrors the benchmark vendor's RSS. The work that matters most is the
 lane-graph substrate (next) and, eventually, demonstrating the checker bounding a
 learned planner.
 
@@ -219,7 +219,6 @@ learned planner.
 
 - Autoware Universe — Planning components: <https://autowarefoundation.github.io/autoware_universe/main/planning/>
 - Autoware — Behavior Path Planner: <https://autowarefoundation.github.io/autoware.universe_planning/main/planning/behavior_path_planner/>
-- Mobileye — Responsibility-Sensitive Safety (RSS): <https://www.mobileye.com/technology/responsibility-sensitive-safety/>
-- Mobileye — Road Experience Management (REM): <https://www.mobileye.com/technology/rem/>
+- RSS — Shalev-Shwartz, Shammah, Shashua, *On a Formal Model of Safe and Scalable Self-driving Cars*: <https://arxiv.org/abs/1708.06374>
 - NVIDIA — End-to-End Driving at Scale with Hydra-MDP: <https://developer.nvidia.com/blog/end-to-end-driving-at-scale-with-hydra-mdp/>
 - Motion Planning for Autonomous Driving: State of the Art (arXiv 2303.09824): <https://arxiv.org/pdf/2303.09824>
