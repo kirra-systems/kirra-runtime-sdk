@@ -153,14 +153,23 @@ impl OodMonitor {
         }
     }
 
-    /// Override the thresholds (the warn band must not exceed the fault band).
+    /// Override the thresholds. Inputs are SANITIZED so the monitor can never be
+    /// configured into a fail-OPEN state (the whole point of the module is
+    /// fail-closed):
+    /// - a non-finite band (`NaN`/∞) would make every `psi >= band` comparison
+    ///   false → silently never escalate; it falls back to the safe default;
+    /// - a negative band is clamped to `0.0`;
+    /// - the bands are kept ordered (warn ≤ fault) so the Degraded band is reachable;
+    /// - `min_window` is forced `>= 1` so [`assess`](Self::assess) can never divide
+    ///   by zero on an empty window (which would produce `NaN` proportions and,
+    ///   again, fail open to `Stable`).
     #[must_use]
     pub fn with_thresholds(mut self, warn_psi: f64, fault_psi: f64, min_window: usize) -> Self {
-        // Keep the bands ordered; a caller inversion would otherwise make the
-        // Degraded band unreachable. Clamp defensively rather than panic.
-        self.warn_psi = warn_psi.min(fault_psi);
-        self.fault_psi = warn_psi.max(fault_psi);
-        self.min_window = min_window;
+        let warn = if warn_psi.is_finite() { warn_psi.max(0.0) } else { DEFAULT_WARN_PSI };
+        let fault = if fault_psi.is_finite() { fault_psi.max(0.0) } else { DEFAULT_FAULT_PSI };
+        self.warn_psi = warn.min(fault);
+        self.fault_psi = warn.max(fault);
+        self.min_window = min_window.max(1);
         self
     }
 
@@ -367,5 +376,37 @@ mod tests {
     fn psi_of_identical_distributions_is_zero() {
         let p = vec![0.25, 0.25, 0.25, 0.25];
         assert!(population_stability_index(&p, &p).abs() < 1e-12);
+    }
+
+    #[test]
+    fn non_finite_thresholds_cannot_configure_a_fail_open_monitor() {
+        // A NaN band would make `psi >= band` always false → never escalate.
+        // Sanitization must fall back to finite defaults so severe drift still
+        // locks out.
+        let m = OodMonitor::new(nominal_baseline())
+            .with_thresholds(f64::NAN, f64::INFINITY, DEFAULT_MIN_WINDOW);
+        let a = m.assess(&vec![0.02_f64; 100]); // severe shift
+        assert_eq!(a.recommended, SafetyPosture::LockedOut, "psi={}", a.psi);
+    }
+
+    #[test]
+    fn zero_min_window_is_forced_to_one_and_empty_window_is_a_safe_noop() {
+        // min_window == 0 would let assess(&[]) divide by zero → NaN proportions
+        // → fail open. It must be forced to >= 1, and an empty window is then a
+        // no-op (InsufficientWindow), never a NaN.
+        let m = OodMonitor::new(nominal_baseline()).with_thresholds(0.1, 0.25, 0);
+        let a = m.assess(&[]);
+        assert_eq!(a.reason, OodReason::InsufficientWindow);
+        assert_eq!(a.recommended, SafetyPosture::Nominal);
+        assert!(a.psi.is_finite(), "no NaN leaks from an empty window");
+        // A genuine severe window still escalates through the forced-min path.
+        assert_eq!(m.assess(&vec![0.02_f64; 100]).recommended, SafetyPosture::LockedOut);
+    }
+
+    #[test]
+    fn inverted_bands_are_reordered() {
+        // Passing fault < warn must not make the Degraded band unreachable.
+        let m = OodMonitor::new(nominal_baseline()).with_thresholds(0.25, 0.10, 30);
+        assert!(m.warn_psi <= m.fault_psi);
     }
 }
