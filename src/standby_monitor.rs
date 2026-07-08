@@ -109,6 +109,49 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
     consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
 }
 
+/// EP-02 drill finding — what a non-empty `PROMOTION_RECORD_KEY` means for the
+/// heartbeating Active that reads it. The record is written by
+/// `perform_promotion` AFTER the durable epoch claim, naming the promoter.
+/// Three cases:
+/// - the record names THIS instance: it is our own promotion record (we are
+///   the legitimately promoted Active). Ignore — treating it as a takeover
+///   self-fenced every freshly-promoted standby on its first heartbeat tick,
+///   leaving the fleet with ZERO Actives after every failover (the two-process
+///   drill caught this).
+/// - the record names another instance and we hold NO epoch (`held == 0`,
+///   the durable fence not armed): the record is the only takeover signal —
+///   preserve the legacy demote-on-takeover.
+/// - the record names another instance and we DO hold an epoch: the caller
+///   has already verified this tick that the durable epoch still equals ours
+///   (the epoch check runs first), and every legitimate takeover claims the
+///   epoch BEFORE writing this record — so the record is a STALE artifact of
+///   a previous failover generation (e.g. this instance restarted and
+///   re-claimed after an old failover). Not a live fence; do not demote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TakeoverRecordVerdict {
+    /// Our own promotion record — not a takeover.
+    OwnRecord,
+    /// Another instance promoted and no epoch fence is armed — demote.
+    Demote,
+    /// Another instance's record from an older epoch generation — forensics only.
+    StaleArtifact,
+}
+
+#[must_use]
+pub(crate) fn takeover_record_verdict(
+    promoted_by: &str,
+    my_id: &str,
+    held_epoch: u64,
+) -> TakeoverRecordVerdict {
+    if promoted_by == my_id {
+        TakeoverRecordVerdict::OwnRecord
+    } else if held_epoch == 0 {
+        TakeoverRecordVerdict::Demote
+    } else {
+        TakeoverRecordVerdict::StaleArtifact
+    }
+}
+
 /// #689: enforce a safe split-brain margin on the ENV-derived HA timings. The
 /// compile-time `const _` assert above only guards the DEFAULT constants; the
 /// runtime `KIRRA_HEARTBEAT_INTERVAL` / `KIRRA_PROMOTION_TIMEOUT` overrides are
@@ -352,16 +395,38 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 }
 
                 if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
-                    // Mirror the epoch path: tear down the local Active
-                    // flag too, not just the heartbeat loop.
-                    app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        promoted_by = %promoted_by,
-                        instance_id = %id_c,
-                        "Standby has promoted — primary self-demoting and stopping heartbeat. \
-                         Restart this instance in PassiveStandby mode."
-                    );
-                    return HeartbeatOutcome::SelfDemoted;
+                    match takeover_record_verdict(&promoted_by, &id_c, held) {
+                        TakeoverRecordVerdict::OwnRecord => {
+                            // Our own promotion record — we ARE the promoted
+                            // Active. (Before the EP-02 drill fix, this branch
+                            // demoted: every promoted standby self-fenced on its
+                            // first heartbeat tick.)
+                        }
+                        TakeoverRecordVerdict::Demote => {
+                            // Mirror the epoch path: tear down the local Active
+                            // flag too, not just the heartbeat loop.
+                            app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!(
+                                promoted_by = %promoted_by,
+                                instance_id = %id_c,
+                                "Standby has promoted — primary self-demoting and stopping heartbeat. \
+                                 Restart this instance in PassiveStandby mode."
+                            );
+                            return HeartbeatOutcome::SelfDemoted;
+                        }
+                        TakeoverRecordVerdict::StaleArtifact => {
+                            // We verified THIS tick that the durable epoch still
+                            // equals ours (the check above), and takeovers claim
+                            // the epoch before writing this record — stale
+                            // forensics from an older failover, not a live fence.
+                            tracing::debug!(
+                                promoted_by = %promoted_by,
+                                instance_id = %id_c,
+                                held_epoch  = held,
+                                "Stale promotion record from a previous failover generation — epoch fence current; ignoring"
+                            );
+                        }
+                    }
                 }
 
                 HeartbeatOutcome::Healthy
@@ -1063,6 +1128,36 @@ mod standby_monitor_tests {
     //   - clock-skew immunity → `test_primary_clock_step_back_does_not_spuriously_promote`,
     //     `test_standby_wall_clock_jump_does_not_change_decision`.
     // The constant-relationship and absent-key tests below remain valid as-is.
+
+    /// EP-02 drill finding — the promotion record must never fence the
+    /// instance that WROTE it (the freshly promoted Active), and a stale
+    /// record from an older failover generation must not demote a current
+    /// epoch holder. Only an other-named record with NO armed epoch fence
+    /// keeps the legacy demote-on-takeover meaning.
+    #[test]
+    fn test_takeover_record_verdict() {
+        use super::TakeoverRecordVerdict as V;
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-b", 2),
+            V::OwnRecord,
+            "the promoted Active reading its own record must NOT self-fence"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-b", 0),
+            V::OwnRecord,
+            "own record is never a takeover regardless of fence state"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-a", 0),
+            V::Demote,
+            "another promoter + no armed epoch fence → legacy demote-on-takeover"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-a", 3),
+            V::StaleArtifact,
+            "another promoter's record while WE hold the current epoch is stale forensics"
+        );
+    }
 
     #[test]
     fn test_absent_heartbeat_key_does_not_auto_promote() {

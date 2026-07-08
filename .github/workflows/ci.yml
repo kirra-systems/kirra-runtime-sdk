@@ -218,6 +218,19 @@ jobs:
         # never silently rot if the unification path changes.
         run: cargo test -p kirra-core --features capture --locked
 
+  ha-two-process-drill:
+    name: HA two-process failover drill (EP-02)
+    runs-on: ubuntu-latest
+    # One drill, real timers, generous boot budgets — its own SERIAL job so
+    # port allocation and wall-clock timing never share a runner with the
+    # parallel test sweep (the test itself is #[ignore] in `cargo test`).
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Run the drill (two kirra_verifier_service processes, one SQLite file)
+        run: cargo test --test ha_two_process_drill --locked -- --ignored --nocapture
+
   docs-and-sdk:
     name: SDK docs + examples (G20)
     runs-on: ubuntu-latest
