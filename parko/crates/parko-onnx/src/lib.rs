@@ -8,6 +8,7 @@ use parko_core::backend::{
     ModelHandle, TensorBatch,
 };
 
+pub mod lineage_load;
 pub mod session_core;
 use session_core::OrtRunCore;
 
@@ -61,6 +62,42 @@ impl OrtBackend {
             core: OrtRunCore::new(session, "ort_native_cpu"),
             descriptor: BackendDescriptor::Cpu,
         })
+    }
+
+    /// EP-04: lineage-SUPERVISED construction — the live consumer of
+    /// [`parko_core::model_lineage`]. Because an `ort::Session` is committed
+    /// from its model path at construction, the rollback seam is here: the
+    /// [`lineage_load::LineageLoader`] resolves WHICH artifact to build from
+    /// (requested on a clean verify; the re-verified last-good on an integrity
+    /// rejection; an `Err` when nothing trustworthy is loadable), and only then
+    /// is the session built. Reads the allow-list from env
+    /// (`KIRRA_MODEL_ALLOWLIST`(+`_STRICT`)) exactly like the per-`load_model`
+    /// #G16 gate; use [`OrtBackend::with_lineage_and_allowlist`] to inject one.
+    ///
+    /// Returns the backend PLUS the [`lineage_load::ResolvedLoad`] so the
+    /// caller can log/escalate a `Rollback` (a rollback is a red flag even
+    /// though a good model is running).
+    pub fn new_with_lineage(
+        loader: &mut lineage_load::LineageLoader,
+        requested_path: &str,
+    ) -> Result<(Self, lineage_load::ResolvedLoad), BackendError> {
+        Self::with_lineage_and_allowlist(
+            loader,
+            requested_path,
+            &parko_core::model_integrity::ModelAllowList::from_env(),
+        )
+    }
+
+    /// [`OrtBackend::new_with_lineage`] with an injected allow-list (testable
+    /// without env mutation — the parko/kirra no-`set_var` invariant).
+    pub fn with_lineage_and_allowlist(
+        loader: &mut lineage_load::LineageLoader,
+        requested_path: &str,
+        allow: &parko_core::model_integrity::ModelAllowList,
+    ) -> Result<(Self, lineage_load::ResolvedLoad), BackendError> {
+        let resolved = loader.resolve(requested_path, allow)?;
+        let backend = Self::new(&resolved.path)?;
+        Ok((backend, resolved))
     }
 }
 
