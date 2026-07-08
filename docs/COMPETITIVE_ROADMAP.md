@@ -149,7 +149,7 @@ to customers and assessors.
 - [ ] Incident response process defined
 
 **Why it matters:** ISO 21434 is now table stakes for any automotive
-safety system. NVIDIA, Qualcomm, and Mobileye all have it.
+safety system. NVIDIA, Qualcomm, and the Tier-1 ADAS benchmark vendor all have it.
 It is a prerequisite for any serious automotive software partnership.
 This is process documentation, not code — it can be started today.
 
@@ -226,7 +226,7 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 - [ ] "Kirra + NVIDIA Jetson" reference architecture
 - [ ] "Kirra + QNX" reference architecture
 - [ ] "Kirra + ROS2" reference architecture
-- [ ] "Kirra + Mobileye RSS" integration guide (already drafted)
+- [ ] "Kirra + RSS" integration guide (already drafted)
 
 ### M5.4 — Packaging
 - [ ] PARK-031: Normalize Docker/Helm naming to Kirra throughout
@@ -238,7 +238,7 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 
 ## Competitive Gap Summary
 
-| Feature | NVIDIA Halos | Mobileye | Kirra Today | Kirra M1 | Kirra M3 |
+| Feature | NVIDIA Halos | Tier-1 ADAS benchmark | Kirra Today | Kirra M1 | Kirra M3 |
 |---------|-------------|----------|-------------|----------|----------|
 | Runtime safety enforcement | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RSS / IEEE 2846 | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -257,7 +257,7 @@ this process now puts Kirra 2-3 years ahead of a competitor who waits.
 
 ## The Core Thesis
 
-NVIDIA and Mobileye sell safety governance bundled with their own silicon.
+NVIDIA and the Tier-1 ADAS benchmark vendor sell safety governance bundled with their own silicon.
 They are structurally unable to offer vendor-neutral safety governance
 without cannibalizing their hardware business.
 

@@ -1,7 +1,7 @@
 //! **Perception redundancy cross-check** — a fail-closed assurance monitor, the
 //! True-Redundancy analog (gap #2b / P1).
 //!
-//! Mobileye's *True Redundancy* runs two INDEPENDENT world models (camera-only vs.
+//! The *True Redundancy* pattern runs two INDEPENDENT world models (camera-only vs.
 //! radar+lidar) as mutual backups. KIRRA promotes that idea from a perception design
 //! into an **assurance check**: given two independent perception channels, verify they
 //! AGREE — and **fail closed** when they don't. A divergence means at least one channel

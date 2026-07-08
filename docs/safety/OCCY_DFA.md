@@ -192,7 +192,7 @@ argues for separate compute.
 ## 7. The independence differentiator
 
 C9 (shared systematic/design faults) is where most architectures are weakest —
-Mobileye and Nvidia build checker and planner in-house, same team, same
+The Tier-1 ADAS benchmark vendor and NVIDIA build checker and planner in-house, same team, same
 assumptions. KIRRA's **vendor-independent checker** is the strongest possible
 mitigation for C9, and a clean independence argument for C1/C8 as well. The DFA
 is precisely the artifact where that independence becomes evidence rather than
