@@ -335,43 +335,70 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     // verified trust instead of the interim registration seed.
     spawn_local_asset_posture_feed(Arc::clone(svc));
 
-    // WS-4 / Track 3 — OTA campaign posture-sweep monitor. Between explicit
-    // `advance` calls, auto-halts any active campaign the moment a fleet
-    // regression is CONFIRMED (a fresh non-Nominal posture; an unavailable/stale
-    // posture is NOT a regression and is skipped). Wired here in the Active block
-    // so a promoted standby (H2) also runs it; supervised non-critical (a wedged
-    // monitor cannot make anything unsafe — the actuator gate is the safety spine).
-    kirra_verifier::campaign_monitor::spawn_campaign_monitor(
-        Arc::clone(&svc.app),
-        Arc::clone(&svc.posture_cache),
-    );
-    tracing::info!(
-        sweep_ms = kirra_verifier::campaign_monitor::CAMPAIGN_SWEEP_MS,
-        "OTA campaign posture-sweep monitor spawned (WS-4 halt-on-regression)"
-    );
-
-    // WP-15 (MGA G-19) — mTLS cert-principal expiry monitor. Periodically censuses
-    // the cert_principals registry and WARNs (log + audit) when a pinned client cert
-    // has lapsed or is about to, so an operator renews before it silently stops
-    // authorizing. Observability only (the auth path already fail-closes an expired
-    // cert); supervised non-critical. Active-only (this instance owns audit writes).
-    kirra_verifier::cert_expiry_monitor::spawn_cert_expiry_monitor(Arc::clone(&svc.app));
-    tracing::info!(
-        sweep_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_SWEEP_MS,
-        warn_window_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_WARN_WINDOW_MS,
-        "mTLS cert-principal expiry monitor spawned (WP-15 cert lifecycle)"
-    );
-
-    // WS-4 / Track 3 — WORM off-box audit shipper. Opt-in: runs only when
-    // KIRRA_AUDIT_SHIP_PATH names an append-only sink file, appending new audit
-    // records off-box each cycle so the tamper-evidence log survives loss of this
-    // box. Active-only (this instance writes the audit records); supervised
-    // non-critical (the local chain stays intact + independently verifiable).
-    if kirra_verifier::audit_shipper::spawn_audit_shipper(Arc::clone(&svc.app)) {
-        tracing::info!(
-            interval_ms = kirra_verifier::audit_shipper::AUDIT_SHIP_INTERVAL_MS,
-            "WORM off-box audit shipper spawned (WS-4 audit survivability)"
+    // WP-20 s2b — the trailing INDEPENDENT supervised monitors are now dispatched
+    // in the manifest's resolved dependency order via a name→spawn registry, with
+    // fail-closed DRIFT protection: `dispatch_in_order` refuses to run unless the
+    // registered spawners EXACTLY cover these manifest tasks (no unknown task, no
+    // missing spawner, no duplicate), so a spawner can never silently diverge from
+    // its manifest entry. For this cover the resolved order is
+    // campaign_monitor → cert_expiry_monitor → audit_shipper — identical to the
+    // prior hand-coded order, so this is behaviour-preserving. (The posture worker +
+    // telemetry watchdog above stay hand-wired — they thread the posture_tx the
+    // worker returns — and the HA heartbeat/promotion loops spawn in the
+    // standby-monitor block; driving THOSE through the registry too is the recorded
+    // WP-20 follow-up.) All monitors are Active-block (a promoted standby (H2) runs
+    // them too) + supervised non-critical (a wedged monitor cannot make anything
+    // unsafe — the actuator gate is the safety spine).
+    let mut monitors: kirra_verifier::execution_manager::SpawnRegistry<Arc<ServiceState>> =
+        kirra_verifier::execution_manager::SpawnRegistry::new();
+    // WS-4/Track 3 — OTA campaign posture-sweep monitor: auto-halts an active
+    // campaign the moment a fleet regression is CONFIRMED (a fresh non-Nominal
+    // posture; an unavailable/stale posture is NOT a regression and is skipped).
+    monitors.register("campaign_monitor", |svc: &Arc<ServiceState>| {
+        kirra_verifier::campaign_monitor::spawn_campaign_monitor(
+            Arc::clone(&svc.app),
+            Arc::clone(&svc.posture_cache),
         );
+        tracing::info!(
+            sweep_ms = kirra_verifier::campaign_monitor::CAMPAIGN_SWEEP_MS,
+            "OTA campaign posture-sweep monitor spawned (WS-4 halt-on-regression)"
+        );
+    });
+    // WP-15 (MGA G-19) — mTLS cert-principal expiry monitor: WARNs (log + audit)
+    // when a pinned client cert has lapsed / is about to. Observability only (the
+    // auth path already fail-closes an expired cert).
+    monitors.register("cert_expiry_monitor", |svc: &Arc<ServiceState>| {
+        kirra_verifier::cert_expiry_monitor::spawn_cert_expiry_monitor(Arc::clone(&svc.app));
+        tracing::info!(
+            sweep_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_SWEEP_MS,
+            warn_window_ms = kirra_verifier::cert_expiry_monitor::CERT_EXPIRY_WARN_WINDOW_MS,
+            "mTLS cert-principal expiry monitor spawned (WP-15 cert lifecycle)"
+        );
+    });
+    // WS-4/Track 3 — WORM off-box audit shipper. Opt-in: runs only when
+    // KIRRA_AUDIT_SHIP_PATH names an append-only sink file so the tamper-evidence
+    // log survives loss of this box.
+    monitors.register("audit_shipper", |svc: &Arc<ServiceState>| {
+        if kirra_verifier::audit_shipper::spawn_audit_shipper(Arc::clone(&svc.app)) {
+            tracing::info!(
+                interval_ms = kirra_verifier::audit_shipper::AUDIT_SHIP_INTERVAL_MS,
+                "WORM off-box audit shipper spawned (WS-4 audit survivability)"
+            );
+        }
+    });
+    const TRAILING_MONITORS: &[&str] =
+        &["campaign_monitor", "cert_expiry_monitor", "audit_shipper"];
+    if let Err(e) = kirra_verifier::execution_manager::dispatch_in_order(
+        &monitors,
+        kirra_verifier::execution_manager::TASK_MANIFEST,
+        TRAILING_MONITORS,
+        svc,
+    ) {
+        tracing::error!(
+            error = %e,
+            "execution manager: supervised-monitor dispatch failed (manifest/registry drift) — aborting (fail-closed)"
+        );
+        std::process::exit(1);
     }
 }
 
