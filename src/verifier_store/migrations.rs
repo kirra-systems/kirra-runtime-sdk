@@ -167,8 +167,9 @@ pub fn validate_step_versions(versions: &[i64]) -> Result<(), String> {
 /// store with no pending step still lands on the baseline version). Returns the
 /// store's schema version BEFORE this call ran.
 ///
-/// This is the single implementation of the migration policy; [`run_migrations_with`]
-/// (SQLite) and the Postgres backend are thin wrappers that supply a [`SchemaBackend`].
+/// This is the single implementation of the migration policy; the SQLite path
+/// (`run_migrations_with`) and the Postgres backend are thin wrappers that supply
+/// a [`SchemaBackend`].
 pub fn run_migrations_generic<B: SchemaBackend>(
     backend: &mut B,
     steps: &[B::Step],
