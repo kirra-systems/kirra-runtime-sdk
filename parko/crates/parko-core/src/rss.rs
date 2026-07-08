@@ -858,8 +858,6 @@ mod tests {
         }
     }
 
-    /// A negative or non-finite `mu` fails safe (a margin must only ever ADD).
-    #[test]
     /// The stationary-ego form is exactly the split form minus the
     /// zero-velocity ego term (the response-phase swerve + its braking tail).
     #[test]
@@ -897,6 +895,8 @@ mod tests {
         );
     }
 
+    /// A negative or non-finite `mu` fails safe (a margin must only ever ADD).
+    #[test]
     fn test_lat_split_negative_mu_is_failsafe() {
         for bad in [-0.1, f64::NAN, f64::NEG_INFINITY] {
             assert_eq!(
