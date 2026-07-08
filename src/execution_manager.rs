@@ -269,7 +269,7 @@ pub fn manifest_task_names() -> Vec<&'static str> {
 /// and `/metrics` (which reads via [`append_prometheus`](Self::append_prometheus)).
 #[derive(Debug)]
 pub struct DeadlineRegistry {
-    /// task name → (deadline budget ms, its miss counter).
+    /// task name → (deadline budget ms, its `DeadlineStats` — cycles + misses).
     tasks: BTreeMap<&'static str, (u64, DeadlineStats)>,
 }
 
@@ -284,9 +284,12 @@ impl DeadlineRegistry {
         Self { tasks }
     }
 
-    /// Record one cycle of `task` against its declared deadline. No-op (returns
-    /// `false`) for a task with no budget or not in the manifest — an unbudgeted
-    /// loop is never a "miss". Returns whether this cycle exceeded the budget.
+    /// Record one cycle of `task` against its declared deadline. Returns `true`
+    /// IFF this cycle MISSED (exceeded) the budget. `false` therefore covers BOTH
+    /// an on-time cycle of a budgeted task AND a task with no budget / not in the
+    /// manifest — the latter is a harmless no-op (an unbudgeted loop is never a
+    /// "miss"), so the return value is strictly "did this cycle overrun?", not
+    /// "was it recorded?".
     pub fn record(&self, task: &str, elapsed_ms: u64) -> bool {
         match self.tasks.get(task) {
             Some((deadline_ms, stats)) => stats.record(elapsed_ms, *deadline_ms),
