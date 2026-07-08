@@ -308,8 +308,61 @@ jobs:
         # libkirra_verifier cdylib and runs it — keeps the C ABI examples from rotting.
         run: ./examples/c/build_and_run.sh
 
+  checker-coverage:
+    name: Checker decision coverage — gated floors (EP-07; true MC/DC toolchain-blocked, #65)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The certification-relevant CHECKER crates get a GATED decision-coverage
+    # floor (the workspace `coverage` job uploads but does not gate). Each crate
+    # first attempts `--mcdc`: rustc currently rejects `-Zcoverage-options=mcdc`
+    # (block|branch|condition only — the EP-07 spike result recorded in #65), so
+    # the attempt falls back to BRANCH coverage (decision coverage — the
+    # strongest gate the toolchain can express) and ci/check_decision_floor.py
+    # gates on the strongest metric present in the export. The day nightly
+    # restores mcdc, this lane upgrades itself with no workflow change.
+    #
+    # Floors sit ~2 points under the measured baselines (kirra-trajectory
+    # 80.08 %, kirra-core 81.15 %, parko-core 79.82 % branch) — real gates with
+    # anti-flake headroom; RATCHET them up as coverage improves, never down
+    # without reviewer sign-off.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - name: Gate the checker crates (root workspace)
+        run: |
+          set -euo pipefail
+          gate () {
+            local crate="$1" floor="$2"
+            if cargo llvm-cov -p "$crate" --mcdc --json --summary-only > "cov-$crate.json" 2> "mcdc-$crate.err"; then
+              echo "[$crate] MC/DC accepted by toolchain — gating on MC/DC."
+            else
+              echo "[$crate] --mcdc rejected by the toolchain (#65) — gating on branch (decision) coverage."
+              cargo llvm-cov -p "$crate" --branch --json --summary-only > "cov-$crate.json"
+            fi
+            python3 ci/check_decision_floor.py "cov-$crate.json" "$floor" "$crate"
+          }
+          gate kirra-trajectory 78.0
+          gate kirra-core 79.0
+      - name: Gate parko-core (parko workspace)
+        working-directory: parko
+        run: |
+          set -euo pipefail
+          if cargo llvm-cov -p parko-core --mcdc --json --summary-only > cov-parko-core.json 2> mcdc.err; then
+            echo "[parko-core] MC/DC accepted by toolchain — gating on MC/DC."
+          else
+            echo "[parko-core] --mcdc rejected by the toolchain (#65) — gating on branch (decision) coverage."
+            cargo llvm-cov -p parko-core --branch --json --summary-only > cov-parko-core.json
+          fi
+          python3 ../ci/check_decision_floor.py cov-parko-core.json 77.0 parko-core
+
   coverage:
-    name: Branch Coverage (MC/DC pending — issue #65)
+    name: Branch Coverage (workspace)
     runs-on: ubuntu-latest
     # Bumped 30→45: when --mcdc is unsupported the instrumented workspace test
     # suite runs TWICE (mcdc attempt, then branch fallback). Instrumented runs
@@ -332,12 +385,13 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
       - name: Run MC/DC coverage
-        # Prefer MC/DC (issue #65 / CERT-001) when the installed cargo-llvm-cov +
-        # nightly support it; fall back to branch coverage only when the toolchain
-        # rejects `--mcdc`. Historically nightly accepted only block|branch|
-        # condition for the coverage-options value and `--mcdc` would not compile,
-        # so branch was the closest substitute; this opportunistically uses MC/DC
-        # once the toolchain realigns, without breaking CI before then.
+        # DECISION (EP-07 / issue #65): true MC/DC is TOOLCHAIN-BLOCKED — current
+        # nightly rejects `-Zcoverage-options=mcdc` (only block|branch|condition
+        # are accepted), so no Rust toolchain can express it today. This job stays
+        # the WORKSPACE-WIDE branch gate (observability via Codecov); the GATED
+        # decision-coverage floors for the certification-relevant checker crates
+        # live in the dedicated `checker-coverage` job below, which attempts
+        # `--mcdc` first every run so it auto-upgrades the day rustc restores it.
         #
         # The `if` swallows a non-zero `--mcdc` exit (set -e is suppressed in an
         # if-condition) and falls back; a genuine deterministic failure also fails
