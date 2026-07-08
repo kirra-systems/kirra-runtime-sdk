@@ -113,27 +113,84 @@ fn assert_allow(label: &str, cmd: &ProposedVehicleCommand, contract: &VehicleKin
 }
 
 /// Measure `f` over `warmup` (discarded) + `iters` (recorded) iterations into a
-/// fresh channel, returning the snapshot. Each sample includes the TWO
-/// per-iteration monotonic clock reads (`now_nanos` at the start and again
-/// inside `elapsed_nanos_since`) — conservatively counted as observer overhead
-/// (methodology §2: include rather than subtract).
+/// fresh channel, returning the snapshot PLUS the raw per-iteration samples in
+/// microseconds (EP-21: the EVT/pWCET tail fit needs the raw sample set, not the
+/// bucketed histogram). Each sample includes the TWO per-iteration monotonic
+/// clock reads (`now_nanos` at the start and again inside `elapsed_nanos_since`)
+/// — conservatively counted as observer overhead (methodology §2: include rather
+/// than subtract).
 fn measure(
     clock: &StdMonotonicClock,
     warmup: u32,
     iters: u32,
     mut f: impl FnMut(),
-) -> kirra_timing::ChannelStats {
+) -> (kirra_timing::ChannelStats, Vec<f64>) {
     for _ in 0..warmup {
         f();
     }
     let mut ch: kirra_timing::WcetChannel<BUCKETS> = kirra_timing::WcetChannel::new(BUCKET_WIDTH_NS);
+    let mut samples_us = Vec::with_capacity(iters as usize);
     for _ in 0..iters {
         let t0 = clock.now_nanos();
         f();
-        ch.record_nanos(clock.elapsed_nanos_since(t0));
+        let elapsed_ns = clock.elapsed_nanos_since(t0);
+        ch.record_nanos(elapsed_ns);
+        samples_us.push(elapsed_ns as f64 / 1_000.0);
     }
-    ch.snapshot()
+    (ch.snapshot(), samples_us)
 }
+
+/// EP-21 — the pWCET (EVT/MBPTA) tail analysis over one stage's raw samples.
+/// Prints the estimate + the representativity diagnostics to stderr and returns
+/// a machine CSV line (`pwcet,...`). ALWAYS labeled INDICATIVE: the EVT fit
+/// characterizes the host sample's tail; it cannot upgrade the evidence class
+/// (`WCET_MEASUREMENT_METHODOLOGY.md` §4a). A refused fit (too few exceedances,
+/// degenerate tail, …) is reported as not-estimable rather than faked.
+fn pwcet_line(stage_name: &str, samples_us: &[f64]) -> String {
+    match kirra_timing::evt::estimate_pwcet(samples_us, PWCET_THRESHOLD_QUANTILE, PWCET_TARGET_PROB)
+    {
+        Ok(est) => {
+            eprintln!(
+                "[kirra-wcet-bench] pWCET[{stage_name}] (INDICATIVE, host tail-fit): \
+                 {:.3} µs @ p={:.0e}/exec  (GPD ξ={:.3} σ={:.3}, u={:.3} µs, {} exceedances of {}) \
+                 diagnostics: lag1_autocorr={:.3} (≈0 ⇒ i.i.d. plausible), \
+                 stationarity_ratio={:.3} (≈1 ⇒ stable mean)",
+                est.pwcet,
+                est.target_prob,
+                est.gpd.xi,
+                est.gpd.sigma,
+                est.threshold,
+                est.n_exceed,
+                est.n_total,
+                est.lag1_autocorr,
+                est.stationarity_ratio,
+            );
+            format!(
+                "pwcet,{stage_name},{:.6},{:.0e},{:.6},{:.6},{},{},{:.6},{:.6},INDICATIVE\n",
+                est.pwcet,
+                est.target_prob,
+                est.gpd.xi,
+                est.gpd.sigma,
+                est.n_exceed,
+                est.n_total,
+                est.lag1_autocorr,
+                est.stationarity_ratio,
+            )
+        }
+        Err(e) => {
+            eprintln!(
+                "[kirra-wcet-bench] pWCET[{stage_name}]: not estimable ({e}) — reported honestly, \
+                 never fabricated"
+            );
+            format!("pwcet,{stage_name},NOT-ESTIMABLE,{e},,,,,,INDICATIVE\n")
+        }
+    }
+}
+
+/// POT threshold quantile for the pWCET fit (the top 5 % of samples form the tail).
+const PWCET_THRESHOLD_QUANTILE: f64 = 0.95;
+/// Target per-execution exceedance probability for the reported pWCET.
+const PWCET_TARGET_PROB: f64 = 1e-5;
 
 fn main() {
     let (env, note) = parse_env(std::env::var("KIRRA_WCET_ENV").ok());
@@ -159,13 +216,13 @@ fn main() {
     assert_allow("governor_exec (nominal)", &nominal_command, &nominal_contract);
     assert_allow("governor_exec_mrc", &mrc_command, &mrc_contract);
 
-    let governor = measure(&clock, warmup, iters, || {
+    let (governor, governor_samples) = measure(&clock, warmup, iters, || {
         let _ = black_box(validate_vehicle_command(
             black_box(&nominal_command),
             black_box(&nominal_contract),
         ));
     });
-    let governor_mrc = measure(&clock, warmup, iters, || {
+    let (governor_mrc, governor_mrc_samples) = measure(&clock, warmup, iters, || {
         let _ = black_box(validate_vehicle_command(
             black_box(&mrc_command),
             black_box(&mrc_contract),
@@ -186,7 +243,16 @@ fn main() {
         stage::PARKO_EVAL,
         stage::ACTUATOR_PUBLISH,
     );
+    // EP-21 — pWCET tail analysis (EVT/MBPTA) per measured stage: the estimate +
+    // representativity diagnostics on stderr, machine rows appended to the CSV.
+    // CSV row: pwcet,<stage>,<pwcet_us>,<p>,<xi>,<sigma>,<n_exceed>,<n_total>,
+    //          <lag1_autocorr>,<stationarity_ratio>,INDICATIVE
+    let pwcet_gov = pwcet_line(stage::GOVERNOR_EXEC, &governor_samples);
+    let pwcet_mrc = pwcet_line(stage::GOVERNOR_EXEC_MRC, &governor_mrc_samples);
+
     let mut csv = String::new();
     report.write_csv(&mut csv).expect("writing to a String cannot fail");
+    csv.push_str(&pwcet_gov);
+    csv.push_str(&pwcet_mrc);
     print!("{csv}");
 }
