@@ -265,6 +265,66 @@ mod ci_gate_tests {
         assert_under_budget("validate_vehicle_command::Allow", max_ns, p999_ns);
     }
 
+    /// EP-01 — the WCET gate extended to the IN-LINE enforcement loop: one
+    /// full `govern_and_release` step (coherent seqlock read → transport
+    /// validate → decode → kinematic bound → Ed25519 sign → actuator verify →
+    /// release decision) over the in-process reference carrier, through the
+    /// assembled `kirra-inline-governor` API — the exact composition the SHM
+    /// path runs. The Ed25519 sign+verify dominates (~50-100 µs release-build),
+    /// still well inside the 1 ms CI threshold. The in-loop republish
+    /// (sub-µs CRC + stores) is included and negligible at this scale.
+    /// HOST-INDICATIVE p99.9, NOT certified WCET — the QNX-target measurement
+    /// remains the certified path.
+    #[test]
+    fn regression_inline_loop_full_step() {
+        use kirra_contract_channel::reference::InProcessRegion;
+        use kirra_contract_channel::{publish, ContractReader, VehicleCommandPayload};
+        use kirra_inline_governor::{govern_and_release, ActuatorStation, GovernorStation};
+
+        let region = InProcessRegion::new();
+        let mut governor = GovernorStation::new(
+            kirra_core::kinematics_contract::VehicleKinematicsContract::nominal_reference_profile(),
+            ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]),
+        );
+        let mut actuator = ActuatorStation::new(governor.verifying_key());
+        let payload = VehicleCommandPayload {
+            linear_velocity_mps: 10.0,
+            current_velocity_mps: 9.0,
+            delta_time_s: 0.05,
+            steering_angle_deg: 5.0,
+            current_steering_angle_deg: 0.0,
+        };
+
+        // Crypto-scale step → fewer iterations than the ns-scale kernel gates
+        // (the same reduction the l3-e2e harness applies to its crypto rows).
+        // Debug builds run a SMALL structural pass only: unoptimized Ed25519 is
+        // ~10 ms/cycle, so the wall-clock budget is asserted ONLY when optimized
+        // (the containment-guard precedent below; the dedicated `wcet-gate` CI
+        // lane runs --release and is the authoritative measurement).
+        let iters: u32 = if cfg!(debug_assertions) { 200 } else { ITERS / 10 };
+        let mut seq: u64 = 0;
+        let (max_ns, p999_ns) = measure_stats(iters, || {
+            seq += 1;
+            let generation = region.load_generation();
+            publish(
+                &region,
+                generation,
+                &payload.to_view(generation, seq, 0, u64::MAX / 2),
+            );
+            let released = govern_and_release(&mut governor, &mut actuator, &region, 0);
+            assert!(released.is_ok(), "gate loop cycle must release: {released:?}");
+            let _ = std::hint::black_box(released);
+        });
+        if cfg!(not(debug_assertions)) {
+            assert_under_budget("inline_loop::govern_and_release", max_ns, p999_ns);
+        } else {
+            println!(
+                "inline_loop::govern_and_release (DEBUG structural pass, not gated): \
+                 max={max_ns}ns p99.9={p999_ns}ns over {iters} iters"
+            );
+        }
+    }
+
     #[test]
     fn regression_deployed_shape_serde_plus_verdict() {
         // F7: the kernel benches measure `validate_vehicle_command` ALONE. The

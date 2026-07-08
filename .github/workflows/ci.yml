@@ -218,6 +218,25 @@ jobs:
         # never silently rot if the unification path changes.
         run: cargo test -p kirra-core --features capture --locked
 
+  inline-governor:
+    name: In-line governor loop (EP-01) — fault matrix + cross-process demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: FDIT fault matrix + cross-process release chain
+        run: cargo test -p kirra-inline-governor --locked
+      - name: Cross-process demo (scripted faults + INDICATIVE latency)
+        run: cargo run --release -p kirra-inline-governor --bin inline_demo --locked
+      - name: L3 end-to-end harness (host run; QNX-target run is the certified path)
+        # The standing ADR-0030 incr.4 harness — verdict-correctness gate over
+        # the same SHM carrier. Low iteration count: CI checks the GATE, not
+        # the timing (host timing is INDICATIVE-only by construction).
+        env:
+          KIRRA_LAT_ITERS: "2000"
+        run: cargo run --release -p kirra-l3-e2e --locked
+
   ha-two-process-drill:
     name: HA two-process failover drill (EP-02)
     runs-on: ubuntu-latest

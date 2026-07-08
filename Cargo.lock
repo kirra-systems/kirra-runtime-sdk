@@ -2206,6 +2206,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-inline-governor"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "kirra-contract-channel",
+ "kirra-core",
+ "kirra-hv-carrier",
+ "kirra-release-token",
+]
+
+[[package]]
 name = "kirra-kpi-gate"
 version = "0.1.0"
 dependencies = [
@@ -2362,6 +2373,7 @@ dependencies = [
  "kirra-contract-channel",
  "kirra-core",
  "kirra-fleet-types",
+ "kirra-inline-governor",
  "kirra-ota-installer",
  "kirra-release-token",
  "parko-core",
