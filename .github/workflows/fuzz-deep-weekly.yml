@@ -1,0 +1,64 @@
+# EP-22 (M1) — the weekly DEEP fuzz campaign. The per-PR `fuzz-build` job in
+# ci.yml is a 60 s/target bitrot + shallow-crash guard; it is deliberately not a
+# discovery campaign. This workflow is the discovery half: 90 minutes per target
+# weekly (4 targets ≈ 6 h), seeded from the committed corpus, with the evolved
+# corpus uploaded as an artifact so coverage compounds across runs (download the
+# artifact and commit interesting entries back to fuzz/corpus/<target>/ to
+# ratchet the seed set). Kept in its OWN workflow so the `schedule` trigger does
+# not fan the whole ci.yml job graph out weekly.
+name: Fuzz deep campaign (weekly)
+
+on:
+  schedule:
+    # 03:23 UTC Sunday (off the hour to dodge the top-of-hour scheduler surge).
+    - cron: "23 3 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-deep-weekly
+  cancel-in-progress: true
+
+jobs:
+  deep-fuzz:
+    name: Deep fuzz (90 min/target, corpus persisted)
+    runs-on: ubuntu-latest
+    # 4 targets x 90 min + toolchain/build headroom.
+    timeout-minutes: 480
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Verify the fuzz workspace lockfile is up to date
+        # Same guard as ci.yml's fuzz-build: `cargo fuzz build` would silently
+        # update a stale fuzz/Cargo.lock; resolve against the committed lock
+        # first so drift reds the lane deterministically.
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Build all fuzz targets
+        run: cargo fuzz build
+      - name: Deep-run each target (90 min; any panic/crash reds the lane)
+        # Targets enumerated from `cargo fuzz list` so a new target joins the
+        # campaign automatically (the no-silent-caps rule). The committed
+        # fuzz/corpus/<target>/ seeds each run; libFuzzer evolves it in place.
+        run: |
+          set -euo pipefail
+          for t in $(cargo fuzz list); do
+            echo "::group::deep-fuzz $t"
+            cargo fuzz run "$t" -- -max_total_time=5400 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
+      - name: Upload evolved corpus (coverage compounds across weeks)
+        # Always upload — on a crash the corpus + artifacts/ dir carry the repro.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-corpus-${{ github.run_id }}
+          path: |
+            fuzz/corpus/
+            fuzz/artifacts/
+          retention-days: 30
