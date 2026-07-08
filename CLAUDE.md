@@ -103,7 +103,7 @@ src/
 │                               validate_step_versions); SqliteBackend is one impl (the
 │                               live path delegates, behaviour-preserving).
 │                               migrations_postgres.rs: PostgresBackend<E: PgExecutor> —
-│                               the same engine over a schema_version table + an injected
+│                               the same engine over a kirra_schema_version table + injected
 │                               executor seam (no tokio-postgres dep; driver binding is
 │                               the integrator's ~10-line adapter)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,

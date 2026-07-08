@@ -2,7 +2,7 @@
 //! migration engine.
 //!
 //! The engine ([`run_migrations_generic`]) is dialect-independent; this module
-//! supplies the Postgres half of the seam: a `schema_version` table stands in for
+//! supplies the Postgres half of the seam: a `kirra_schema_version` table stands in for
 //! SQLite's `PRAGMA user_version`, and each step's DDL + its version stamp commit
 //! in one transaction. The **same** fail-closed guarantees hold — refuse a
 //! future DB, enforce ascending registry ordering, never leave a step
@@ -83,6 +83,17 @@ impl<E: core::fmt::Display> core::fmt::Display for PgMigrationError<E> {
                  (max {target}) — refusing to open (fail-closed downgrade protection)"
             ),
             PgMigrationError::MalformedRegistry(r) => write!(f, "{r}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for PgMigrationError<E> {
+    /// The `Executor` variant chains to the underlying driver error so `?`
+    /// propagation and error-reporting (`anyhow`, `.source()` walks) see the cause.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PgMigrationError::Executor(e) => Some(e),
+            PgMigrationError::FutureSchema { .. } | PgMigrationError::MalformedRegistry(_) => None,
         }
     }
 }
@@ -291,6 +302,19 @@ mod tests {
         assert_eq!(b.exec.version, Some(3));
         assert!(!b.exec.objects.contains("SELECT will_not_run"), "the already-applied v2 step did not re-run");
         assert!(b.exec.objects.contains("CREATE TABLE m3 (x INTEGER)"));
+    }
+
+    #[test]
+    fn error_chains_the_executor_source() {
+        use std::error::Error as _;
+        // A driver error type that implements std::error::Error → the Executor
+        // variant must expose it via source(); the framework variants have none.
+        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let e: PgMigrationError<std::io::Error> = PgMigrationError::Executor(io);
+        assert!(e.source().is_some(), "Executor variant chains its cause");
+        let fut: PgMigrationError<std::io::Error> =
+            PgMigrationError::FutureSchema { db_version: 2, target: 1 };
+        assert!(fut.source().is_none());
     }
 
     #[test]

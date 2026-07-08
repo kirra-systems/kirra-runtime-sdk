@@ -106,13 +106,13 @@ fn future_schema_error(db_version: i64, target: i64) -> rusqlite::Error {
 // apply-in-order, atomic version stamp) is dialect-INDEPENDENT; only the
 // version-tracking primitive and the step DDL are backend-specific. This seam
 // lifts the policy off the concrete store so the SAME engine drives SQLite's
-// `PRAGMA user_version` AND, e.g., a Postgres `schema_version` table
+// `PRAGMA user_version` AND, e.g., a Postgres `kirra_schema_version` table
 // (`migrations_postgres.rs`), with one set of fail-closed guarantees.
 // ---------------------------------------------------------------------------
 
 /// A backend-agnostic schema-version journal — the seam the migration engine
 /// ([`run_migrations_generic`]) drives. The engine owns the POLICY; each concrete
-/// store (SQLite `PRAGMA user_version`, a Postgres `schema_version` table, …)
+/// store (SQLite `PRAGMA user_version`, a Postgres `kirra_schema_version` table, …)
 /// supplies these primitives. Migration STEP bodies stay per-backend ([`Step`]),
 /// because their DDL is dialect-specific — only the version policy is shared.
 ///
