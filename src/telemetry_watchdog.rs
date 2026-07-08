@@ -201,6 +201,15 @@ pub fn spawn_telemetry_watchdog_with_clock(
                 loop {
                     sweep_interval.tick().await;
 
+                    // WP-20 s2c — time this sweep against the `telemetry_watchdog`
+                    // deadline budget (`execution_manager` manifest) for /metrics
+                    // observability. Measured on the CLOCK seam (real wall-ms under
+                    // `SystemClock`; deterministic under a test `VirtualClock`), and
+                    // captured HERE before the per-sweep clones below shadow `app`/`clock`.
+                    let deadline_app = Arc::clone(&app);
+                    let deadline_clock = Arc::clone(&clock);
+                    let sweep_start_ms = deadline_clock.now_ms();
+
                     // The sweep is SYNCHRONOUS and does blocking work — `std::sync::Mutex`
                     // acquisition plus SQLite reads/writes. Run it OFF the async worker via
                     // `spawn_blocking` so a slow disk or a writer-held store lock cannot pin
@@ -242,6 +251,13 @@ pub fn spawn_telemetry_watchdog_with_clock(
                         }
                         Err(join_err) => panic!("telemetry watchdog sweep task failed: {join_err}"),
                     }
+
+                    // Record the completed sweep's elapsed against the budget (a slow
+                    // sweep past `deadline_ms` increments the miss counter exported on
+                    // /metrics). Reached only on the Ok path — a panicking sweep
+                    // re-raises above and the loop dies (the CRITICAL supervisor escalates).
+                    let elapsed_ms = deadline_clock.now_ms().saturating_sub(sweep_start_ms);
+                    deadline_app.deadline_registry.record("telemetry_watchdog", elapsed_ms);
                 }
             }
         },

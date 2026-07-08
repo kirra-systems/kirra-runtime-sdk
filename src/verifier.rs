@@ -430,6 +430,12 @@ pub struct AppState {
     /// them. Lives here (not on `ServiceState`) so the posture engine, the
     /// routing gate, and the HA promotion path can all reach it.
     pub fleet_metrics: crate::metrics::FleetSafetyMetrics,
+
+    /// WP-20 (G-11) per-task deadline-miss counters for the supervised loops that
+    /// declare a `deadline_ms` budget in `execution_manager::TASK_MANIFEST` (today:
+    /// the telemetry watchdog). The task loop records each cycle; `GET /metrics`
+    /// exports `kirra_task_deadline_*`. Lock-free; observability only.
+    pub deadline_registry: Arc<crate::execution_manager::DeadlineRegistry>,
 }
 
 impl AppState {
@@ -473,6 +479,9 @@ impl AppState {
             capture_drops: Arc::new(AtomicU64::new(0)),
             av_registry_dirty: Arc::new(AtomicBool::new(false)),
             fleet_metrics: crate::metrics::FleetSafetyMetrics::new(),
+            deadline_registry: Arc::new(crate::execution_manager::DeadlineRegistry::from_manifest(
+                crate::execution_manager::TASK_MANIFEST,
+            )),
         }
     }
 
