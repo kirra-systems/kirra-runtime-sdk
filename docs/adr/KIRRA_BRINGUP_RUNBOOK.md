@@ -118,4 +118,4 @@ Step 4 — verify:
 
 ---
 
-*Companion documents: `ADR-0001-governor-deployment-platform.md` (the decision of record) and `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md` (the full rationale).*
+*Companion documents: `0032-governor-deployment-platform.md` (the decision of record) and `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md` (the full rationale).*

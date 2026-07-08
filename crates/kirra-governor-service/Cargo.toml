@@ -3,7 +3,7 @@
 # Minimal over-the-wire (UDP) KIRRA governor for the two-box governed-car
 # prototype (docs/adr/KIRRA_BRINGUP_RUNBOOK.md, Prompt A).
 #
-# DEPENDENCY DISCIPLINE (ADR-0001): this target depends ONLY on serde + bincode
+# DEPENDENCY DISCIPLINE (ADR-0032): this target depends ONLY on serde + bincode
 # + std (via the lean `kirra-core` crate). It deliberately does NOT depend on the
 # parent `kirra-verifier` crate (which pulls tokio/axum/rusqlite/reqwest) —
 # instead it depends on `kirra-core`, which carries the EXISTING verdict core (the

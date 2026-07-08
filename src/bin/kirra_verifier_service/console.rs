@@ -386,7 +386,7 @@ pub(crate) async fn console_versions(State(svc): State<Arc<ServiceState>>) -> im
 }
 
 /// GET /console/campaigns (WS-4 / Track 3) — public read-only OTA rollout view for
-/// the operator console. Same [`summarize_campaigns`] projection the admin
+/// the operator console. Same `summarize_campaigns` projection the admin
 /// `/system/campaigns/summary` returns (counts by state, active-campaign stage
 /// progress, halted-with-reason, and the `applied_nodes` adoption numerator joined
 /// from the node reports), but posture-exempt and unauthenticated like the rest of

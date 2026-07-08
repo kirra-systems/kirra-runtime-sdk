@@ -27,4 +27,7 @@ path = "src/main.rs"
 
 [dependencies]
 kirra-core = { path = "../kirra-core" }
-kirra-timing = { path = "../kirra-timing", features = ["std"] }
+# EP-21: `evt` adds the host-analysis pWCET tail-fitting (GPD/POT) so the report
+# carries a probabilistic-WCET estimate + i.i.d./stationarity diagnostics.
+# Still INDICATIVE by construction — the EVT math cannot upgrade a host sample.
+kirra-timing = { path = "../kirra-timing", features = ["std", "evt"] }

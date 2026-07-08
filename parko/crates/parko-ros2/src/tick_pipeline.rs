@@ -143,6 +143,37 @@ where
     run_pipeline_tick_inner(config, loop_mutex, frame, posture).await
 }
 
+/// **EP-05** — tick driver that folds the live OOD assessment into the
+/// source posture before dispatch. The feed's ring window (fed one perception
+/// confidence per tick by the node) is assessed here; a drifted distribution
+/// ESCALATES the effective posture — `Degraded` derates through the MRC cap,
+/// `LockedOut` stops the tick — exactly the seam the redundancy comparator
+/// uses. Escalation-only: a stable window never relaxes the source posture.
+///
+// SAFETY: SG8 SG9 | REQ: parko-ros2-tick-ood-derate-only | TEST: ood_shifted_stream_locks_out_the_tick,ood_moderate_shift_derates_the_tick_to_mrc_cap,ood_nominal_stream_leaves_the_tick_alone,ood_under_filled_window_is_a_noop
+pub async fn run_pipeline_tick_with_ood<B>(
+    config:      &ParkoNodeConfig,
+    loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
+    frame:       SensorFrame,
+    posture:     SafetyPosture,
+    ood:         &crate::ood_feed::OodFeed,
+) -> TickOutcome
+where
+    B: InferenceBackend + 'static,
+{
+    let (effective, assessment) = ood.escalate(posture);
+    if effective != posture {
+        tracing::warn!(
+            psi = assessment.psi,
+            reason = ?assessment.reason,
+            source = ?posture,
+            effective = ?effective,
+            "parko-ros2: OOD monitor escalated the tick posture (input-distribution drift)"
+        );
+    }
+    run_pipeline_tick_inner(config, loop_mutex, frame, effective).await
+}
+
 pub(crate) async fn run_pipeline_tick_inner<B>(
     config:      &ParkoNodeConfig,
     loop_mutex:  Arc<Mutex<InferenceLoop<B>>>,
@@ -846,5 +877,94 @@ mod tick_pipeline_tests {
         let gated2 = apply_object_rss_gate(tick2, Some(&clear_snapshot), &params, 500, now);
         assert!(gated2.error.is_none(), "a verified-clear scene passes; got {:?}", gated2.error);
         assert!(gated2.twist.linear_x_mps > 0.0);
+    }
+
+    // =======================================================================
+    // EP-05 — the OOD monitor's live per-tick escalation, proven THROUGH
+    // `run_pipeline_tick_with_ood` (the composition the node runs when
+    // KIRRA_OOD_ENABLED arms the feed).
+    // =======================================================================
+
+    use crate::ood_feed::OodFeed;
+    use parko_core::ood::{CalibrationBaseline, OodMonitor};
+
+    /// Deterministic nominal-confidence sequence (≈uniform over [0.6, 0.9)) —
+    /// used for BOTH the baseline corpus and the in-distribution live window,
+    /// so a same-distribution window reads as Stable.
+    fn nominal_conf(i: usize, n: usize) -> f64 {
+        0.6 + 0.3 * ((i * 37 % n) as f64 / n as f64)
+    }
+
+    fn nominal_ood_feed() -> OodFeed {
+        let corpus: Vec<f64> = (0..200).map(|i| nominal_conf(i, 200)).collect();
+        let baseline = CalibrationBaseline::from_samples(&corpus, 10, 0.0, 1.0).unwrap();
+        OodFeed::new(OodMonitor::new(baseline), 128)
+    }
+
+    /// THE DoD TEST (severe axis): a collapsed confidence stream — the whole
+    /// window piling into the lowest bins — escalates the Nominal source to
+    /// LockedOut, and the tick publishes a STOPPED twist for a command the
+    /// envelope would otherwise admit.
+    #[tokio::test(start_paused = true)]
+    async fn ood_shifted_stream_locks_out_the_tick() {
+        let mut feed = nominal_ood_feed();
+        for _ in 0..100 {
+            feed.observe(0.05);
+        }
+        let (infer, _rx) = build_loop(0.1, 0.0);
+        let outcome = run_pipeline_tick_with_ood(
+            &default_config(), infer, make_frame(301, 0), SafetyPosture::Nominal, &feed).await;
+        assert_eq!(outcome.twist.linear_x_mps, 0.0,
+            "a severe distribution shift must stop the tick (LockedOut escalation)");
+        assert_eq!(outcome.twist.angular_z_rads, 0.0);
+    }
+
+    /// THE DoD TEST (moderate axis): a moderately shifted stream derates the
+    /// tick at least to the Degraded MRC cap — a 10 m/s request is clamped
+    /// to ≤ 5 m/s (or stopped, if the shift reads severe).
+    #[tokio::test(start_paused = true)]
+    async fn ood_moderate_shift_derates_the_tick_to_mrc_cap() {
+        let mut feed = nominal_ood_feed();
+        for i in 0..100 {
+            // Confidence sagging toward the low-mid range — a moderate shift.
+            feed.observe(0.35 + 0.3 * ((i * 37 % 100) as f64 / 100.0));
+        }
+        let (infer, _rx) = build_loop(10.0, 0.0);
+        let outcome = run_pipeline_tick_with_ood(
+            &default_config(), infer, make_frame(302, 0), SafetyPosture::Nominal, &feed).await;
+        assert!(outcome.twist.linear_x_mps <= 5.0 + 1e-9,
+            "a moderate shift must derate at least to the Degraded MRC cap (≤5 m/s); got {}",
+            outcome.twist.linear_x_mps);
+    }
+
+    /// Control (false-positive budget at the tick level): an in-distribution
+    /// window does NOT escalate — the 0.1 m/s command passes untouched.
+    #[tokio::test(start_paused = true)]
+    async fn ood_nominal_stream_leaves_the_tick_alone() {
+        let mut feed = nominal_ood_feed();
+        for i in 0..100 {
+            feed.observe(nominal_conf(i, 100));
+        }
+        let (infer, _rx) = build_loop(0.1, 0.2);
+        let outcome = run_pipeline_tick_with_ood(
+            &default_config(), infer, make_frame(303, 0), SafetyPosture::Nominal, &feed).await;
+        assert!(outcome.error.is_none());
+        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+            "an in-distribution window must not derate the tick; got {}",
+            outcome.twist.linear_x_mps);
+    }
+
+    /// Absent-input no-op: an under-filled window (no evidence this tick) is
+    /// byte-identical to the ungated tick — a quiet start never flaps posture.
+    #[tokio::test(start_paused = true)]
+    async fn ood_under_filled_window_is_a_noop() {
+        let mut feed = nominal_ood_feed();
+        feed.observe(0.05); // low — but one sample is no evidence
+        let (infer, _rx) = build_loop(0.1, 0.2);
+        let outcome = run_pipeline_tick_with_ood(
+            &default_config(), infer, make_frame(304, 0), SafetyPosture::Nominal, &feed).await;
+        assert!(outcome.error.is_none());
+        assert!((outcome.twist.linear_x_mps - 0.1).abs() < 1e-4,
+            "an under-filled window is a no-op; got {}", outcome.twist.linear_x_mps);
     }
 }

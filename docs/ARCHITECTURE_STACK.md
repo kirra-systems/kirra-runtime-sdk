@@ -70,7 +70,7 @@ guarantee independent of guest CPU behavior (the R-HV-1…R-HV-4 hypervisor-conf
 requirements). The #279 fault-injection campaign is designed so each injected fault
 is attributed to its **named owning barrier** (hypervisor / contract-discipline /
 judge) — a fault absorbed by the wrong layer is a finding, not a pass. **Anchors:**
-the platform ADRs (`ADR-0001-governor-deployment-platform.md`, ADR-0006);
+the platform ADRs (`0032-governor-deployment-platform.md`, ADR-0006);
 `HYPERVISOR_CONTRACT_CHANNEL.md` §5 (hypervisor requirements); §4 + **#279** (the
 barrier-attribution taxonomy).
 

@@ -165,7 +165,7 @@ Kirra is designed in alignment with ISO 26262 ASIL-D requirements and IEC 61508 
 | ADR-0004 | Independent Safety Channel — D1–D3 settlement | Superseded by ADR-0003 |
 
 The **cert-target platform** decision and its prototype bring-up plan live under
-[`docs/adr/`](docs/adr/): `ADR-0001-governor-deployment-platform.md` (KIRRA
+[`docs/adr/`](docs/adr/): `0032-governor-deployment-platform.md` (KIRRA
 governor on QNX Hypervisor 8.0 for Safety; the Autoware/ROS 2 doer as an isolated
 guest VM; a Ferrocene `no_std` verdict core as the certified artifact), with
 companions `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`, `KIRRA_BRINGUP_RUNBOOK.md`,

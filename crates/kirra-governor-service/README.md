@@ -1,7 +1,7 @@
 # kirra-governor-service
 
 Minimal over-the-wire (UDP) KIRRA governor for the two-box governed-car
-prototype — see `docs/adr/KIRRA_BRINGUP_RUNBOOK.md` (Prompt A), `ADR-0001`, and
+prototype — see `docs/adr/KIRRA_BRINGUP_RUNBOOK.md` (Prompt A), `ADR-0032`, and
 `KIRRA_PLATFORM_DEPLOYMENT_STRATEGY.md`.
 
 It wraps the **existing** verdict core (`kirra_core::kinematics_contract`) —
@@ -11,7 +11,7 @@ re-pinned it to logic blob `ed00f4da30afe8f3f83ff10a0d31103737526622`
 (superseding the historical `997fb7ae…`; see `docs/CAPTURE_PIPELINE_SPEC.md` §0).
 Because that core imports only `serde` + `std`, this binary's whole dependency
 tree is **serde + bincode + std** — no `tokio`, ROS 2, `r2r`, or DDS, matching
-the minimal-governor thesis of ADR-0001 (and the QNX cert target has none of
+the minimal-governor thesis of ADR-0032 (and the QNX cert target has none of
 those anyway).
 
 ## Wire contract (single source of truth)
@@ -82,7 +82,7 @@ and the target's `std`.
 > build is therefore a separate decision — QNX 7.1.0 + Ferrocene (qualified
 > today) or a future Ferrocene `qnx800` qualification once QNX OS for Safety 8.0
 > is the locked cert target. The prototype here is SDP 8.0 / `qnx800` with QM
-> Rust: fine for the demo, **not** the certified artifact. See ADR-0001 and
+> Rust: fine for the demo, **not** the certified artifact. See ADR-0032 and
 > `docs/adr/KIRRA_QNX_CROSSCOMPILE.md`.
 
 ## What this is not
@@ -91,4 +91,4 @@ A prototype over UDP — not the certified build and not a tight real-time contr
 transport. Stale/missing verdicts are handled by safe-stating (governor watchdog
 M6 + car-side deadline), which is the correct fail direction. The cert target
 (single-SoC QNX Hypervisor, shared-memory mailbox, Ferrocene `no_std` core)
-follows once the logic is proven — see ADR-0001.
+follows once the logic is proven — see ADR-0032.

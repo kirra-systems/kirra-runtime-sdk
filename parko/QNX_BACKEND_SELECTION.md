@@ -5,7 +5,7 @@
 | Requirement | **PARK-026** (issue #38) |
 | Status | **Requirements half DECIDED** + enforced; **availability half PENDING #36** |
 | Enforcement | `parko-core` — `backend_permitted` / `current_platform` (`src/backend_selector.rs`) |
-| Cross-refs | #36 (PARK-024 QNX deployment spike), #37 (PARK-025 QNN+QNX analysis), #34 / PR #290 (`BackendSelector`), ADR-0001, ADR-0006, EPIC #270 |
+| Cross-refs | #36 (PARK-024 QNX deployment spike), #37 (PARK-025 QNN+QNX analysis), #34 / PR #290 (`BackendSelector`), ADR-0032, ADR-0006, EPIC #270 |
 
 > **The split (PARK-026).** This issue was labelled *blocked until PARK-024 (#36)
 > confirms which POSIX features QNX exposes*. That blocks only the **availability**
@@ -154,7 +154,7 @@ the platform as a **parameter**, so every rule is exercised by host-run unit tes
 - **#37** (PARK-025) — QNN + QNX compatibility analysis; gates the `QualcommQnn` row.
 - **#34 / PR #290** — `BackendSelector` (factory registry + fail-closed env
   selection); this is the platform gate layered ahead of its resolution.
-- **ADR-0001** — Governor Deployment Platform.
+- **ADR-0032** — Governor Deployment Platform.
 - **ADR-0006** — Governor transport; the partition topology (governor QNX-resident,
   planner an isolated guest) this document's framing rests on.
 - **EPIC #270** — the QNX governor-transport lane.

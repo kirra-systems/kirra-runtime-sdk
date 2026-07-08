@@ -34,6 +34,7 @@ pub mod image_shim;
 pub mod pointcloud2_shim;
 pub mod imu_shim;
 pub mod odometry_shim;
+pub mod ood_feed;
 pub mod platform_profile;
 pub mod posture_state;
 pub mod radar_shim;
@@ -71,7 +72,13 @@ pub use crate::sensor_mapping::{
 pub use crate::scene_vetoes::{
     apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
 };
-pub use crate::tick_pipeline::{run_pipeline_tick, TickError, TickOutcome};
+pub use crate::ood_feed::{
+    load_baseline, ood_feed_from_env, ood_feed_from_env_values, OodFeed, OodFeedError,
+    KIRRA_OOD_BASELINE_PATH_ENV, KIRRA_OOD_ENABLED_ENV,
+};
+pub use crate::tick_pipeline::{
+    run_pipeline_tick, run_pipeline_tick_with_ood, TickError, TickOutcome,
+};
 pub use crate::clearance_gate::{
     run_pipeline_tick_with_clearance, ClearedTickOutcome, NodeClearance,
 };

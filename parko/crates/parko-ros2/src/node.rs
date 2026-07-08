@@ -76,6 +76,22 @@ where
     B: InferenceBackend + 'static,
     M: SensorInputMapping<Sample = Vec<f32>> + 'static,
 {
+    // EP-05: the OOD input-shift monitor (`KIRRA_OOD_ENABLED`). Resolved FIRST —
+    // fail-closed: an armed gate whose calibration baseline is missing or
+    // unloadable aborts startup here, before any task spawns, rather than
+    // running with a monitor that silently isn't watching.
+    let drain_ood = crate::ood_feed::ood_feed_from_env()?;
+    match &drain_ood {
+        Some(_) => tracing::info!(
+            "parko-ros2: OOD input-shift monitor ARMED (corridor confidence → PSI window; \
+             distribution drift escalates the tick posture, escalation-only)"
+        ),
+        None => tracing::info!(
+            gate = crate::ood_feed::KIRRA_OOD_ENABLED_ENV,
+            "parko-ros2: OOD input-shift monitor OFF — input-distribution drift is not watched"
+        ),
+    }
+
     let ctx = r2r::Context::create()?;
     let mut node = r2r::Node::create(ctx, node_name, "parko")?;
 
@@ -346,6 +362,9 @@ where
         // The node-owned clearance gate (Phase-B). Owned by the single drain task
         // so the per-tick `&mut` borrow needs no extra locking.
         let mut clearance = clearance;
+        // EP-05: the OOD feed is likewise owned by the single drain task
+        // (per-tick `&mut` observe/assess, no lock).
+        let mut drain_ood = drain_ood;
         let mut frame_id: u64 = 0;
         let mut stream = sensor_sub;
         while let Some(msg) = stream.next().await {
@@ -403,11 +422,42 @@ where
                 object_snapshot_to_vanished_scene(snap, drain_config.corridor_max_age_ms, now)
             });
 
+            // EP-05: feed the freshest corridor confidence into the OOD window
+            // and fold the assessment into THIS tick's posture (escalation-only —
+            // a stable window never relaxes the source). No corridor snapshot →
+            // no sample this tick (an under-filled window is a no-op inside the
+            // monitor; a PERSISTENTLY absent corridor is the containment gate's
+            // fail-closed concern, never fabricated OOD evidence).
+            let tick_posture = match drain_ood.as_mut() {
+                Some(feed) => {
+                    let conf = drain_corridor
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|snap| f64::from(snap.confidence())));
+                    if let Some(c) = conf {
+                        feed.observe(c);
+                    }
+                    let (effective, assessment) = feed.escalate(posture);
+                    if effective != posture {
+                        tracing::warn!(
+                            psi = assessment.psi,
+                            reason = ?assessment.reason,
+                            source = ?posture,
+                            effective = ?effective,
+                            "parko-ros2: OOD monitor escalated the tick posture \
+                             (input-distribution drift)"
+                        );
+                    }
+                    effective
+                }
+                None => posture,
+            };
+
             let cleared = run_pipeline_tick_with_clearance(
                 &drain_config,
                 Arc::clone(&drain_infer),
                 frame,
-                posture,
+                tick_posture,
                 clearance.as_mut(),
                 &impact_inputs,
                 vanished_scene.as_ref(),

@@ -7,13 +7,13 @@
 // which now lives in the lean `kirra-core` crate (de-monolith Stage 3). This binary
 // depends on that crate directly; because `kirra-core` imports only `serde` + `std`,
 // it pulls in nothing heavy: this binary's entire dependency tree is serde + bincode
-// + std — NO tokio, ROS 2, r2r, or DDS, per ADR-0001 (the governor is the minimal,
+// + std — NO tokio, ROS 2, r2r, or DDS, per ADR-0032 (the governor is the minimal,
 // async/ROS-free checker; the QNX cert target has none of those anyway). The contract
 // logic is the real, unmodified one — the talisman is never forked, only relocated.
 //
 // PROTOTYPE STAGE (QM, not the cert build): regular Rust over UDP. The
 // Ferrocene / `no_std` / ASIL-D factoring and the shared-memory mailbox are a
-// later stage and do not block the demo — see ADR-0001 and the bring-up runbook.
+// later stage and do not block the demo — see ADR-0032 and the bring-up runbook.
 //
 // AUTHENTICATION (review B2): the UDP command path is a vehicle-control surface,
 // so it is NOT trusted by source address. Every datagram (both directions) carries

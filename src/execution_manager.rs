@@ -103,14 +103,14 @@ pub const TASK_MANIFEST: &[TaskSpec] = &[
         deps: &["posture_engine_worker"], // resolves posture the worker populates
         criticality: Criticality::NonCritical,
         scheduling: SchedulingClass::Normal,
-        deadline_ms: None,
+        deadline_ms: Some(1_000), // CAMPAIGN_SWEEP_MS — a sweep slower than its own cadence is a miss
     },
     TaskSpec {
         name: "cert_expiry_monitor",
         deps: &[],
         criticality: Criticality::NonCritical,
         scheduling: SchedulingClass::Normal,
-        deadline_ms: None,
+        deadline_ms: Some(30_000), // an hourly census taking >30 s means the store is badly wedged
     },
     TaskSpec {
         name: "audit_shipper",
@@ -240,6 +240,104 @@ impl DeadlineStats {
     #[must_use]
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EP-11 (M1) — sustained-miss hysteresis: deadline misses → supervisor
+// escalation.
+//
+// WP-20 s2c made deadline misses OBSERVABLE (`DeadlineRegistry` → /metrics);
+// this closes the CONTROL half for Critical tasks: a SUSTAINED pattern of
+// misses — the threshold count inside a rolling window, the same shape as
+// `recovery_hysteresis` — fires a breach the task loop turns into the C2
+// escalation (sticky `supervisor_tripped` + a posture-engine nudge → the
+// posture engine forces fail-closed LockedOut). Hysteresis-guarded so nominal
+// scheduling jitter (an isolated slow cycle) NEVER escalates: only a task
+// that is persistently unable to meet its budget — a dead-man's switch that
+// can no longer keep its detection-latency bound — trips it.
+// ---------------------------------------------------------------------------
+
+/// Misses within the window required before a sustained-miss breach fires —
+/// mirrors `AV_RECOVERY_STREAK_THRESHOLD` (5) in shape and scale.
+pub const DEADLINE_SUSTAINED_MISS_THRESHOLD: u32 = 5;
+/// Rolling window (ms) over which misses accumulate — mirrors
+/// `AV_RECOVERY_WINDOW_MS` (10 s). A miss landing after the window expired
+/// starts a fresh window (stale misses never accumulate into a breach).
+pub const DEADLINE_SUSTAINED_WINDOW_MS: u64 = 10_000;
+
+/// Pure sustained-miss hysteresis for ONE task loop. Owned by the loop itself
+/// (single-threaded per task; no locking) and fed each recorded cycle.
+#[derive(Debug)]
+pub struct SustainedMissTracker {
+    threshold: u32,
+    window_ms: u64,
+    /// Start of the current accumulation window (`None` = no misses pending).
+    window_start_ms: Option<u64>,
+    misses_in_window: u32,
+}
+
+impl Default for SustainedMissTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SustainedMissTracker {
+    /// A tracker with the default threshold/window.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_params(DEADLINE_SUSTAINED_MISS_THRESHOLD, DEADLINE_SUSTAINED_WINDOW_MS)
+    }
+
+    /// Override the bands (deployment-tunable). `threshold` is forced ≥ 1 so a
+    /// misconfigured 0 cannot make `observe` fire on every on-time cycle.
+    #[must_use]
+    pub fn with_params(threshold: u32, window_ms: u64) -> Self {
+        Self {
+            threshold: threshold.max(1),
+            window_ms,
+            window_start_ms: None,
+            misses_in_window: 0,
+        }
+    }
+
+    /// Observe one recorded cycle (`missed` from `DeadlineRegistry::record`).
+    /// Returns `true` exactly when a sustained breach FIRES: the threshold-th
+    /// miss inside the rolling window. Semantics:
+    /// - an ON-TIME cycle never resets the accumulation (the predicate is "N
+    ///   misses IN the window", not "N consecutive misses" — an overloaded
+    ///   loop limping at 50% misses must still trip);
+    /// - a miss arriving after the window expired starts a FRESH window (so
+    ///   sparse, isolated misses — nominal jitter — never accumulate);
+    /// - after firing, the state resets: a continuing overload re-fires only
+    ///   after a full fresh accumulation (rate-limits escalation sends; the
+    ///   sticky `supervisor_tripped` flag makes the first fire sufficient).
+    pub fn observe(&mut self, now_ms: u64, missed: bool) -> bool {
+        if !missed {
+            return false;
+        }
+        match self.window_start_ms {
+            Some(start) if now_ms.saturating_sub(start) <= self.window_ms => {
+                self.misses_in_window += 1;
+            }
+            _ => {
+                self.window_start_ms = Some(now_ms);
+                self.misses_in_window = 1;
+            }
+        }
+        if self.misses_in_window >= self.threshold {
+            self.window_start_ms = None;
+            self.misses_in_window = 0;
+            return true;
+        }
+        false
+    }
+
+    /// Misses accumulated in the current window (observability/tests).
+    #[must_use]
+    pub fn misses_in_window(&self) -> u32 {
+        self.misses_in_window
     }
 }
 
@@ -475,6 +573,71 @@ pub fn dispatch_in_order<C>(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    // ---- EP-11: SustainedMissTracker hysteresis ---------------------------
+
+    #[test]
+    fn sustained_misses_within_the_window_fire_a_breach() {
+        let mut t = SustainedMissTracker::new();
+        // 5 misses, 100 ms apart (one sweep cadence) — all inside the 10 s window.
+        for i in 0..4 {
+            assert!(!t.observe(1_000 + i * 100, true), "miss {} must not fire early", i + 1);
+        }
+        assert!(t.observe(1_400, true), "the threshold-th miss inside the window fires");
+        assert_eq!(t.misses_in_window(), 0, "state resets after firing");
+    }
+
+    #[test]
+    fn sparse_misses_never_accumulate_across_expired_windows() {
+        // Nominal jitter: one slow sweep every 15 s — each miss lands after the
+        // prior window expired, so the count restarts at 1 forever. No breach.
+        let mut t = SustainedMissTracker::new();
+        for i in 0..50u64 {
+            assert!(
+                !t.observe(i * 15_000, true),
+                "sparse, isolated misses (nominal jitter) must never escalate"
+            );
+        }
+    }
+
+    #[test]
+    fn on_time_cycles_do_not_reset_the_accumulation() {
+        // An overloaded loop limping at ~50% misses must still trip: on-time
+        // cycles between misses do NOT clear the window count.
+        let mut t = SustainedMissTracker::new();
+        let mut now = 0u64;
+        let mut fired = false;
+        for i in 0..10 {
+            now += 500;
+            let missed = i % 2 == 0; // alternate miss / on-time
+            if t.observe(now, missed) {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "interleaved on-time cycles must not mask a sustained overload");
+    }
+
+    #[test]
+    fn a_continuing_overload_refires_only_after_a_full_fresh_accumulation() {
+        let mut t = SustainedMissTracker::new();
+        let mut fires = 0;
+        for i in 0..20u64 {
+            if t.observe(1_000 + i * 100, true) {
+                fires += 1;
+            }
+        }
+        // 20 back-to-back misses at the default threshold 5 → exactly 4 fires
+        // (rate-limited escalation, not one per miss past the threshold).
+        assert_eq!(fires, 4);
+    }
+
+    #[test]
+    fn zero_threshold_is_forced_to_one_and_on_time_never_fires() {
+        let mut t = SustainedMissTracker::with_params(0, 10_000);
+        assert!(!t.observe(1_000, false), "an on-time cycle can never fire");
+        assert!(t.observe(1_100, true), "threshold forced to 1: the first miss fires");
+    }
 
     fn spec(name: &'static str, deps: &'static [&'static str]) -> TaskSpec {
         TaskSpec {

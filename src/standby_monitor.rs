@@ -109,6 +109,49 @@ pub fn should_self_demote_on_heartbeat_failures(consecutive_failures: u32) -> bo
     consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
 }
 
+/// EP-02 drill finding — what a non-empty `PROMOTION_RECORD_KEY` means for the
+/// heartbeating Active that reads it. The record is written by
+/// `perform_promotion` AFTER the durable epoch claim, naming the promoter.
+/// Three cases:
+/// - the record names THIS instance: it is our own promotion record (we are
+///   the legitimately promoted Active). Ignore — treating it as a takeover
+///   self-fenced every freshly-promoted standby on its first heartbeat tick,
+///   leaving the fleet with ZERO Actives after every failover (the two-process
+///   drill caught this).
+/// - the record names another instance and we hold NO epoch (`held == 0`,
+///   the durable fence not armed): the record is the only takeover signal —
+///   preserve the legacy demote-on-takeover.
+/// - the record names another instance and we DO hold an epoch: the caller
+///   has already verified this tick that the durable epoch still equals ours
+///   (the epoch check runs first), and every legitimate takeover claims the
+///   epoch BEFORE writing this record — so the record is a STALE artifact of
+///   a previous failover generation (e.g. this instance restarted and
+///   re-claimed after an old failover). Not a live fence; do not demote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TakeoverRecordVerdict {
+    /// Our own promotion record — not a takeover.
+    OwnRecord,
+    /// Another instance promoted and no epoch fence is armed — demote.
+    Demote,
+    /// Another instance's record from an older epoch generation — forensics only.
+    StaleArtifact,
+}
+
+#[must_use]
+pub(crate) fn takeover_record_verdict(
+    promoted_by: &str,
+    my_id: &str,
+    held_epoch: u64,
+) -> TakeoverRecordVerdict {
+    if promoted_by == my_id {
+        TakeoverRecordVerdict::OwnRecord
+    } else if held_epoch == 0 {
+        TakeoverRecordVerdict::Demote
+    } else {
+        TakeoverRecordVerdict::StaleArtifact
+    }
+}
+
 /// #689: enforce a safe split-brain margin on the ENV-derived HA timings. The
 /// compile-time `const _` assert above only guards the DEFAULT constants; the
 /// runtime `KIRRA_HEARTBEAT_INTERVAL` / `KIRRA_PROMOTION_TIMEOUT` overrides are
@@ -252,19 +295,36 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
 }
 
 async fn heartbeat_loop(app: Arc<AppState>, id: String) {
-        let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
+        let env_interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&v| v > 0) // #707: reject 0 — disables the #689 clamp AND panics tokio::interval
             .unwrap_or(HEARTBEAT_INTERVAL_MS);
+
+        // EP-03: the lease gate. When armed, the holder must renew at the lease
+        // half-life — which is FASTER than the default heartbeat interval
+        // (1.5 s vs 2 s at the default TTL) — so the loop runs at the tighter
+        // of the two cadences (each tick both heartbeats AND renews).
+        let lease = crate::lease::lease_params_from_env();
+        let interval_ms = match &lease {
+            Some(p) => env_interval_ms.min(p.renew_interval_ms.max(1)),
+            None => env_interval_ms,
+        };
 
         let mut tick = interval(Duration::from_millis(interval_ms));
 
         tracing::info!(
             instance_id = %id,
             interval_ms = interval_ms,
+            lease_enabled = lease.is_some(),
             "Heartbeat writer started"
         );
+
+        // EP-03: monotonic anchor of the last SUCCESSFUL lease renewal. The
+        // durable claim that made this instance Active stamped the lease
+        // (`try_claim_epoch` sets `updated_at_ms`), so loop start counts as
+        // freshly renewed.
+        let mut last_renew = Instant::now();
 
         // Review item "1": consecutive failed heartbeat ticks (write or epoch
         // read). Reset to 0 on any healthy tick; at MAX_CONSECUTIVE_HEARTBEAT_
@@ -278,14 +338,37 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             /// Fenced or promoted-over: the closure already set mode_active=false;
             /// the loop breaks.
             SelfDemoted,
-            /// The heartbeat write or the epoch read failed this tick.
+            /// The heartbeat write, the epoch read, or the lease renewal failed
+            /// this tick.
             Failed,
-            /// A clean tick: heartbeat written, epoch read and still owned.
+            /// A clean tick: heartbeat written, epoch read and still owned, and —
+            /// lease gate on — the durable lease renewed.
             Healthy,
         }
 
         loop {
             tick.tick().await;
+
+            // EP-03 holder-side lease rule: past its own TTL this holder can no
+            // longer PROVE it holds the lease — self-demote (fail-closed) before
+            // touching the store, exactly like the disk-wedge path. The
+            // challenger's promote deadline is ttl + ttl/2, so this demote
+            // strictly precedes any lease-triggered promotion
+            // (`demote_before_promote`, const-proved in `lease.rs`).
+            if let Some(params) = &lease {
+                let elapsed_ms = last_renew.elapsed().as_millis() as u64;
+                if crate::lease::lease_expired(elapsed_ms, params) {
+                    app.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        instance_id = %id,
+                        elapsed_ms,
+                        ttl_ms = params.ttl_ms,
+                        "LEASE EXPIRED — this holder cannot prove ownership; self-demoting and stopping heartbeat (fail-closed)"
+                    );
+                    break;
+                }
+            }
+
             // #80: this `now_ms()` is written as a freshness TOKEN, not a clock
             // the standby trusts. The standby treats it as an opaque
             // change-detector (it advances each tick) and times staleness on its
@@ -301,6 +384,7 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             // instance id (reused next tick) into it.
             let app_c = Arc::clone(&app);
             let id_c = id.clone();
+            let lease_c = lease;
             let outcome = match app.store.call(move |store| {
                 if let Err(e) = store.save_engine_state(HEARTBEAT_KEY, &ts.to_string()) {
                     tracing::warn!(
@@ -352,16 +436,62 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
                 }
 
                 if let Ok(Some(promoted_by)) = store.load_engine_state(PROMOTION_RECORD_KEY) {
-                    // Mirror the epoch path: tear down the local Active
-                    // flag too, not just the heartbeat loop.
-                    app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                    tracing::error!(
-                        promoted_by = %promoted_by,
-                        instance_id = %id_c,
-                        "Standby has promoted — primary self-demoting and stopping heartbeat. \
-                         Restart this instance in PassiveStandby mode."
-                    );
-                    return HeartbeatOutcome::SelfDemoted;
+                    match takeover_record_verdict(&promoted_by, &id_c, held) {
+                        TakeoverRecordVerdict::OwnRecord => {
+                            // Our own promotion record — we ARE the promoted
+                            // Active. (Before the EP-02 drill fix, this branch
+                            // demoted: every promoted standby self-fenced on its
+                            // first heartbeat tick.)
+                        }
+                        TakeoverRecordVerdict::Demote => {
+                            // Mirror the epoch path: tear down the local Active
+                            // flag too, not just the heartbeat loop.
+                            app_c.mode_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!(
+                                promoted_by = %promoted_by,
+                                instance_id = %id_c,
+                                "Standby has promoted — primary self-demoting and stopping heartbeat. \
+                                 Restart this instance in PassiveStandby mode."
+                            );
+                            return HeartbeatOutcome::SelfDemoted;
+                        }
+                        TakeoverRecordVerdict::StaleArtifact => {
+                            // We verified THIS tick that the durable epoch still
+                            // equals ours (the check above), and takeovers claim
+                            // the epoch before writing this record — stale
+                            // forensics from an older failover, not a live fence.
+                            tracing::debug!(
+                                promoted_by = %promoted_by,
+                                instance_id = %id_c,
+                                held_epoch  = held,
+                                "Stale promotion record from a previous failover generation — epoch fence current; ignoring"
+                            );
+                        }
+                    }
+                }
+
+                // EP-03: renew the durable lease under the SAME store
+                // acquisition (epoch + holder guarded — a fenced or superseded
+                // row refuses the renewal). A refused/failed renewal is a FAILED
+                // tick: the consecutive-failure guard demotes on persistence,
+                // and the holder-side expiry check above is the hard backstop.
+                if let Some(params) = &lease_c {
+                    let _ = params; // cadence already folded into the tick interval
+                    match store.renew_lease(&id_c, held, ts) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                instance_id = %id_c,
+                                held = held,
+                                "Lease renewal REFUSED (epoch/holder no longer ours)"
+                            );
+                            return HeartbeatOutcome::Failed;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, instance_id = %id_c, "Lease renewal write failed");
+                            return HeartbeatOutcome::Failed;
+                        }
+                    }
                 }
 
                 HeartbeatOutcome::Healthy
@@ -377,7 +507,11 @@ async fn heartbeat_loop(app: Arc<AppState>, id: String) {
             };
             match outcome {
                 HeartbeatOutcome::SelfDemoted => break,
-                HeartbeatOutcome::Healthy => consecutive_failures = 0,
+                HeartbeatOutcome::Healthy => {
+                    consecutive_failures = 0;
+                    // EP-03: a healthy tick renewed the lease (gate on) — re-anchor.
+                    last_renew = Instant::now();
+                }
                 HeartbeatOutcome::Failed => {
                     consecutive_failures += 1;
                     // Review item "1": after N consecutive failures the primary can
@@ -610,6 +744,30 @@ async fn promotion_loop(
             return;
         }
 
+        // EP-03: the lease gate. When armed, the promotion TRIGGER is the lease
+        // rule (`promote_after_ms` = ttl + ttl/2 ≈ 4.5 s at the default TTL)
+        // instead of the legacy heartbeat timeout (~10 s) — the ≤5 s failover
+        // property. The durable epoch CAS in `perform_promotion` remains the
+        // sole takeover authority either way.
+        let lease = crate::lease::lease_params_from_env();
+        let poll_ms = match &lease {
+            // The challenger must observe every renewal: clamp the poll DOWN to
+            // half the renew cadence if the configured poll is too slow
+            // (clamping down is the safe direction — never promotes late, never
+            // misses a live holder's renewals).
+            Some(params) if !crate::lease::poll_fast_enough(poll_ms, params) => {
+                let clamped = (params.renew_interval_ms / 2).max(1);
+                tracing::error!(
+                    poll_ms,
+                    clamped,
+                    renew_interval_ms = params.renew_interval_ms,
+                    "KIRRA_PROMOTION_POLL too slow to observe every lease renewal — clamped down"
+                );
+                clamped
+            }
+            _ => poll_ms,
+        };
+
         let mut tick = interval(Duration::from_millis(poll_ms));
 
         // #80: monotonic heartbeat-freshness tracker. Staleness is measured as
@@ -622,8 +780,87 @@ async fn promotion_loop(
             instance_id = %id,
             poll_ms     = poll_ms,
             timeout_ms  = timeout_ms,
+            lease_enabled = lease.is_some(),
             "Promotion monitor started"
         );
+
+        // EP-03 (gate on): the lease path. Promote only when BOTH liveness
+        // signals — the heartbeat TOKEN and the durable lease STAMP — have gone
+        // unobserved-to-advance for `promote_after_ms`, each timed on THIS
+        // standby's monotonic clock via the same change-token tracker (#80's
+        // skew-immunity, never cross-machine wall-clock differencing). The
+        // conjunction keeps a mixed-config fleet safe: a gate-OFF primary never
+        // renews the lease (its stamp reads permanently stale) but its
+        // heartbeat token keeps advancing, so a gate-ON standby will not
+        // promote over it; a DEAD primary stops advancing both, so promotion
+        // fires at promote_after (≈4.5 s), not the legacy ~10 s timeout.
+        if let Some(params) = lease {
+            let mut hb_fresh = HeartbeatFreshness::new(Instant::now());
+            let mut lease_fresh = HeartbeatFreshness::new(Instant::now());
+            loop {
+                tick.tick().await;
+
+                let read = app
+                    .store
+                    .call_read(|store| {
+                        let token = store.load_engine_state(HEARTBEAT_KEY)?;
+                        let ha = store.read_ha_lease()?;
+                        Ok::<_, rusqlite::Error>((token, ha))
+                    })
+                    .await;
+                let (token, ha) = match read {
+                    Ok(Ok(pair)) => pair,
+                    // SAFETY: SG-HA-4 — a store/offload error skips the tick
+                    // without disturbing either anchor (decide only on a read).
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Lease monitor: store read failed");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Lease monitor: read offload failed");
+                        continue;
+                    }
+                };
+
+                // Fresh deployment: no primary has EVER held the lease and no
+                // heartbeat was ever written — nothing to take over (mirrors the
+                // legacy absent-key rule: never auto-promote a cold fleet).
+                if ha.holder.is_none() && token.is_none() {
+                    tracing::debug!("Lease monitor: no holder yet — waiting for a primary");
+                    continue;
+                }
+
+                let now = Instant::now();
+                if let Some(t) = &token {
+                    let _ = hb_fresh.observe(t, now);
+                }
+                let _ = lease_fresh.observe(&ha.last_renew_ms.to_string(), now);
+
+                let hb_elapsed = hb_fresh.elapsed(now).as_millis() as u64;
+                let lease_elapsed = lease_fresh.elapsed(now).as_millis() as u64;
+                let hb_stale = crate::lease::should_promote(hb_elapsed, &params);
+                let lease_stale = crate::lease::should_promote(lease_elapsed, &params);
+
+                if hb_stale && lease_stale {
+                    tracing::error!(
+                        instance_id = %id,
+                        hb_elapsed_ms = hb_elapsed,
+                        lease_elapsed_ms = lease_elapsed,
+                        promote_after_ms = params.promote_after_ms,
+                        "Lease expired unobserved past the promote deadline — promoting to Active"
+                    );
+                    if perform_promotion(&app, &cache, &id, "LEASE_EXPIRED").await {
+                        apply_post_promotion(&app, on_promote.as_ref());
+                    }
+                    return;
+                }
+                tracing::debug!(
+                    hb_elapsed_ms = hb_elapsed,
+                    lease_elapsed_ms = lease_elapsed,
+                    "Lease monitor: holder alive (a liveness signal is advancing)"
+                );
+            }
+        }
 
         loop {
             tick.tick().await;
@@ -1063,6 +1300,36 @@ mod standby_monitor_tests {
     //   - clock-skew immunity → `test_primary_clock_step_back_does_not_spuriously_promote`,
     //     `test_standby_wall_clock_jump_does_not_change_decision`.
     // The constant-relationship and absent-key tests below remain valid as-is.
+
+    /// EP-02 drill finding — the promotion record must never fence the
+    /// instance that WROTE it (the freshly promoted Active), and a stale
+    /// record from an older failover generation must not demote a current
+    /// epoch holder. Only an other-named record with NO armed epoch fence
+    /// keeps the legacy demote-on-takeover meaning.
+    #[test]
+    fn test_takeover_record_verdict() {
+        use super::TakeoverRecordVerdict as V;
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-b", 2),
+            V::OwnRecord,
+            "the promoted Active reading its own record must NOT self-fence"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-b", 0),
+            V::OwnRecord,
+            "own record is never a takeover regardless of fence state"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-a", 0),
+            V::Demote,
+            "another promoter + no armed epoch fence → legacy demote-on-takeover"
+        );
+        assert_eq!(
+            takeover_record_verdict("drill-b", "drill-a", 3),
+            V::StaleArtifact,
+            "another promoter's record while WE hold the current epoch is stale forensics"
+        );
+    }
 
     #[test]
     fn test_absent_heartbeat_key_does_not_auto_promote() {

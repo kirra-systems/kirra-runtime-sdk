@@ -1,4 +1,6 @@
-# ADR-0001 — Governor Deployment Platform
+# ADR-0032 — Governor Deployment Platform
+
+> **Renumbered from ADR-0001 (2026-07-08)** to resolve a numbering collision with `0001-occy-odd-speed-cap.md` (EP-23). All platform references now cite ADR-0032.
 
 **Status:** Accepted
 **Date:** 2026-06-08

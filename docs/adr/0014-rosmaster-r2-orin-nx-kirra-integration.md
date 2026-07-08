@@ -7,7 +7,7 @@
 | Deciders | Project / safety-case owner |
 | Hardware | Rosmaster R2 (Ackermann-steer chassis, onboard ROS expansion board + IMU, Astra Pro depth camera, lidar) · Jetson Orin NX 16GB (~100 TOPS, 16 GB unified, 10–25 W) · *optional* governor box (Raspberry Pi / 4GB Nano) for the two-box topology |
 | Stack | Perception (Parko) · Planner (Occy / LLM) · KIRRA governor + verifier + console |
-| Cross-refs | ADR-0001 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), #480 (Mick `mick` intent seam), #481 (tolerant intent parser), #482 (doer-bound demo — KIRRA bounds a black-box planner), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
+| Cross-refs | ADR-0032 (two-box governed-car prototype), ADR-0006 (QM↔safety boundary), ADR-0013 (request-not-command E-stop), #126 / #127 (perception / actuation SEooC AoU), #131 (Option-B trajectory validation), #49 / #171 (cmd_vel robot lane), #279 (freedom-from-interference), #480 (Mick `mick` intent seam), #481 (tolerant intent parser), #482 (doer-bound demo — KIRRA bounds a black-box planner), Parko (`parko-core` vendor-neutral inference), Occy (`kirra-planner`) |
 
 ## Context
 
@@ -137,7 +137,7 @@ what an LLM output instructs"*). Forbidden.
 
 KIRRA already supports a **two-box** topology: `kirra-governor-service` is *"a minimal UDP
 governor for the two-box governed-car prototype"* (Proposal car→governor / Verdict
-governor→car over UDP; `kirra-wire-client` is the client mirror; ADR-0001). Two choices:
+governor→car over UDP; `kirra-wire-client` is the client mirror; ADR-0032). Two choices:
 
 - **Single-box (simplest bring-up).** Everything on the Orin NX; the governor shares silicon
   with System 2, so freedom-from-interference rests on hypervisor / partition isolation (the
@@ -168,7 +168,7 @@ clean I/O*, not TOPS, and the Pi delivers both more cheaply.
 ### Cert-correctness caveat
 
 Neither a Pi nor a Nano running Linux is the **certifiable** governor target — that remains QNX
-on a safety MCU / partition (ADR-0001, ADR-0006, #270). And per ADR-0013 the **certifiable
+on a safety MCU / partition (ADR-0032, ADR-0006, #270). And per ADR-0013 the **certifiable
 E-stop is a hardwired button→relay circuit independent of compute** — the Pi's GPIO drives only
 the *supplementary*, governor-commanded safe-state, never the primary cut. The two-box Pi setup
 is a **prototype / FFI demonstrator** and a stepping stone to QNX, not the final safety artifact.

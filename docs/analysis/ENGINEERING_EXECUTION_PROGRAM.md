@@ -199,7 +199,7 @@ graph TD
 
 - **EP-21** — enable `evt` in `kirra-wcet-bench`; emit pWCET + i.i.d./stationarity diagnostics in the bench report (still INDICATIVE-labeled). S (1 d).
 - **EP-22** — weekly scheduled deep-fuzz workflow (4–8 h across the 4 targets, corpus persisted as artifact). S (0.5 d).
-- **EP-23** — hygiene: rename `audit_powerloss.rs`/`audit_power_loss.rs` → intent-revealing names; archive `GAP_CLOSURE_STATUS.md` under `docs/analysis/archive/` with a banner (its G-numbers collide with the MGA taxonomy — a real confusion hazard found during DD); fix the ADR-0001 numbering collision (`0001-occy-odd-speed-cap.md` vs `ADR-0001-governor-deployment-platform.md`). S (0.5–1 d).
+- **EP-23** — hygiene: rename `audit_powerloss.rs`/`audit_power_loss.rs` → intent-revealing names; archive `GAP_CLOSURE_STATUS.md` under `docs/analysis/archive/` with a banner (its G-numbers collide with the MGA taxonomy — a real confusion hazard found during DD); fix the ADR-0001 numbering collision (`0001-occy-odd-speed-cap.md` vs `0032-governor-deployment-platform.md`). S (0.5–1 d).
 
 ---
 

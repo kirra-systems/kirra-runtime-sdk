@@ -198,6 +198,10 @@ pub fn spawn_telemetry_watchdog_with_clock(
                 sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 let mut last_node_refresh_ms: u64 = 0;
                 let mut node_health: HashMap<String, WatchdogNodeEntry> = HashMap::new();
+                // EP-11: sustained-miss hysteresis over the sweep deadline. Loop-owned
+                // (single consumer, no lock); rebuilt fresh on a supervisor restart.
+                let mut sustained_misses =
+                    crate::execution_manager::SustainedMissTracker::new();
                 loop {
                     sweep_interval.tick().await;
 
@@ -208,6 +212,9 @@ pub fn spawn_telemetry_watchdog_with_clock(
                     // captured HERE before the per-sweep clones below shadow `app`/`clock`.
                     let deadline_app = Arc::clone(&app);
                     let deadline_clock = Arc::clone(&clock);
+                    // EP-11: escalation handle captured BEFORE the per-sweep clones
+                    // below shadow-and-move `posture_engine_tx` into the blocking task.
+                    let escalation_tx = posture_engine_tx.clone();
                     let sweep_start_ms = deadline_clock.now_ms();
 
                     // The sweep is SYNCHRONOUS and does blocking work — `std::sync::Mutex`
@@ -257,7 +264,20 @@ pub fn spawn_telemetry_watchdog_with_clock(
                     // /metrics). Reached only on the Ok path — a panicking sweep
                     // re-raises above and the loop dies (the CRITICAL supervisor escalates).
                     let elapsed_ms = deadline_clock.now_ms().saturating_sub(sweep_start_ms);
-                    deadline_app.deadline_registry.record("telemetry_watchdog", elapsed_ms);
+                    let missed = deadline_app
+                        .deadline_registry
+                        .record("telemetry_watchdog", elapsed_ms);
+                    // EP-11: a SUSTAINED pattern of slow sweeps (threshold misses
+                    // inside the rolling window) means this dead-man's switch can no
+                    // longer hold its detection-latency bound — escalate fail-closed.
+                    // An isolated slow sweep (nominal jitter) never trips this.
+                    escalate_on_sustained_overrun(
+                        &deadline_app,
+                        &escalation_tx,
+                        &mut sustained_misses,
+                        deadline_clock.now_ms(),
+                        missed,
+                    );
                 }
             }
         },
@@ -633,6 +653,42 @@ fn force_watchdog_lockout(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// EP-11 — sustained sweep-deadline overrun → C2 supervisor escalation
+// ---------------------------------------------------------------------------
+
+/// Fold one recorded sweep-deadline outcome into the sustained-miss hysteresis;
+/// on a breach, run the C2 escalation: set the sticky `supervisor_tripped` flag
+/// and nudge the posture engine, which reads the flag and forces the fleet to a
+/// fail-closed `LockedOut` (the same path the supervisor's restart-budget
+/// escalation takes — see `spawn_supervised` + `posture_engine::force_lockout`).
+///
+/// Rationale: the watchdog is the SG-003 dead-man's switch. A sweep that
+/// PERSISTENTLY overruns its `AV_WATCHDOG_SWEEP_MS` budget is a switch whose
+/// detection latency is no longer bounded — silence could go unnoticed past the
+/// telemetry timeout. That is fail-OPEN drift, so a sustained overrun fails the
+/// fleet CLOSED instead. Hysteresis-guarded (`SustainedMissTracker`): an
+/// isolated slow sweep — scheduling jitter, a cold cache — never escalates.
+pub(crate) fn escalate_on_sustained_overrun(
+    app: &Arc<AppState>,
+    posture_engine_tx: &PostureEngineSender,
+    tracker: &mut crate::execution_manager::SustainedMissTracker,
+    now_ms: u64,
+    missed: bool,
+) {
+    if tracker.observe(now_ms, missed) {
+        tracing::error!(
+            threshold = crate::execution_manager::DEADLINE_SUSTAINED_MISS_THRESHOLD,
+            window_ms = crate::execution_manager::DEADLINE_SUSTAINED_WINDOW_MS,
+            "telemetry watchdog SUSTAINED deadline overrun — the dead-man's switch cannot \
+             hold its detection-latency bound; escalating fleet to LockedOut (C2 fail-closed)"
+        );
+        app.supervisor_tripped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = posture_engine_tx.try_send(PostureRecalcTrigger::PeriodicRefresh);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1485,5 +1541,96 @@ mod sg_003_cert_tests {
             }
             other => panic!("SG-003: expected WatchdogTimeout, got {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EP-11 tests — sustained sweep-overrun → C2 escalation (the rig proof)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sustained_overrun_tests {
+    use super::*;
+    use crate::execution_manager::{
+        SustainedMissTracker, DEADLINE_SUSTAINED_MISS_THRESHOLD,
+    };
+    use crate::verifier::{AppState, VerifierOperationMode};
+    use crate::verifier_store::VerifierStore;
+    use tokio::sync::mpsc;
+
+    fn app() -> Arc<AppState> {
+        let store = VerifierStore::new(":memory:").expect("memory store");
+        Arc::new(AppState::new(store, VerifierOperationMode::Active))
+    }
+
+    /// THE DoD TEST: a sustained watchdog overrun — the threshold count of
+    /// deadline misses inside the rolling window, exactly what the sweep loop
+    /// records under persistent overload — sets the sticky `supervisor_tripped`
+    /// flag AND nudges the posture engine. The posture engine's handling of the
+    /// flag (recalc → forced sticky LockedOut) is pinned by its own #688 tests;
+    /// this proves the deadline path REACHES that escalation seam.
+    #[test]
+    fn sustained_overrun_trips_the_supervisor_and_nudges_the_engine() {
+        let app = app();
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut tracker = SustainedMissTracker::new();
+
+        // Threshold misses at sweep cadence (100 ms apart) — a wedged store /
+        // saturated node, not jitter.
+        for i in 0..u64::from(DEADLINE_SUSTAINED_MISS_THRESHOLD) {
+            escalate_on_sustained_overrun(&app, &tx, &mut tracker, 1_000 + i * 100, true);
+        }
+
+        assert!(
+            app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            "a sustained sweep overrun must set the sticky supervisor_tripped flag (C2)"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(PostureRecalcTrigger::PeriodicRefresh)),
+            "the escalation must nudge the posture engine so the flag takes effect NOW, \
+             not at the next periodic refresh"
+        );
+    }
+
+    /// The control (DoD's second half): nominal jitter — isolated slow sweeps
+    /// spread wider than the window — never escalates. The dead-man's switch
+    /// stays armed without ever crying wolf on scheduling noise.
+    #[test]
+    fn nominal_jitter_does_not_escalate() {
+        let app = app();
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut tracker = SustainedMissTracker::new();
+
+        // One slow sweep every 15 s (window is 10 s) for a long stretch, with
+        // on-time sweeps between — realistic jitter, never a sustained pattern.
+        let mut now = 0u64;
+        for _ in 0..50 {
+            now += 15_000;
+            escalate_on_sustained_overrun(&app, &tx, &mut tracker, now, true);
+            for _ in 0..10 {
+                now += 100;
+                escalate_on_sustained_overrun(&app, &tx, &mut tracker, now, false);
+            }
+        }
+
+        assert!(
+            !app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst),
+            "isolated slow sweeps (nominal jitter) must never trip the supervisor"
+        );
+        assert!(rx.try_recv().is_err(), "no engine nudge without a sustained breach");
+    }
+
+    /// Below-threshold misses inside one window do not escalate — the breach
+    /// needs the FULL threshold, not merely "some misses recently".
+    #[test]
+    fn below_threshold_misses_do_not_escalate() {
+        let app = app();
+        let (tx, mut rx) = mpsc::channel::<PostureRecalcTrigger>(128);
+        let mut tracker = SustainedMissTracker::new();
+        for i in 0..u64::from(DEADLINE_SUSTAINED_MISS_THRESHOLD) - 1 {
+            escalate_on_sustained_overrun(&app, &tx, &mut tracker, 1_000 + i * 100, true);
+        }
+        assert!(!app.supervisor_tripped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(rx.try_recv().is_err());
     }
 }

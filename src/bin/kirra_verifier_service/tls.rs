@@ -109,7 +109,7 @@ pub fn resolve_tls_from_env() -> Result<TlsResolution, String> {
 
 /// Build a rustls [`ServerConfig`] from a PEM cert-chain + private-key file, pinned
 /// to the `ring` provider. When `client_ca_path` is `Some`, client certificates are
-/// REQUIRED and CA-verified (mTLS) via rustls's audited [`WebPkiClientVerifier`].
+/// REQUIRED and CA-verified (mTLS) via rustls's audited `WebPkiClientVerifier`.
 /// Fail-closed: any read/parse/empty/rejected-key/bad-CA error is an `Err` (the
 /// caller aborts startup before binding).
 pub fn load_server_config(
