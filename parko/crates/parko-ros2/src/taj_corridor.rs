@@ -67,6 +67,13 @@ impl CorridorSnapshot {
         self
     }
 
+    /// The perception confidence this snapshot carries — EP-05's per-tick OOD
+    /// feature (the node feeds it into the `OodFeed` window each tick).
+    #[must_use]
+    pub fn confidence(&self) -> f32 {
+        self.confidence
+    }
+
     /// Borrow the snapshot into a kernel [`Corridor`] with the configured health
     /// gates (`min_confidence` / `max_age_ms`). The gate's containment check
     /// then enforces those — a low-confidence or stale corridor fails closed.
