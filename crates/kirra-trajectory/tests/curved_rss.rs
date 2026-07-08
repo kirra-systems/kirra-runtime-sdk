@@ -264,6 +264,94 @@ fn tighter_curvature_never_admits_a_higher_speed() {
     }
 }
 
+/// EP-08 refinement pin (RSS responsibility): the lateral CUT-IN arm does not
+/// fire for a STOPPED pose — a planner's yield-to-a-stop short of a crossing
+/// vehicle is admitted; the same scene with the ego still MOVING at that spot
+/// is rejected. (The abreast arm stays live even at v = 0.)
+#[test]
+fn a_stopped_pose_is_not_rejected_for_a_crosser_it_yielded_to() {
+    // Straight lane along +X; a crosser 4 m left at x = 40, closing laterally
+    // at 1.5 m/s (its lateral safe distance ≈ 4.4 m > 4 m — inside the
+    // alignment band, outside the overlap band).
+    let corridor = PolyCorridor {
+        left: vec![Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 120.0, y_m: 5.0 }],
+        right: vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 120.0, y_m: -5.0 }],
+    };
+    let crosser = PerceivedObject {
+        id: 9,
+        pos: Point { x_m: 45.0, y_m: 4.0 },
+        velocity_mps: 1.5,
+        heading_rad: -std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 0.0, y_m: -1.5 },
+    };
+
+    // Yield: the MOVING poses all stay outside the 8 m lateral-conflict
+    // window (x ≤ 36.9, gap ≥ 8.1); the vehicle comes to rest just inside it
+    // (x = 37.2, gap 7.8) and holds. Exactly the mid-turn shape: only the
+    // STOPPED pose sits inside the window, so the verdict isolates the
+    // stopped-pose rule.
+    let mut yielded: Vec<TrajectoryPoint> = Vec::new();
+    for i in 0..12 {
+        let t = i as f64 * 0.1;
+        let frac = t / 1.2;
+        yielded.push(TrajectoryPoint {
+            pose: Pose {
+                x_m: 28.0 + 8.9 * (1.0 - (1.0 - frac) * (1.0 - frac)),
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            velocity_mps: 3.0 * (1.0 - frac) + 0.2, // still moving at the window edge
+            time_from_start_s: t,
+        });
+    }
+    for i in 12..21 {
+        let t = i as f64 * 0.1;
+        yielded.push(TrajectoryPoint {
+            pose: Pose { x_m: 37.2, y_m: 0.0, heading_rad: 0.0 },
+            velocity_mps: 0.0,
+            time_from_start_s: t,
+        });
+    }
+    let v_yield = validate_trajectory_slow(
+        &yielded,
+        &corridor,
+        std::slice::from_ref(&crosser),
+        &urban(),
+        None,
+        FleetPosture::Nominal,
+    );
+    assert!(
+        admitted(v_yield),
+        "a yield-to-a-stop short of a laterally-closing crosser must be admitted \
+         (the stopped ego has completed its proper response); got {v_yield:?}"
+    );
+
+    // Control: DRIVING through the same window at speed → the cut-in arm fires.
+    let driving: Vec<TrajectoryPoint> = (0..21)
+        .map(|i| {
+            let t = i as f64 * 0.1;
+            TrajectoryPoint {
+                pose: Pose { x_m: 32.0 + 5.0 * t, y_m: 0.0, heading_rad: 0.0 },
+                velocity_mps: 5.0,
+                time_from_start_s: t,
+            }
+        })
+        .collect();
+    let v_drive = validate_trajectory_slow(
+        &driving,
+        &corridor,
+        std::slice::from_ref(&crosser),
+        &urban(),
+        None,
+        FleetPosture::Nominal,
+    );
+    assert_eq!(
+        v_drive,
+        TrajectoryVerdict::MRCFallback,
+        "driving through the crosser's closing path at speed must reject"
+    );
+}
+
 proptest! {
     /// STRAIGHT-LINE EQUIVALENCE (the EP-08 property): on straight corridors —
     /// arbitrary offset, width, length, and small boundary vertex noise below

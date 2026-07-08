@@ -572,7 +572,22 @@ pub fn validate_trajectory_slow_capped(
             // motion here — the orientation-based `sin(heading − ego)` form read it
             // as ~0 and could miss the cut-in. EP-08: from the same frame.
             let obj_lat_vel = frame.obj_lat_v;
-            let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
+            // EP-08 refinement (RSS responsibility, Shalev-Shwartz §3.4 — the
+            // same principle behind the §4 stopped-queue admission): a pose at
+            // which the ego is STOPPED has completed its proper response on
+            // both axes. A laterally-CLOSING object can no longer be met by
+            // any ego action — the collision, if one occurs, is attributable
+            // to the closer, not the stationary ego — so the cut-in arm does
+            // not fire for a stopped pose. (Without this, a planner's smooth
+            // yield-to-a-stop short of a crossing vehicle is refused at its
+            // final stopped pose and replaced by an MRC stop at essentially
+            // the same spot — over-rejection with no safety gain.) The ABREAST
+            // arm (`lon_unsafe`) is deliberately kept even at v = 0
+            // (conservative: a stopped ego abreast-dangerously close is still
+            // flagged).
+            let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS
+                && traj_point.velocity_mps.abs()
+                    > kirra_core::kinematics_contract::STOP_EPSILON_MPS;
             // #683/#684: scale the lateral-conflict longitudinal window by closing
             // SPEED (via `lon_required`), floored at the 8 m urban minimum. A FIXED 8 m
             // ceiling clipped (a) a high-speed cut-in originating farther ahead than 8 m — at the
