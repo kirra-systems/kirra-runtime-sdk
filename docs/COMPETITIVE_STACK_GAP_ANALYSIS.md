@@ -183,7 +183,7 @@ case is invariant to the doer; that is the whole game.
 ## 6. Strategic recommendation
 
 The gap analysis points one way: **we are the layer the whole industry is independently
-reinventing** (Autoware Safety Island, NVIDIA Halos/SFF, the Tier-1 ADAS benchmark vendor RSS) — but ours is the
+reinventing** (Autoware Safety Island, NVIDIA Halos/SFF, benchmark-vendor RSS) — but ours is the
 only one built as a *portable, vendor-neutral, fleet-scale, fail-closed* bound from day
 one. The right plays, in order:
 
