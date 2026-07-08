@@ -193,11 +193,11 @@ impl EpochFence for VerifierStore {
     type Error = rusqlite::Error;
 
     fn current_epoch(&self) -> Result<u64> {
-        VerifierStore::current_epoch(self)
+        self.current_epoch()
     }
 
     fn current_active_holder(&self) -> Result<(u64, Option<String>)> {
-        VerifierStore::current_active_holder(self)
+        self.current_active_holder()
     }
 
     fn try_claim_epoch(
@@ -206,11 +206,11 @@ impl EpochFence for VerifierStore {
         instance_id: &str,
         now_ms: u64,
     ) -> Result<Option<u64>> {
-        VerifierStore::try_claim_epoch(self, observed, instance_id, now_ms)
+        self.try_claim_epoch(observed, instance_id, now_ms)
     }
 
     fn assert_actuator_epoch_held(&mut self, held_epoch: u64) -> std::result::Result<(), FenceError> {
-        VerifierStore::assert_actuator_epoch_held(self, held_epoch)
+        self.assert_actuator_epoch_held(held_epoch)
     }
 }
 
@@ -231,7 +231,10 @@ pub struct InMemoryEpochFence {
     row_present: bool,
 }
 
-/// Why an [`InMemoryEpochFence`] read/claim could not proceed.
+/// Why an [`InMemoryEpochFence`] READ (`current_epoch` / `current_active_holder`)
+/// could not proceed. Note this is a read-only error: `try_claim_epoch` never
+/// returns it — a claim against an absent/wedged row returns `Ok(None)` (the CAS
+/// simply doesn't win), mirroring SQLite's `UPDATE … WHERE …` affecting 0 rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InMemFenceError {
     /// The modelled `ha_state` row is absent (see [`InMemoryEpochFence::wedge`]).
