@@ -157,6 +157,36 @@ pub fn poll_fast_enough(poll_interval_ms: u64, params: &LeaseParams) -> bool {
     poll_interval_ms > 0 && poll_interval_ms < params.renew_interval_ms
 }
 
+// ---------------------------------------------------------------------------
+// WP-19 slice 2 — durable-lease decision wrappers
+//
+// The helpers above take an ELAPSED time (measured on the caller's own monotonic
+// clock). Slice 2 makes the lease DURABLE on `ha_state.updated_at_ms` (see
+// `VerifierStore::renew_lease` / `read_ha_lease`), so the live decisions read an
+// ABSOLUTE last-renew timestamp instead. These wrappers map that timestamp to the
+// elapsed form with a SATURATING subtraction: if `now < last_renew` (the observer's
+// clock briefly reads behind the stored renewal — cross-node wall-clock skew), the
+// elapsed is 0, i.e. "freshly renewed" — the fail-SAFE direction (never a spurious
+// giant elapsed that would promote over a live holder).
+// ---------------------------------------------------------------------------
+
+/// Challenger-side, durable-lease form: may a standby PROMOTE, given the durable
+/// last-renew timestamp (`ha_state.updated_at_ms`) and the observer's `now_ms`?
+/// Wrapper over [`should_promote`]; skew fails safe (see the module note above).
+#[must_use]
+pub fn promotion_due_since_renew(now_ms: u64, last_renew_ms: u64, params: &LeaseParams) -> bool {
+    should_promote(now_ms.saturating_sub(last_renew_ms), params)
+}
+
+/// Holder-side, durable-lease form: must the Active holder self-demote because its
+/// own lease (last renewed at `last_renew_ms`) has EXPIRED? Wrapper over
+/// [`lease_expired`]; skew fails safe (a clock blip never spuriously demotes a
+/// just-renewed holder).
+#[must_use]
+pub fn holder_must_self_demote(now_ms: u64, last_renew_ms: u64, params: &LeaseParams) -> bool {
+    lease_expired(now_ms.saturating_sub(last_renew_ms), params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +260,29 @@ mod tests {
         assert!(!lease_expired(p.renew_interval_ms, &p), "one missed renewal: lease still valid");
         // A second consecutive miss reaches expiry → self-demote.
         assert!(lease_expired(p.ttl_ms, &p), "sustained renewal failure expires the lease");
+    }
+
+    #[test]
+    fn durable_lease_wrappers_map_the_timestamp_and_fail_safe_on_skew() {
+        let p = LeaseParams::default_params();
+        let renew_at = 100_000u64;
+
+        // Fresh: now just after the renewal → neither promote nor self-demote.
+        assert!(!promotion_due_since_renew(renew_at + 10, renew_at, &p));
+        assert!(!holder_must_self_demote(renew_at + 10, renew_at, &p));
+
+        // At ttl the holder's lease has expired (self-demote) but the challenger is
+        // still inside the guard window (must NOT promote yet).
+        assert!(holder_must_self_demote(renew_at + p.ttl_ms, renew_at, &p));
+        assert!(!promotion_due_since_renew(renew_at + p.ttl_ms, renew_at, &p));
+
+        // At promote_after the challenger may finally promote.
+        assert!(promotion_due_since_renew(renew_at + p.promote_after_ms, renew_at, &p));
+
+        // Skew fails SAFE: an observer whose clock reads BEFORE the stored renewal
+        // sees elapsed 0 (freshly renewed), never a spurious huge elapsed.
+        assert!(!promotion_due_since_renew(renew_at - 5_000, renew_at, &p), "skew must not promote");
+        assert!(!holder_must_self_demote(renew_at - 5_000, renew_at, &p), "skew must not self-demote");
     }
 
     #[test]

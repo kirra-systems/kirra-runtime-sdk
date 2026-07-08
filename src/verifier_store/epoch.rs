@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// A read of the durable HA lease (WP-19 slice 2). The lease reuses the existing
+/// `ha_state` singleton: `epoch` + `active_instance_id` are the write-ownership
+/// identity, and `last_renew_ms` (the row's `updated_at_ms`) is the holder's last
+/// liveness renewal — the durable timestamp a standby measures lease freshness
+/// against. No new column: the lease IS the epoch row, kept fresh by the holder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HaLease {
+    /// The current durable epoch (the write-ownership generation).
+    pub epoch: u64,
+    /// The instance currently holding the epoch (`None` at genesis).
+    pub holder: Option<String>,
+    /// When the holder last renewed (the `ha_state.updated_at_ms` timestamp).
+    pub last_renew_ms: u64,
+}
+
 impl VerifierStore {
     /// In-transaction HA epoch fence (issue #79). Closes the residual TOCTOU in
     /// the request-path gate (`enforce_posture_routing`): that gate compares a
@@ -120,6 +135,43 @@ impl VerifierStore {
         } else {
             Ok(None)
         }
+    }
+
+    /// WP-19 slice 2 — RENEW the HA lease: refresh `ha_state.updated_at_ms` to
+    /// `now_ms`, but ONLY if this instance still legitimately holds the epoch
+    /// (`epoch == held_epoch AND active_instance_id == instance_id`). The
+    /// epoch+holder guard is the load-bearing part: a superseded instance (whose
+    /// epoch was bumped by a challenger's `try_claim_epoch`) matches 0 rows, so its
+    /// renewal FAILS — that failure is the signal for the old holder to self-demote
+    /// (the durable analogue of the lease-expiry self-demote). `Ok(true)` = renewed
+    /// (still the holder); `Ok(false)` = superseded / not the holder → self-demote.
+    ///
+    /// Rides the durable (force-synced) connection like `try_claim_epoch`, so a
+    /// renewal is fsync'd before it is relied on. O(1); no retry loop.
+    pub fn renew_lease(
+        &mut self,
+        instance_id: &str,
+        held_epoch: u64,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let n = self.durable_ref().execute(
+            "UPDATE ha_state SET updated_at_ms = ?3 \
+             WHERE id = 1 AND epoch = ?1 AND active_instance_id = ?2",
+            params![held_epoch as i64, instance_id, now_ms as i64],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// WP-19 slice 2 — read the durable HA lease (`epoch`, holder, last-renew
+    /// timestamp) a standby measures freshness against. The last-renew timestamp is
+    /// the row's `updated_at_ms`, refreshed by [`renew_lease`](Self::renew_lease).
+    pub fn read_ha_lease(&self) -> Result<HaLease> {
+        let (epoch, holder, last_renew_ms): (i64, Option<String>, i64) = self.conn.query_row(
+            "SELECT epoch, active_instance_id, updated_at_ms FROM ha_state WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(HaLease { epoch: epoch as u64, holder, last_renew_ms: last_renew_ms as u64 })
     }
 
     /// TEST-ONLY: remove the singleton HA row to simulate an epoch-read/disk
