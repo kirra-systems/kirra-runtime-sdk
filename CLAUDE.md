@@ -112,7 +112,11 @@ src/
 │                               family seam; VerifierStore impls it (inherent methods win
 │                               resolution → non-breaking), InMemoryEpochFence is the
 │                               portability-proof 2nd backend, a generic conformance test
-│                               runs the at-most-one-writer contract against both
+│                               runs the at-most-one-writer contract against both.
+│                               WP-18 store-trait 2/N: nodes.rs adds the NodeStore trait
+│                               (save_node/load_node/load_nodes/node_exists/count_nodes)
+│                               the same way — VerifierStore impls it + InMemoryNodeStore is
+│                               the 2nd backend + a shared conformance test (upsert/load/count)
 ├── posture_cache.rs          — SharedPostureCache, CachedFleetPosture, ServiceState,
 │                               OperationalCommand, should_route_command, POSTURE_CACHE_TTL_MS
 ├── posture_engine.rs         — recalculate_and_broadcast, derive_fleet_posture,

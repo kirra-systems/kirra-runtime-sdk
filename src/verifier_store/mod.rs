@@ -564,6 +564,9 @@ pub struct CausalEventInput<'a> {
 // Each child module holds an `impl VerifierStore` block for one table-domain;
 // all share the struct's private connection handles via descendant visibility.
 mod nodes;
+// WP-18 (G-9 store half) — the node-registry storage trait + its in-memory
+// reference backend (the 2nd VerifierStorage-family seam after EpochFence).
+pub use nodes::{InMemoryNodeStore, NodeStore};
 mod posture;
 mod audit;
 mod operators;
