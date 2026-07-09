@@ -1498,12 +1498,14 @@ fn predictive_overlap_gate_is_the_sole_reason_an_in_band_closing_mode_breaches()
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
     let ego = held_ego(10.0);
-    // Closing head-on: x decreases 13→9 over 1.0 s (≈4 m/s), y fixed at 2.0 →
-    // zero predicted lateral velocity.
+    // Closing head-on: x decreases 13→9 over 1.0 s (≈4 m/s), y fixed at 2.4 →
+    // zero predicted lateral velocity. |dy| = 2.4 sits in (lat_required ≈ 2.325,
+    // overlap 2.5): the predictive lateral branch does NOT fire, so the breach is
+    // the overlap gate's alone (a `< → ==`/`>` mutant on it stops the breach).
     let near_samples = [
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.0 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 11.0, y_m: 2.0 }, time_from_start_s: 0.5 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.4 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 11.0, y_m: 2.4 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: 2.4 }, time_from_start_s: 1.0 },
     ];
     let near_modes = [PredictedMode { object_id: 1, samples: &near_samples }];
     let near = validate_trajectory_slow_capped(

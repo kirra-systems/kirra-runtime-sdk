@@ -81,9 +81,10 @@ fn sample_at_fraction(poly: &[Point], cum: &[f64], frac: f64) -> Point {
     let target = frac * cum[cum.len() - 1];
     // Find the segment containing `target` (cum is non-decreasing).
     let i = match cum.binary_search_by(|c| c.partial_cmp(&target).unwrap()) {
-        Ok(idx) => idx.min(poly.len() - 2),
-        Err(idx) => idx.saturating_sub(1).min(poly.len() - 2),
-    };
+        Ok(idx) => idx,
+        Err(idx) => idx.saturating_sub(1),
+    }
+    .min(poly.len() - 2);
     // A zero-length segment (coincident vertices) is handled by the `seg > 0.0`
     // guard below — `t = 0.0` returns `poly[i]`, which equals `poly[i + 1]` for
     // such a segment, so no separate skip loop is needed (and none can divide by
@@ -172,19 +173,25 @@ impl CenterlineFrenet {
         let mut total = 0.0;
         let mut prev: Option<(f64, f64)> = None;
         for w in self.pts.windows(2) {
-            let (dx, dy) = (w[1].x_m - w[0].x_m, w[1].y_m - w[0].y_m);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len <= 0.0 {
+            let v = (w[1].x_m - w[0].x_m, w[1].y_m - w[0].y_m);
+            // A zero-length segment carries no direction — skip it WITHOUT
+            // resetting `prev`, so the turn across it is still measured between
+            // the two real neighbours. (Construction collapses duplicates, so
+            // this only guards a hand-built frame.)
+            if v == (0.0, 0.0) {
                 continue;
             }
-            let t = (dx / len, dy / len);
             if let Some(p) = prev {
-                // Angle between consecutive unit tangents.
-                let cross = p.0 * t.1 - p.1 * t.0;
-                let dot = (p.0 * t.0 + p.1 * t.1).clamp(-1.0, 1.0);
+                // Turn angle between consecutive segment vectors. `atan2(cross,
+                // dot)` is invariant to each vector's magnitude (both scale by
+                // |p|·|v|, which cancels), so the RAW segment vectors give the
+                // exact angle — no per-segment normalization is needed (it was
+                // dead computation the angle never depended on).
+                let cross = p.0 * v.1 - p.1 * v.0;
+                let dot = p.0 * v.0 + p.1 * v.1;
                 total += cross.atan2(dot).abs();
             }
-            prev = Some(t);
+            prev = Some(v);
         }
         total
     }
@@ -236,13 +243,11 @@ impl CenterlineFrenet {
     #[must_use]
     pub fn tangent_at(&self, s: f64) -> (f64, f64) {
         let s = s.clamp(0.0, self.total_length_m());
-        let i = match self
-            .cum_s
-            .binary_search_by(|c| c.partial_cmp(&s).unwrap())
-        {
-            Ok(idx) => idx.min(self.pts.len() - 2),
-            Err(idx) => idx.saturating_sub(1).min(self.pts.len() - 2),
-        };
+        let i = match self.cum_s.binary_search_by(|c| c.partial_cmp(&s).unwrap()) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
+        }
+        .min(self.pts.len() - 2);
         let (dx, dy) = (
             self.pts[i + 1].x_m - self.pts[i].x_m,
             self.pts[i + 1].y_m - self.pts[i].y_m,
@@ -590,4 +595,31 @@ mod tests {
         // seg0's end — the near-vs-far comparison must keep seg1.
         assert!(b.s > 10.0, "must have chosen seg1, s = {}", b.s);
     }
+
+    #[test]
+    fn segment_lookup_clamps_the_final_arc_length_into_the_last_segment() {
+        // A 5-point frame so `.min(len - 2)` is BOTH reachable and distinguishable
+        // from a mangled bound: at s = total the binary search returns the last
+        // index, which must clamp into the last SEGMENT (index len-2) — a `- → +`
+        // bound would index past the end (panic) and a `- → /` bound
+        // (len/2 = 2 ≠ len-2 = 3) would land on the wrong segment.
+        let f = CenterlineFrenet {
+            pts: vec![
+                Point { x_m: 0.0, y_m: 0.0 },
+                Point { x_m: 5.0, y_m: 0.0 },
+                Point { x_m: 10.0, y_m: 0.0 },
+                Point { x_m: 15.0, y_m: 0.0 },
+                Point { x_m: 20.0, y_m: 5.0 }, // last segment turns, so its tangent is distinct
+            ],
+            cum_s: vec![0.0, 5.0, 10.0, 15.0, 15.0 + 29.0_f64.sqrt()],
+        };
+        // tangent_at(total) → last segment (5,5)/√50.
+        let (tx, ty) = f.tangent_at(f.total_length_m());
+        assert!((tx - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12 && (ty - 5.0 / 50.0_f64.sqrt()).abs() < 1e-12, "{tx},{ty}");
+        // sample_at_fraction(frac = 1.0) → the final vertex exactly.
+        let poly: Vec<Point> = f.pts.clone();
+        let end = sample_at_fraction(&poly, &f.cum_s, 1.0);
+        assert!((end.x_m - 20.0).abs() < 1e-12 && (end.y_m - 5.0).abs() < 1e-12, "{end:?}");
+    }
+
 }
