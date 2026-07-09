@@ -212,12 +212,14 @@ pub struct Campaign {
     pub artifact_signature_b64: Option<String>,
     /// EP-13 (G-7 remainder) — the full SIGNED Uptane metadata set
     /// (timestamp/snapshot/targets + role signatures) for this campaign, stored
-    /// as published and served unchanged (the verifier is an untrusted carrier —
-    /// it never re-signs; role signatures cover each metadata's canonical binary
-    /// `signing_image`, so JSON formatting is immaterial; verification is
-    /// end-to-end at the node against its provisioned root anchor). Optional for
-    /// legacy campaigns; an Uptane-anchored node refuses an assignment without
-    /// it (fail-closed node-side).
+    /// and relayed to nodes structurally intact (the verifier is an untrusted
+    /// carrier — it may re-serialize the JSON, so byte-for-byte formatting is
+    /// NOT preserved, but it never re-signs; role signatures cover each
+    /// metadata's canonical binary `signing_image` built from the parsed fields,
+    /// so JSON formatting/key-order is immaterial; verification is end-to-end at
+    /// the node against its provisioned root anchor). Optional for legacy
+    /// campaigns; an Uptane-anchored node refuses an assignment without it
+    /// (fail-closed node-side).
     #[serde(default)]
     pub uptane_metadata_json: Option<String>,
     pub artifact_version: String,

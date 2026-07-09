@@ -39,9 +39,13 @@ pub(crate) struct CreateCampaignRequest {
     /// EP-13 — the campaign's full signed Uptane metadata set (the JSON object
     /// the repository published: timestamp/snapshot/targets + role signatures).
     /// Optional (legacy campaigns); validated fail-closed at authoring (must
-    /// parse and must authorize `artifact_digest`), then stored + served
-    /// VERBATIM — the verifier is an untrusted carrier, nodes verify end-to-end
-    /// against their provisioned root anchor.
+    /// parse and must authorize `artifact_digest`), then stored + relayed to
+    /// nodes structurally intact. The verifier is an untrusted carrier: it may
+    /// re-serialize the JSON (so byte-for-byte formatting/key-order is NOT
+    /// preserved) but never re-signs — role signatures cover each metadata's
+    /// canonical binary `signing_image` (built from the parsed fields), so JSON
+    /// formatting is immaterial. Nodes verify end-to-end against their
+    /// provisioned root anchor.
     #[serde(default)]
     uptane_metadata: Option<serde_json::Value>,
 }
