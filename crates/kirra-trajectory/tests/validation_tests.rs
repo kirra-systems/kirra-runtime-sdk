@@ -1447,6 +1447,85 @@ fn rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distanc
     }
 }
 
+#[test]
+fn snapshot_overlap_gate_is_the_sole_reason_an_in_band_closing_object_mrcs() {
+    // EP-08 per-class longitudinal-overlap gate (validation.rs:553):
+    //   `dy_ego.abs() < rss_longitudinal_overlap_m && lon_unsafe → MRCFallback`.
+    // An object INSIDE the overlap band (|dy| = 2.0 m < 2.5 m) but BEYOND the
+    // lateral safe distance, closing HEAD-ON (purely longitudinal, no lateral
+    // cut-in), against a STOPPED ego (whose stationary-ego lateral required gap
+    // ≈ 1.26 m < 2.0 m, so the lateral branch does not fire) is MRC'd ONLY by
+    // this gate. A `< → ==` / `< → >` comparison mutant stops the MRC. Two
+    // controls make the gate the provable sole cause:
+    //   (a) the SAME object placed longitudinally FAR is admitted — nothing
+    //       else about the geometry MRCs it;
+    //   (b) at the SAME near geometry but NOT closing (stationary object,
+    //       `lon_unsafe` false), it is admitted — proving the lateral branch
+    //       does not fire at 2.0 m offset, so the closing-case MRC is the gate.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0); // stopped ego → stationary-ego lateral form
+    let closing = |x: f64| PerceivedObject {
+        id: 7,
+        pos: Point { x_m: x, y_m: 2.0 },
+        velocity_mps: 6.0,
+        heading_rad: std::f64::consts::PI, // facing −X: head-on, no lateral component
+        vel: Point { x_m: -6.0, y_m: 0.0 },
+    };
+    // NEAR + closing (dx = 3 m, longitudinally unsafe) → MRC via the gate.
+    let near = validate_trajectory_slow(&ego, &corridor, &[closing(13.0)], &cfg, None, FleetPosture::Nominal);
+    assert_eq!(near, TrajectoryVerdict::MRCFallback,
+        "an in-band (2.0<2.5), head-on-closing object must MRC via the overlap gate; got {near:?}");
+    // (a) FAR + closing (dx = 60 m, longitudinally safe) → admitted.
+    let far = validate_trajectory_slow(&ego, &corridor, &[closing(70.0)], &cfg, None, FleetPosture::Nominal);
+    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same object 60 m away must be admitted; got {far:?}");
+    // (b) NEAR but stationary (not closing) → admitted: the lateral branch does
+    // not fire at a 2.0 m offset, so only the closing-case gate MRCs.
+    let near_still = validate_trajectory_slow(&ego, &corridor, &[stopped_object(13.0, 2.0)], &cfg, None, FleetPosture::Nominal);
+    assert!(matches!(near_still, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a stationary in-band object at 2.0 m offset must be admitted (no lateral MRC); got {near_still:?}");
+}
+
+#[test]
+fn predictive_overlap_gate_is_the_sole_reason_an_in_band_closing_mode_breaches() {
+    // The predictive twin of the snapshot gate (validation.rs:911) — the same
+    // `dy_ego.abs() < rss_longitudinal_overlap_m && lon_unsafe` comparison, over
+    // a predicted MODE. A mode closing HEAD-ON at |dy| = 2.0 m (in-band, beyond
+    // the stopped-ego lateral gap, no predicted lateral motion) breaches ONLY
+    // via this gate; a `< → ==` / `< → >` / `< → <=`-off mutant stops the breach.
+    // Control: the same mode kept longitudinally FAR is admitted.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0);
+    // Closing head-on: x decreases 13→9 over 1.0 s (≈4 m/s), y fixed at 2.0 →
+    // zero predicted lateral velocity.
+    let near_samples = [
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.0 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 11.0, y_m: 2.0 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+    ];
+    let near_modes = [PredictedMode { object_id: 1, samples: &near_samples }];
+    let near = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&near_modes), None, FrameTrust::Trusted,
+    );
+    assert_eq!(near, TrajectoryVerdict::MRCFallback,
+        "an in-band, head-on-closing predicted mode must breach via the overlap gate; got {near:?}");
+    // Control: same closing motion but far ahead (x 63→59) → longitudinally
+    // safe, admitted.
+    let far_samples = [
+        PredictedSample { pos: Point { x_m: 63.0, y_m: 2.0 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 61.0, y_m: 2.0 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 59.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+    ];
+    let far_modes = [PredictedMode { object_id: 1, samples: &far_samples }];
+    let far = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&far_modes), None, FrameTrust::Trusted,
+    );
+    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same mode far ahead must be admitted; got {far:?}");
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0029 — courier angular (yaw-rate) channel
 // ---------------------------------------------------------------------------

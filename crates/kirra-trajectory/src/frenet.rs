@@ -80,14 +80,14 @@ fn arc_fractions(n: usize) -> impl Iterator<Item = f64> {
 fn sample_at_fraction(poly: &[Point], cum: &[f64], frac: f64) -> Point {
     let target = frac * cum[cum.len() - 1];
     // Find the segment containing `target` (cum is non-decreasing).
-    let mut i = match cum.binary_search_by(|c| c.partial_cmp(&target).unwrap()) {
+    let i = match cum.binary_search_by(|c| c.partial_cmp(&target).unwrap()) {
         Ok(idx) => idx.min(poly.len() - 2),
         Err(idx) => idx.saturating_sub(1).min(poly.len() - 2),
     };
-    // Skip zero-length segments (guarded against div-by-zero below).
-    while i + 2 < poly.len() && (cum[i + 1] - cum[i]) <= 0.0 {
-        i += 1;
-    }
+    // A zero-length segment (coincident vertices) is handled by the `seg > 0.0`
+    // guard below — `t = 0.0` returns `poly[i]`, which equals `poly[i + 1]` for
+    // such a segment, so no separate skip loop is needed (and none can divide by
+    // zero).
     let seg = cum[i + 1] - cum[i];
     let t = if seg > 0.0 { ((target - cum[i]) / seg).clamp(0.0, 1.0) } else { 0.0 };
     Point {
@@ -519,29 +519,32 @@ mod tests {
     }
 
     // A hand-built frame with EXACT geometry (bypassing resampling error) so the
-    // projection / tangent / heading arithmetic can be pinned to 1e-12.
+    // projection / tangent / heading arithmetic can be pinned to 1e-12. The two
+    // legs have DIFFERENT lengths (√10 and √26) on purpose: a same-length corner
+    // lets a `dx*dx + dy*dy → dx*dx * dy*dy` length mutant keep the cross/dot
+    // RATIO (hence the angle) unchanged — unequal legs break that proportionality
+    // so the heading mutant is caught.
     fn corner_frame() -> CenterlineFrenet {
-        // Two unit-scaled 3-4-5 legs: seg0 dir (0.8,0.6) len 5, seg1 dir
-        // (0.6,0.8) len 5 — both tangents non-axis-aligned and distinct, so
-        // every operand of the cross/dot/normalize arithmetic is load-bearing.
+        // seg0 (0,0)→(1,3): dir (1,3)/√10; seg1 (1,3)→(6,4): dir (5,1)/√26.
         CenterlineFrenet {
             pts: vec![
                 Point { x_m: 0.0, y_m: 0.0 },
-                Point { x_m: 4.0, y_m: 3.0 },
-                Point { x_m: 7.0, y_m: 7.0 },
+                Point { x_m: 1.0, y_m: 3.0 },
+                Point { x_m: 6.0, y_m: 4.0 },
             ],
-            cum_s: vec![0.0, 5.0, 10.0],
+            cum_s: vec![0.0, 10.0_f64.sqrt(), 10.0_f64.sqrt() + 26.0_f64.sqrt()],
         }
     }
 
     #[test]
     fn tangent_at_pins_the_segment_direction() {
         let f = corner_frame();
-        // Inside seg0 → unit (0.8, 0.6); inside seg1 → unit (0.6, 0.8).
-        let (t0x, t0y) = f.tangent_at(2.5);
-        assert!((t0x - 0.8).abs() < 1e-12 && (t0y - 0.6).abs() < 1e-12, "{t0x},{t0y}");
-        let (t1x, t1y) = f.tangent_at(7.5);
-        assert!((t1x - 0.6).abs() < 1e-12 && (t1y - 0.8).abs() < 1e-12, "{t1x},{t1y}");
+        let (s10, s26) = (10.0_f64.sqrt(), 26.0_f64.sqrt());
+        // Inside seg0 → unit (1,3)/√10; inside seg1 → unit (5,1)/√26.
+        let (t0x, t0y) = f.tangent_at(s10 / 2.0);
+        assert!((t0x - 1.0 / s10).abs() < 1e-12 && (t0y - 3.0 / s10).abs() < 1e-12, "{t0x},{t0y}");
+        let (t1x, t1y) = f.tangent_at(s10 + s26 / 2.0);
+        assert!((t1x - 5.0 / s26).abs() < 1e-12 && (t1y - 1.0 / s26).abs() < 1e-12, "{t1x},{t1y}");
         // Neither is (1,0): kills the whole-function default-return mutant.
         assert!((t0x - 1.0).abs() > 0.1 || t0y.abs() > 0.1);
     }
@@ -549,9 +552,9 @@ mod tests {
     #[test]
     fn total_heading_change_pins_the_corner_angle() {
         let f = corner_frame();
-        // Angle between (0.8,0.6) and (0.6,0.8): cross = .8*.8-.6*.6 = 0.28,
-        // dot = .8*.6+.6*.8 = 0.96 → atan2(0.28, 0.96).
-        let expected = 0.28_f64.atan2(0.96);
+        // Angle between (1,3)/√10 and (5,1)/√26: cross = (1·1 − 3·5)/√260 =
+        // −14/√260, dot = (1·5 + 3·1)/√260 = 8/√260 → |atan2(−14, 8)|.
+        let expected = 14.0_f64.atan2(8.0);
         assert!(
             (f.total_heading_change_rad() - expected).abs() < 1e-12,
             "{} vs {expected}",

@@ -1457,8 +1457,10 @@ mod rss_frame_tests {
         let right: Vec<Point> = (0..=20).map(|i| off(center(i as f64), -2.0)).collect();
         let frenet = CenterlineFrenet::from_boundaries(&left, &right).unwrap();
 
-        // Ego on the centerline at s = 5; object at s = 12, 1 m to the LEFT.
-        let ego_w = center(5.0);
+        // Ego at s = 5, 0.5 m to the RIGHT of the centerline; object at s = 12,
+        // 1.0 m to the LEFT. A non-zero ego offset makes `o.d - ego.d`
+        // load-bearing (an ego ON the centerline would let a `-`→`+` mutant pass).
+        let ego_w = off(center(5.0), -0.5);
         let obj_w = off(center(12.0), 1.0);
         let (vx, vy) = (2.0_f64, 3.0_f64);
         let f = rss_frenet_frame(
@@ -1467,9 +1469,9 @@ mod rss_frame_tests {
             &obj_at(obj_w.x_m, obj_w.y_m, vx, vy),
         )
         .expect("both points project onto the lane");
-        // Arc gap 12 - 5 = 7; lateral offset +1 (object left of ego).
+        // Arc gap 12 - 5 = 7; lateral offset 1.0 - (-0.5) = 1.5.
         assert!((f.lon_gap - 7.0).abs() < 1e-6, "lon_gap {}", f.lon_gap);
-        assert!((f.lat_off - 1.0).abs() < 1e-6, "lat_off {}", f.lat_off);
+        assert!((f.lat_off - 1.5).abs() < 1e-6, "lat_off {}", f.lat_off);
         // Velocity resolved against the lane tangent at the object.
         assert!((f.obj_lon_v - (tx * vx + ty * vy)).abs() < 1e-6, "obj_lon_v {}", f.obj_lon_v);
         assert!((f.obj_lat_v - (-ty * vx + tx * vy)).abs() < 1e-6, "obj_lat_v {}", f.obj_lat_v);
