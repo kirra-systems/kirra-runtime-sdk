@@ -334,12 +334,46 @@ pub fn longitudinal_safe_distance(
         return RSS_FAILSAFE_DISTANCE_M;
     }
 
-    let d_response = ego_vel * reaction_time + 0.5 * accel_max * reaction_time.powi(2);
-    let v_after = ego_vel + accel_max * reaction_time;
+    // NO-TRANSIENT-NAN DISCIPLINE. Extreme-but-finite inputs can overflow an
+    // intermediate term to ±Inf, and `Inf + -Inf` / `Inf - Inf` would transit
+    // through NaN before a final finiteness check caught it. The previous
+    // shape was still fail-closed (a NaN `raw` is non-finite → failsafe), but
+    // the NaN *production* itself is now guarded away: every addition or
+    // subtraction below happens only after its operands are proven finite
+    // (products/divisions of finite operands — with the divisors guarded
+    // finite-positive above — yield ±Inf at worst, never NaN). Output is
+    // identical for every input; the property "this function never forms a
+    // NaN" is what the Kani R1/R2 harnesses machine-check.
+    let rt2 = reaction_time.powi(2);
+    if !rt2.is_finite() {
+        // finite² can overflow to +Inf; guarded here so the products below
+        // are finite×finite (0 × Inf would be the one product-formed NaN).
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let d_react = ego_vel * reaction_time;
+    let d_accel = 0.5 * accel_max * rt2;
+    if !(d_react.is_finite() && d_accel.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let d_response = d_react + d_accel;
+
+    let v_gain = accel_max * reaction_time;
+    if !(v_gain.is_finite() && d_response.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let v_after = ego_vel + v_gain;
     let d_brake_ego = v_after.powi(2) / (2.0 * brake_min);
     let d_brake_lead = lead_vel.powi(2) / (2.0 * brake_max);
+    if !(d_brake_ego.is_finite() && d_brake_lead.is_finite()) {
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
 
-    let raw = d_response + d_brake_ego - d_brake_lead;
+    let sum = d_response + d_brake_ego;
+    if !sum.is_finite() {
+        // finite + finite can still overflow to ±Inf (never NaN); fail closed.
+        return RSS_FAILSAFE_DISTANCE_M;
+    }
+    let raw = sum - d_brake_lead;
     if !raw.is_finite() {
         return RSS_FAILSAFE_DISTANCE_M;
     }
