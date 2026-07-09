@@ -111,7 +111,12 @@ mod tests {
         let s = imu_to_sample(&raw(0.0)); // cov0 != -1 → orientation present
         assert_eq!(
             s.orientation,
-            Some(Quaternion { x: 0.11, y: 0.22, z: 0.33, w: 0.44 })
+            Some(Quaternion {
+                x: 0.11,
+                y: 0.22,
+                z: 0.33,
+                w: 0.44
+            })
         );
     }
 

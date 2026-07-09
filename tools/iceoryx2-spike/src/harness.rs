@@ -86,14 +86,24 @@ impl FaultClass {
     pub fn expected(&self) -> Outcome {
         match self {
             FaultClass::Valid => Outcome::Judged(Verdict::Accept),
-            FaultClass::BadMagicStaleHeader => Outcome::Judged(Verdict::Reject(RejectReason::BadMagic)),
-            FaultClass::SequenceRegress => Outcome::Judged(Verdict::Reject(RejectReason::SequenceRegress)),
+            FaultClass::BadMagicStaleHeader => {
+                Outcome::Judged(Verdict::Reject(RejectReason::BadMagic))
+            }
+            FaultClass::SequenceRegress => {
+                Outcome::Judged(Verdict::Reject(RejectReason::SequenceRegress))
+            }
             FaultClass::Replay => Outcome::Judged(Verdict::Reject(RejectReason::Replay)),
-            FaultClass::DeadlineMissed => Outcome::Judged(Verdict::Reject(RejectReason::DeadlineMissed)),
-            FaultClass::IntegrityFlag => Outcome::Judged(Verdict::Reject(RejectReason::IntegrityFlag)),
+            FaultClass::DeadlineMissed => {
+                Outcome::Judged(Verdict::Reject(RejectReason::DeadlineMissed))
+            }
+            FaultClass::IntegrityFlag => {
+                Outcome::Judged(Verdict::Reject(RejectReason::IntegrityFlag))
+            }
             FaultClass::PayloadCorrupt => Outcome::EdgeReject(EdgeReject::CrcMismatch),
             FaultClass::PayloadOversize => Outcome::EdgeReject(EdgeReject::Oversize),
-            FaultClass::KinematicLimit => Outcome::Judged(Verdict::Reject(RejectReason::KinematicLimit)),
+            FaultClass::KinematicLimit => {
+                Outcome::Judged(Verdict::Reject(RejectReason::KinematicLimit))
+            }
         }
     }
 
@@ -203,7 +213,10 @@ impl Channel {
             .open_or_create()?;
         let publisher = service.publisher_builder().create()?;
         let subscriber = service.subscriber_builder().create()?;
-        Ok(Self { publisher, subscriber })
+        Ok(Self {
+            publisher,
+            subscriber,
+        })
     }
 
     /// Publish one frame and return the RECEIVED copy (proves the round-trip).

@@ -29,17 +29,17 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use parko_kirra::KirraGovernor;
 use parko_core::{
     backend::{
-        BackendCapabilities, BackendError, InferenceBackend, ModelHandle,
-        PrecisionMode, TensorBatch, TensorStorage,
+        BackendCapabilities, BackendError, InferenceBackend, ModelHandle, PrecisionMode,
+        TensorBatch, TensorStorage,
     },
     commands::ControlCommand,
     control_loop::ControlLoop,
     runtime::RuntimeState,
     sensor::{SensorFrame, SensorStream},
 };
+use parko_kirra::KirraGovernor;
 
 /// The over-speed command the mock emits (m/s) — far above any envelope, so
 /// every admitted result below is a genuine clamp, not a pass-through.
@@ -64,7 +64,10 @@ impl InferenceBackend for OverspeedBackend {
         _inputs: &TensorBatch,
     ) -> Result<TensorBatch<'static>, BackendError> {
         let mut named = HashMap::new();
-        named.insert("cmd_vel_linear".into(), TensorStorage::Owned(vec![OVERSPEED_MPS as f32]));
+        named.insert(
+            "cmd_vel_linear".into(),
+            TensorStorage::Owned(vec![OVERSPEED_MPS as f32]),
+        );
         named.insert("cmd_vel_angular".into(), TensorStorage::Owned(vec![0.0]));
         Ok(TensorBatch {
             named_tensors: named,
@@ -98,7 +101,9 @@ impl SensorStream for SingleFrameStream {
 /// distinct from `update_rss_state` which pushes an actual verdict), so the
 /// posture→kinematic tier is what's exercised; `false` leaves it `NeverFed`
 /// (fail-closed — the #770 default that holds at zero).
-fn make_loop(externally_gated: bool) -> (
+fn make_loop(
+    externally_gated: bool,
+) -> (
     ControlLoop<OverspeedBackend, SingleFrameStream>,
     mpsc::Receiver<ControlCommand>,
 ) {
@@ -143,8 +148,14 @@ async fn tick_velocity(externally_gated: bool, state: RuntimeState) -> f64 {
 async fn unfed_governor_holds_at_zero_in_every_posture() {
     let nominal = tick_velocity(false, RuntimeState::Nominal).await;
     let degraded = tick_velocity(false, RuntimeState::Degraded).await;
-    assert_eq!(nominal, 0.0, "unfed governor must hold at zero even under Nominal (fail-closed)");
-    assert_eq!(degraded, 0.0, "unfed governor must hold at zero under Degraded (fail-closed)");
+    assert_eq!(
+        nominal, 0.0,
+        "unfed governor must hold at zero even under Nominal (fail-closed)"
+    );
+    assert_eq!(
+        degraded, 0.0,
+        "unfed governor must hold at zero under Degraded (fail-closed)"
+    );
 }
 
 /// Externally-gated + Nominal: the scene-RSS tier is quiescent, so the posture→kinematic
@@ -202,7 +213,11 @@ async fn set_state_for_test_forces_degraded_behavior() {
         RuntimeState::Degraded,
         "set_state_for_test must override the initial Warmup state"
     );
-    let snapshot = control.tick().await.expect("tick should succeed").expect("tick should fire");
+    let snapshot = control
+        .tick()
+        .await
+        .expect("tick should succeed")
+        .expect("tick should fire");
     assert!(
         snapshot.active_command.linear_velocity < OVERSPEED_MPS,
         "Degraded state must clamp the over-speed command"

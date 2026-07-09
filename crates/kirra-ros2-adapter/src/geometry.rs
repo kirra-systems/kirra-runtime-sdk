@@ -50,10 +50,7 @@ mod tests {
     #[test]
     fn quat_180deg_z_rotation_is_pi() {
         let y = quat_to_yaw(0.0, 0.0, 1.0, 0.0);
-        assert!(
-            (y.abs() - PI).abs() < 1e-12,
-            "expected |yaw| = π; got {y}"
-        );
+        assert!((y.abs() - PI).abs() < 1e-12, "expected |yaw| = π; got {y}");
     }
 
     /// Negative quaternion is the same orientation (double cover) — yaw
@@ -79,6 +76,9 @@ mod tests {
         // siny_cosp = 2·(c·0 + 0·s) = 0; cosy_cosp = 1 − 2·s² = 0 → atan2(0, 0)
         // returns 0 in Rust's f64 implementation, which is correct for the
         // "no yaw, pure pitch" interpretation.
-        assert!(y.abs() < 1e-12, "pure-pitch quat must give yaw ≈ 0; got {y}");
+        assert!(
+            y.abs() < 1e-12,
+            "pure-pitch quat must give yaw ≈ 0; got {y}"
+        );
     }
 }

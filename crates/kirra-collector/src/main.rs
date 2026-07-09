@@ -74,14 +74,19 @@ fn parse_args() -> Result<Args, String> {
             "--doer-version" => args.doer_version = Some(next("--doer-version")?),
             "--out" => args.out = Some(PathBuf::from(next("--out")?)),
             "--pass-rate" => {
-                args.pass_rate = next("--pass-rate")?.parse().map_err(|e| format!("--pass-rate: {e}"))?
+                args.pass_rate = next("--pass-rate")?
+                    .parse()
+                    .map_err(|e| format!("--pass-rate: {e}"))?
             }
             "--window-ms" => {
-                args.window_ms = next("--window-ms")?.parse().map_err(|e| format!("--window-ms: {e}"))?
+                args.window_ms = next("--window-ms")?
+                    .parse()
+                    .map_err(|e| format!("--window-ms: {e}"))?
             }
             "--max-orphan-rate" => {
-                args.max_orphan_rate =
-                    next("--max-orphan-rate")?.parse().map_err(|e| format!("--max-orphan-rate: {e}"))?
+                args.max_orphan_rate = next("--max-orphan-rate")?
+                    .parse()
+                    .map_err(|e| format!("--max-orphan-rate: {e}"))?
             }
             "-h" | "--help" => {
                 println!("{USAGE}");

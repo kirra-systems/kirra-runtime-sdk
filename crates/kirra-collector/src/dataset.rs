@@ -137,7 +137,11 @@ pub fn dataset_schema() -> SchemaRef {
         f("proposed_linear_velocity_mps", DataType::Float64, true),
         f("proposed_current_velocity_mps", DataType::Float64, true),
         f("proposed_steering_angle_deg", DataType::Float64, true),
-        f("proposed_current_steering_angle_deg", DataType::Float64, true),
+        f(
+            "proposed_current_steering_angle_deg",
+            DataType::Float64,
+            true,
+        ),
         f("proposed_delta_time_s", DataType::Float64, true),
         f("asset_id", DataType::Utf8, true),
         f("trajectory_id", DataType::UInt64, true),
@@ -168,21 +172,39 @@ fn build_batch(schema: &SchemaRef, rows: &[&DatasetRow]) -> Result<RecordBatch, 
     }
     macro_rules! str_opt {
         ($field:ident) => {
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.$field.clone()))) as ArrayRef
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.$field.clone()),
+            )) as ArrayRef
         };
     }
     let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.decision_seq))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.source.as_str()))),
-        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.t_wall_ms))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.t_mono_ns.as_str()))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.doer_version.as_str()))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.outcome.as_str()))),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.decision_seq),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.source.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.t_wall_ms),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.t_mono_ns.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.doer_version.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.outcome.as_str()),
+        )),
         str_opt!(deny_code),
         f64_opt!(safe_value),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| Some(r.mrc)))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.posture.as_str()))),
-        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| Some(r.derate_enabled)))),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.posture.as_str()),
+        )),
+        Arc::new(BooleanArray::from_iter(
+            rows.iter().map(|r| Some(r.derate_enabled)),
+        )),
         f64_opt!(proposed_linear_velocity_mps),
         f64_opt!(proposed_current_velocity_mps),
         f64_opt!(proposed_steering_angle_deg),
@@ -200,7 +222,9 @@ fn build_batch(schema: &SchemaRef, rows: &[&DatasetRow]) -> Result<RecordBatch, 
         f64_opt!(last_pose_y_m),
         f64_opt!(last_pose_heading_rad),
         f64_opt!(target_speed_mps),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.bulk_ref.as_str()))),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.bulk_ref.as_str()),
+        )),
     ];
     RecordBatch::try_new(Arc::clone(schema), columns).map_err(CollectorError::Arrow)
 }
@@ -211,8 +235,14 @@ fn build_batch(schema: &SchemaRef, rows: &[&DatasetRow]) -> Result<RecordBatch, 
 pub fn read_part_columns_and_rows(path: &Path) -> Result<(Vec<String>, usize), CollectorError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let file = fs::File::open(path).map_err(CollectorError::Io)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(CollectorError::Parquet)?;
-    let columns: Vec<String> = builder.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(CollectorError::Parquet)?;
+    let columns: Vec<String> = builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
     let reader = builder.build().map_err(CollectorError::Parquet)?;
     let mut rows = 0usize;
     for batch in reader {
@@ -225,7 +255,13 @@ pub fn read_part_columns_and_rows(path: &Path) -> Result<(Vec<String>, usize), C
 fn sanitize(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -236,16 +272,24 @@ fn sanitize(value: &str) -> String {
 /// Rows within each partition are sorted by `(source, decision_seq)` so the
 /// output is reproducible regardless of the caller's input order — the basis for
 /// the manifest's stable `content_digest` [M2].
-pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<PartitionInfo>, CollectorError> {
+pub fn write_dataset(
+    rows: &[DatasetRow],
+    out_dir: &Path,
+) -> Result<Vec<PartitionInfo>, CollectorError> {
     let schema = dataset_schema();
     // Group by (doer_version, source); BTreeMap → deterministic partition order.
     let mut groups: BTreeMap<(String, String), Vec<&DatasetRow>> = BTreeMap::new();
     for r in rows {
-        groups.entry((r.doer_version.clone(), r.source.clone())).or_default().push(r);
+        groups
+            .entry((r.doer_version.clone(), r.source.clone()))
+            .or_default()
+            .push(r);
     }
     let mut written = Vec::new();
     for ((doer_version, source), mut group) in groups {
-        group.sort_by(|a, b| (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq)));
+        group.sort_by(|a, b| {
+            (a.source.as_str(), a.decision_seq).cmp(&(b.source.as_str(), b.decision_seq))
+        });
         let rel = format!(
             "doer_version={}/source={}/part-000.parquet",
             sanitize(&doer_version),
@@ -261,8 +305,8 @@ pub fn write_dataset(rows: &[DatasetRow], out_dir: &Path) -> Result<Vec<Partitio
         let props = WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
             .build();
-        let mut writer =
-            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).map_err(CollectorError::Parquet)?;
+        let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
+            .map_err(CollectorError::Parquet)?;
         writer.write(&batch).map_err(CollectorError::Parquet)?;
         writer.close().map_err(CollectorError::Parquet)?;
         written.push(PartitionInfo {

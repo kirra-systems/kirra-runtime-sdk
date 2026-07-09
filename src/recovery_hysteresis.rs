@@ -87,7 +87,11 @@ pub enum HysteresisDecision {
     RecoveryConfirmed { streak: u32 },
 
     /// Streak is building but threshold not yet reached.
-    StreakBuilding { current: u32, required: u32, window_remaining_ms: u64 },
+    StreakBuilding {
+        current: u32,
+        required: u32,
+        window_remaining_ms: u64,
+    },
 
     /// Streak was discarded because the time window expired.
     /// The streak counter was reset; this report starts a new streak of 1.
@@ -157,13 +161,15 @@ pub fn evaluate_recovery_report<S: RecoveryStreakStore + ?Sized>(
         // This report is now the first in a new streak (streak=1, start=now).
         let _ = store.increment_recovery_streak(node_id, now_ms);
 
-        return HysteresisDecision::WindowExpired { old_streak: current_streak };
+        return HysteresisDecision::WindowExpired {
+            old_streak: current_streak,
+        };
     }
 
     // Window is valid (or this is the first report). Increment streak.
     // Pass streak_start_ms=0 to indicate we want to set it if not already set.
     let new_streak = match store.increment_recovery_streak(node_id, now_ms) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, node_id = %node_id, "Failed to increment recovery streak");
             return HysteresisDecision::StreakBuilding {
@@ -388,32 +394,40 @@ mod hysteresis_tests {
 
     #[test]
     fn test_recovery_constants_are_coherent() {
-        assert!(AV_RECOVERY_STREAK_THRESHOLD > 1,
-            "streak threshold of 1 provides no flapping protection");
+        assert!(
+            AV_RECOVERY_STREAK_THRESHOLD > 1,
+            "streak threshold of 1 provides no flapping protection"
+        );
 
         let min_window = (AV_RECOVERY_STREAK_THRESHOLD as u64) * 100;
-        assert!(AV_RECOVERY_WINDOW_MS >= min_window,
-            "window too small for threshold at 100ms reporting rate");
+        assert!(
+            AV_RECOVERY_WINDOW_MS >= min_window,
+            "window too small for threshold at 100ms reporting rate"
+        );
 
-        assert!(AV_RECOVERY_WINDOW_MS <= 60_000,
-            "window larger than 60s defeats the purpose of hysteresis");
+        assert!(
+            AV_RECOVERY_WINDOW_MS <= 60_000,
+            "window larger than 60s defeats the purpose of hysteresis"
+        );
     }
 
     #[test]
     fn test_hysteresis_decision_variants_are_distinct() {
         let confirmed = HysteresisDecision::RecoveryConfirmed { streak: 5 };
-        let building  = HysteresisDecision::StreakBuilding {
-            current: 3, required: 5, window_remaining_ms: 5000,
+        let building = HysteresisDecision::StreakBuilding {
+            current: 3,
+            required: 5,
+            window_remaining_ms: 5000,
         };
-        let expired   = HysteresisDecision::WindowExpired { old_streak: 3 };
-        let na        = HysteresisDecision::NotApplicable;
+        let expired = HysteresisDecision::WindowExpired { old_streak: 3 };
+        let na = HysteresisDecision::NotApplicable;
 
         assert_ne!(confirmed, building);
         assert_ne!(confirmed, expired);
         assert_ne!(confirmed, na);
-        assert_ne!(building,  expired);
-        assert_ne!(building,  na);
-        assert_ne!(expired,   na);
+        assert_ne!(building, expired);
+        assert_ne!(building, na);
+        assert_ne!(expired, na);
     }
 
     #[test]
@@ -422,22 +436,30 @@ mod hysteresis_tests {
         let now: u64 = 500;
         let elapsed = now.saturating_sub(streak_start);
         assert_eq!(elapsed, 0, "saturating_sub must handle clock skew safely");
-        assert!(elapsed < AV_RECOVERY_WINDOW_MS,
-            "clock skew must not falsely trigger window expiry");
+        assert!(
+            elapsed < AV_RECOVERY_WINDOW_MS,
+            "clock skew must not falsely trigger window expiry"
+        );
     }
 
     #[test]
     fn test_streak_threshold_boundary_exactly_at_threshold_confirms() {
         let streak = AV_RECOVERY_STREAK_THRESHOLD;
         let confirmed = streak >= AV_RECOVERY_STREAK_THRESHOLD;
-        assert!(confirmed, "streak exactly at threshold must confirm recovery");
+        assert!(
+            confirmed,
+            "streak exactly at threshold must confirm recovery"
+        );
     }
 
     #[test]
     fn test_streak_one_below_threshold_does_not_confirm() {
         let streak = AV_RECOVERY_STREAK_THRESHOLD - 1;
         let confirmed = streak >= AV_RECOVERY_STREAK_THRESHOLD;
-        assert!(!confirmed, "streak one below threshold must not confirm recovery");
+        assert!(
+            !confirmed,
+            "streak one below threshold must not confirm recovery"
+        );
     }
 
     #[test]
@@ -445,7 +467,10 @@ mod hysteresis_tests {
         let window = AV_RECOVERY_WINDOW_MS;
         let elapsed: u64 = window + 5_000;
         let remaining = window.saturating_sub(elapsed);
-        assert_eq!(remaining, 0, "window remaining must saturate at 0, not underflow");
+        assert_eq!(
+            remaining, 0,
+            "window remaining must saturate at 0, not underflow"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -504,15 +529,25 @@ mod hysteresis_tests {
         let decision = evaluate_recovery_report(&store, "lidar_front", 5_000);
 
         assert_eq!(store.load_calls.get(), 1, "must attempt to load once");
-        assert_eq!(store.reset_calls.get(), 0,
-            "load failure must NOT trigger a reset (no expired window in a fresh streak)");
-        assert_eq!(store.increment_calls.get(), 1,
-            "after fail-closed treat-as-fresh, the increment must still run");
+        assert_eq!(
+            store.reset_calls.get(),
+            0,
+            "load failure must NOT trigger a reset (no expired window in a fresh streak)"
+        );
+        assert_eq!(
+            store.increment_calls.get(),
+            1,
+            "after fail-closed treat-as-fresh, the increment must still run"
+        );
 
         match decision {
-            HysteresisDecision::StreakBuilding { current, required, .. } => {
-                assert_eq!(current, 1,
-                    "fresh streak after load failure must report streak=1, not Confirmed");
+            HysteresisDecision::StreakBuilding {
+                current, required, ..
+            } => {
+                assert_eq!(
+                    current, 1,
+                    "fresh streak after load failure must report streak=1, not Confirmed"
+                );
                 assert_eq!(required, AV_RECOVERY_STREAK_THRESHOLD);
             }
             other => panic!(
@@ -560,16 +595,28 @@ mod hysteresis_tests {
         };
         let decision = evaluate_recovery_report(&store, "lidar_front", 2_000);
 
-        assert_eq!(store.increment_calls.get(), 1,
-            "increment must be attempted exactly once before the failure arm");
+        assert_eq!(
+            store.increment_calls.get(),
+            1,
+            "increment must be attempted exactly once before the failure arm"
+        );
 
         match decision {
-            HysteresisDecision::StreakBuilding { current, required, window_remaining_ms } => {
-                assert_eq!(current, AV_RECOVERY_STREAK_THRESHOLD - 1,
-                    "on increment failure, must report the LOADED streak (no virtual advance)");
+            HysteresisDecision::StreakBuilding {
+                current,
+                required,
+                window_remaining_ms,
+            } => {
+                assert_eq!(
+                    current,
+                    AV_RECOVERY_STREAK_THRESHOLD - 1,
+                    "on increment failure, must report the LOADED streak (no virtual advance)"
+                );
                 assert_eq!(required, AV_RECOVERY_STREAK_THRESHOLD);
-                assert!(window_remaining_ms <= AV_RECOVERY_WINDOW_MS,
-                    "window_remaining must reflect actual elapsed time");
+                assert!(
+                    window_remaining_ms <= AV_RECOVERY_WINDOW_MS,
+                    "window_remaining must reflect actual elapsed time"
+                );
             }
             other => panic!(
                 "increment failure must fail closed to StreakBuilding — never RecoveryConfirmed \
@@ -586,12 +633,15 @@ mod hysteresis_tests {
     fn test_happy_path_through_real_verifier_store_via_trait_seam() {
         use crate::verifier_store::VerifierStore;
         let store = VerifierStore::new(":memory:").expect("memory store");
-        store.register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 0)
+        store
+            .register_av_subsystem_meta("lidar_front", "LIDAR", "hw-0001", 0.7, 0)
             .expect("register subsystem");
 
         // Drive streak to threshold-1 via direct increment.
         for _ in 0..(AV_RECOVERY_STREAK_THRESHOLD - 1) {
-            store.increment_recovery_streak("lidar_front", 1_000).expect("inc");
+            store
+                .increment_recovery_streak("lidar_front", 1_000)
+                .expect("inc");
         }
 
         // Now exercise evaluate_recovery_report via the trait seam.
@@ -600,8 +650,10 @@ mod hysteresis_tests {
         let decision = evaluate_recovery_report(&store, "lidar_front", 1_500);
         match decision {
             HysteresisDecision::RecoveryConfirmed { streak } => {
-                assert_eq!(streak, AV_RECOVERY_STREAK_THRESHOLD,
-                    "real store reaching threshold must report Confirmed at the exact value");
+                assert_eq!(
+                    streak, AV_RECOVERY_STREAK_THRESHOLD,
+                    "real store reaching threshold must report Confirmed at the exact value"
+                );
             }
             other => panic!(
                 "happy path through real VerifierStore + trait must produce \

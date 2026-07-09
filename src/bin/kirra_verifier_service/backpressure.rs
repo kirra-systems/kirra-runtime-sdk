@@ -150,7 +150,9 @@ mod backpressure_tests {
             .unwrap();
         assert_eq!(shed.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
-            shed.headers().get(axum::http::header::RETRY_AFTER).map(|v| v.as_bytes()),
+            shed.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .map(|v| v.as_bytes()),
             Some(&b"1"[..])
         );
 
@@ -177,13 +179,21 @@ mod backpressure_tests {
 
         let over = app
             .clone()
-            .oneshot(Request::post("/echo").body(Body::from(vec![b'x'; 17])).unwrap())
+            .oneshot(
+                Request::post("/echo")
+                    .body(Body::from(vec![b'x'; 17]))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let at_cap = app
-            .oneshot(Request::post("/echo").body(Body::from(vec![b'x'; 16])).unwrap())
+            .oneshot(
+                Request::post("/echo")
+                    .body(Body::from(vec![b'x'; 16]))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(at_cap.status(), StatusCode::OK);

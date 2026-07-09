@@ -187,8 +187,16 @@ mod tests {
                 objects_ms: 123_456,
                 point_count: 12,
                 object_count: 3,
-                first_pose: Some(PoseSnapshot { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 }),
-                last_pose: Some(PoseSnapshot { x_m: 5.0, y_m: 1.0, heading_rad: 0.1 }),
+                first_pose: Some(PoseSnapshot {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                }),
+                last_pose: Some(PoseSnapshot {
+                    x_m: 5.0,
+                    y_m: 1.0,
+                    heading_rad: 0.1,
+                }),
                 target_speed_mps: Some(8.0),
             }),
             outcome: CaptureOutcome::Deny,
@@ -232,7 +240,10 @@ mod tests {
         for original in [gateway_clamp_record(), trajectory_mrc_record()] {
             let s1 = serde_json::to_string(&original).unwrap();
             let back: CaptureRecord = serde_json::from_str(&s1).unwrap();
-            assert_eq!(back, original, "deserialized record must equal the original");
+            assert_eq!(
+                back, original,
+                "deserialized record must equal the original"
+            );
             let s2 = serde_json::to_string(&back).unwrap();
             assert_eq!(s1, s2, "re-serialized JSON must be byte-identical");
         }
@@ -243,17 +254,14 @@ mod tests {
     /// optional join blocks makes the skip-serialized shape readable.
     #[test]
     fn deserialize_tolerates_omitted_optional_blocks() {
-        let gw: CaptureRecord = serde_json::from_str(
-            &serde_json::to_string(&gateway_clamp_record()).unwrap(),
-        )
-        .unwrap();
+        let gw: CaptureRecord =
+            serde_json::from_str(&serde_json::to_string(&gateway_clamp_record()).unwrap()).unwrap();
         assert!(gw.traj.is_none());
         assert!(gw.proposed.is_some());
 
-        let tj: CaptureRecord = serde_json::from_str(
-            &serde_json::to_string(&trajectory_mrc_record()).unwrap(),
-        )
-        .unwrap();
+        let tj: CaptureRecord =
+            serde_json::from_str(&serde_json::to_string(&trajectory_mrc_record()).unwrap())
+                .unwrap();
         assert!(tj.proposed.is_none());
         assert!(tj.traj.is_some());
     }

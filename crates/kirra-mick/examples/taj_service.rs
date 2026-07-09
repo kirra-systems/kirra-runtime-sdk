@@ -51,14 +51,30 @@ struct PerceptionRequest {
     #[serde(default = "default_floor")]
     confidence_floor: f32,
 }
-fn default_extent() -> f64 { 20.0 }
-fn default_decel() -> f64 { 1.5 }
-fn default_margin() -> f64 { 0.4 }
-fn default_lane_half() -> f64 { 0.6 }
-fn default_floor() -> f32 { 0.5 }
+fn default_extent() -> f64 {
+    20.0
+}
+fn default_decel() -> f64 {
+    1.5
+}
+fn default_margin() -> f64 {
+    0.4
+}
+fn default_lane_half() -> f64 {
+    0.6
+}
+fn default_floor() -> f32 {
+    0.5
+}
 
 #[derive(Serialize)]
-struct ObjOut { id: u64, x: f64, y: f64, vx: f64, vy: f64 }
+struct ObjOut {
+    id: u64,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+}
 
 #[derive(Serialize)]
 struct PerceptionResponse {
@@ -81,7 +97,8 @@ struct PerceptionResponse {
 /// furthest forward point. Taj clips this at a dead-ahead obstacle, so it already
 /// encodes the clear distance for the centre of the lane.
 fn corridor_reach(corr: &impl CorridorSource) -> f64 {
-    let far = |pts: &[kirra_core::corridor::Point]| pts.iter().map(|p| p.x_m).fold(0.0_f64, f64::max);
+    let far =
+        |pts: &[kirra_core::corridor::Point]| pts.iter().map(|p| p.x_m).fold(0.0_f64, f64::max);
     far(corr.left_boundary()).min(far(corr.right_boundary()))
 }
 
@@ -96,7 +113,10 @@ fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
     };
     // Process at the scan's own stamp → age 0; wall-clock staleness is the consumer's job
     // (the ROS node times the cap topic), keeping this service stateless.
-    let taj = TajPhaseA::new(TajConfig { forward_extent_m: req.forward_extent_m, ..Default::default() });
+    let taj = TajPhaseA::new(TajConfig {
+        forward_extent_m: req.forward_extent_m,
+        ..Default::default()
+    });
     let perception = taj.process(&scan, req.stamp_ms);
 
     let confidence = perception.corridor.confidence();
@@ -134,7 +154,13 @@ fn handle_perception(req: &PerceptionRequest) -> PerceptionResponse {
     let objects = perception
         .objects
         .iter()
-        .map(|o| ObjOut { id: o.id, x: o.pos.x_m, y: o.pos.y_m, vx: o.vel.x_m, vy: o.vel.y_m })
+        .map(|o| ObjOut {
+            id: o.id,
+            x: o.pos.x_m,
+            y: o.pos.y_m,
+            vx: o.vel.x_m,
+            vy: o.vel.y_m,
+        })
         .collect();
 
     PerceptionResponse {
@@ -159,11 +185,15 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
 fn serve(mut stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() { return; }
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() { break; }
+        if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
+            break;
+        }
         if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
         }
@@ -184,18 +214,33 @@ fn serve(mut stream: TcpStream) {
         match serde_json::from_slice::<PerceptionRequest>(&body) {
             Ok(req) => {
                 let resp = handle_perception(&req);
-                respond(&mut stream, "200 OK", &serde_json::to_string(&resp).unwrap());
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    &serde_json::to_string(&resp).unwrap(),
+                );
             }
-            Err(e) => respond(&mut stream, "400 Bad Request", &format!("{{\"error\":\"{e}\"}}")),
+            Err(e) => respond(
+                &mut stream,
+                "400 Bad Request",
+                &format!("{{\"error\":\"{e}\"}}"),
+            ),
         }
         return;
     }
-    respond(&mut stream, "404 Not Found", "{\"error\":\"unknown route\"}");
+    respond(
+        &mut stream,
+        "404 Not Found",
+        "{\"error\":\"unknown route\"}",
+    );
 }
 
 fn main() {
     let addr = std::env::var("KIRRA_TAJ_ADDR").unwrap_or_else(|_| "127.0.0.1:8101".to_string());
-    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| { eprintln!("taj_service: bind {addr}: {e}"); std::process::exit(1); });
+    let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+        eprintln!("taj_service: bind {addr}: {e}");
+        std::process::exit(1);
+    });
     println!("Taj perception service on http://{addr}  (POST /perception, GET /health)");
     for stream in listener.incoming() {
         match stream {

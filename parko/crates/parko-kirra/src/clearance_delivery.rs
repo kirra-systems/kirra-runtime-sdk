@@ -33,10 +33,16 @@ pub enum DeliveryOutcome {
     /// untouched.
     NoGrant,
     /// A grant was delivered and CLEARED the loop (→ `Normal`).
-    Cleared { operator_id: String, grant_rowid: i64 },
+    Cleared {
+        operator_id: String,
+        grant_rowid: i64,
+    },
     /// A grant was picked up but the loop REJECTED it (stale / malformed /
     /// not-immobilized). It is CONSUMED (never retried); the loop stays as it was.
-    Rejected { reason: &'static str, grant_rowid: i64 },
+    Rejected {
+        reason: &'static str,
+        grant_rowid: i64,
+    },
     /// The store could not be consulted — fail-closed: nothing is cleared.
     StoreError,
 }
@@ -113,7 +119,10 @@ impl ClearanceDelivery {
         // 1. ONE-SHOT CONSUME — the grant is now spent regardless of the verdict.
         //    The closure returns the take result; the outer match maps it to the
         //    early-return outcomes (Rule 4 — `return` cannot cross the closure).
-        let row = match self.store.with(|store| store.take_pending_clearance_grant(&self.node_id, now_ms)) {
+        let row = match self
+            .store
+            .with(|store| store.take_pending_clearance_grant(&self.node_id, now_ms))
+        {
             Ok(Some(r)) => r,
             Ok(None) => return DeliveryOutcome::NoGrant,
             Err(_) => return DeliveryOutcome::StoreError,
@@ -181,7 +190,9 @@ mod tests {
     }
 
     fn audit_has(s: &StoreHandle, event_type: &str) -> bool {
-        let page = s.with(|store| store.load_audit_chain_page(200, 0, None)).unwrap();
+        let page = s
+            .with(|store| store.load_audit_chain_page(200, 0, None))
+            .unwrap();
         page.entries.iter().any(|e| {
             serde_json::to_value(e)
                 .unwrap()
@@ -199,11 +210,20 @@ mod tests {
         let d = ClearanceDelivery::new(s.clone(), "robot-01");
 
         let out = d.poll_and_deliver(&mut l, 1_500); // within the age window
-        assert!(matches!(out, DeliveryOutcome::Cleared { .. }), "got {out:?}");
+        assert!(
+            matches!(out, DeliveryOutcome::Cleared { .. }),
+            "got {out:?}"
+        );
         assert_eq!(l.state(), ClearanceState::Normal, "loop cleared to Normal");
-        assert!(audit_has(&s, "ClearanceDelivered"), "ClearanceDelivered audit present");
+        assert!(
+            audit_has(&s, "ClearanceDelivered"),
+            "ClearanceDelivered audit present"
+        );
 
-        let st = s.with(|store| store.latest_clearance_grant("robot-01")).unwrap().unwrap();
+        let st = s
+            .with(|store| store.latest_clearance_grant("robot-01"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.outcome.as_deref(), Some("Cleared"));
         assert!(st.consumed_at_ms.is_some(), "grant consumed");
     }
@@ -219,19 +239,34 @@ mod tests {
         let stale_now = 1_000 + DEFAULT_MAX_GRANT_AGE_MS + 1;
         let out = d.poll_and_deliver(&mut l, stale_now);
         assert!(
-            matches!(out, DeliveryOutcome::Rejected { reason: "malformed_grant", .. }),
+            matches!(
+                out,
+                DeliveryOutcome::Rejected {
+                    reason: "malformed_grant",
+                    ..
+                }
+            ),
             "a grant the verifier accepted is still rejected at delivery if stale; got {out:?}"
         );
-        assert!(l.is_immobilized(), "loop still immobilized after a stale grant");
+        assert!(
+            l.is_immobilized(),
+            "loop still immobilized after a stale grant"
+        );
         assert!(audit_has(&s, "ClearanceDeliveryRejected"));
 
         // the stale grant is CONSUMED — a second pickup finds nothing (no retry).
-        assert_eq!(d.poll_and_deliver(&mut l, stale_now + 1), DeliveryOutcome::NoGrant);
+        assert_eq!(
+            d.poll_and_deliver(&mut l, stale_now + 1),
+            DeliveryOutcome::NoGrant
+        );
 
         // the operator RE-ISSUES a fresh grant through the console → clears.
         record_grant(&s, "robot-01", "alice", stale_now + 2);
         let out2 = d.poll_and_deliver(&mut l, stale_now + 3);
-        assert!(matches!(out2, DeliveryOutcome::Cleared { .. }), "fresh grant clears; got {out2:?}");
+        assert!(
+            matches!(out2, DeliveryOutcome::Cleared { .. }),
+            "fresh grant clears; got {out2:?}"
+        );
         assert_eq!(l.state(), ClearanceState::Normal);
     }
 
@@ -239,10 +274,17 @@ mod tests {
     fn one_shot_second_take_gets_none() {
         let s = store();
         record_grant(&s, "robot-01", "alice", 1_000);
-        let first = s.with(|store| store.take_pending_clearance_grant("robot-01", 1_100)).unwrap();
-        let second = s.with(|store| store.take_pending_clearance_grant("robot-01", 1_101)).unwrap();
+        let first = s
+            .with(|store| store.take_pending_clearance_grant("robot-01", 1_100))
+            .unwrap();
+        let second = s
+            .with(|store| store.take_pending_clearance_grant("robot-01", 1_101))
+            .unwrap();
         assert!(first.is_some(), "first take gets the grant");
-        assert!(second.is_none(), "second take gets None — exactly-once consume");
+        assert!(
+            second.is_none(),
+            "second take gets None — exactly-once consume"
+        );
     }
 
     #[test]
@@ -282,7 +324,10 @@ mod tests {
             .expect("record grant");
         let mut l = immobilized_loop();
         let out = d.poll_and_deliver(&mut l, 1_500);
-        assert!(matches!(out, DeliveryOutcome::Cleared { .. }), "got {out:?}");
+        assert!(
+            matches!(out, DeliveryOutcome::Cleared { .. }),
+            "got {out:?}"
+        );
         assert!(audit_has(&d.store, "ClearanceDelivered"));
 
         let _ = std::fs::remove_file(&db);
@@ -296,13 +341,20 @@ mod tests {
         // carried an empty operator_id, the loop rejects it (malformed), the grant
         // is consumed, and it is audited. (We insert the degenerate row directly.)
         let s = store();
-        s.with(|store| store.save_clearance_grant_chained("robot-01", "", 1_000)).expect("record");
+        s.with(|store| store.save_clearance_grant_chained("robot-01", "", 1_000))
+            .expect("record");
         let mut l = immobilized_loop();
         let d = ClearanceDelivery::new(s.clone(), "robot-01");
 
         let out = d.poll_and_deliver(&mut l, 1_100);
         assert!(
-            matches!(out, DeliveryOutcome::Rejected { reason: "malformed_grant", .. }),
+            matches!(
+                out,
+                DeliveryOutcome::Rejected {
+                    reason: "malformed_grant",
+                    ..
+                }
+            ),
             "got {out:?}"
         );
         assert!(l.is_immobilized());

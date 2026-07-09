@@ -85,11 +85,14 @@ impl ContractWriter for InProcessRegion {
     }
     fn store_body(&self, view: &GovernorContractView) {
         // Every field EXCEPT generation (the publish() driver owns the counter).
-        self.layout_version.store(view.layout_version, Ordering::Relaxed);
+        self.layout_version
+            .store(view.layout_version, Ordering::Relaxed);
         self.magic.store(view.magic, Ordering::Relaxed);
         self.sequence.store(view.sequence, Ordering::Relaxed);
-        self.publication_nanos.store(view.publication_nanos, Ordering::Relaxed);
-        self.deadline_nanos.store(view.deadline_nanos, Ordering::Relaxed);
+        self.publication_nanos
+            .store(view.publication_nanos, Ordering::Relaxed);
+        self.deadline_nanos
+            .store(view.deadline_nanos, Ordering::Relaxed);
         self.crc32.store(view.crc32, Ordering::Relaxed);
         self.command_len.store(view.command_len, Ordering::Relaxed);
         for (i, b) in view.command.iter().enumerate() {

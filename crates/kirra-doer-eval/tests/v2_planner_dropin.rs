@@ -17,13 +17,19 @@ const SEED: u64 = 0xC0FFEE;
 #[test]
 fn v2_safety_aware_drops_into_the_harness_and_is_admitted() {
     let cfg = ScorerConfigV2::reduced();
-    let (candidate, _) = train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
-    let (reference, _) = train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+    let (candidate, _) =
+        train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
+    let (reference, _) =
+        train_planner_v2(&cfg, &TrainConfigV2::reduced(SEED), Teacher::SafetyAware);
 
     let corpus = demo_corpus();
     let s = evaluate_corpus(&corpus, &candidate, &reference);
 
-    assert_eq!(s.quality.argmax_agreement_rate(), 1.0, "same seed+teacher ⇒ same argmax");
+    assert_eq!(
+        s.quality.argmax_agreement_rate(),
+        1.0,
+        "same seed+teacher ⇒ same argmax"
+    );
     assert_eq!(
         s.admissibility.admissibility_rate(),
         1.0,
@@ -54,5 +60,9 @@ fn v2_misalignment_is_still_caught_by_both_metrics() {
         "the checker refuses the misaligned v2 net on ≥1 hazard: {:?}",
         s.admissibility
     );
-    assert!(s.admissibility.mrc > 0, "≥1 MRC refusal: {:?}", s.admissibility);
+    assert!(
+        s.admissibility.mrc > 0,
+        "≥1 MRC refusal: {:?}",
+        s.admissibility
+    );
 }

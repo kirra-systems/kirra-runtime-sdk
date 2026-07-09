@@ -86,12 +86,22 @@ impl MickDecisionRecord {
     /// Build the record from a Mick decision: the chosen `intent`, the `plan` Occy grounded
     /// it to, and the `verdict` KIRRA returned for that plan. Pure — no I/O, no clock.
     #[must_use]
-    pub fn new(seq: u64, t_wall_ms: u64, intent: &MickIntent, plan: &PlanOutput, verdict: TrajectoryVerdict) -> Self {
+    pub fn new(
+        seq: u64,
+        t_wall_ms: u64,
+        intent: &MickIntent,
+        plan: &PlanOutput,
+        verdict: TrajectoryVerdict,
+    ) -> Self {
         let (intent_kind, goal_x_m, goal_y_m, lane_offset_m, target_speed_mps) = match *intent {
             MickIntent::GoTo { x_m, y_m } => ("go_to", Some(x_m), Some(y_m), None, None),
-            MickIntent::LaneChange { target_offset_m } => ("lane_change", None, None, Some(target_offset_m), None),
+            MickIntent::LaneChange { target_offset_m } => {
+                ("lane_change", None, None, Some(target_offset_m), None)
+            }
             MickIntent::Hold => ("hold", None, None, None, None),
-            MickIntent::Cruise { target_speed_mps } => ("cruise", None, None, None, Some(target_speed_mps)),
+            MickIntent::Cruise { target_speed_mps } => {
+                ("cruise", None, None, None, Some(target_speed_mps))
+            }
             MickIntent::Overtake => ("overtake", None, None, None, None),
             MickIntent::PullOver => ("pull_over", None, None, None, None),
             MickIntent::TurnAt { .. } => ("turn_at", None, None, None, None),
@@ -99,8 +109,12 @@ impl MickDecisionRecord {
             MickIntent::RouteTo { x_m, y_m } => ("route_to", Some(x_m), Some(y_m), None, None),
             // Sidewalk-courier intents (ADR-0028) — the goal point is the destination/far-curb.
             MickIntent::Yield { x_m, y_m } => ("yield", Some(x_m), Some(y_m), None, None),
-            MickIntent::CrossWhenClear { x_m, y_m } => ("cross_when_clear", Some(x_m), Some(y_m), None, None),
-            MickIntent::CreepThrough { x_m, y_m } => ("creep_through", Some(x_m), Some(y_m), None, None),
+            MickIntent::CrossWhenClear { x_m, y_m } => {
+                ("cross_when_clear", Some(x_m), Some(y_m), None, None)
+            }
+            MickIntent::CreepThrough { x_m, y_m } => {
+                ("creep_through", Some(x_m), Some(y_m), None, None)
+            }
         };
         let turn_direction = match *intent {
             MickIntent::TurnAt { direction } => Some(direction.as_str()),
@@ -170,7 +184,10 @@ impl MickEvalLog {
     /// # Errors
     /// Returns the underlying [`std::io::Error`] if the file cannot be opened for append.
     pub fn open(path: &str) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         Ok(Self { file })
     }
 
@@ -182,7 +199,8 @@ impl MickEvalLog {
         if !Self::enabled() {
             return None;
         }
-        let path = std::env::var(MICK_EVAL_PATH_ENV).unwrap_or_else(|_| DEFAULT_MICK_EVAL_PATH.to_string());
+        let path = std::env::var(MICK_EVAL_PATH_ENV)
+            .unwrap_or_else(|_| DEFAULT_MICK_EVAL_PATH.to_string());
         Self::open(&path).ok()
     }
 
@@ -294,10 +312,21 @@ impl MickEvalSummary {
     /// Mean per-decision peak speed (0.0 when empty).
     #[must_use]
     pub fn mean_max_speed_mps(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.sum_max_speed_mps / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.sum_max_speed_mps / self.total as f64
+        }
     }
 
-    fn tally(&mut self, intent_kind: &str, proposal_kind: &str, verdict: &str, max_speed_mps: f64, path_len_m: f64) {
+    fn tally(
+        &mut self,
+        intent_kind: &str,
+        proposal_kind: &str,
+        verdict: &str,
+        max_speed_mps: f64,
+        path_len_m: f64,
+    ) {
         self.total += 1;
         match verdict {
             "accept" => self.accepted += 1,
@@ -327,7 +356,13 @@ impl MickEvalSummary {
     pub fn from_records<'a>(records: impl IntoIterator<Item = &'a MickDecisionRecord>) -> Self {
         let mut s = Self::default();
         for r in records {
-            s.tally(r.intent_kind, r.proposal_kind, r.verdict, r.max_speed_mps, r.path_len_m);
+            s.tally(
+                r.intent_kind,
+                r.proposal_kind,
+                r.verdict,
+                r.max_speed_mps,
+                r.path_len_m,
+            );
         }
         s
     }
@@ -344,7 +379,13 @@ impl MickEvalSummary {
                 continue;
             }
             let row: EvalRow = serde_json::from_str(&line).map_err(std::io::Error::other)?;
-            s.tally(&row.intent_kind, &row.proposal_kind, &row.verdict, row.max_speed_mps, row.path_len_m);
+            s.tally(
+                &row.intent_kind,
+                &row.proposal_kind,
+                &row.verdict,
+                row.max_speed_mps,
+                row.path_len_m,
+            );
         }
         Ok(s)
     }
@@ -353,20 +394,56 @@ impl MickEvalSummary {
 impl std::fmt::Display for MickEvalSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Mick eval — {} decisions", self.total)?;
-        writeln!(f, "  admitted {:>5} ({:>5.1}%)   [accept {}, clamp {}]", self.admitted(), 100.0 * self.acceptance_rate(), self.accepted, self.clamped)?;
-        writeln!(f, "  refused  {:>5} ({:>5.1}%)   [mrc_fallback {}, pending {}]", self.refused(), 100.0 * self.refusal_rate(), self.mrc_fallback, self.pending)?;
-        writeln!(f, "  motion   {:>5} | holds {} ({:.1}%)", self.motion, self.safe_stop, 100.0 * self.hold_rate())?;
+        writeln!(
+            f,
+            "  admitted {:>5} ({:>5.1}%)   [accept {}, clamp {}]",
+            self.admitted(),
+            100.0 * self.acceptance_rate(),
+            self.accepted,
+            self.clamped
+        )?;
+        writeln!(
+            f,
+            "  refused  {:>5} ({:>5.1}%)   [mrc_fallback {}, pending {}]",
+            self.refused(),
+            100.0 * self.refusal_rate(),
+            self.mrc_fallback,
+            self.pending
+        )?;
+        writeln!(
+            f,
+            "  motion   {:>5} | holds {} ({:.1}%)",
+            self.motion,
+            self.safe_stop,
+            100.0 * self.hold_rate()
+        )?;
         writeln!(f, "  by intent:")?;
         for (kind, st) in &self.by_intent {
-            writeln!(f, "    {:<11} {:>4}   admit {:>5.1}%   refuse {:>5.1}%", kind, st.count, 100.0 * st.acceptance_rate(), 100.0 * ratio(st.refused, st.count))?;
+            writeln!(
+                f,
+                "    {:<11} {:>4}   admit {:>5.1}%   refuse {:>5.1}%",
+                kind,
+                st.count,
+                100.0 * st.acceptance_rate(),
+                100.0 * ratio(st.refused, st.count)
+            )?;
         }
-        write!(f, "  progress: total {:.1} m, mean peak speed {:.2} m/s", self.sum_path_len_m, self.mean_max_speed_mps())
+        write!(
+            f,
+            "  progress: total {:.1} m, mean peak speed {:.2} m/s",
+            self.sum_path_len_m,
+            self.mean_max_speed_mps()
+        )
     }
 }
 
 /// Ratio `n/d` as a fraction, 0.0 when `d == 0` (avoids a divide-by-zero on an empty suite).
 fn ratio(n: usize, d: usize) -> f64 {
-    if d == 0 { 0.0 } else { n as f64 / d as f64 }
+    if d == 0 {
+        0.0
+    } else {
+        n as f64 / d as f64
+    }
 }
 
 #[cfg(test)]
@@ -377,25 +454,42 @@ mod tests {
     fn motion_plan() -> PlanOutput {
         let trajectory = (0..5)
             .map(|i| TrajectoryPoint {
-                pose: Pose { x_m: i as f64, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: i as f64,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: if i == 4 { 0.0 } else { 3.0 },
                 time_from_start_s: i as f64 * 0.1,
             })
             .collect();
-        PlanOutput { trajectory, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::Motion,
+        }
     }
 
     #[test]
     fn record_captures_intent_grounding_and_verdict() {
         let plan = motion_plan();
-        let rec = MickDecisionRecord::new(7, 1234, &MickIntent::Overtake, &plan, TrajectoryVerdict::Accept);
+        let rec = MickDecisionRecord::new(
+            7,
+            1234,
+            &MickIntent::Overtake,
+            &plan,
+            TrajectoryVerdict::Accept,
+        );
 
         assert_eq!(rec.seq, 7);
         assert_eq!(rec.t_wall_ms, 1234);
         assert_eq!(rec.intent_kind, "overtake");
         assert_eq!(rec.proposal_kind, "motion");
         assert_eq!(rec.points, 5);
-        assert!((rec.path_len_m - 4.0).abs() < 1e-9, "5 unit-spaced points → 4 m, got {}", rec.path_len_m);
+        assert!(
+            (rec.path_len_m - 4.0).abs() < 1e-9,
+            "5 unit-spaced points → 4 m, got {}",
+            rec.path_len_m
+        );
         assert_eq!(rec.max_speed_mps, 3.0);
         assert_eq!(rec.final_speed_mps, 0.0);
         assert_eq!(rec.verdict, "accept");
@@ -406,28 +500,86 @@ mod tests {
     fn intent_kind_and_params_map_per_variant() {
         let plan = motion_plan();
         let cases: [(MickIntent, &str); 7] = [
-            (MickIntent::GoTo { x_m: 20.0, y_m: -4.0 }, "go_to"),
-            (MickIntent::LaneChange { target_offset_m: 3.5 }, "lane_change"),
+            (
+                MickIntent::GoTo {
+                    x_m: 20.0,
+                    y_m: -4.0,
+                },
+                "go_to",
+            ),
+            (
+                MickIntent::LaneChange {
+                    target_offset_m: 3.5,
+                },
+                "lane_change",
+            ),
             (MickIntent::Hold, "hold"),
-            (MickIntent::Cruise { target_speed_mps: 5.0 }, "cruise"),
+            (
+                MickIntent::Cruise {
+                    target_speed_mps: 5.0,
+                },
+                "cruise",
+            ),
             (MickIntent::Overtake, "overtake"),
             (MickIntent::PullOver, "pull_over"),
-            (MickIntent::TurnAt { direction: crate::TurnDirection::Left }, "turn_at"),
+            (
+                MickIntent::TurnAt {
+                    direction: crate::TurnDirection::Left,
+                },
+                "turn_at",
+            ),
         ];
         for (intent, kind) in cases {
             let r = MickDecisionRecord::new(0, 0, &intent, &plan, TrajectoryVerdict::Accept);
             assert_eq!(r.intent_kind, kind);
         }
         // TurnAt carries its direction; non-turn intents leave it None.
-        let turn = MickDecisionRecord::new(0, 0, &MickIntent::TurnAt { direction: crate::TurnDirection::Right }, &plan, TrajectoryVerdict::Accept);
+        let turn = MickDecisionRecord::new(
+            0,
+            0,
+            &MickIntent::TurnAt {
+                direction: crate::TurnDirection::Right,
+            },
+            &plan,
+            TrajectoryVerdict::Accept,
+        );
         assert_eq!(turn.turn_direction, Some("right"));
-        let hold = MickDecisionRecord::new(0, 0, &MickIntent::Hold, &plan, TrajectoryVerdict::Accept);
+        let hold =
+            MickDecisionRecord::new(0, 0, &MickIntent::Hold, &plan, TrajectoryVerdict::Accept);
         assert_eq!(hold.turn_direction, None);
         // The one relevant parameter is carried; the others stay None.
-        let goto = MickDecisionRecord::new(0, 0, &MickIntent::GoTo { x_m: 20.0, y_m: -4.0 }, &plan, TrajectoryVerdict::Accept);
-        assert_eq!((goto.goal_x_m, goto.goal_y_m, goto.lane_offset_m, goto.target_speed_mps), (Some(20.0), Some(-4.0), None, None));
-        let cruise = MickDecisionRecord::new(0, 0, &MickIntent::Cruise { target_speed_mps: 5.0 }, &plan, TrajectoryVerdict::Accept);
-        assert_eq!((cruise.target_speed_mps, cruise.goal_x_m), (Some(5.0), None));
+        let goto = MickDecisionRecord::new(
+            0,
+            0,
+            &MickIntent::GoTo {
+                x_m: 20.0,
+                y_m: -4.0,
+            },
+            &plan,
+            TrajectoryVerdict::Accept,
+        );
+        assert_eq!(
+            (
+                goto.goal_x_m,
+                goto.goal_y_m,
+                goto.lane_offset_m,
+                goto.target_speed_mps
+            ),
+            (Some(20.0), Some(-4.0), None, None)
+        );
+        let cruise = MickDecisionRecord::new(
+            0,
+            0,
+            &MickIntent::Cruise {
+                target_speed_mps: 5.0,
+            },
+            &plan,
+            TrajectoryVerdict::Accept,
+        );
+        assert_eq!(
+            (cruise.target_speed_mps, cruise.goal_x_m),
+            (Some(5.0), None)
+        );
     }
 
     #[test]
@@ -446,13 +598,22 @@ mod tests {
     #[test]
     fn record_serializes_as_one_flat_json_object_skipping_absent_params() {
         let plan = motion_plan();
-        let rec = MickDecisionRecord::new(1, 2, &MickIntent::Hold, &plan, TrajectoryVerdict::MRCFallback);
+        let rec = MickDecisionRecord::new(
+            1,
+            2,
+            &MickIntent::Hold,
+            &plan,
+            TrajectoryVerdict::MRCFallback,
+        );
         let v: serde_json::Value = serde_json::to_value(&rec).unwrap();
         assert_eq!(v["intent_kind"], "hold");
         assert_eq!(v["verdict"], "mrc_fallback");
         assert_eq!(v["admitted"], false);
         // Absent intent params are omitted (skip_serializing_if), not serialized as null.
-        assert!(v.get("goal_x_m").is_none(), "absent params are omitted from the JSON");
+        assert!(
+            v.get("goal_x_m").is_none(),
+            "absent params are omitted from the JSON"
+        );
     }
 
     #[test]
@@ -465,8 +626,22 @@ mod tests {
         let plan = motion_plan();
         {
             let mut log = MickEvalLog::open(path_str).expect("open sink");
-            log.append(&MickDecisionRecord::new(0, 0, &MickIntent::Overtake, &plan, TrajectoryVerdict::Accept)).unwrap();
-            log.append(&MickDecisionRecord::new(1, 100, &MickIntent::PullOver, &plan, TrajectoryVerdict::MRCFallback)).unwrap();
+            log.append(&MickDecisionRecord::new(
+                0,
+                0,
+                &MickIntent::Overtake,
+                &plan,
+                TrajectoryVerdict::Accept,
+            ))
+            .unwrap();
+            log.append(&MickDecisionRecord::new(
+                1,
+                100,
+                &MickIntent::PullOver,
+                &plan,
+                TrajectoryVerdict::MRCFallback,
+            ))
+            .unwrap();
         }
 
         let body = std::fs::read_to_string(&path).expect("read sink");
@@ -487,7 +662,11 @@ mod tests {
     fn hold_plan() -> PlanOutput {
         PlanOutput {
             trajectory: vec![TrajectoryPoint {
-                pose: Pose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 0.0,
                 time_from_start_s: 0.0,
             }],
@@ -501,9 +680,33 @@ mod tests {
         let m = motion_plan();
         let h = hold_plan();
         vec![
-            MickDecisionRecord::new(0, 0, &MickIntent::GoTo { x_m: 20.0, y_m: 0.0 }, &m, TrajectoryVerdict::Accept),
-            MickDecisionRecord::new(1, 100, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &m, TrajectoryVerdict::Clamp),
-            MickDecisionRecord::new(2, 200, &MickIntent::Overtake, &m, TrajectoryVerdict::MRCFallback),
+            MickDecisionRecord::new(
+                0,
+                0,
+                &MickIntent::GoTo {
+                    x_m: 20.0,
+                    y_m: 0.0,
+                },
+                &m,
+                TrajectoryVerdict::Accept,
+            ),
+            MickDecisionRecord::new(
+                1,
+                100,
+                &MickIntent::GoTo {
+                    x_m: 40.0,
+                    y_m: 0.0,
+                },
+                &m,
+                TrajectoryVerdict::Clamp,
+            ),
+            MickDecisionRecord::new(
+                2,
+                200,
+                &MickIntent::Overtake,
+                &m,
+                TrajectoryVerdict::MRCFallback,
+            ),
             MickDecisionRecord::new(3, 300, &MickIntent::Hold, &h, TrajectoryVerdict::Accept),
         ]
     }
@@ -512,7 +715,10 @@ mod tests {
     fn summary_aggregates_records_into_rates_and_per_intent_breakdown() {
         let s = MickEvalSummary::from_records(&suite());
         assert_eq!(s.total, 4);
-        assert_eq!((s.accepted, s.clamped, s.mrc_fallback, s.pending), (2, 1, 1, 0));
+        assert_eq!(
+            (s.accepted, s.clamped, s.mrc_fallback, s.pending),
+            (2, 1, 1, 0)
+        );
         assert_eq!(s.admitted(), 3);
         assert_eq!(s.refused(), 1);
         assert_eq!((s.motion, s.safe_stop), (3, 1));
@@ -522,17 +728,38 @@ mod tests {
         assert!((s.clamp_rate() - 0.25).abs() < 1e-9);
 
         // Per-intent: go_to fully admitted (2/2); overtake fully refused (0/1).
-        assert_eq!(s.by_intent["go_to"], IntentStats { count: 2, admitted: 2, refused: 0 });
-        assert_eq!(s.by_intent["overtake"], IntentStats { count: 1, admitted: 0, refused: 1 });
+        assert_eq!(
+            s.by_intent["go_to"],
+            IntentStats {
+                count: 2,
+                admitted: 2,
+                refused: 0
+            }
+        );
+        assert_eq!(
+            s.by_intent["overtake"],
+            IntentStats {
+                count: 1,
+                admitted: 0,
+                refused: 1
+            }
+        );
         assert!((s.by_intent["overtake"].acceptance_rate() - 0.0).abs() < 1e-9);
         // Motion progress accumulates only the moving plans' lengths (4 m each), holds add 0.
-        assert!((s.sum_path_len_m - 12.0).abs() < 1e-9, "3 motion plans × 4 m, got {}", s.sum_path_len_m);
+        assert!(
+            (s.sum_path_len_m - 12.0).abs() < 1e-9,
+            "3 motion plans × 4 m, got {}",
+            s.sum_path_len_m
+        );
     }
 
     #[test]
     fn reading_a_jsonl_log_yields_the_same_summary_as_the_in_memory_records() {
         let mut path = std::env::temp_dir();
-        path.push(format!("kirra_mick_eval_score_{}.jsonl", std::process::id()));
+        path.push(format!(
+            "kirra_mick_eval_score_{}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let records = suite();
         {
@@ -549,7 +776,10 @@ mod tests {
         assert_eq!(from_log, MickEvalSummary::from_records(&records));
         // And the Display report carries the headline numbers.
         let report = from_log.to_string();
-        assert!(report.contains("4 decisions") && report.contains("75.0%"), "report: {report}");
+        assert!(
+            report.contains("4 decisions") && report.contains("75.0%"),
+            "report: {report}"
+        );
     }
 
     #[test]

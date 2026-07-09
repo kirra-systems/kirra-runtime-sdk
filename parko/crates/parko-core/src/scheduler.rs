@@ -5,12 +5,17 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::backend::{BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch};
-use crate::commands::ControlCommand;
-use crate::sensor::SensorFrame;
-use crate::telemetry::{CumulativeJitterEvaluator, PostureSnapshot, RuntimeTelemetry, ThermalState};
-use crate::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
 use crate::audit::{AuditClient, FaultRecord, OverrideRecord};
+use crate::backend::{
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
+    PrecisionMode, TensorBatch,
+};
+use crate::commands::ControlCommand;
+use crate::safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
+use crate::sensor::SensorFrame;
+use crate::telemetry::{
+    CumulativeJitterEvaluator, PostureSnapshot, RuntimeTelemetry, ThermalState,
+};
 
 /// The stable audit reason code for a governor override, or `None` for `Allow`
 /// (the common no-op, which is not recorded).
@@ -229,7 +234,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
     /// accumulator by `DECAY`. The drain IS the recovery hysteresis — the
     /// posture recommendation stays escalated until the bucket empties.
     fn record_deadline_healthy(&mut self) {
-        self.deadline_breach_acc = self.deadline_breach_acc.saturating_sub(DEADLINE_BREACH_DECAY);
+        self.deadline_breach_acc = self
+            .deadline_breach_acc
+            .saturating_sub(DEADLINE_BREACH_DECAY);
     }
 
     /// WS-0.4 F2 — the posture the deadline watchdog recommends from its breach
@@ -292,7 +299,11 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         self
     }
 
-    pub async fn tick(&mut self, current_frame: SensorFrame, posture: SafetyPosture) -> Result<PostureSnapshot, String> {
+    pub async fn tick(
+        &mut self,
+        current_frame: SensorFrame,
+        posture: SafetyPosture,
+    ) -> Result<PostureSnapshot, String> {
         let loop_start_ms = crate::sensor::current_time_ms();
 
         // Flush previously validated command (frame N-1).
@@ -307,8 +318,7 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         if let Some(prev) = self.last_frame_id {
             if current_frame.frame_id > prev + 1 {
                 let gap = current_frame.frame_id - prev - 1;
-                self.dropped_frame_counter =
-                    self.dropped_frame_counter.saturating_add(gap);
+                self.dropped_frame_counter = self.dropped_frame_counter.saturating_add(gap);
             }
         }
         self.last_frame_id = Some(current_frame.frame_id);
@@ -349,8 +359,7 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 }
             } else {
                 self.hung_inference = Some(straggler);
-                self.last_validated_command =
-                    Some(ControlCommand::stopped(loop_start_ms));
+                self.last_validated_command = Some(ControlCommand::stopped(loop_start_ms));
                 // WS-0.4 F2: a while-hung tick is a continuing breach — keep the
                 // posture escalated (and drive it toward LockedOut on persistence).
                 self.record_deadline_breach();
@@ -408,8 +417,7 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                 // The next flush must carry a STOP, not the pre-hang command
                 // (fail-closed: after a hang the governor's `previous` is a
                 // stop, so Degraded's no-re-initiation gate holds at zero).
-                self.last_validated_command =
-                    Some(ControlCommand::stopped(loop_start_ms));
+                self.last_validated_command = Some(ControlCommand::stopped(loop_start_ms));
                 return Ok(self.deadline_mrc_snapshot(
                     current_frame.frame_id,
                     loop_start_ms,
@@ -460,7 +468,8 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
         // parse_inference_to_command; treat them as a recoverable degraded
         // condition and return a safe stopped snapshot rather than propagating
         // the error and crashing the loop.
-        let proposed_cmd = match self.parse_inference_to_command(&processed_outputs, loop_start_ms) {
+        let proposed_cmd = match self.parse_inference_to_command(&processed_outputs, loop_start_ms)
+        {
             Ok(cmd) => cmd,
             Err(parse_err) => {
                 // Non-finite (NaN/Inf) inference output → fail-closed stopped
@@ -481,7 +490,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
                     frame_age_ms,
                     tensor_payload_bytes,
                     backend_precision: capabilities_precision(&self.cached_capabilities),
-                    backend_vendor: std::borrow::Cow::Borrowed(descriptor_vendor(&self.cached_descriptor)),
+                    backend_vendor: std::borrow::Cow::Borrowed(descriptor_vendor(
+                        &self.cached_descriptor,
+                    )),
                 };
                 // WS-0.4 F3: re-stamp STOP so the next tick's flush does not
                 // re-send the pre-fault MOVING command while the model keeps
@@ -644,7 +655,9 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
             inference_latency_ms: self.inference_deadline_ms,
             rolling_jitter_ms: self.jitter_tracker.std_dev_ms(),
             dropped_frames: self.dropped_frame_counter,
-            thermal_state: self.probe_platform_thermals().unwrap_or(ThermalState::Normal),
+            thermal_state: self
+                .probe_platform_thermals()
+                .unwrap_or(ThermalState::Normal),
             frame_age_ms,
             tensor_payload_bytes,
             backend_precision: capabilities_precision(&self.cached_capabilities),
@@ -709,11 +722,11 @@ impl<B: InferenceBackend + 'static> InferenceLoop<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
     use crate::backend::{BackendError, InferenceBackend, PrecisionMode, TensorStorage};
     use crate::sensor::SensorStream;
     use proptest::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     struct TestBackend;
 
@@ -751,7 +764,6 @@ mod tests {
                 metadata: HashMap::new(),
             })
         }
-
     }
 
     /// Like `TestBackend` but emits a large NEGATIVE (reverse) command — the
@@ -778,9 +790,18 @@ mod tests {
         ) -> Result<TensorBatch<'static>, BackendError> {
             std::thread::sleep(std::time::Duration::from_millis(200)); // force degraded
             let mut map = HashMap::new();
-            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![-65.0]));
-            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0]));
-            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            map.insert(
+                "cmd_vel_linear".to_string(),
+                TensorStorage::Owned(vec![-65.0]),
+            );
+            map.insert(
+                "cmd_vel_angular".to_string(),
+                TensorStorage::Owned(vec![0.0]),
+            );
+            Ok(TensorBatch {
+                named_tensors: map,
+                metadata: HashMap::new(),
+            })
         }
     }
 
@@ -850,8 +871,7 @@ mod tests {
         let model = backend.load_model("").unwrap();
         let (tx, _rx) = mpsc::channel(4);
 
-        let mut loop_engine = InferenceLoop::new(backend, model, tx)
-            .with_governor(ZeroGovernor);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx).with_governor(ZeroGovernor);
         let mut stream = SimpleStream { next_id: 0 };
 
         // Tick 1: fills last_validated_command; nothing flushed to actuator yet.
@@ -928,7 +948,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(snapshot.active_state_degraded, "200ms latency must trigger degraded mode");
+        assert!(
+            snapshot.active_state_degraded,
+            "200ms latency must trigger degraded mode"
+        );
         let bound = DegradationThresholds::default().max_linear_velocity_mps;
         assert_eq!(
             snapshot.active_command.linear_velocity, -bound,
@@ -946,12 +969,18 @@ mod tests {
         let model = backend.load_model("").unwrap();
         let (tx, mut rx) = mpsc::channel(4);
 
-        let mut loop_engine = InferenceLoop::new(backend, model, tx)
-            .with_governor(ClampToTwoGovernor);
+        let mut loop_engine =
+            InferenceLoop::new(backend, model, tx).with_governor(ClampToTwoGovernor);
         let mut stream = SimpleStream { next_id: 0 };
 
-        let _ = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
-        let snapshot = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let _ = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        let snapshot = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
 
         assert_eq!(snapshot.active_command.linear_velocity, 2.0);
 
@@ -978,7 +1007,10 @@ mod tests {
             .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
             .await
             .unwrap();
-        assert_eq!(snap.active_command.linear_velocity, 2.0, "governor clamps 10 → 2");
+        assert_eq!(
+            snap.active_command.linear_velocity, 2.0,
+            "governor clamps 10 → 2"
+        );
 
         let (decisions, overrides, faults, health) = mock.counts();
         assert_eq!(
@@ -1012,7 +1044,10 @@ mod tests {
             .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
             .await
             .unwrap();
-        assert!(snap.active_state_degraded, "nonfinite output → degraded snapshot");
+        assert!(
+            snap.active_state_degraded,
+            "nonfinite output → degraded snapshot"
+        );
         assert_eq!(snap.active_command.linear_velocity, 0.0, "fail-closed stop");
 
         let (decisions, overrides, faults, health) = mock.counts();
@@ -1031,10 +1066,16 @@ mod tests {
         let mut stream = SimpleStream { next_id: 0 };
 
         // First tick: fills last_validated_command, sends nothing yet.
-        let _ = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let _ = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
 
         // Second tick: sends previous command, computes a new clamped one.
-        let snapshot = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let snapshot = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
 
         assert!(snapshot.active_state_degraded, "expected degraded mode");
         assert!(snapshot.active_command.linear_velocity <= 1.5);
@@ -1066,15 +1107,28 @@ mod tests {
                 expected_precision: PrecisionMode::FP32,
             })
         }
-        fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
+        fn run(
+            &self,
+            _: &ModelHandle,
+            _: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, BackendError> {
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 std::thread::sleep(std::time::Duration::from_millis(self.hang_ms));
             }
             let mut map = HashMap::new();
-            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![0.5_f32]));
-            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
-            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            map.insert(
+                "cmd_vel_linear".to_string(),
+                TensorStorage::Owned(vec![0.5_f32]),
+            );
+            map.insert(
+                "cmd_vel_angular".to_string(),
+                TensorStorage::Owned(vec![0.0_f32]),
+            );
+            Ok(TensorBatch {
+                named_tensors: map,
+                metadata: HashMap::new(),
+            })
         }
     }
 
@@ -1115,8 +1169,14 @@ mod tests {
             elapsed < std::time::Duration::from_millis(300),
             "the deadline must cut the hung backend off within budget; tick took {elapsed:?}"
         );
-        assert_eq!(snap.active_command.linear_velocity, 0.0, "deadline breach → MRC stop");
-        assert!(snap.active_state_degraded, "deadline breach → degraded snapshot");
+        assert_eq!(
+            snap.active_command.linear_velocity, 0.0,
+            "deadline breach → MRC stop"
+        );
+        assert!(
+            snap.active_state_degraded,
+            "deadline breach → degraded snapshot"
+        );
         let faults = mock.faults();
         assert_eq!(faults.len(), 1, "the breach must be audited exactly once");
         assert_eq!(faults[0].code, "inference_deadline_exceeded");
@@ -1134,7 +1194,11 @@ mod tests {
             1,
             "while hung, ticks must NOT stack more blocking tasks onto the wedged backend"
         );
-        assert_eq!(mock.faults().len(), 1, "while-hung ticks do not re-audit the onset");
+        assert_eq!(
+            mock.faults().len(),
+            1,
+            "while-hung ticks do not re-audit the onset"
+        );
 
         // Let the straggler finish, then tick 3 — the stale result is reaped
         // and DISCARDED; fresh inference runs and the loop publishes it.
@@ -1152,7 +1216,10 @@ mod tests {
             snap3.active_command.linear_velocity, 0.5,
             "recovery tick publishes the fresh backend output, not the stale straggler result"
         );
-        assert!(!snap3.active_state_degraded, "recovered loop is healthy again");
+        assert!(
+            !snap3.active_state_degraded,
+            "recovered loop is healthy again"
+        );
     }
 
     /// WS-0.4 F2 — the deadline-breach posture escalator (leaky bucket) drives
@@ -1172,26 +1239,47 @@ mod tests {
 
         // One breach → Degraded (acc = INC = 3).
         engine.record_deadline_breach();
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded,
-            "a single deadline breach must recommend Degraded");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Degraded,
+            "a single deadline breach must recommend Degraded"
+        );
 
         // Recovery hysteresis: it stays Degraded for INC/DECAY = 3 healthy ticks,
         // clearing only when the bucket drains to 0.
         engine.record_deadline_healthy(); // 3 → 2
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "still draining (2)");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Degraded,
+            "still draining (2)"
+        );
         engine.record_deadline_healthy(); // 2 → 1
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "still draining (1)");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Degraded,
+            "still draining (1)"
+        );
         engine.record_deadline_healthy(); // 1 → 0
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Nominal,
-            "recovered to Nominal only after the confirmation streak drained the bucket");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Nominal,
+            "recovered to Nominal only after the confirmation streak drained the bucket"
+        );
 
         // Three consecutive breaches (no intervening recovery) → LockedOut.
         engine.record_deadline_breach(); // 3
         engine.record_deadline_breach(); // 6
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Degraded, "two breaches: still Degraded");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Degraded,
+            "two breaches: still Degraded"
+        );
         engine.record_deadline_breach(); // 9 == DEADLINE_LOCKOUT_LEVEL
-        assert_eq!(engine.recommended_posture(), SafetyPosture::LockedOut,
-            "three consecutive breaches must escalate to LockedOut");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::LockedOut,
+            "three consecutive breaches must escalate to LockedOut"
+        );
     }
 
     /// WS-0.4 F2 — the escalation is LIVE through the real tick path: a backend
@@ -1207,14 +1295,21 @@ mod tests {
         });
         let model = backend.load_model("").unwrap();
         let (tx, _rx) = mpsc::channel(8);
-        let mut engine = InferenceLoop::new(Arc::clone(&backend), model, tx)
-            .with_inference_deadline_ms(30);
+        let mut engine =
+            InferenceLoop::new(Arc::clone(&backend), model, tx).with_inference_deadline_ms(30);
         let mut stream = SimpleStream { next_id: 0 };
 
-        assert_eq!(engine.recommended_posture(), SafetyPosture::Nominal, "healthy at start");
+        assert_eq!(
+            engine.recommended_posture(),
+            SafetyPosture::Nominal,
+            "healthy at start"
+        );
 
         // Tick 1: the backend hangs → deadline breach → posture escalates.
-        let _ = engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let _ = engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
         assert_eq!(
             engine.recommended_posture(),
             SafetyPosture::Degraded,
@@ -1227,13 +1322,19 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let mut recovered = false;
         for _ in 0..6 {
-            let _ = engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+            let _ = engine
+                .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+                .await
+                .unwrap();
             if engine.recommended_posture() == SafetyPosture::Nominal {
                 recovered = true;
                 break;
             }
         }
-        assert!(recovered, "the posture must relax to Nominal after a recovery streak of healthy ticks");
+        assert!(
+            recovered,
+            "the posture must relax to Nominal after a recovery streak of healthy ticks"
+        );
     }
 
     /// #773 F6 — the deadline is clamped to a sanity ceiling so a `u64::MAX`
@@ -1265,7 +1366,10 @@ mod tests {
             .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
             .await
             .unwrap();
-        assert!(snap.active_state_degraded, "200 ms latency trips the degraded THRESHOLD");
+        assert!(
+            snap.active_state_degraded,
+            "200 ms latency trips the degraded THRESHOLD"
+        );
         assert_eq!(
             snap.active_command.linear_velocity, 1.5,
             "a completed inference is clamped (1.5), not deadline-MRC'd to 0.0 — \
@@ -1292,13 +1396,25 @@ mod tests {
             })
         }
 
-        fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
+        fn run(
+            &self,
+            _: &ModelHandle,
+            _: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, BackendError> {
             let mut map = HashMap::new();
-            map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![self.linear]));
-            map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
-            Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+            map.insert(
+                "cmd_vel_linear".to_string(),
+                TensorStorage::Owned(vec![self.linear]),
+            );
+            map.insert(
+                "cmd_vel_angular".to_string(),
+                TensorStorage::Owned(vec![0.0_f32]),
+            );
+            Ok(TensorBatch {
+                named_tensors: map,
+                metadata: HashMap::new(),
+            })
         }
-
     }
 
     /// WS-0.4 F3 — a backend that emits a good MOVING command on run 1, then a
@@ -1320,21 +1436,45 @@ mod tests {
                 expected_precision: PrecisionMode::FP32,
             })
         }
-        fn run(&self, _: &ModelHandle, _: &TensorBatch) -> Result<TensorBatch<'static>, BackendError> {
+        fn run(
+            &self,
+            _: &ModelHandle,
+            _: &TensorBatch,
+        ) -> Result<TensorBatch<'static>, BackendError> {
             let n = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 let mut map = HashMap::new();
-                map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![2.0_f32]));
-                map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
-                return Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() });
+                map.insert(
+                    "cmd_vel_linear".to_string(),
+                    TensorStorage::Owned(vec![2.0_f32]),
+                );
+                map.insert(
+                    "cmd_vel_angular".to_string(),
+                    TensorStorage::Owned(vec![0.0_f32]),
+                );
+                return Ok(TensorBatch {
+                    named_tensors: map,
+                    metadata: HashMap::new(),
+                });
             }
             if self.nan {
                 let mut map = HashMap::new();
-                map.insert("cmd_vel_linear".to_string(), TensorStorage::Owned(vec![f32::NAN]));
-                map.insert("cmd_vel_angular".to_string(), TensorStorage::Owned(vec![0.0_f32]));
-                Ok(TensorBatch { named_tensors: map, metadata: HashMap::new() })
+                map.insert(
+                    "cmd_vel_linear".to_string(),
+                    TensorStorage::Owned(vec![f32::NAN]),
+                );
+                map.insert(
+                    "cmd_vel_angular".to_string(),
+                    TensorStorage::Owned(vec![0.0_f32]),
+                );
+                Ok(TensorBatch {
+                    named_tensors: map,
+                    metadata: HashMap::new(),
+                })
             } else {
-                Err(BackendError::ExecutionFailure("injected post-good failure".into()))
+                Err(BackendError::ExecutionFailure(
+                    "injected post-good failure".into(),
+                ))
             }
         }
     }
@@ -1356,18 +1496,36 @@ mod tests {
         let mut loop_engine = InferenceLoop::new(backend, model, tx); // no governor
         let mut stream = SimpleStream { next_id: 0 };
 
-        let s1 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
-        assert_eq!(s1.active_command.linear_velocity, 2.0, "tick 1 validates the good 2.0 m/s command");
+        let s1 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert_eq!(
+            s1.active_command.linear_velocity, 2.0,
+            "tick 1 validates the good 2.0 m/s command"
+        );
 
-        let s2 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
-        assert_eq!(s2.active_command.linear_velocity, 0.0, "NaN tick returns a stopped snapshot");
+        let s2 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
+        assert_eq!(
+            s2.active_command.linear_velocity, 0.0,
+            "NaN tick returns a stopped snapshot"
+        );
         assert!(s2.active_state_degraded);
 
-        let _s3 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let _s3 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
 
         let flush_after_good = rx.recv().await.unwrap();
         let flush_after_fault = rx.recv().await.unwrap();
-        assert_eq!(flush_after_good.linear_velocity, 2.0, "tick-2 flush is tick-1's good command");
+        assert_eq!(
+            flush_after_good.linear_velocity, 2.0,
+            "tick-2 flush is tick-1's good command"
+        );
         assert_eq!(
             flush_after_fault.linear_velocity, 0.0,
             "tick-3 flush MUST be a STOP — the pre-fault moving command must not re-flush (F3)"
@@ -1388,15 +1546,26 @@ mod tests {
         let mut loop_engine = InferenceLoop::new(backend, model, tx);
         let mut stream = SimpleStream { next_id: 0 };
 
-        let _s1 = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.unwrap();
+        let _s1 = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .unwrap();
         // Tick 2: backend errors → tick returns Err (after flushing tick-1's good cmd).
-        assert!(loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await.is_err());
+        assert!(loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await
+            .is_err());
         // Tick 3: also errors, but its flush publishes tick-2's post-fault stamp first.
-        let _ = loop_engine.tick(stream.next_frame().unwrap(), SafetyPosture::Nominal).await;
+        let _ = loop_engine
+            .tick(stream.next_frame().unwrap(), SafetyPosture::Nominal)
+            .await;
 
         let flush_after_good = rx.recv().await.unwrap();
         let flush_after_fault = rx.recv().await.unwrap();
-        assert_eq!(flush_after_good.linear_velocity, 2.0, "tick-2 flush is tick-1's good command");
+        assert_eq!(
+            flush_after_good.linear_velocity, 2.0,
+            "tick-2 flush is tick-1's good command"
+        );
         assert_eq!(
             flush_after_fault.linear_velocity, 0.0,
             "tick-3 flush MUST be a STOP after a backend error, not the re-flushed moving command (F3)"
@@ -1483,14 +1652,15 @@ mod tests {
     #[tokio::test]
     async fn valid_input_reaches_governor_unchanged() {
         let recorded = Arc::new(Mutex::new(None::<f64>));
-        let governor = RecordingGovernor { recorded: Arc::clone(&recorded) };
+        let governor = RecordingGovernor {
+            recorded: Arc::clone(&recorded),
+        };
 
         let backend = Arc::new(ConfigurableBackend { linear: 3.0_f32 });
         let model = backend.load_model("").unwrap();
         let (tx, _rx) = mpsc::channel(4);
 
-        let mut loop_engine = InferenceLoop::new(backend, model, tx)
-            .with_governor(governor);
+        let mut loop_engine = InferenceLoop::new(backend, model, tx).with_governor(governor);
         let mut stream = SimpleStream { next_id: 0 };
 
         let _ = loop_engine
@@ -1498,7 +1668,10 @@ mod tests {
             .await
             .unwrap();
 
-        let received = recorded.lock().unwrap().expect("governor must have been called");
+        let received = recorded
+            .lock()
+            .unwrap()
+            .expect("governor must have been called");
         assert_eq!(
             received, 3.0_f64,
             "governor must receive the exact proposed velocity from model output, got {}",

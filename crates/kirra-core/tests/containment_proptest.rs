@@ -28,7 +28,14 @@ fn footprint() -> VehicleFootprint {
 }
 
 fn straight_corridor<'a>(left: &'a [Point], right: &'a [Point]) -> Corridor<'a> {
-    Corridor { left, right, confidence: 1.0, age_ms: 0, min_confidence: 0.5, max_age_ms: 5_000 }
+    Corridor {
+        left,
+        right,
+        confidence: 1.0,
+        age_ms: 0,
+        min_confidence: 0.5,
+        max_age_ms: 5_000,
+    }
 }
 
 proptest! {

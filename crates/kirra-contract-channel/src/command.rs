@@ -115,8 +115,14 @@ impl VehicleCommandPayload {
         }
         let f64_at = |o: usize| {
             f64::from_le_bytes([
-                bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3], bytes[o + 4], bytes[o + 5],
-                bytes[o + 6], bytes[o + 7],
+                bytes[o],
+                bytes[o + 1],
+                bytes[o + 2],
+                bytes[o + 3],
+                bytes[o + 4],
+                bytes[o + 5],
+                bytes[o + 6],
+                bytes[o + 7],
             ])
         };
         let cmd = Self {
@@ -133,7 +139,10 @@ impl VehicleCommandPayload {
             (cmd.current_velocity_mps, CommandField::CurrentVelocityMps),
             (cmd.delta_time_s, CommandField::DeltaTimeS),
             (cmd.steering_angle_deg, CommandField::SteeringAngleDeg),
-            (cmd.current_steering_angle_deg, CommandField::CurrentSteeringAngleDeg),
+            (
+                cmd.current_steering_angle_deg,
+                CommandField::CurrentSteeringAngleDeg,
+            ),
         ] {
             if !value.is_finite() {
                 return Err(CommandCodecError::NonFinite { field });
@@ -177,10 +186,12 @@ impl VehicleCommandPayload {
     /// (returns a [`CommandCodecError::LengthMismatch`] mapped from an out-of-range
     /// `command_len`, though a validated view cannot hit that), then [`decode`](Self::decode).
     pub fn from_validated_view(view: &GovernorContractView) -> Result<Self, CommandCodecError> {
-        let bytes = view.validated_command().ok_or(CommandCodecError::LengthMismatch {
-            found: view.command_len as usize,
-            expected: COMMAND_PAYLOAD_LEN,
-        })?;
+        let bytes = view
+            .validated_command()
+            .ok_or(CommandCodecError::LengthMismatch {
+                found: view.command_len as usize,
+                expected: COMMAND_PAYLOAD_LEN,
+            })?;
         Self::decode(bytes)
     }
 }
@@ -197,7 +208,9 @@ const _: () = assert!(COMMAND_PAYLOAD_LEN == 5 * core::mem::size_of::<f64>());
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{publish, read_coherent_snapshot, validate, AcceptedWatermark, MAX_SNAPSHOT_RETRIES};
+    use crate::{
+        publish, read_coherent_snapshot, validate, AcceptedWatermark, MAX_SNAPSHOT_RETRIES,
+    };
 
     fn sample() -> VehicleCommandPayload {
         VehicleCommandPayload {
@@ -307,7 +320,10 @@ mod tests {
         let s2 = read_coherent_snapshot(&region, MAX_SNAPSHOT_RETRIES).unwrap();
         assert_eq!(
             validate(&s2, 5_000, &wm),
-            Err(crate::ContractFault::SequenceRegressOrReplay { found: 7, last_accepted: 7 })
+            Err(crate::ContractFault::SequenceRegressOrReplay {
+                found: 7,
+                last_accepted: 7
+            })
         );
     }
 

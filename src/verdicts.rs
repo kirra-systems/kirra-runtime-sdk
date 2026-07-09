@@ -45,7 +45,9 @@ pub fn mint_verdict_id(now_ms: u64, payload_json: &str) -> String {
 /// pattern, so `%`/`_` metacharacters can never widen the match.
 #[must_use]
 pub fn is_valid_verdict_id(s: &str) -> bool {
-    s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Fallback explanation for a token this build does not recognize (a NEWER
@@ -151,11 +153,15 @@ mod tests {
         for code in all {
             let explanation = explain_deny_token(code.reason());
             assert_ne!(
-                explanation, EXPLAIN_UNKNOWN,
+                explanation,
+                EXPLAIN_UNKNOWN,
                 "DenyCode::{code:?} ({}) has no operator explanation",
                 code.reason()
             );
-            assert!(explanation.len() > 40, "explanation for {code:?} is too thin");
+            assert!(
+                explanation.len() > 40,
+                "explanation for {code:?} is too thin"
+            );
         }
     }
 
@@ -170,7 +176,10 @@ mod tests {
         let b = mint_verdict_id(1_000, "{\"x\":1}"); // same ms, same payload
         assert!(is_valid_verdict_id(&a), "{a}");
         assert!(is_valid_verdict_id(&b), "{b}");
-        assert_ne!(a, b, "the counter must discriminate same-ms same-payload mints");
+        assert_ne!(
+            a, b,
+            "the counter must discriminate same-ms same-payload mints"
+        );
     }
 
     #[test]
@@ -181,7 +190,10 @@ mod tests {
         assert!(!is_valid_verdict_id(&"a".repeat(33)));
         assert!(!is_valid_verdict_id(&format!("{}%", "a".repeat(31))));
         assert!(!is_valid_verdict_id(&format!("{}_", "a".repeat(31))));
-        assert!(!is_valid_verdict_id(&"A".repeat(32)), "uppercase is not canonical");
+        assert!(
+            !is_valid_verdict_id(&"A".repeat(32)),
+            "uppercase is not canonical"
+        );
         assert!(is_valid_verdict_id("0123456789abcdef0123456789abcdef"));
     }
 }

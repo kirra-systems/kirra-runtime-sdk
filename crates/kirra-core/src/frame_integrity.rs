@@ -247,7 +247,10 @@ mod tests {
     fn just_over_primary_is_degraded() {
         let cfg = FrameIntegrityCfg::default();
         assert_eq!(
-            resolve_frame_trust(&reported(cfg.primary_max_lateral_error_95_m + 1e-9, 0), &cfg),
+            resolve_frame_trust(
+                &reported(cfg.primary_max_lateral_error_95_m + 1e-9, 0),
+                &cfg
+            ),
             FrameTrust::Degraded
         );
     }
@@ -266,7 +269,10 @@ mod tests {
     fn just_over_fallback_is_untrusted() {
         let cfg = FrameIntegrityCfg::default();
         assert_eq!(
-            resolve_frame_trust(&reported(cfg.fallback_max_lateral_error_95_m + 1e-9, 0), &cfg),
+            resolve_frame_trust(
+                &reported(cfg.fallback_max_lateral_error_95_m + 1e-9, 0),
+                &cfg
+            ),
             FrameTrust::Untrusted
         );
     }

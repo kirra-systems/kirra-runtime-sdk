@@ -31,7 +31,10 @@ impl Default for RedundancyConfig {
         // Conservative defaults: ~1 vehicle-width of position slack, a brisk-walk of
         // speed slack. Tighter than this risks flapping on sensor noise; looser risks
         // missing a real single-channel fault.
-        Self { position_tol_m: 2.0, velocity_tol_mps: 1.5 }
+        Self {
+            position_tol_m: 2.0,
+            velocity_tol_mps: 1.5,
+        }
     }
 }
 
@@ -49,7 +52,11 @@ pub enum DivergenceReason {
     /// other — a phantom (false positive) or a miss (false negative). The dangerous case.
     Unmatched { id: u64, channel: Channel },
     /// A position-matched pair disagrees on speed beyond `velocity_tol_mps`.
-    SpeedMismatch { id_a: u64, id_b: u64, delta_mps: f64 },
+    SpeedMismatch {
+        id_a: u64,
+        id_b: u64,
+        delta_mps: f64,
+    },
 }
 
 /// The cross-check verdict.
@@ -246,7 +253,10 @@ fn unmatched_or_mismatched(
     for o in from {
         match nearest_within(o, other, cfg.position_tol_m) {
             None => {
-                return Some(DivergenceReason::Unmatched { id: o.id, channel: from_channel });
+                return Some(DivergenceReason::Unmatched {
+                    id: o.id,
+                    channel: from_channel,
+                });
             }
             Some(m) => {
                 let delta = (o.velocity_mps - m.velocity_mps).abs();
@@ -256,7 +266,11 @@ fn unmatched_or_mismatched(
                         Channel::A => (o.id, m.id),
                         Channel::B => (m.id, o.id),
                     };
-                    return Some(DivergenceReason::SpeedMismatch { id_a, id_b, delta_mps: delta });
+                    return Some(DivergenceReason::SpeedMismatch {
+                        id_a,
+                        id_b,
+                        delta_mps: delta,
+                    });
                 }
             }
         }
@@ -273,7 +287,12 @@ fn nearest_within<'a>(
 ) -> Option<&'a PerceivedObject> {
     candidates
         .iter()
-        .map(|c| (c, (c.pos.x_m - target.pos.x_m).hypot(c.pos.y_m - target.pos.y_m)))
+        .map(|c| {
+            (
+                c,
+                (c.pos.x_m - target.pos.x_m).hypot(c.pos.y_m - target.pos.y_m),
+            )
+        })
         .filter(|(_, d)| *d <= tol_m)
         .min_by(|(_, d1), (_, d2)| d1.total_cmp(d2))
         .map(|(c, _)| c)
@@ -306,7 +325,10 @@ mod tests {
 
     #[test]
     fn empty_channels_are_consistent() {
-        assert_eq!(cross_check(&[], &[], RedundancyConfig::default()), RedundancyVerdict::Consistent);
+        assert_eq!(
+            cross_check(&[], &[], RedundancyConfig::default()),
+            RedundancyVerdict::Consistent
+        );
     }
 
     #[test]
@@ -316,8 +338,18 @@ mod tests {
         let b: [PerceivedObject; 0] = [];
         let v = cross_check(&a, &b, RedundancyConfig::default());
         assert!(v.is_diverged());
-        assert_eq!(v, RedundancyVerdict::Diverged(DivergenceReason::Unmatched { id: 1, channel: Channel::A }));
-        assert_eq!(v.to_perception_cap(), Some(0.0), "divergence → MRC-floor cap");
+        assert_eq!(
+            v,
+            RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
+                id: 1,
+                channel: Channel::A
+            })
+        );
+        assert_eq!(
+            v.to_perception_cap(),
+            Some(0.0),
+            "divergence → MRC-floor cap"
+        );
     }
 
     #[test]
@@ -326,7 +358,10 @@ mod tests {
         let b = [obj(4, 18.0, 0.5, 2.0)];
         assert_eq!(
             cross_check(&a, &b, RedundancyConfig::default()),
-            RedundancyVerdict::Diverged(DivergenceReason::Unmatched { id: 4, channel: Channel::B })
+            RedundancyVerdict::Diverged(DivergenceReason::Unmatched {
+                id: 4,
+                channel: Channel::B
+            })
         );
     }
 
@@ -336,7 +371,11 @@ mod tests {
         let a = [obj(1, 20.0, 0.0, 0.0)];
         let b = [obj(2, 20.3, 0.0, 8.0)];
         match cross_check(&a, &b, RedundancyConfig::default()) {
-            RedundancyVerdict::Diverged(DivergenceReason::SpeedMismatch { id_a, id_b, delta_mps }) => {
+            RedundancyVerdict::Diverged(DivergenceReason::SpeedMismatch {
+                id_a,
+                id_b,
+                delta_mps,
+            }) => {
                 assert_eq!((id_a, id_b), (1, 2));
                 assert!((delta_mps - 8.0).abs() < 1e-9);
             }
@@ -351,7 +390,10 @@ mod tests {
         // State 1: a stark divergence, but the monitor is off → no cap (byte-identical prior).
         let a = [obj(1, 20.0, 0.0, 0.0)];
         let b: [PerceivedObject; 0] = [];
-        assert_eq!(resolve_redundancy_cap(false, &a, &b, true, RedundancyConfig::default()), None);
+        assert_eq!(
+            resolve_redundancy_cap(false, &a, &b, true, RedundancyConfig::default()),
+            None
+        );
     }
 
     #[test]
@@ -359,7 +401,10 @@ mod tests {
         // State 2: enabled, fresh secondary, channels agree → None.
         let a = [obj(1, 20.0, 0.0, 5.0)];
         let b = [obj(7, 20.3, 0.1, 5.4)];
-        assert_eq!(resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()), None);
+        assert_eq!(
+            resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()),
+            None
+        );
     }
 
     #[test]
@@ -367,7 +412,10 @@ mod tests {
         // State 3: enabled, fresh, a phantom in A that B misses → MRC-floor cap.
         let a = [obj(1, 20.0, 0.0, 0.0)];
         let b: [PerceivedObject; 0] = [];
-        assert_eq!(resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()), Some(0.0));
+        assert_eq!(
+            resolve_redundancy_cap(true, &a, &b, true, RedundancyConfig::default()),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -376,7 +424,10 @@ mod tests {
         // last secondary snapshot happens to still agree (it is no longer assured-fresh).
         let a = [obj(1, 20.0, 0.0, 5.0)];
         let b = [obj(7, 20.3, 0.1, 5.4)];
-        assert_eq!(resolve_redundancy_cap(true, &a, &b, false, RedundancyConfig::default()), Some(0.0));
+        assert_eq!(
+            resolve_redundancy_cap(true, &a, &b, false, RedundancyConfig::default()),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -385,7 +436,11 @@ mod tests {
         assert_eq!(more_restrictive_cap(None, None), None);
         assert_eq!(more_restrictive_cap(Some(3.0), None), Some(3.0));
         assert_eq!(more_restrictive_cap(None, Some(2.0)), Some(2.0));
-        assert_eq!(more_restrictive_cap(Some(3.0), Some(0.0)), Some(0.0), "an MRC floor binds");
+        assert_eq!(
+            more_restrictive_cap(Some(3.0), Some(0.0)),
+            Some(0.0),
+            "an MRC floor binds"
+        );
         assert_eq!(more_restrictive_cap(Some(5.0), Some(2.0)), Some(2.0));
     }
 
@@ -404,7 +459,10 @@ mod tests {
         // The per-tick MRC cap handles a blip; posture stays Nominal under DIVERGENCE_DEGRADE_MS.
         let mut e = DivergenceEscalator::new();
         e.observe(true, 1_000);
-        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS - 1), FleetPosture::Nominal);
+        assert_eq!(
+            e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS - 1),
+            FleetPosture::Nominal
+        );
     }
 
     #[test]
@@ -412,10 +470,16 @@ mod tests {
         let mut e = DivergenceEscalator::new();
         e.observe(true, 1_000); // divergence onset; stays diverged across ticks
         e.observe(true, 1_500);
-        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS), FleetPosture::Degraded,
-            "≥ degrade window → Degraded");
-        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS), FleetPosture::LockedOut,
-            "≥ lockout window → LockedOut");
+        assert_eq!(
+            e.recommended_posture(1_000 + DIVERGENCE_DEGRADE_MS),
+            FleetPosture::Degraded,
+            "≥ degrade window → Degraded"
+        );
+        assert_eq!(
+            e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS),
+            FleetPosture::LockedOut,
+            "≥ lockout window → LockedOut"
+        );
     }
 
     #[test]
@@ -423,12 +487,22 @@ mod tests {
         let mut e = DivergenceEscalator::new();
         e.observe(true, 1_000);
         // It had been diverging long enough to escalate...
-        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS), FleetPosture::LockedOut);
+        assert_eq!(
+            e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS),
+            FleetPosture::LockedOut
+        );
         // ...but a consistent tick clears it → recovers to Nominal (cap + verifier posture remain).
         e.observe(false, 1_000 + DIVERGENCE_LOCKOUT_MS + 10);
-        assert_eq!(e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS + 10), FleetPosture::Nominal);
+        assert_eq!(
+            e.recommended_posture(1_000 + DIVERGENCE_LOCKOUT_MS + 10),
+            FleetPosture::Nominal
+        );
         // A NEW divergence restarts the streak from its own onset (not the old one).
         e.observe(true, 100_000);
-        assert_eq!(e.recommended_posture(100_000 + 10), FleetPosture::Nominal, "fresh streak → momentary again");
+        assert_eq!(
+            e.recommended_posture(100_000 + 10),
+            FleetPosture::Nominal,
+            "fresh streak → momentary again"
+        );
     }
 }

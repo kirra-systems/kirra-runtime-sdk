@@ -9,18 +9,21 @@
 //! See `examples/c/kirra_ffi_demo.c` for a linked, runnable consumer, and the Rust
 //! `governor_quickstart` example for the equivalent in-process path.
 
-use std::sync::{Mutex, LazyLock};
-use crate::kirra_core::{KirraKernelGovernor, RuntimeTrustEngine};
 use crate::kinematics_contract::KinematicContract;
-use crate::{SafetyGovernor, SafetyContract};
+use crate::kirra_core::{KirraKernelGovernor, RuntimeTrustEngine};
+use crate::{SafetyContract, SafetyGovernor};
+use std::sync::{LazyLock, Mutex};
 
-static GLOBAL_GOVERNOR: LazyLock<Mutex<KirraKernelGovernor<KinematicContract>>> = LazyLock::new(|| {
-    let contract = KinematicContract {
-        max_linear_velocity: 2.0, max_angular_velocity: 1.0,
-        max_linear_acceleration: 10.0, fallback_linear_speed: 0.0,
-    };
-    Mutex::new(KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0))
-});
+static GLOBAL_GOVERNOR: LazyLock<Mutex<KirraKernelGovernor<KinematicContract>>> =
+    LazyLock::new(|| {
+        let contract = KinematicContract {
+            max_linear_velocity: 2.0,
+            max_angular_velocity: 1.0,
+            max_linear_acceleration: 10.0,
+            fallback_linear_speed: 0.0,
+        };
+        Mutex::new(KirraKernelGovernor::new(contract, 0.0, -2.0, 2.0))
+    });
 
 /// Bound a proposed LINEAR velocity (m/s) against the governor's envelope and
 /// rate-of-change limits, over a timestep `dt` (seconds). Returns the sanitized
@@ -29,7 +32,10 @@ static GLOBAL_GOVERNOR: LazyLock<Mutex<KirraKernelGovernor<KinematicContract>>> 
 /// contract fallback (`0.0`).
 #[no_mangle]
 pub extern "C" fn kirra_filter_move_velocity(proposed_velocity: f64, dt: f64) -> f64 {
-    GLOBAL_GOVERNOR.lock().map(|mut g| g.evaluate(proposed_velocity, dt).sanitized_scalar).unwrap_or(0.0)
+    GLOBAL_GOVERNOR
+        .lock()
+        .map(|mut g| g.evaluate(proposed_velocity, dt).sanitized_scalar)
+        .unwrap_or(0.0)
 }
 
 // --- Structured verdict (WS-2 SDK: the verdict struct) ---------------------
@@ -101,7 +107,10 @@ pub extern "C" fn kirra_check_move_velocity(proposed_velocity: f64, dt: f64) -> 
                 code: mitigation_to_code(&r.mitigation),
             }
         }
-        Err(_) => KirraVerdict { sanitized_value: 0.0, code: KIRRA_VERDICT_LOCK_POISONED },
+        Err(_) => KirraVerdict {
+            sanitized_value: 0.0,
+            code: KIRRA_VERDICT_LOCK_POISONED,
+        },
     }
 }
 
@@ -130,14 +139,19 @@ pub extern "C" fn kirra_filter_rotate_velocity(proposed_angular: f64, _dt: f64) 
             g.trust_engine.register_safe_tick();
             proposed_angular
         }
-    } else { 0.0 }
+    } else {
+        0.0
+    }
 }
 
 /// The governor's current trust score (0–100). Safe ticks raise it; clamps and
 /// fail-closed rejections decay it. A poisoned lock reads as `0` (fail-closed).
 #[no_mangle]
 pub extern "C" fn kirra_get_trust_score() -> u32 {
-    GLOBAL_GOVERNOR.lock().map(|g| g.trust_engine.current_score).unwrap_or(0)
+    GLOBAL_GOVERNOR
+        .lock()
+        .map(|g| g.trust_engine.current_score)
+        .unwrap_or(0)
 }
 
 // --- Posture query (WS-2 SDK: posture query) -------------------------------
@@ -301,7 +315,9 @@ pub unsafe extern "C" fn kirra_verify_release_token(
     let token = crate::governor_release::ReleaseToken::from_bytes(&token_arr);
     match crate::governor_release::verify_release_over_digest(&token, &digest_arr, &vk) {
         Ok(()) => KIRRA_RELEASE_OK,
-        Err(crate::governor_release::ReleaseDenied::DigestMismatch) => KIRRA_RELEASE_DIGEST_MISMATCH,
+        Err(crate::governor_release::ReleaseDenied::DigestMismatch) => {
+            KIRRA_RELEASE_DIGEST_MISMATCH
+        }
         Err(crate::governor_release::ReleaseDenied::SignatureInvalid) => {
             KIRRA_RELEASE_SIGNATURE_INVALID
         }
@@ -327,7 +343,9 @@ pub unsafe extern "C" fn kirra_verify_release_token(
 /// a raw pointer must be marked unsafe fn.
 #[no_mangle]
 pub unsafe extern "C" fn kirra_reset_state(token_ptr: *const u8, token_len: usize) -> i32 {
-    if token_ptr.is_null() || token_len == 0 || token_len > 64 { return 0; }
+    if token_ptr.is_null() || token_len == 0 || token_len > 64 {
+        return 0;
+    }
     let key = match std::env::var("KIRRA_SUPERVISOR_RESET_KEY") {
         Ok(v) if !v.is_empty() => v.into_bytes(),
         _ => return 0,
@@ -343,7 +361,9 @@ pub unsafe extern "C" fn kirra_reset_state(token_ptr: *const u8, token_len: usiz
     // unchanged (the caller supplies time, which is correct).
     if let Ok(mut g) = GLOBAL_GOVERNOR.lock() {
         reset_engine_at(&mut g.trust_engine, token, &key, supervisor_now_ms())
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,8 +481,14 @@ mod reset_clock_tests {
             1,
             "a served cooldown must admit the correct token (no permanent lockout)"
         );
-        assert_eq!(engine.failed_reset_attempts, 0, "success clears the counter");
-        assert_eq!(engine.reset_cooldown_end_ms, 0, "success clears the cooldown");
+        assert_eq!(
+            engine.failed_reset_attempts, 0,
+            "success clears the counter"
+        );
+        assert_eq!(
+            engine.reset_cooldown_end_ms, 0,
+            "success clears the cooldown"
+        );
         assert_eq!(engine.mode, crate::TrustMode::FullAutonomy);
     }
 
@@ -482,7 +508,10 @@ mod reset_clock_tests {
         // First wrong attempt after the window: counter restarts at 1, no re-arm.
         assert_eq!(reset_engine_at(&mut engine, b"wrong", key, after), 0);
         assert_eq!(engine.failed_reset_attempts, 1);
-        assert_eq!(engine.reset_cooldown_end_ms, 0, "one failure must not re-arm the cooldown");
+        assert_eq!(
+            engine.reset_cooldown_end_ms, 0,
+            "one failure must not re-arm the cooldown"
+        );
     }
 
     /// A restart must NOT bypass the throttle (Copilot #819). The gateway persists
@@ -508,7 +537,10 @@ mod reset_clock_tests {
             t + 60_000,
             "a restart at threshold must ARM a cooldown, not clear the counter"
         );
-        assert_eq!(engine.failed_reset_attempts, 5, "counter held until the cooldown is served");
+        assert_eq!(
+            engine.failed_reset_attempts, 5,
+            "counter held until the cooldown is served"
+        );
 
         // Within the window: still blocked.
         assert_eq!(reset_engine_at(&mut engine, key, key, t + 59_999), 0);
@@ -542,17 +574,42 @@ mod verdict_tests {
         let cases = [
             (M::PassthroughUnrestrictedNormal, KIRRA_VERDICT_PASSTHROUGH),
             (M::EnvelopeClampTakesPriority, KIRRA_VERDICT_ENVELOPE_CLAMP),
-            (M::RateClampEnforced { max_rate: 1.0 }, KIRRA_VERDICT_RATE_CLAMP),
-            (M::NonfiniteInputRejectedFailsafe, KIRRA_VERDICT_NONFINITE_REJECTED),
-            (M::InvalidTimeDeltaRejectedFailsafe, KIRRA_VERDICT_INVALID_DT_REJECTED),
-            (M::DegradedPostureClamp { cap_min: -1.0, cap_max: 1.0 }, KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP),
-            (M::DegradedDecelToStopHold { held: 0.5 }, KIRRA_VERDICT_DEGRADED_DECEL_HOLD),
-            (M::ShadowModeHoldEnforced { retained: 0.2 }, KIRRA_VERDICT_SHADOW_HOLD),
+            (
+                M::RateClampEnforced { max_rate: 1.0 },
+                KIRRA_VERDICT_RATE_CLAMP,
+            ),
+            (
+                M::NonfiniteInputRejectedFailsafe,
+                KIRRA_VERDICT_NONFINITE_REJECTED,
+            ),
+            (
+                M::InvalidTimeDeltaRejectedFailsafe,
+                KIRRA_VERDICT_INVALID_DT_REJECTED,
+            ),
+            (
+                M::DegradedPostureClamp {
+                    cap_min: -1.0,
+                    cap_max: 1.0,
+                },
+                KIRRA_VERDICT_DEGRADED_POSTURE_CLAMP,
+            ),
+            (
+                M::DegradedDecelToStopHold { held: 0.5 },
+                KIRRA_VERDICT_DEGRADED_DECEL_HOLD,
+            ),
+            (
+                M::ShadowModeHoldEnforced { retained: 0.2 },
+                KIRRA_VERDICT_SHADOW_HOLD,
+            ),
             (M::CriticalLockoutFallback, KIRRA_VERDICT_LOCKOUT_FALLBACK),
         ];
         let mut seen = std::collections::BTreeSet::new();
         for (m, expected) in cases {
-            assert_eq!(mitigation_to_code(&m), expected, "code for {m:?} must be stable");
+            assert_eq!(
+                mitigation_to_code(&m),
+                expected,
+                "code for {m:?} must be stable"
+            );
             assert!(seen.insert(expected), "code {expected} must be distinct");
         }
         // The poisoned-lock sentinel is distinct from every mapped code.
@@ -566,9 +623,18 @@ mod verdict_tests {
     #[test]
     fn verdict_value_matches_the_scalar_filter_nonfinite() {
         let v = kirra_check_move_velocity(f64::NAN, 0.05);
-        assert_eq!(v.code, KIRRA_VERDICT_NONFINITE_REJECTED, "a NaN demand is a fail-closed rejection");
-        assert!(v.sanitized_value.is_finite(), "the verdict value is never non-finite");
-        assert_eq!(v.sanitized_value, kirra_filter_move_velocity(f64::NAN, 0.05));
+        assert_eq!(
+            v.code, KIRRA_VERDICT_NONFINITE_REJECTED,
+            "a NaN demand is a fail-closed rejection"
+        );
+        assert!(
+            v.sanitized_value.is_finite(),
+            "the verdict value is never non-finite"
+        );
+        assert_eq!(
+            v.sanitized_value,
+            kirra_filter_move_velocity(f64::NAN, 0.05)
+        );
     }
 
     /// A non-positive timestep is a fail-closed rejection with the invalid-dt code
@@ -585,10 +651,19 @@ mod verdict_tests {
     #[test]
     fn posture_codes_are_stable_ordered_and_distinct() {
         use crate::TrustMode as T;
-        assert_eq!(trust_mode_to_posture(T::FullAutonomy), KIRRA_POSTURE_NOMINAL);
-        assert_eq!(trust_mode_to_posture(T::ConstrainedAdvisory), KIRRA_POSTURE_CONSTRAINED);
+        assert_eq!(
+            trust_mode_to_posture(T::FullAutonomy),
+            KIRRA_POSTURE_NOMINAL
+        );
+        assert_eq!(
+            trust_mode_to_posture(T::ConstrainedAdvisory),
+            KIRRA_POSTURE_CONSTRAINED
+        );
         assert_eq!(trust_mode_to_posture(T::ShadowMode), KIRRA_POSTURE_SHADOW);
-        assert_eq!(trust_mode_to_posture(T::LockedOut), KIRRA_POSTURE_LOCKED_OUT);
+        assert_eq!(
+            trust_mode_to_posture(T::LockedOut),
+            KIRRA_POSTURE_LOCKED_OUT
+        );
         // Ordered most-permissive → most-restrictive, and all distinct.
         assert!(
             KIRRA_POSTURE_NOMINAL < KIRRA_POSTURE_CONSTRAINED
@@ -639,10 +714,22 @@ mod verdict_tests {
         ] {
             assert!(v.is_finite(), "every envelope field must be finite");
         }
-        assert_eq!(e.min_linear_velocity_mps, -e.max_linear_velocity_mps, "symmetric envelope");
-        assert!(e.max_linear_velocity_mps >= 0.0, "max velocity is non-negative");
-        assert!(e.max_angular_velocity_radps >= 0.0, "max angular rate is non-negative");
-        assert!(e.max_linear_acceleration_mps2 >= 0.0, "accel limit is non-negative (0 in the fail-closed envelope)");
+        assert_eq!(
+            e.min_linear_velocity_mps, -e.max_linear_velocity_mps,
+            "symmetric envelope"
+        );
+        assert!(
+            e.max_linear_velocity_mps >= 0.0,
+            "max velocity is non-negative"
+        );
+        assert!(
+            e.max_angular_velocity_radps >= 0.0,
+            "max angular rate is non-negative"
+        );
+        assert!(
+            e.max_linear_acceleration_mps2 >= 0.0,
+            "accel limit is non-negative (0 in the fail-closed envelope)"
+        );
     }
 
     /// The reported envelope agrees with what the checker enforces: a demand well
@@ -663,7 +750,6 @@ mod verdict_tests {
 
 #[cfg(test)]
 mod release_token_ffi_tests {
-
 
     use super::*;
     use crate::governor_release::{contract_digest, issue_release_token};
@@ -701,7 +787,14 @@ mod release_token_ffi_tests {
         let other_digest = contract_digest(&view(b"steer:9.9")); // different bytes
         let vk = sk.verifying_key().to_bytes();
         let code = unsafe {
-            kirra_verify_release_token(token.as_ptr(), 96, other_digest.as_ptr(), 32, vk.as_ptr(), 32)
+            kirra_verify_release_token(
+                token.as_ptr(),
+                96,
+                other_digest.as_ptr(),
+                32,
+                vk.as_ptr(),
+                32,
+            )
         };
         assert_eq!(code, KIRRA_RELEASE_DIGEST_MISMATCH);
     }
@@ -728,9 +821,18 @@ mod release_token_ffi_tests {
         let v = view(b"steer:1.5");
         let token = issue_release_token(&v, &sk).to_bytes();
         let digest = contract_digest(&v);
-        let other_vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        let other_vk = SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes();
         let code = unsafe {
-            kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, other_vk.as_ptr(), 32)
+            kirra_verify_release_token(
+                token.as_ptr(),
+                96,
+                digest.as_ptr(),
+                32,
+                other_vk.as_ptr(),
+                32,
+            )
         };
         assert_eq!(code, KIRRA_RELEASE_SIGNATURE_INVALID);
     }
@@ -745,17 +847,30 @@ mod release_token_ffi_tests {
         let vk = sk.verifying_key().to_bytes();
         // Wrong token length.
         assert_eq!(
-            unsafe { kirra_verify_release_token(token.as_ptr(), 95, digest.as_ptr(), 32, vk.as_ptr(), 32) },
+            unsafe {
+                kirra_verify_release_token(token.as_ptr(), 95, digest.as_ptr(), 32, vk.as_ptr(), 32)
+            },
             KIRRA_RELEASE_BAD_ARGS
         );
         // Wrong digest length.
         assert_eq!(
-            unsafe { kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 31, vk.as_ptr(), 32) },
+            unsafe {
+                kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 31, vk.as_ptr(), 32)
+            },
             KIRRA_RELEASE_BAD_ARGS
         );
         // Null token pointer.
         assert_eq!(
-            unsafe { kirra_verify_release_token(std::ptr::null(), 96, digest.as_ptr(), 32, vk.as_ptr(), 32) },
+            unsafe {
+                kirra_verify_release_token(
+                    std::ptr::null(),
+                    96,
+                    digest.as_ptr(),
+                    32,
+                    vk.as_ptr(),
+                    32,
+                )
+            },
             KIRRA_RELEASE_BAD_ARGS
         );
         // A correct-LENGTH but non-decodable Ed25519 key (not a valid curve point)
@@ -767,7 +882,14 @@ mod release_token_ffi_tests {
         );
         assert_eq!(
             unsafe {
-                kirra_verify_release_token(token.as_ptr(), 96, digest.as_ptr(), 32, bad_vk.as_ptr(), 32)
+                kirra_verify_release_token(
+                    token.as_ptr(),
+                    96,
+                    digest.as_ptr(),
+                    32,
+                    bad_vk.as_ptr(),
+                    32,
+                )
             },
             KIRRA_RELEASE_BAD_ARGS
         );
@@ -803,7 +925,10 @@ mod ffi_nonfinite_tests {
         // Fixed transitively by `evaluate`'s Priority-0 guard → contract fallback.
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let out = kirra_filter_move_velocity(bad, 0.05);
-            assert!(out.is_finite(), "move shim must never return non-finite (got {out})");
+            assert!(
+                out.is_finite(),
+                "move shim must never return non-finite (got {out})"
+            );
             assert_eq!(out, 0.0);
         }
     }

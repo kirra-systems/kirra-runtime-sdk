@@ -30,11 +30,8 @@ use parko_kirra::{
     select_divergence_sink, DiverseKirraGovernor, GovernorComparator, KirraGovernor,
 };
 use parko_ros2::{
-    clearance_gate::NodeClearance,
-    comparator_adapter::ComparatorAsGovernor,
-    config::ParkoNodeConfig,
-    node::run_node,
-    platform_profile::CourierPlatformProfile,
+    clearance_gate::NodeClearance, comparator_adapter::ComparatorAsGovernor,
+    config::ParkoNodeConfig, node::run_node, platform_profile::CourierPlatformProfile,
     sensor_mapping::VectorMapping,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -103,8 +100,12 @@ fn build_divergence_sink() -> Arc<dyn parko_kirra::comparator::DivergenceEventSi
 /// `KIRRA_DB_PATH` (the verifier's canonical var). See docs/CONSOLE_RUNBOOK.md
 /// "On the vehicle".
 fn resolve_one_store_db() -> Option<String> {
-    let kirra = std::env::var("KIRRA_DB_PATH").ok().filter(|s| !s.is_empty());
-    let divergence = std::env::var("PARKO_DIVERGENCE_AUDIT_DB").ok().filter(|s| !s.is_empty());
+    let kirra = std::env::var("KIRRA_DB_PATH")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let divergence = std::env::var("PARKO_DIVERGENCE_AUDIT_DB")
+        .ok()
+        .filter(|s| !s.is_empty());
     if let (Some(k), Some(d)) = (&kirra, &divergence) {
         if k != d {
             tracing::warn!(
@@ -133,7 +134,9 @@ fn resolve_one_store_db() -> Option<String> {
 /// verifier already recorded + signed.
 fn build_node_clearance(config: &ParkoNodeConfig) -> Option<NodeClearance> {
     let db = resolve_one_store_db();
-    let key = std::env::var("KIRRA_LOG_SIGNING_KEY").ok().filter(|s| !s.is_empty());
+    let key = std::env::var("KIRRA_LOG_SIGNING_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let (db, key) = match (db, key) {
         (Some(db), Some(key)) => (db, key),
@@ -148,7 +151,10 @@ fn build_node_clearance(config: &ParkoNodeConfig) -> Option<NodeClearance> {
     };
 
     // Delivery requested → the node id is mandatory and has no default.
-    let node_id = match std::env::var("KIRRA_NODE_ID").ok().filter(|s| !s.is_empty()) {
+    let node_id = match std::env::var("KIRRA_NODE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => id,
         None => {
             tracing::error!(
@@ -225,22 +231,22 @@ fn build_loop<B>(
 where
     B: InferenceBackend + 'static,
 {
-    let model = backend.load_model(model_path)
-        .unwrap_or_else(|e| {
-            eprintln!("parko_ros2_node: backend.load_model({model_path}) failed: {e:?}");
-            std::process::exit(3);
-        });
+    let model = backend.load_model(model_path).unwrap_or_else(|e| {
+        eprintln!("parko_ros2_node: backend.load_model({model_path}) failed: {e:?}");
+        std::process::exit(3);
+    });
 
     // PARK-021 #2: warm up the backend BEFORE the loop serves any command, so a
     // multi-second first-use cost (e.g. the TensorRT engine build) never lands on
     // the first real command. No-op for backends that need no warm-up (mock, CPU
     // ORT). FAIL-CLOSED: if warm-up fails the backend is not ready, so refuse to
     // start rather than serve against an unbuilt/cold engine.
-    backend.warm_up(&model)
-        .unwrap_or_else(|e| {
-            eprintln!("parko_ros2_node: backend.warm_up failed — refusing to start (fail-closed): {e:?}");
-            std::process::exit(4);
-        });
+    backend.warm_up(&model).unwrap_or_else(|e| {
+        eprintln!(
+            "parko_ros2_node: backend.warm_up failed — refusing to start (fail-closed): {e:?}"
+        );
+        std::process::exit(4);
+    });
 
     let (actuator_tx, mut actuator_rx) = mpsc::channel::<ControlCommand>(8);
 
@@ -277,9 +283,20 @@ where
     // operator explicitly accepted motion without object perception; it is
     // applied to BOTH comparator arms (a one-sided declaration would be a
     // permanent false divergence).
-    let gate_arm = |g: KirraGovernor| if external_rss_gate { g.with_external_rss_gate() } else { g };
-    let gate_arm_diverse =
-        |g: DiverseKirraGovernor| if external_rss_gate { g.with_external_rss_gate() } else { g };
+    let gate_arm = |g: KirraGovernor| {
+        if external_rss_gate {
+            g.with_external_rss_gate()
+        } else {
+            g
+        }
+    };
+    let gate_arm_diverse = |g: DiverseKirraGovernor| {
+        if external_rss_gate {
+            g.with_external_rss_gate()
+        } else {
+            g
+        }
+    };
     let comparator = match platform_profile {
         Some(profile) => GovernorComparator::with_sink(
             gate_arm(profile.angular_governor()),
@@ -328,8 +345,12 @@ async fn install_shutdown_handler() {
 ///     VALIDATION-PENDING; parko-core default 30 m/s²). A non-numeric value is
 ///     ignored with a warning (the safe default stands).
 fn build_config() -> ParkoNodeConfig {
-    let imu_topic = std::env::var("PARKO_IMU_TOPIC").ok().filter(|s| !s.is_empty());
-    let contact_topic = std::env::var("PARKO_CONTACT_TOPIC").ok().filter(|s| !s.is_empty());
+    let imu_topic = std::env::var("PARKO_IMU_TOPIC")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let contact_topic = std::env::var("PARKO_CONTACT_TOPIC")
+        .ok()
+        .filter(|s| !s.is_empty());
     let mut config = ParkoNodeConfig {
         imu_topic,
         contact_topic,
@@ -430,22 +451,21 @@ async fn main() {
     // tolerates the dev sentinel; the onnx/tensorrt lanes require a real
     // PARKO_MODEL_PATH and FAIL-CLOSED if their runtime/EP is absent — never a
     // silent substitution. See `parko_ros2::backend_select`.
-    let model_path = std::env::var("PARKO_MODEL_PATH")
-        .unwrap_or_else(|_| "mock://development".to_string());
+    let model_path =
+        std::env::var("PARKO_MODEL_PATH").unwrap_or_else(|_| "mock://development".to_string());
     tracing::info!(
         backend = parko_ros2::backend_select::SELECTED_BACKEND,
         %model_path,
         "parko-ros2: selected backend"
     );
-    let backend = parko_ros2::backend_select::select_backend(&model_path)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "parko_ros2_node: backend construction failed ({}) for {model_path:?} — refusing to \
+    let backend = parko_ros2::backend_select::select_backend(&model_path).unwrap_or_else(|e| {
+        eprintln!(
+            "parko_ros2_node: backend construction failed ({}) for {model_path:?} — refusing to \
                  start (fail-closed, no fallback): {e:?}",
-                parko_ros2::backend_select::SELECTED_BACKEND,
-            );
-            std::process::exit(2);
-        });
+            parko_ros2::backend_select::SELECTED_BACKEND,
+        );
+        std::process::exit(2);
+    });
     // WS-0.1 (#G2): decide the governors' RSS mode. Fail-closed default: with
     // no armed object gate and no explicit waiver, the governors stay UNFED
     // and the node HOLDs at zero.
@@ -500,7 +520,9 @@ async fn main() {
         let infer = Arc::clone(&infer);
         let mapping = Arc::clone(&mapping);
         tokio::spawn(async move {
-            if let Err(e) = run_node(config, infer, mapping, posture, clearance, "parko_governor").await {
+            if let Err(e) =
+                run_node(config, infer, mapping, posture, clearance, "parko_governor").await
+            {
                 tracing::error!(error = ?e, "parko-ros2: run_node exited with error");
             }
         })

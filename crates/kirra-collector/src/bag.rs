@@ -69,7 +69,10 @@ pub struct InMemoryBag {
 impl InMemoryBag {
     #[must_use]
     pub fn new(uri: impl Into<String>, messages: Vec<BusMessage>) -> Self {
-        Self { uri: uri.into(), messages }
+        Self {
+            uri: uri.into(),
+            messages,
+        }
     }
 
     /// Load from a JSON file containing an array of `BusMessage`.
@@ -148,13 +151,13 @@ impl Db3BagReader {
         topic: &str,
         doer_version: impl Into<String>,
     ) -> Result<Self, BagError> {
-        let conn = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(BagError::Open)?;
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(BagError::Open)?;
         let topic_id: i64 = conn
-            .query_row("SELECT id FROM topics WHERE name = ?1", [topic], |r| r.get(0))
+            .query_row("SELECT id FROM topics WHERE name = ?1", [topic], |r| {
+                r.get(0)
+            })
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => BagError::TopicNotFound(topic.to_string()),
                 other => BagError::Open(other),
@@ -178,7 +181,9 @@ impl BagReader for Db3BagReader {
         // rosbag2 stamps are nanoseconds; the join window is milliseconds. Mirror
         // InMemoryBag's inclusive [t-window, t+window] ms window (the +999_999
         // covers the whole upper millisecond).
-        let lo_ns = t_wall_ms.saturating_sub(window_ms).saturating_mul(1_000_000);
+        let lo_ns = t_wall_ms
+            .saturating_sub(window_ms)
+            .saturating_mul(1_000_000);
         let hi_ns = t_wall_ms
             .saturating_add(window_ms)
             .saturating_mul(1_000_000)
@@ -242,17 +247,24 @@ mod db3_tests {
             [],
         ).unwrap();
         let payload: &[u8] = &[0xAA, 0xBB]; // opaque CDR — the reader must never decode it
-        for (id, ts) in [(1i64, 1_000_000_000i64), (2, 1_010_000_000), (3, 1_050_000_000), (4, 2_000_000_000)] {
+        for (id, ts) in [
+            (1i64, 1_000_000_000i64),
+            (2, 1_010_000_000),
+            (3, 1_050_000_000),
+            (4, 2_000_000_000),
+        ] {
             conn.execute(
                 "INSERT INTO messages (id, topic_id, timestamp, data) VALUES (?1, 1, ?2, ?3)",
                 rusqlite::params![id, ts, payload],
-            ).unwrap();
+            )
+            .unwrap();
         }
         // a message on the OTHER topic must never leak into the trajectory query
         conn.execute(
             "INSERT INTO messages (id, topic_id, timestamp, data) VALUES (99, 2, 1005000000, ?1)",
             rusqlite::params![payload],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn tmp_db() -> std::path::PathBuf {
@@ -270,12 +282,20 @@ mod db3_tests {
         let r = Db3BagReader::open(&db, "/planning/trajectory", "doer-v1.2.3").unwrap();
 
         // ±100ms around 1000ms == [900,1100] -> 1000,1010,1050 (NOT 2000)
-        let mut ms: Vec<u64> = r.messages_in_window(1000, 100).iter().map(|m| m.t_wall_ms).collect();
+        let mut ms: Vec<u64> = r
+            .messages_in_window(1000, 100)
+            .iter()
+            .map(|m| m.t_wall_ms)
+            .collect();
         ms.sort_unstable();
         assert_eq!(ms, vec![1000, 1010, 1050]);
 
         // ±30ms around 1050 -> just 1050
-        let ms2: Vec<u64> = r.messages_in_window(1050, 30).iter().map(|m| m.t_wall_ms).collect();
+        let ms2: Vec<u64> = r
+            .messages_in_window(1050, 30)
+            .iter()
+            .map(|m| m.t_wall_ms)
+            .collect();
         assert_eq!(ms2, vec![1050]);
 
         let _ = std::fs::remove_file(&db);
@@ -288,17 +308,29 @@ mod db3_tests {
         let r = Db3BagReader::open(&db, "/planning/trajectory", "doer-v1.2.3").unwrap();
 
         let all = r.messages_in_window(1005, 1000); // huge window
-        assert_eq!(all.len(), 4, "only the 4 trajectory msgs; the perception topic is excluded");
-        assert!(all.iter().all(|m| m.doer_version == "doer-v1.2.3"), "doer_version stamped [D3]");
+        assert_eq!(
+            all.len(),
+            4,
+            "only the 4 trajectory msgs; the perception topic is excluded"
+        );
+        assert!(
+            all.iter().all(|m| m.doer_version == "doer-v1.2.3"),
+            "doer_version stamped [D3]"
+        );
         assert!(
             all.iter().all(|m| m.asset_id.is_none() && m.trajectory_id.is_none() && m.objects_ms.is_none()),
             "cross-check keys left None (no CDR decode); join treats None as not-asserted [D2]/[D4]"
         );
-        assert!(all.iter().all(|m| m.bulk_ref.contains("#/planning/trajectory@")));
+        assert!(all
+            .iter()
+            .all(|m| m.bulk_ref.contains("#/planning/trajectory@")));
 
         let exact = r.messages_in_window(1000, 5);
         assert_eq!(exact.len(), 1);
-        assert_eq!(exact[0].bulk_ref, format!("{}#/planning/trajectory@1000000000", db.display()));
+        assert_eq!(
+            exact[0].bulk_ref,
+            format!("{}#/planning/trajectory@1000000000", db.display())
+        );
         assert_eq!(r.bag_uri(), db.display().to_string());
 
         let _ = std::fs::remove_file(&db);
@@ -344,7 +376,10 @@ mod db3_tests {
             panic!("expected a join against the db3 bag");
         };
         assert_eq!(m.doer_version, "doer-v1.2.3");
-        assert_eq!(m.matched_t_wall_ms, 1010, "nearest-in-time to 1008 is the 1010 stamp");
+        assert_eq!(
+            m.matched_t_wall_ms, 1010,
+            "nearest-in-time to 1008 is the 1010 stamp"
+        );
         assert!(m.bulk_ref.ends_with("@1010000000"));
 
         let _ = std::fs::remove_file(&db);
@@ -415,7 +450,9 @@ impl BagReader for McapBagReader {
     }
 
     fn messages_in_window(&self, t_wall_ms: u64, window_ms: u64) -> Vec<BusMessage> {
-        let lo_ns = t_wall_ms.saturating_sub(window_ms).saturating_mul(1_000_000);
+        let lo_ns = t_wall_ms
+            .saturating_sub(window_ms)
+            .saturating_mul(1_000_000);
         let hi_ns = t_wall_ms
             .saturating_add(window_ms)
             .saturating_mul(1_000_000)
@@ -444,7 +481,12 @@ mod mcap_tests {
 
     fn write_msg(w: &mut mcap::Writer<std::io::BufWriter<std::fs::File>>, chan_id: u16, ts: u64) {
         w.write_to_known_channel(
-            &mcap::records::MessageHeader { channel_id: chan_id, sequence: 0, log_time: ts, publish_time: ts },
+            &mcap::records::MessageHeader {
+                channel_id: chan_id,
+                sequence: 0,
+                log_time: ts,
+                publish_time: ts,
+            },
             &[0xAA, 0xBB], // opaque payload — the reader must never decode it
         )
         .unwrap();
@@ -468,7 +510,12 @@ mod mcap_tests {
         };
         let traj_id = w.add_channel(&traj).unwrap();
         let perc_id = w.add_channel(&perc).unwrap();
-        for ts in [1_000_000_000u64, 1_010_000_000, 1_050_000_000, 2_000_000_000] {
+        for ts in [
+            1_000_000_000u64,
+            1_010_000_000,
+            1_050_000_000,
+            2_000_000_000,
+        ] {
             write_msg(&mut w, traj_id, ts);
         }
         write_msg(&mut w, perc_id, 1_005_000_000); // other topic — must not leak
@@ -488,10 +535,18 @@ mod mcap_tests {
         let p = tmp_bag();
         make_bag(&p);
         let r = McapBagReader::open(&p, "/planning/trajectory", "doer-v1.2.3").unwrap();
-        let mut ms: Vec<u64> = r.messages_in_window(1000, 100).iter().map(|m| m.t_wall_ms).collect();
+        let mut ms: Vec<u64> = r
+            .messages_in_window(1000, 100)
+            .iter()
+            .map(|m| m.t_wall_ms)
+            .collect();
         ms.sort_unstable();
         assert_eq!(ms, vec![1000, 1010, 1050]);
-        let ms2: Vec<u64> = r.messages_in_window(1050, 30).iter().map(|m| m.t_wall_ms).collect();
+        let ms2: Vec<u64> = r
+            .messages_in_window(1050, 30)
+            .iter()
+            .map(|m| m.t_wall_ms)
+            .collect();
         assert_eq!(ms2, vec![1050]);
         let _ = std::fs::remove_file(&p);
     }
@@ -502,13 +557,24 @@ mod mcap_tests {
         make_bag(&p);
         let r = McapBagReader::open(&p, "/planning/trajectory", "doer-v1.2.3").unwrap();
         let all = r.messages_in_window(1005, 1000);
-        assert_eq!(all.len(), 4, "only the 4 trajectory msgs; the perception topic is excluded");
+        assert_eq!(
+            all.len(),
+            4,
+            "only the 4 trajectory msgs; the perception topic is excluded"
+        );
         assert!(all.iter().all(|m| m.doer_version == "doer-v1.2.3"));
-        assert!(all.iter().all(|m| m.asset_id.is_none() && m.trajectory_id.is_none() && m.objects_ms.is_none()));
-        assert!(all.iter().all(|m| m.bulk_ref.contains("#/planning/trajectory@")));
+        assert!(all
+            .iter()
+            .all(|m| m.asset_id.is_none() && m.trajectory_id.is_none() && m.objects_ms.is_none()));
+        assert!(all
+            .iter()
+            .all(|m| m.bulk_ref.contains("#/planning/trajectory@")));
         let exact = r.messages_in_window(1000, 5);
         assert_eq!(exact.len(), 1);
-        assert_eq!(exact[0].bulk_ref, format!("{}#/planning/trajectory@1000000000", p.display()));
+        assert_eq!(
+            exact[0].bulk_ref,
+            format!("{}#/planning/trajectory@1000000000", p.display())
+        );
         assert_eq!(r.bag_uri(), p.display().to_string());
         let _ = std::fs::remove_file(&p);
     }

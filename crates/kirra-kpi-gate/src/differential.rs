@@ -152,7 +152,13 @@ impl DifferentialSummary {
 /// oracle's default clip tolerance.
 #[must_use]
 pub fn differential_summary<'a>(
-    frames: impl IntoIterator<Item = (&'a TajCorridor, &'a [SemanticDetection], &'a [SemanticDetection])>,
+    frames: impl IntoIterator<
+        Item = (
+            &'a TajCorridor,
+            &'a [SemanticDetection],
+            &'a [SemanticDetection],
+        ),
+    >,
 ) -> DifferentialSummary {
     let mut s = DifferentialSummary::default();
     for (corridor, truth, detected) in frames {
@@ -169,7 +175,12 @@ mod tests {
     use kirra_taj::SemanticClass;
 
     fn det(class: SemanticClass, near_x: f64) -> SemanticDetection {
-        SemanticDetection { class, near_x_m: near_x, lateral_min_m: -5.0, lateral_max_m: 5.0 }
+        SemanticDetection {
+            class,
+            near_x_m: near_x,
+            lateral_min_m: -5.0,
+            lateral_max_m: 5.0,
+        }
     }
 
     fn corridor() -> TajCorridor {
@@ -185,7 +196,10 @@ mod tests {
         let water = |x| det(SemanticClass::Water, x);
 
         // Agreement cells.
-        assert_eq!(classify_frame(&c, &[], &[], DEFAULT_CLIP_TOL_M), DivergenceClass::Identical);
+        assert_eq!(
+            classify_frame(&c, &[], &[], DEFAULT_CLIP_TOL_M),
+            DivergenceClass::Identical
+        );
         assert_eq!(
             classify_frame(&c, &[water(8.0)], &[water(8.0)], DEFAULT_CLIP_TOL_M),
             DivergenceClass::JustifiedTighten

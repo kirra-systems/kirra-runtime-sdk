@@ -78,8 +78,9 @@ pub fn fleet_peer_config(
     // never falls back to its default `tcp/[::]:0` (IPv6) listener. Build the
     // endpoint array via serde so any character needing JSON escaping in the
     // caller-supplied `host:port` is escaped correctly (never a raw `format!`).
-    let listen_endpoints: Vec<String> =
-        listen.map(|l| vec![format!("{scheme}/{l}")]).unwrap_or_default();
+    let listen_endpoints: Vec<String> = listen
+        .map(|l| vec![format!("{scheme}/{l}")])
+        .unwrap_or_default();
     let listen_json = serde_json::to_string(&listen_endpoints).map_err(|e| e.to_string())?;
     insert_cfg(&mut c, "listen/endpoints", &listen_json)?;
     if let Some(cn) = connect {
@@ -106,7 +107,11 @@ pub fn fleet_peer_config(
             insert_cfg(&mut c, "transport/link/tls/enable_mtls", bool_json5(m))?;
         }
         if let Some(v) = t.verify_name_on_connect {
-            insert_cfg(&mut c, "transport/link/tls/verify_name_on_connect", bool_json5(v))?;
+            insert_cfg(
+                &mut c,
+                "transport/link/tls/verify_name_on_connect",
+                bool_json5(v),
+            )?;
         }
     }
     Ok(c)
@@ -214,7 +219,11 @@ fn default_ingress_limiter(now_ms: u64) -> IngressRateLimiter {
 /// malformed key cannot escape bucketing. The id is untrusted; spoofing many
 /// ids only degrades to the global backstop (see `ingress_limit`).
 fn bucket_source_from_key(key_expr: &str) -> &str {
-    key_expr.split('/').nth(3).filter(|s| !s.is_empty()).unwrap_or(key_expr)
+    key_expr
+        .split('/')
+        .nth(3)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(key_expr)
 }
 
 /// Gate one ingest through the shared limiter BEFORE any decode/verify work.
@@ -269,7 +278,10 @@ impl FleetSubscriber {
             .declare_subscriber(key_trust_report(node_id))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self { subscriber, limiter: Mutex::new(limiter) })
+        Ok(Self {
+            subscriber,
+            limiter: Mutex::new(limiter),
+        })
     }
 
     /// Receive the next payload, gate it through the ingest rate limiter, then
@@ -325,7 +337,10 @@ impl GrantIngest {
             .declare_subscriber(key_clearance_grant(node_id))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self { subscriber, limiter: Mutex::new(limiter) })
+        Ok(Self {
+            subscriber,
+            limiter: Mutex::new(limiter),
+        })
     }
 
     /// Receive the next grant, gate it through the ingest rate limiter (a flood
@@ -501,16 +516,18 @@ mod transport_tests {
         let (sk, pk) = keypair();
         let ep = format!("127.0.0.1:{}", free_port());
 
-        let sub_session = zenoh::open(fleet_peer_config(Some(&ep), None, Some(&server_tls)).unwrap())
-            .await
-            .unwrap();
+        let sub_session =
+            zenoh::open(fleet_peer_config(Some(&ep), None, Some(&server_tls)).unwrap())
+                .await
+                .unwrap();
         let subscriber = FleetSubscriber::declare(&sub_session, "robot-tls", 1_000)
             .await
             .unwrap();
 
-        let pub_session = zenoh::open(fleet_peer_config(None, Some(&ep), Some(&client_tls)).unwrap())
-            .await
-            .unwrap();
+        let pub_session =
+            zenoh::open(fleet_peer_config(None, Some(&ep), Some(&client_tls)).unwrap())
+                .await
+                .unwrap();
         let publisher = FleetPublisher::new(pub_session);
         settle().await;
 
@@ -620,8 +637,14 @@ mod transport_tests {
     /// a malformed key buckets under its whole expression (never a panic).
     #[test]
     fn bucket_source_extracts_the_node_segment() {
-        assert_eq!(bucket_source_from_key("kirra/v1/fleet/robot-9/trust-report"), "robot-9");
-        assert_eq!(bucket_source_from_key("kirra/v1/ops/robot-9/clearance-grant"), "robot-9");
+        assert_eq!(
+            bucket_source_from_key("kirra/v1/fleet/robot-9/trust-report"),
+            "robot-9"
+        );
+        assert_eq!(
+            bucket_source_from_key("kirra/v1/ops/robot-9/clearance-grant"),
+            "robot-9"
+        );
         assert_eq!(bucket_source_from_key("weird"), "weird");
         assert_eq!(bucket_source_from_key("a/b/c//d"), "a/b/c//d");
     }
@@ -655,8 +678,14 @@ mod transport_tests {
         settle().await;
 
         // Two well-signed reports, then a bad-signature third (the flood excess).
-        publisher.publish_report(&signed_report(&sk, "robot-flood")).await.unwrap();
-        publisher.publish_report(&signed_report(&sk, "robot-flood")).await.unwrap();
+        publisher
+            .publish_report(&signed_report(&sk, "robot-flood"))
+            .await
+            .unwrap();
+        publisher
+            .publish_report(&signed_report(&sk, "robot-flood"))
+            .await
+            .unwrap();
         let mut forged = signed_report(&sk, "robot-flood");
         forged.signature_b64 = B64.encode([0u8; 64]);
         publisher.publish_report(&forged).await.unwrap();
@@ -668,8 +697,14 @@ mod transport_tests {
                 subscriber.recv_report(&pk, c, 1_000),
             )
         };
-        recv(&counter).await.expect("recv 1").expect("first report admitted + verified");
-        recv(&counter).await.expect("recv 2").expect("second report admitted + verified");
+        recv(&counter)
+            .await
+            .expect("recv 1")
+            .expect("first report admitted + verified");
+        recv(&counter)
+            .await
+            .expect("recv 2")
+            .expect("second report admitted + verified");
         let third = recv(&counter).await.expect("recv 3");
         assert_eq!(
             third.unwrap_err(),
@@ -681,6 +716,9 @@ mod transport_tests {
         let snap = counter.snapshot();
         assert_eq!(snap.accepted, 2);
         assert_eq!(snap.rate_limited, 1);
-        assert_eq!(snap.bad_signature, 0, "the forged payload was never verified");
+        assert_eq!(
+            snap.bad_signature, 0,
+            "the forged payload was never verified"
+        );
     }
 }

@@ -146,7 +146,10 @@ async fn authorize_scope(
     let principal = match principal {
         Some(p) => Some(p),
         None if bearer.is_none() && !admin_env.is_empty() => {
-            match request.extensions().get::<super::tls::ClientCertFingerprint>() {
+            match request
+                .extensions()
+                .get::<super::tls::ClientCertFingerprint>()
+            {
                 Some(fp) => {
                     let fp = fp.0.clone();
                     match svc
@@ -205,7 +208,11 @@ async fn authorize_scope(
             if decision.auth_method == "api-principal" {
                 // Credential type for incident/debug: an mTLS-resolved principal vs a
                 // bearer token (the predicate can't tell — the middleware knows the source).
-                let credential = if resolved_via_cert { "mtls-cert" } else { "api-token" };
+                let credential = if resolved_via_cert {
+                    "mtls-cert"
+                } else {
+                    "api-token"
+                };
                 tracing::info!(
                     scope = required_scope,
                     principal_id = decision.principal_id.as_deref().unwrap_or("?"),
@@ -227,13 +234,18 @@ async fn authorize_scope(
             Ok(next.run(request).await)
         }
         AuthzOutcome::Unconfigured => {
-            tracing::warn!(scope = required_scope,
-                "authz denied: KIRRA_ADMIN_TOKEN absent/empty → 503 (fail-closed)");
+            tracing::warn!(
+                scope = required_scope,
+                "authz denied: KIRRA_ADMIN_TOKEN absent/empty → 503 (fail-closed)"
+            );
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
         AuthzOutcome::Unauthenticated => {
-            tracing::warn!(scope = required_scope, token_fp = fp.as_deref().unwrap_or("none"),
-                "authz denied: no/unknown/revoked credential → 401");
+            tracing::warn!(
+                scope = required_scope,
+                token_fp = fp.as_deref().unwrap_or("none"),
+                "authz denied: no/unknown/revoked credential → 401"
+            );
             Err(StatusCode::UNAUTHORIZED)
         }
         AuthzOutcome::Forbidden => {
@@ -380,7 +392,10 @@ mod g7_admin_action_attribution_tests {
         assert!(!should_record_admin_action("HEAD", StatusCode::OK));
         assert!(!should_record_admin_action("OPTIONS", StatusCode::OK));
         // Failed mutations → never (nothing changed).
-        assert!(!should_record_admin_action("POST", StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!should_record_admin_action(
+            "POST",
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
         assert!(!should_record_admin_action("POST", StatusCode::FORBIDDEN));
         assert!(!should_record_admin_action("POST", StatusCode::BAD_REQUEST));
     }
@@ -396,8 +411,12 @@ mod g7_transport_security_router_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // for `oneshot`
 
-    use kirra_verifier::posture_cache::{now_ms, CachedFleetPosture, ServiceState, SharedPostureCache};
-    use kirra_verifier::verifier::{AppState, FleetPosture, TransportSecurityConfig, VerifierOperationMode};
+    use kirra_verifier::posture_cache::{
+        now_ms, CachedFleetPosture, ServiceState, SharedPostureCache,
+    };
+    use kirra_verifier::verifier::{
+        AppState, FleetPosture, TransportSecurityConfig, VerifierOperationMode,
+    };
     use kirra_verifier::verifier_store::VerifierStore;
 
     // Inject the transport-security config via the PUBLIC field (no env mutation —
@@ -411,8 +430,9 @@ mod g7_transport_security_router_tests {
             require_secure_transport: require,
             forwarded_proto_header: "x-forwarded-proto".to_string(),
         };
-        let posture_cache: SharedPostureCache =
-            Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+        let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+            CachedFleetPosture::new(FleetPosture::Nominal),
+        )));
         Arc::new(ServiceState {
             app: Arc::new(app),
             posture_cache,
@@ -420,7 +440,9 @@ mod g7_transport_security_router_tests {
             audit_verifying_key: None,
             fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
             fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-            fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+            fabric_causal_log: Arc::new(
+                kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+            ),
             posture_engine_tx: std::sync::OnceLock::new(),
             perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
             perception_monitor_enabled: false,
@@ -484,7 +506,11 @@ mod g7_transport_security_router_tests {
             .await
             .expect("router should not panic")
             .status();
-        assert_eq!(status, StatusCode::FORBIDDEN, "attestation nonce flow must require secure transport");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "attestation nonce flow must require secure transport"
+        );
     }
 
     /// The carved-out auditor read routes (WS-1) carry the same transport boundary.
@@ -501,6 +527,10 @@ mod g7_transport_security_router_tests {
             .await
             .expect("router should not panic")
             .status();
-        assert_eq!(status, StatusCode::FORBIDDEN, "auditor routes must require secure transport");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "auditor routes must require secure transport"
+        );
     }
 }

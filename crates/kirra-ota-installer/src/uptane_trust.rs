@@ -17,8 +17,8 @@
 use std::path::{Path, PathBuf};
 
 use kirra_release_token::uptane::{
-    apply_root_rotation, verify_root_self, RootMetadata, SignedRoot, TrustedVersions,
-    UptaneError, UptaneMetadataSet,
+    apply_root_rotation, verify_root_self, RootMetadata, SignedRoot, TrustedVersions, UptaneError,
+    UptaneMetadataSet,
 };
 
 /// The durable trust state a node persists between OTA polls / restarts.
@@ -124,7 +124,9 @@ pub fn uptane_pull_gate(
     let set = set.ok_or(UptaneGateError::MetadataMissing)?;
     let verified = set.verify(&state.root.meta, state.versions, now_ms)?;
     if verified.targets().find(assigned_digest).is_none() {
-        return Err(UptaneGateError::DigestNotAuthorized(assigned_digest.to_string()));
+        return Err(UptaneGateError::DigestNotAuthorized(
+            assigned_digest.to_string(),
+        ));
     }
     Ok(Some(verified.new_versions()))
 }
@@ -152,7 +154,10 @@ impl UptaneTrustStore {
             )));
         }
         verify_root_self(&anchor.meta, &anchor.sig_by_new_root_b64)?;
-        let state = TrustState { root: anchor.clone(), versions: TrustedVersions::default() };
+        let state = TrustState {
+            root: anchor.clone(),
+            versions: TrustedVersions::default(),
+        };
         self.write(&state)?;
         Ok(state)
     }
@@ -180,10 +185,7 @@ impl UptaneTrustStore {
     /// PERSIST the new trust state (rolling the version floor forward is the
     /// caller's job via [`record_versions`](Self::record_versions)). Fail-closed: a rejected rotation
     /// leaves the stored state untouched. Returns the adopted root.
-    pub fn adopt_rotation(
-        &self,
-        presented: &SignedRoot,
-    ) -> Result<RootMetadata, TrustStoreError> {
+    pub fn adopt_rotation(&self, presented: &SignedRoot) -> Result<RootMetadata, TrustStoreError> {
         let mut state = self.load()?;
         let adopted = apply_root_rotation(&state.root.meta, presented)?;
         state.root = presented.clone();
@@ -298,15 +300,24 @@ mod tests {
         let store = UptaneTrustStore::new(&path);
         assert!(store.load().is_err(), "missing file fails closed");
 
-        store.provision(&author_initial_root(r.root(1), &r.root_sk)).expect("provision");
+        store
+            .provision(&author_initial_root(r.root(1), &r.root_sk))
+            .expect("provision");
         // Tamper: swap the persisted targets_key for an attacker's — the stored
         // self-signature no longer covers it, so load must reject.
         let mut state = store.load().expect("load ok before tamper");
-        state.root.meta.targets_key = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        state.root.meta.targets_key = SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes();
         // Write the tampered state directly (bypassing verification).
         std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
         assert!(
-            matches!(store.load(), Err(TrustStoreError::Uptane(UptaneError::SignatureInvalid(Role::Root)))),
+            matches!(
+                store.load(),
+                Err(TrustStoreError::Uptane(UptaneError::SignatureInvalid(
+                    Role::Root
+                )))
+            ),
             "a tampered persisted root must fail closed on load"
         );
         let _ = std::fs::remove_file(&path);
@@ -322,23 +333,48 @@ mod tests {
         let path = tmp_path("rotate");
         let _ = std::fs::remove_file(&path);
         let store = UptaneTrustStore::new(&path);
-        store.provision(&author_initial_root(r.root(1), &r.root_sk)).expect("provision");
+        store
+            .provision(&author_initial_root(r.root(1), &r.root_sk))
+            .expect("provision");
 
         // A metadata set signed by the OLD targets key, valid under v1.
         let targets = TargetsMetadata {
             version: 5,
             expires_at_ms: EXP,
-            targets: vec![TargetEntry { digest_hex: DIGEST.into(), length_bytes: 9, version: "v2".into() }],
+            targets: vec![TargetEntry {
+                digest_hex: DIGEST.into(),
+                length_bytes: 9,
+                version: "v2".into(),
+            }],
         };
-        let snap = SnapshotMetadata { version: 5, expires_at_ms: EXP, targets_version: 5 };
-        let tsm = TimestampMetadata { version: 5, expires_at_ms: EXP, snapshot_version: 5 };
+        let snap = SnapshotMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            targets_version: 5,
+        };
+        let tsm = TimestampMetadata {
+            version: 5,
+            expires_at_ms: EXP,
+            snapshot_version: 5,
+        };
         let (t_sig, s_sig, ts_sig) = (
             sign_targets(&targets, &r.targets_sk),
             sign_snapshot(&snap, &r.snapshot_sk),
             sign_timestamp(&tsm, &r.timestamp_sk),
         );
         let v1 = store.load().unwrap();
-        assert!(verify_update(&v1.root.meta, v1.versions, NOW, &tsm, &ts_sig, &snap, &s_sig, &targets, &t_sig).is_ok());
+        assert!(verify_update(
+            &v1.root.meta,
+            v1.versions,
+            NOW,
+            &tsm,
+            &ts_sig,
+            &snap,
+            &s_sig,
+            &targets,
+            &t_sig
+        )
+        .is_ok());
 
         // Rotate targets → a fresh key, adopt + persist.
         let new_targets_sk = SigningKey::from_bytes(&[9u8; 32]);
@@ -350,13 +386,34 @@ mod tests {
         // RELOAD (restart boundary): the old-key metadata is now refused...
         let v2 = store.load().expect("reload");
         assert_eq!(
-            verify_update(&v2.root.meta, v2.versions, NOW, &tsm, &ts_sig, &snap, &s_sig, &targets, &t_sig),
+            verify_update(
+                &v2.root.meta,
+                v2.versions,
+                NOW,
+                &tsm,
+                &ts_sig,
+                &snap,
+                &s_sig,
+                &targets,
+                &t_sig
+            ),
             Err(UptaneError::SignatureInvalid(Role::Targets)),
             "the revoked old targets key must be refused after the persisted rotation"
         );
         // ...while the NEW key verifies.
         let new_t_sig = sign_targets(&targets, &new_targets_sk);
-        assert!(verify_update(&v2.root.meta, v2.versions, NOW, &tsm, &ts_sig, &snap, &s_sig, &targets, &new_t_sig).is_ok());
+        assert!(verify_update(
+            &v2.root.meta,
+            v2.versions,
+            NOW,
+            &tsm,
+            &ts_sig,
+            &snap,
+            &s_sig,
+            &targets,
+            &new_t_sig
+        )
+        .is_ok());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -373,7 +430,9 @@ mod tests {
         let path = tmp_path("rootrot");
         let _ = std::fs::remove_file(&path);
         let store = UptaneTrustStore::new(&path);
-        store.provision(&author_initial_root(r.root(1), &r.root_sk)).expect("provision");
+        store
+            .provision(&author_initial_root(r.root(1), &r.root_sk))
+            .expect("provision");
 
         // Rotate the ROOT key itself to a fresh one at v2 (signed by outgoing
         // old root + incoming new root), adopt + persist.
@@ -381,25 +440,34 @@ mod tests {
         let mut m2 = r.root(2);
         m2.root_key = new_root_sk.verifying_key().to_bytes();
         let rotation = author_root_rotation(m2, &r.root_sk, &new_root_sk);
-        store.adopt_rotation(&rotation).expect("adopt root-key rotation");
+        store
+            .adopt_rotation(&rotation)
+            .expect("adopt root-key rotation");
 
         // RELOAD must SUCCEED and trust the NEW root key.
         let reloaded = store.load().expect("root-key rotation must reload cleanly");
         assert_eq!(reloaded.root.meta.version, 2);
-        assert_eq!(reloaded.root.meta.root_key, new_root_sk.verifying_key().to_bytes());
+        assert_eq!(
+            reloaded.root.meta.root_key,
+            new_root_sk.verifying_key().to_bytes()
+        );
 
         // A further rotation must chain from the NEW root: the old root key can
         // no longer authorize a rotation (it is not the trusted outgoing key).
         let mut m3 = r.root(3);
         m3.root_key = new_root_sk.verifying_key().to_bytes();
-        m3.targets_key = SigningKey::from_bytes(&[77u8; 32]).verifying_key().to_bytes();
+        m3.targets_key = SigningKey::from_bytes(&[77u8; 32])
+            .verifying_key()
+            .to_bytes();
         let by_stale_old = author_root_rotation(m3.clone(), &r.root_sk, &new_root_sk);
         assert!(
             store.adopt_rotation(&by_stale_old).is_err(),
             "a rotation authored by the stale OLD root key must be refused after the root-key rotation"
         );
         let by_new = author_root_rotation(m3, &new_root_sk, &new_root_sk);
-        store.adopt_rotation(&by_new).expect("the new root authorizes the next rotation");
+        store
+            .adopt_rotation(&by_new)
+            .expect("the new root authorizes the next rotation");
         assert_eq!(store.load().unwrap().root.meta.version, 3);
         let _ = std::fs::remove_file(&path);
     }
@@ -416,8 +484,16 @@ mod tests {
                 version: "v2".into(),
             }],
         };
-        let snap = SnapshotMetadata { version: v, expires_at_ms: EXP, targets_version: v };
-        let tsm = TimestampMetadata { version: v, expires_at_ms: EXP, snapshot_version: v };
+        let snap = SnapshotMetadata {
+            version: v,
+            expires_at_ms: EXP,
+            targets_version: v,
+        };
+        let tsm = TimestampMetadata {
+            version: v,
+            expires_at_ms: EXP,
+            snapshot_version: v,
+        };
         UptaneMetadataSet {
             timestamp_sig_b64: sign_timestamp(&tsm, &r.timestamp_sk),
             timestamp: tsm,
@@ -466,7 +542,14 @@ mod tests {
         let floor = uptane_pull_gate(Some(&state), Some(&set), DIGEST, NOW)
             .expect("valid set must pass")
             .expect("anchored path returns a floor");
-        assert_eq!(floor, TrustedVersions { targets: 3, snapshot: 3, timestamp: 3 });
+        assert_eq!(
+            floor,
+            TrustedVersions {
+                targets: 3,
+                snapshot: 3,
+                timestamp: 3
+            }
+        );
     }
 
     #[test]
@@ -475,7 +558,11 @@ mod tests {
         // re-served OLDER set (v3) — the classic rollback attack — must refuse.
         let r = Repo::new();
         let mut state = anchored_state(&r);
-        state.versions = TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 };
+        state.versions = TrustedVersions {
+            targets: 5,
+            snapshot: 5,
+            timestamp: 5,
+        };
         let stale = metadata_set(&r, 3);
         assert!(
             matches!(
@@ -512,7 +599,9 @@ mod tests {
         set.targets_sig_b64 = sign_targets(&set.targets, &attacker);
         assert!(matches!(
             uptane_pull_gate(Some(&state), Some(&set), DIGEST, NOW),
-            Err(UptaneGateError::Verify(UptaneError::SignatureInvalid(Role::Targets)))
+            Err(UptaneGateError::Verify(UptaneError::SignatureInvalid(
+                Role::Targets
+            )))
         ));
     }
 
@@ -522,9 +611,24 @@ mod tests {
         let path = tmp_path("floor");
         let _ = std::fs::remove_file(&path);
         let store = UptaneTrustStore::new(&path);
-        store.provision(&author_initial_root(r.root(1), &r.root_sk)).expect("provision");
-        store.record_versions(TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 }).expect("record");
-        assert_eq!(store.load().unwrap().versions, TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 });
+        store
+            .provision(&author_initial_root(r.root(1), &r.root_sk))
+            .expect("provision");
+        store
+            .record_versions(TrustedVersions {
+                targets: 5,
+                snapshot: 5,
+                timestamp: 5,
+            })
+            .expect("record");
+        assert_eq!(
+            store.load().unwrap().versions,
+            TrustedVersions {
+                targets: 5,
+                snapshot: 5,
+                timestamp: 5
+            }
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

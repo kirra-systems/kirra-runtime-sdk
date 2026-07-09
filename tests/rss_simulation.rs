@@ -86,7 +86,11 @@ fn effective_velocity(action: EnforcementAction, proposed: f64) -> f64 {
 }
 
 fn cmd(v: f64) -> ControlCommand {
-    ControlCommand { linear_velocity: v, angular_velocity: 0.0, timestamp_ms: 0 }
+    ControlCommand {
+        linear_velocity: v,
+        angular_velocity: 0.0,
+        timestamp_ms: 0,
+    }
 }
 
 fn read_fleet_posture(cache: &SharedPostureCache) -> FleetPosture {
@@ -177,10 +181,16 @@ fn test_rss_adversarial_10k_scenarios() {
 async fn test_rss_posture_lifecycle_violation_to_recovery() {
     let (app, cache) = build_app();
 
-    let violation =
-        RssState { safe: false, longitudinal_margin: 0.5, lateral_margin: 0.2 };
-    let safe_tick =
-        RssState { safe: true, longitudinal_margin: 12.0, lateral_margin: 5.0 };
+    let violation = RssState {
+        safe: false,
+        longitudinal_margin: 0.5,
+        lateral_margin: 0.2,
+    };
+    let safe_tick = RssState {
+        safe: true,
+        longitudinal_margin: 12.0,
+        lateral_margin: 5.0,
+    };
 
     let mut runner = ScenarioRunner::new(app, cache)
         .at_ms(0, ScenarioEvent::RssReport(violation))
@@ -202,7 +212,10 @@ async fn test_rss_posture_lifecycle_violation_to_recovery() {
     let recovery_t = last_pre_recovery_t + 100;
     runner
         .at_ms(recovery_t, ScenarioEvent::RssReport(safe_tick.clone()))
-        .assert_at_ms(recovery_t, PostureAssertion::FleetPostureIs(FleetPosture::Nominal))
+        .assert_at_ms(
+            recovery_t,
+            PostureAssertion::FleetPostureIs(FleetPosture::Nominal),
+        )
         .run()
         .await;
 }
@@ -235,7 +248,11 @@ fn test_locked_out_hard_stop_dominates_rss_gate() {
     );
 
     // RSS state is safe — LockedOut from the DAG must not be overridden.
-    let safe_rss = RssState { safe: true, longitudinal_margin: 50.0, lateral_margin: 20.0 };
+    let safe_rss = RssState {
+        safe: true,
+        longitudinal_margin: 50.0,
+        lateral_margin: 20.0,
+    };
     apply_rss_state(&app, &safe_rss, 0);
     recalculate_and_broadcast(&app, &cache);
 

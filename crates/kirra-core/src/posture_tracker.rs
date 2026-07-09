@@ -187,13 +187,16 @@ mod tracker_tests {
         // M1 behaviour unchanged: no source configured → Nominal forever,
         // regardless of clock advancement or stray observe calls.
         let mut t = PostureTracker::nominal_default_no_source();
-        assert_eq!(t.current_posture(0),         FleetPosture::Nominal);
+        assert_eq!(t.current_posture(0), FleetPosture::Nominal);
         assert_eq!(t.current_posture(1_000_000), FleetPosture::Nominal);
         // observe is a no-op in this mode — verify directly.
         t.observe(1_000, FleetPosture::Degraded);
         t.observe(2_000, FleetPosture::LockedOut);
-        assert_eq!(t.current_posture(3_000),     FleetPosture::Nominal,
-            "observe must not affect a no-source tracker");
+        assert_eq!(
+            t.current_posture(3_000),
+            FleetPosture::Nominal,
+            "observe must not affect a no-source tracker"
+        );
     }
 
     #[test]
@@ -204,8 +207,10 @@ mod tracker_tests {
         let mut t = PostureTracker::nominal_default_no_source();
         assert!(!t.source_configured());
         t.observe(1_000, FleetPosture::LockedOut);
-        assert!(!t.sticky_locked_out,
-            "no-source tracker must not latch sticky-LockedOut from observe");
+        assert!(
+            !t.sticky_locked_out,
+            "no-source tracker must not latch sticky-LockedOut from observe"
+        );
     }
 
     #[test]
@@ -215,10 +220,13 @@ mod tracker_tests {
         // because the fleet posture has not yet been confirmed.
         let t = PostureTracker::with_source();
         assert!(t.source_configured());
-        assert_eq!(t.current_posture(0),     FleetPosture::Degraded);
+        assert_eq!(t.current_posture(0), FleetPosture::Degraded);
         assert_eq!(t.current_posture(5_000), FleetPosture::Degraded);
-        assert_eq!(t.current_posture(60_000), FleetPosture::Degraded,
-            "pre-first-event state must remain Degraded indefinitely");
+        assert_eq!(
+            t.current_posture(60_000),
+            FleetPosture::Degraded,
+            "pre-first-event state must remain Degraded indefinitely"
+        );
     }
 
     #[test]
@@ -227,9 +235,11 @@ mod tracker_tests {
         t.observe(1_000, FleetPosture::Nominal);
         // Read inside the staleness window — the observed posture applies.
         assert_eq!(t.current_posture(1_000), FleetPosture::Nominal);
-        assert_eq!(t.current_posture(1_000 + POSTURE_STALENESS_TIMEOUT_MS),
-                   FleetPosture::Nominal,
-            "boundary read AT the staleness timeout must still be in-window");
+        assert_eq!(
+            t.current_posture(1_000 + POSTURE_STALENESS_TIMEOUT_MS),
+            FleetPosture::Nominal,
+            "boundary read AT the staleness timeout must still be in-window"
+        );
     }
 
     #[test]
@@ -249,8 +259,11 @@ mod tracker_tests {
         t.observe(1_000, FleetPosture::Nominal);
         // 1ms past the timeout boundary → stale.
         let stale_at = 1_000 + POSTURE_STALENESS_TIMEOUT_MS + 1;
-        assert_eq!(t.current_posture(stale_at), FleetPosture::Degraded,
-            "staleness must derate the last-known Nominal to Degraded");
+        assert_eq!(
+            t.current_posture(stale_at),
+            FleetPosture::Degraded,
+            "staleness must derate the last-known Nominal to Degraded"
+        );
     }
 
     #[test]
@@ -280,8 +293,11 @@ mod tracker_tests {
         let mut t = PostureTracker::with_source();
         t.observe(1_000, FleetPosture::LockedOut);
         let stale_at = 1_000 + POSTURE_STALENESS_TIMEOUT_MS + 100_000;
-        assert_eq!(t.current_posture(stale_at), FleetPosture::LockedOut,
-            "LockedOut must stick through a staleness timeout (sticky-toward-safe)");
+        assert_eq!(
+            t.current_posture(stale_at),
+            FleetPosture::LockedOut,
+            "LockedOut must stick through a staleness timeout (sticky-toward-safe)"
+        );
     }
 
     #[test]
@@ -292,14 +308,20 @@ mod tracker_tests {
         t.observe(1_000, FleetPosture::LockedOut);
         assert_eq!(t.current_posture(2_000), FleetPosture::LockedOut);
         t.observe(3_000, FleetPosture::Nominal);
-        assert_eq!(t.current_posture(3_000), FleetPosture::Nominal,
-            "explicit Nominal observation must release sticky-LockedOut");
+        assert_eq!(
+            t.current_posture(3_000),
+            FleetPosture::Nominal,
+            "explicit Nominal observation must release sticky-LockedOut"
+        );
 
         // Now a follow-on staleness should derate Nominal → Degraded,
         // not stay at LockedOut (the sticky flag must have cleared).
         let stale_at = 3_000 + POSTURE_STALENESS_TIMEOUT_MS + 1;
-        assert_eq!(t.current_posture(stale_at), FleetPosture::Degraded,
-            "post-release staleness derates Nominal → Degraded, not LockedOut");
+        assert_eq!(
+            t.current_posture(stale_at),
+            FleetPosture::Degraded,
+            "post-release staleness derates Nominal → Degraded, not LockedOut"
+        );
     }
 
     #[test]

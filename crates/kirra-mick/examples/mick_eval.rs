@@ -27,7 +27,9 @@ fn main() {
         Err(e) => {
             eprintln!("mick_eval: cannot open {path}: {e}");
             eprintln!("  produce a log first, e.g.:");
-            eprintln!("  KIRRA_MICK_EVAL_ENABLED=1 cargo run -p kirra-mick --example mick_intersection");
+            eprintln!(
+                "  KIRRA_MICK_EVAL_ENABLED=1 cargo run -p kirra-mick --example mick_intersection"
+            );
             std::process::exit(1);
         }
     };

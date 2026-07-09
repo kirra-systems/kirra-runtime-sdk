@@ -55,7 +55,10 @@ impl OwnedPredictedMode {
     /// Borrow this owned mode as a [`PredictedMode`] for the checker.
     #[must_use]
     pub fn as_mode(&self) -> PredictedMode<'_> {
-        PredictedMode { object_id: self.object_id, samples: &self.samples }
+        PredictedMode {
+            object_id: self.object_id,
+            samples: &self.samples,
+        }
     }
 }
 
@@ -94,7 +97,10 @@ fn cv_samples(obj: &PerceivedObject, horizon_s: f64, dt_s: f64) -> SampleVec {
         .map(|i| {
             let t = i as f64 * dt_s;
             PredictedSample {
-                pos: Point { x_m: obj.pos.x_m + obj.vel.x_m * t, y_m: obj.pos.y_m + obj.vel.y_m * t },
+                pos: Point {
+                    x_m: obj.pos.x_m + obj.vel.x_m * t,
+                    y_m: obj.pos.y_m + obj.vel.y_m * t,
+                },
                 time_from_start_s: t,
             }
         })
@@ -104,18 +110,29 @@ fn cv_samples(obj: &PerceivedObject, horizon_s: f64, dt_s: f64) -> SampleVec {
 /// Roll `obj` forward on CONSTANT TURN RATE: travel at its current speed while the heading turns
 /// at `yaw_rate_rad_s`. The divergent hypothesis for a turning object (curves where CV goes
 /// straight). Euler-integrated at `dt_s`.
-fn ctrv_samples(obj: &PerceivedObject, yaw_rate_rad_s: f64, horizon_s: f64, dt_s: f64) -> SampleVec {
+fn ctrv_samples(
+    obj: &PerceivedObject,
+    yaw_rate_rad_s: f64,
+    horizon_s: f64,
+    dt_s: f64,
+) -> SampleVec {
     let n = step_count(horizon_s, dt_s);
     let speed = obj.velocity_mps;
     let mut heading = obj.vel.y_m.atan2(obj.vel.x_m);
     let (mut x, mut y) = (obj.pos.x_m, obj.pos.y_m);
     let mut out = SampleVec::with_capacity(n + 1);
-    out.push(PredictedSample { pos: Point { x_m: x, y_m: y }, time_from_start_s: 0.0 });
+    out.push(PredictedSample {
+        pos: Point { x_m: x, y_m: y },
+        time_from_start_s: 0.0,
+    });
     for i in 1..=n {
         heading += yaw_rate_rad_s * dt_s;
         x += speed * heading.cos() * dt_s;
         y += speed * heading.sin() * dt_s;
-        out.push(PredictedSample { pos: Point { x_m: x, y_m: y }, time_from_start_s: i as f64 * dt_s });
+        out.push(PredictedSample {
+            pos: Point { x_m: x, y_m: y },
+            time_from_start_s: i as f64 * dt_s,
+        });
     }
     out
 }
@@ -135,7 +152,11 @@ fn point_on_polyline(poly: &[Point], dist_m: f64) -> Point {
             for w in poly.windows(2) {
                 let seg = (w[1].x_m - w[0].x_m).hypot(w[1].y_m - w[0].y_m);
                 if acc + seg >= dist_m {
-                    let f = if seg > 1e-9 { (dist_m - acc) / seg } else { 0.0 };
+                    let f = if seg > 1e-9 {
+                        (dist_m - acc) / seg
+                    } else {
+                        0.0
+                    };
                     return Point {
                         x_m: w[0].x_m + f * (w[1].x_m - w[0].x_m),
                         y_m: w[0].y_m + f * (w[1].y_m - w[0].y_m),
@@ -156,7 +177,10 @@ fn lane_follow_samples(path: &[Point], speed_mps: f64, horizon_s: f64, dt_s: f64
     (0..=n)
         .map(|i| {
             let t = i as f64 * dt_s;
-            PredictedSample { pos: point_on_polyline(path, speed_mps * t), time_from_start_s: t }
+            PredictedSample {
+                pos: point_on_polyline(path, speed_mps * t),
+                time_from_start_s: t,
+            }
         })
         .collect()
 }
@@ -182,7 +206,10 @@ pub fn predicted_modes_from_objects(
     let dt = dt_s.max(1e-3);
     let mut modes = Vec::with_capacity(objects.len());
     for obj in objects {
-        modes.push(OwnedPredictedMode { object_id: obj.id, samples: cv_samples(obj, horizon_s, dt) });
+        modes.push(OwnedPredictedMode {
+            object_id: obj.id,
+            samples: cv_samples(obj, horizon_s, dt),
+        });
         if let Some(&(_, yaw)) = yaw_rates.iter().find(|(id, _)| *id == obj.id) {
             // A distinct CTRV mode only when the yaw is BOTH non-negligible AND
             // CONSISTENT with the object's speed: `speed·|yaw|` (the implied
@@ -193,12 +220,18 @@ pub fn predicted_modes_from_objects(
             if yaw.abs() > CTRV_YAW_EPS_RAD_S
                 && implied_lateral_accel <= CTRV_MAX_LATERAL_ACCEL_MPS2
             {
-                modes.push(OwnedPredictedMode { object_id: obj.id, samples: ctrv_samples(obj, yaw, horizon_s, dt) });
+                modes.push(OwnedPredictedMode {
+                    object_id: obj.id,
+                    samples: ctrv_samples(obj, yaw, horizon_s, dt),
+                });
             }
         }
         if let Some(&(_, path)) = lane_paths.iter().find(|(id, _)| *id == obj.id) {
             if path.len() >= 2 && obj.velocity_mps > LANE_FOLLOW_MIN_SPEED_MPS {
-                modes.push(OwnedPredictedMode { object_id: obj.id, samples: lane_follow_samples(path, obj.velocity_mps, horizon_s, dt) });
+                modes.push(OwnedPredictedMode {
+                    object_id: obj.id,
+                    samples: lane_follow_samples(path, obj.velocity_mps, horizon_s, dt),
+                });
             }
         }
     }
@@ -260,8 +293,15 @@ mod tests {
         // The CTRV mode curves (gains lateral y) where CV stays on the axis.
         let cv = &modes[0].samples;
         let ctrv = &modes[1].samples;
-        assert!(cv.last().unwrap().pos.y_m.abs() < 1e-9, "CV stays on the x-axis");
-        assert!(ctrv.last().unwrap().pos.y_m > 0.5, "CTRV curves off-axis (+y), got {}", ctrv.last().unwrap().pos.y_m);
+        assert!(
+            cv.last().unwrap().pos.y_m.abs() < 1e-9,
+            "CV stays on the x-axis"
+        );
+        assert!(
+            ctrv.last().unwrap().pos.y_m > 0.5,
+            "CTRV curves off-axis (+y), got {}",
+            ctrv.last().unwrap().pos.y_m
+        );
     }
 
     #[test]
@@ -279,7 +319,11 @@ mod tests {
         // breach (A2).
         let fast = obj(1, 10.0, 0.0, 20.0, 0.0);
         let modes = predicted_modes_from_objects(&[fast], &[(1, 1.0)], &[], 2.0, 0.5);
-        assert_eq!(modes.len(), 1, "implausible speed·yaw → CV-only, CTRV rejected");
+        assert_eq!(
+            modes.len(),
+            1,
+            "implausible speed·yaw → CV-only, CTRV rejected"
+        );
 
         // The SAME turn rate at a LOW speed (2 m/s → 2 m/s² lateral) is a genuine
         // tight turn and IS emitted — the check filters noise, not real maneuvers.
@@ -305,7 +349,13 @@ mod tests {
 
     #[test]
     fn each_object_gets_its_own_modes() {
-        let modes = predicted_modes_from_objects(&[obj(1, 0.0, 0.0, 1.0, 0.0), obj(2, 5.0, 0.0, 1.0, 0.0)], &[(2, 0.3)], &[], 1.0, 0.5);
+        let modes = predicted_modes_from_objects(
+            &[obj(1, 0.0, 0.0, 1.0, 0.0), obj(2, 5.0, 0.0, 1.0, 0.0)],
+            &[(2, 0.3)],
+            &[],
+            1.0,
+            0.5,
+        );
         // obj1 CV only, obj2 CV+CTRV → 3 modes, ids preserved.
         assert_eq!(modes.len(), 3);
         assert_eq!(modes[0].object_id, 1);
@@ -319,21 +369,43 @@ mod tests {
         // bend (gains +y) where the CV mode stays on the axis — a distinct hypothesis.
         let o = obj(1, 0.0, 0.0, 4.0, 0.0); // 4 m/s east
         let path = [
-            Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 4.0, y_m: 0.0 },
-            Point { x_m: 8.0, y_m: 4.0 }, Point { x_m: 8.0, y_m: 12.0 },
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 4.0, y_m: 0.0 },
+            Point { x_m: 8.0, y_m: 4.0 },
+            Point {
+                x_m: 8.0,
+                y_m: 12.0,
+            },
         ];
         let modes = predicted_modes_from_objects(&[o], &[], &[(1, &path[..])], 2.0, 0.5);
         assert_eq!(modes.len(), 2, "CV + lane-follow (no yaw → no CTRV)");
-        assert!(modes[0].samples.last().unwrap().pos.y_m.abs() < 1e-9, "CV stays on the x-axis");
-        assert!(modes[1].samples.last().unwrap().pos.y_m > 1.0, "lane-follow traces the bend into +y, got {}", modes[1].samples.last().unwrap().pos.y_m);
+        assert!(
+            modes[0].samples.last().unwrap().pos.y_m.abs() < 1e-9,
+            "CV stays on the x-axis"
+        );
+        assert!(
+            modes[1].samples.last().unwrap().pos.y_m > 1.0,
+            "lane-follow traces the bend into +y, got {}",
+            modes[1].samples.last().unwrap().pos.y_m
+        );
     }
 
     #[test]
     fn a_stationary_object_gets_no_lane_follow_mode() {
         let o = obj(1, 0.0, 0.0, 0.0, 0.0); // not moving
-        let path = [Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 10.0, y_m: 0.0 }];
+        let path = [
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+        ];
         let modes = predicted_modes_from_objects(&[o], &[], &[(1, &path[..])], 2.0, 0.5);
-        assert_eq!(modes.len(), 1, "a stationary object's lane-follow degenerates to CV → omitted");
+        assert_eq!(
+            modes.len(),
+            1,
+            "a stationary object's lane-follow degenerates to CV → omitted"
+        );
     }
 
     #[test]
@@ -342,14 +414,34 @@ mod tests {
         assert_eq!(step_count(3.0, 0.5), 6, "nominal 3 s / 0.5 s horizon");
         assert_eq!(step_count(2.0, 1.0), 2);
         // ...and step_count never drops below 1 for a degenerate-but-finite horizon.
-        assert_eq!(step_count(0.0, 0.5), 1, "a zero horizon still yields the t=0 step");
+        assert_eq!(
+            step_count(0.0, 0.5),
+            1,
+            "a zero horizon still yields the t=0 step"
+        );
         // A pathological caller (huge horizon / near-zero dt) is CLAMPED, not unbounded.
-        assert_eq!(step_count(1.0e9, 1.0e-9), MAX_PREDICTION_STEPS, "huge ratio clamps to the ceiling");
-        assert_eq!(step_count(10.0, 1.0e-6), MAX_PREDICTION_STEPS, "tiny dt clamps to the ceiling");
+        assert_eq!(
+            step_count(1.0e9, 1.0e-9),
+            MAX_PREDICTION_STEPS,
+            "huge ratio clamps to the ceiling"
+        );
+        assert_eq!(
+            step_count(10.0, 1.0e-6),
+            MAX_PREDICTION_STEPS,
+            "tiny dt clamps to the ceiling"
+        );
         // dt_s == 0 makes the ratio +inf (non-finite) → clamps to the ceiling, never panics/UB-casts.
-        assert_eq!(step_count(5.0, 0.0), MAX_PREDICTION_STEPS, "dt=0 → +inf ratio clamps");
+        assert_eq!(
+            step_count(5.0, 0.0),
+            MAX_PREDICTION_STEPS,
+            "dt=0 → +inf ratio clamps"
+        );
         // A negative dt_s is FINITE (negative ratio), so it takes the ordinary floor, not the cap.
-        assert_eq!(step_count(5.0, -1.0), 1, "negative dt → finite negative ratio floors at 1");
+        assert_eq!(
+            step_count(5.0, -1.0),
+            1,
+            "negative dt → finite negative ratio floors at 1"
+        );
     }
 
     #[test]

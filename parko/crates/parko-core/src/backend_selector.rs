@@ -382,7 +382,10 @@ mod tests {
     // descriptors above resolve deterministically in BOTH feature lanes.)
 
     fn ok_mock_cpu() -> Result<Box<dyn InferenceBackend>, BackendError> {
-        Ok(Box::new(MockBackend::new(HashMap::new(), BackendDescriptor::Cpu)))
+        Ok(Box::new(MockBackend::new(
+            HashMap::new(),
+            BackendDescriptor::Cpu,
+        )))
     }
 
     #[test]
@@ -422,7 +425,10 @@ mod tests {
     #[test]
     fn register_backend_factory_is_last_wins() {
         fn first() -> Result<Box<dyn InferenceBackend>, BackendError> {
-            Ok(Box::new(MockBackend::new(HashMap::new(), BackendDescriptor::Cpu)))
+            Ok(Box::new(MockBackend::new(
+                HashMap::new(),
+                BackendDescriptor::Cpu,
+            )))
         }
         fn second() -> Result<Box<dyn InferenceBackend>, BackendError> {
             // distinguishable from `first` via a non-default output map
@@ -460,15 +466,42 @@ mod tests {
 
     #[test]
     fn descriptor_from_env_str_maps_and_is_case_insensitive() {
-        assert_eq!(descriptor_from_env_str("cpu").unwrap(), BackendDescriptor::Cpu);
-        assert_eq!(descriptor_from_env_str("cuda").unwrap(), BackendDescriptor::Cuda);
-        assert_eq!(descriptor_from_env_str("tensorrt").unwrap(), BackendDescriptor::TensorRT);
-        assert_eq!(descriptor_from_env_str("TENSORRT").unwrap(), BackendDescriptor::TensorRT);
-        assert_eq!(descriptor_from_env_str("  TensorRT  ").unwrap(), BackendDescriptor::TensorRT);
-        assert_eq!(descriptor_from_env_str("qnn").unwrap(), BackendDescriptor::QualcommQnn);
-        assert_eq!(descriptor_from_env_str("tidl").unwrap(), BackendDescriptor::TiTidl);
-        assert_eq!(descriptor_from_env_str("openvino").unwrap(), BackendDescriptor::IntelOpenVino);
-        assert_eq!(descriptor_from_env_str("vitis").unwrap(), BackendDescriptor::AmdVitis);
+        assert_eq!(
+            descriptor_from_env_str("cpu").unwrap(),
+            BackendDescriptor::Cpu
+        );
+        assert_eq!(
+            descriptor_from_env_str("cuda").unwrap(),
+            BackendDescriptor::Cuda
+        );
+        assert_eq!(
+            descriptor_from_env_str("tensorrt").unwrap(),
+            BackendDescriptor::TensorRT
+        );
+        assert_eq!(
+            descriptor_from_env_str("TENSORRT").unwrap(),
+            BackendDescriptor::TensorRT
+        );
+        assert_eq!(
+            descriptor_from_env_str("  TensorRT  ").unwrap(),
+            BackendDescriptor::TensorRT
+        );
+        assert_eq!(
+            descriptor_from_env_str("qnn").unwrap(),
+            BackendDescriptor::QualcommQnn
+        );
+        assert_eq!(
+            descriptor_from_env_str("tidl").unwrap(),
+            BackendDescriptor::TiTidl
+        );
+        assert_eq!(
+            descriptor_from_env_str("openvino").unwrap(),
+            BackendDescriptor::IntelOpenVino
+        );
+        assert_eq!(
+            descriptor_from_env_str("vitis").unwrap(),
+            BackendDescriptor::AmdVitis
+        );
     }
 
     #[test]
@@ -566,7 +599,10 @@ mod tests {
     static ORDERING_FACTORY_CALLED: AtomicBool = AtomicBool::new(false);
     fn ordering_flagging_factory() -> Result<Box<dyn InferenceBackend>, BackendError> {
         ORDERING_FACTORY_CALLED.store(true, Ordering::SeqCst);
-        Ok(Box::new(MockBackend::new(HashMap::new(), BackendDescriptor::Cpu)))
+        Ok(Box::new(MockBackend::new(
+            HashMap::new(),
+            BackendDescriptor::Cpu,
+        )))
     }
 
     #[test]
@@ -576,8 +612,9 @@ mod tests {
         // On QNX the gate denies (AmdVitis is PENDING) BEFORE the factory runs —
         // a registered factory must NOT bypass the platform rule.
         ORDERING_FACTORY_CALLED.store(false, Ordering::SeqCst);
-        let err = BackendSelector::new_for_platform(TargetPlatform::Qnx, BackendDescriptor::AmdVitis)
-            .unwrap_err();
+        let err =
+            BackendSelector::new_for_platform(TargetPlatform::Qnx, BackendDescriptor::AmdVitis)
+                .unwrap_err();
         assert!(
             !ORDERING_FACTORY_CALLED.load(Ordering::SeqCst),
             "platform gate must deny before the registered factory is consulted"

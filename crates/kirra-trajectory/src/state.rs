@@ -132,7 +132,11 @@ pub struct EgoOdom {
 
 impl Default for EgoOdom {
     fn default() -> Self {
-        Self { linear_x_mps: 0.0, yaw_rate_rads: 0.0, stamp_ms: 0 }
+        Self {
+            linear_x_mps: 0.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        }
     }
 }
 
@@ -160,13 +164,16 @@ mod tests {
 
     #[test]
     fn clamp_verdict_is_preserved_while_fresh_mrc_is_floored() {
-        let clamp = AcceptedTrajectory::with_verdict(
-            "ego", 2, Vec::new(), TrajectoryVerdict::Clamp, 1_000,
-        );
+        let clamp =
+            AcceptedTrajectory::with_verdict("ego", 2, Vec::new(), TrajectoryVerdict::Clamp, 1_000);
         assert_eq!(clamp.fail_closed(1_000), TrajectoryVerdict::Clamp);
 
         let mrc = AcceptedTrajectory::with_verdict(
-            "ego", 3, Vec::new(), TrajectoryVerdict::MRCFallback, 1_000,
+            "ego",
+            3,
+            Vec::new(),
+            TrajectoryVerdict::MRCFallback,
+            1_000,
         );
         assert_eq!(mrc.fail_closed(1_000), TrajectoryVerdict::MRCFallback);
     }

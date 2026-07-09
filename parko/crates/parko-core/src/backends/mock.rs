@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::{
-    BackendDescriptor, BackendError, InferenceBackend,
-    ModelHandle, PrecisionMode, TensorBatch, TensorStorage,
+    BackendDescriptor, BackendError, InferenceBackend, ModelHandle, PrecisionMode, TensorBatch,
+    TensorStorage,
 };
 
 /// Deterministic, zero-dependency backend for parko-core tests.
@@ -38,7 +38,8 @@ impl MockBackend {
 
 impl InferenceBackend for MockBackend {
     fn load_model(&self, path: &str) -> Result<ModelHandle, BackendError> {
-        let output_shapes = self.output_data
+        let output_shapes = self
+            .output_data
             .iter()
             .map(|(name, data)| (name.clone(), vec![data.len()]))
             .collect();
@@ -58,7 +59,8 @@ impl InferenceBackend for MockBackend {
     ) -> Result<TensorBatch<'static>, BackendError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
-        let named_tensors = self.output_data
+        let named_tensors = self
+            .output_data
             .iter()
             .map(|(name, data)| (name.clone(), TensorStorage::Owned(data.clone())))
             .collect();

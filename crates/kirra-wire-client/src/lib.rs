@@ -74,10 +74,10 @@ pub enum ClientDenyCode {
 /// appended LAST (tag 4) so the existing wire tags 0–3 are unchanged (review H1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientEnforceAction {
-    Allow,                                  // 0
-    ClampLinear(f64),                       // 1
-    ClampSteering(f64),                     // 2
-    DenyBreach(ClientDenyCode),             // 3
+    Allow,                                    // 0
+    ClampLinear(f64),                         // 1
+    ClampSteering(f64),                       // 2
+    DenyBreach(ClientDenyCode),               // 3
     ClampBoth { linear: f64, steering: f64 }, // 4
 }
 
@@ -156,7 +156,10 @@ mod wire_layout {
              the enum order drifted from the core"
         );
         // Re-encode must reproduce the exact bytes (round-trip closes the loop).
-        assert_eq!(bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(), DENY_VERDICT_BYTES);
+        assert_eq!(
+            bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(),
+            DENY_VERDICT_BYTES
+        );
     }
 
     #[test]
@@ -164,10 +167,17 @@ mod wire_layout {
         // seq=0, Allow (index 0, no payload), reason_code=0 → 16 zero bytes.
         let bytes = [0u8; 16];
         let v = decode_verdict(&bytes).expect("decode");
-        assert_eq!(v.action, ClientEnforceAction::Allow, "index 0 must be Allow");
+        assert_eq!(
+            v.action,
+            ClientEnforceAction::Allow,
+            "index 0 must be Allow"
+        );
         assert_eq!(v.seq, 0);
         assert_eq!(v.reason_code, 0);
-        assert_eq!(bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(), bytes);
+        assert_eq!(
+            bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap(),
+            bytes
+        );
     }
 
     #[test]
@@ -210,7 +220,11 @@ mod wire_layout {
             ClientEnforceAction::ClampLinear(22.35),
             ClientEnforceAction::ClampSteering(-12.5),
         ] {
-            let v = Verdict { seq: 99, action: action.clone(), reason_code: 0 };
+            let v = Verdict {
+                seq: 99,
+                action: action.clone(),
+                reason_code: 0,
+            };
             let bytes = bincode::serde::encode_to_vec(&v, wire_cfg()).unwrap();
             assert_eq!(decode_verdict(&bytes).unwrap(), v);
         }

@@ -40,7 +40,10 @@ fn arc_point(r: f64, s: f64, d: f64) -> Point {
         let a = s / r;
         // Offset d is LEFT of travel = toward the circle center.
         let radius = r - d;
-        Point { x_m: radius * a.sin(), y_m: r - radius * a.cos() }
+        Point {
+            x_m: radius * a.sin(),
+            y_m: r - radius * a.cos(),
+        }
     } else {
         Point { x_m: s, y_m: d }
     }
@@ -68,9 +71,14 @@ fn arc_len(r: f64) -> f64 {
 
 fn arc_corridor(r: f64, half_w: f64, len: f64, n: usize) -> PolyCorridor {
     let ring = |d: f64| -> Vec<Point> {
-        (0..n).map(|i| arc_point(r, len * i as f64 / (n - 1) as f64, d)).collect()
+        (0..n)
+            .map(|i| arc_point(r, len * i as f64 / (n - 1) as f64, d))
+            .collect()
     };
-    PolyCorridor { left: ring(half_w), right: ring(-half_w) }
+    PolyCorridor {
+        left: ring(half_w),
+        right: ring(-half_w),
+    }
 }
 
 /// Arc-length offset of the FIRST trajectory pose from the corridor start —
@@ -88,7 +96,11 @@ fn lane_following_trajectory(r: f64, v: f64, horizon_s: f64, dt: f64) -> Vec<Tra
             let s = EGO_START_S + v * t;
             let p = arc_point(r, s, 0.0);
             TrajectoryPoint {
-                pose: Pose { x_m: p.x_m, y_m: p.y_m, heading_rad: arc_heading(r, s) },
+                pose: Pose {
+                    x_m: p.x_m,
+                    y_m: p.y_m,
+                    heading_rad: arc_heading(r, s),
+                },
                 velocity_mps: v,
                 time_from_start_s: t,
             }
@@ -130,8 +142,8 @@ fn max_admitted_speed(r: f64) -> f64 {
     let mut max_ok = 0.0;
     for i in 1..=18 {
         let v = i as f64; // 1..=18 m/s (inside the urban ODD cap)
-        // Horizon shortened so the footprint's front stays inside the shortest
-        // corridor in the sweep (r = 25 → 50 m of arc).
+                          // Horizon shortened so the footprint's front stays inside the shortest
+                          // corridor in the sweep (r = 25 → 50 m of arc).
         let traj = lane_following_trajectory(r, v, 2.0_f64.min(38.0 / v), 0.1);
         let verdict = validate_trajectory_slow(
             &traj,
@@ -210,7 +222,10 @@ fn out_of_lane_object_on_the_tangent_line_is_not_spuriously_rejected() {
     let h = arc_heading(r, EGO_START_S);
     let obj = PerceivedObject {
         id: 2,
-        pos: Point { x_m: start.x_m + 30.0 * h.cos(), y_m: start.y_m + 30.0 * h.sin() },
+        pos: Point {
+            x_m: start.x_m + 30.0 * h.cos(),
+            y_m: start.y_m + 30.0 * h.sin(),
+        },
         velocity_mps: 0.0,
         heading_rad: h,
         vel: Point { x_m: 0.0, y_m: 0.0 },
@@ -274,15 +289,36 @@ fn a_stopped_pose_is_not_rejected_for_a_crosser_it_yielded_to() {
     // at 1.5 m/s (its lateral safe distance ≈ 4.4 m > 4 m — inside the
     // alignment band, outside the overlap band).
     let corridor = PolyCorridor {
-        left: vec![Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 120.0, y_m: 5.0 }],
-        right: vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 120.0, y_m: -5.0 }],
+        left: vec![
+            Point { x_m: 0.0, y_m: 5.0 },
+            Point {
+                x_m: 120.0,
+                y_m: 5.0,
+            },
+        ],
+        right: vec![
+            Point {
+                x_m: 0.0,
+                y_m: -5.0,
+            },
+            Point {
+                x_m: 120.0,
+                y_m: -5.0,
+            },
+        ],
     };
     let crosser = PerceivedObject {
         id: 9,
-        pos: Point { x_m: 45.0, y_m: 4.0 },
+        pos: Point {
+            x_m: 45.0,
+            y_m: 4.0,
+        },
         velocity_mps: 1.5,
         heading_rad: -std::f64::consts::FRAC_PI_2,
-        vel: Point { x_m: 0.0, y_m: -1.5 },
+        vel: Point {
+            x_m: 0.0,
+            y_m: -1.5,
+        },
     };
 
     // Yield: the MOVING poses all stay outside the 8 m lateral-conflict
@@ -307,7 +343,11 @@ fn a_stopped_pose_is_not_rejected_for_a_crosser_it_yielded_to() {
     for i in 12..21 {
         let t = i as f64 * 0.1;
         yielded.push(TrajectoryPoint {
-            pose: Pose { x_m: 37.2, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 37.2,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 0.0,
             time_from_start_s: t,
         });
@@ -331,7 +371,11 @@ fn a_stopped_pose_is_not_rejected_for_a_crosser_it_yielded_to() {
         .map(|i| {
             let t = i as f64 * 0.1;
             TrajectoryPoint {
-                pose: Pose { x_m: 32.0 + 5.0 * t, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 32.0 + 5.0 * t,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 5.0,
                 time_from_start_s: t,
             }

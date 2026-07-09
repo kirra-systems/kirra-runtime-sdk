@@ -62,13 +62,11 @@ pub const MIGRATIONS: &[Migration] = &[
     // that finds its column already present has nothing left to do.
     Migration {
         version: 2,
-        apply: |conn| {
-            match conn
-                .execute_batch("ALTER TABLE ota_campaigns ADD COLUMN uptane_metadata_json TEXT")
-            {
-                Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
-                other => other,
-            }
+        apply: |conn| match conn
+            .execute_batch("ALTER TABLE ota_campaigns ADD COLUMN uptane_metadata_json TEXT")
+        {
+            Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+            other => other,
         },
     },
 ];
@@ -92,7 +90,10 @@ pub fn decide_migration(db_version: i64, target: i64) -> MigrationDecision {
     use std::cmp::Ordering;
     match db_version.cmp(&target) {
         Ordering::Equal => MigrationDecision::UpToDate,
-        Ordering::Less => MigrationDecision::Migrate { from: db_version, to: target },
+        Ordering::Less => MigrationDecision::Migrate {
+            from: db_version,
+            to: target,
+        },
         Ordering::Greater => MigrationDecision::RefuseFuture { db_version, target },
     }
 }
@@ -110,7 +111,10 @@ fn set_user_version(conn: &Connection, v: i64) -> rusqlite::Result<()> {
 
 /// Build a fail-closed migration error carrying an operator-readable reason.
 fn migration_error(reason: String) -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some(reason))
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(reason),
+    )
 }
 
 /// The fail-closed "future schema" error (a DB migrated past this binary).
@@ -328,18 +332,31 @@ mod tests {
     #[test]
     fn decide_covers_the_three_directions() {
         assert_eq!(decide_migration(1, 1), MigrationDecision::UpToDate);
-        assert_eq!(decide_migration(0, 1), MigrationDecision::Migrate { from: 0, to: 1 });
-        assert_eq!(decide_migration(3, 5), MigrationDecision::Migrate { from: 3, to: 5 });
+        assert_eq!(
+            decide_migration(0, 1),
+            MigrationDecision::Migrate { from: 0, to: 1 }
+        );
+        assert_eq!(
+            decide_migration(3, 5),
+            MigrationDecision::Migrate { from: 3, to: 5 }
+        );
         assert_eq!(
             decide_migration(2, 1),
-            MigrationDecision::RefuseFuture { db_version: 2, target: 1 }
+            MigrationDecision::RefuseFuture {
+                db_version: 2,
+                target: 1
+            }
         );
     }
 
     #[test]
     fn a_fresh_db_reads_version_zero_then_stamps_to_baseline() {
         let c = mem();
-        assert_eq!(read_user_version(&c).unwrap(), 0, "an unstamped DB is version 0");
+        assert_eq!(
+            read_user_version(&c).unwrap(),
+            0,
+            "an unstamped DB is version 0"
+        );
         // Precondition of `run_migrations`: the baseline DDL has run (in
         // `VerifierStore::new` it always precedes this call). The v2 step
         // ALTERs `ota_campaigns`, so create the baseline-shaped table here.
@@ -356,7 +373,11 @@ mod tests {
         .unwrap();
         let before = run_migrations(&c).unwrap();
         assert_eq!(before, 0);
-        assert_eq!(read_user_version(&c).unwrap(), SCHEMA_VERSION, "stamped to the baseline");
+        assert_eq!(
+            read_user_version(&c).unwrap(),
+            SCHEMA_VERSION,
+            "stamped to the baseline"
+        );
         // Idempotent: re-running keeps it at the baseline.
         assert_eq!(run_migrations(&c).unwrap(), SCHEMA_VERSION);
         assert_eq!(read_user_version(&c).unwrap(), SCHEMA_VERSION);
@@ -366,8 +387,14 @@ mod tests {
     fn a_future_db_is_refused_fail_closed() {
         let c = mem();
         set_user_version(&c, SCHEMA_VERSION + 1).unwrap();
-        assert!(assert_schema_not_future(&c).is_err(), "a newer-binary DB must be refused");
-        assert!(run_migrations(&c).is_err(), "run_migrations also refuses a future DB");
+        assert!(
+            assert_schema_not_future(&c).is_err(),
+            "a newer-binary DB must be refused"
+        );
+        assert!(
+            run_migrations(&c).is_err(),
+            "run_migrations also refuses a future DB"
+        );
         // The refusal did NOT downgrade the stamp.
         assert_eq!(read_user_version(&c).unwrap(), SCHEMA_VERSION + 1);
     }
@@ -383,15 +410,25 @@ mod tests {
             c.execute_batch("CREATE TABLE m3 (x INTEGER)")
         }
         let steps = [
-            Migration { version: 2, apply: mk_v2 },
-            Migration { version: 3, apply: mk_v3 },
+            Migration {
+                version: 2,
+                apply: mk_v2,
+            },
+            Migration {
+                version: 3,
+                apply: mk_v3,
+            },
         ];
         let c = mem();
         // Start at the v1 baseline; migrate up to v3.
         set_user_version(&c, 1).unwrap();
         let before = run_migrations_with(&c, &steps, 3).unwrap();
         assert_eq!(before, 1);
-        assert_eq!(read_user_version(&c).unwrap(), 3, "stamped to the newest applied step");
+        assert_eq!(
+            read_user_version(&c).unwrap(),
+            3,
+            "stamped to the newest applied step"
+        );
         // Both marker tables exist → both steps ran.
         for t in ["m2", "m3"] {
             let n: i64 = c
@@ -414,14 +451,44 @@ mod tests {
         }
         let c = mem();
         // Not strictly ascending.
-        let descending = [Migration { version: 3, apply: noop }, Migration { version: 2, apply: noop }];
-        assert!(run_migrations_with(&c, &descending, 5).is_err(), "descending registry refused");
+        let descending = [
+            Migration {
+                version: 3,
+                apply: noop,
+            },
+            Migration {
+                version: 2,
+                apply: noop,
+            },
+        ];
+        assert!(
+            run_migrations_with(&c, &descending, 5).is_err(),
+            "descending registry refused"
+        );
         // Duplicate version.
-        let dup = [Migration { version: 2, apply: noop }, Migration { version: 2, apply: noop }];
-        assert!(run_migrations_with(&c, &dup, 5).is_err(), "duplicate version refused");
+        let dup = [
+            Migration {
+                version: 2,
+                apply: noop,
+            },
+            Migration {
+                version: 2,
+                apply: noop,
+            },
+        ];
+        assert!(
+            run_migrations_with(&c, &dup, 5).is_err(),
+            "duplicate version refused"
+        );
         // At/below the v1 baseline (versions ≤ 1 are the baseline, not steps).
-        let at_baseline = [Migration { version: 1, apply: noop }];
-        assert!(run_migrations_with(&c, &at_baseline, 5).is_err(), "a step at the baseline is refused");
+        let at_baseline = [Migration {
+            version: 1,
+            apply: noop,
+        }];
+        assert!(
+            run_migrations_with(&c, &at_baseline, 5).is_err(),
+            "a step at the baseline is refused"
+        );
     }
 
     #[test]
@@ -433,11 +500,21 @@ mod tests {
             c.execute_batch("CREATE TABLE m2 (x INTEGER)")?;
             Err(rusqlite::Error::ExecuteReturnedResults) // synthetic mid-step failure
         }
-        let steps = [Migration { version: 2, apply: write_then_fail }];
+        let steps = [Migration {
+            version: 2,
+            apply: write_then_fail,
+        }];
         let c = mem();
         set_user_version(&c, 1).unwrap();
-        assert!(run_migrations_with(&c, &steps, 2).is_err(), "the failing step propagates");
-        assert_eq!(read_user_version(&c).unwrap(), 1, "version not advanced on a failed step");
+        assert!(
+            run_migrations_with(&c, &steps, 2).is_err(),
+            "the failing step propagates"
+        );
+        assert_eq!(
+            read_user_version(&c).unwrap(),
+            1,
+            "version not advanced on a failed step"
+        );
         let tables: i64 = c
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='m2'",
@@ -445,7 +522,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(tables, 0, "the failed step's DDL rolled back with the stamp (atomic)");
+        assert_eq!(
+            tables, 0,
+            "the failed step's DDL rolled back with the stamp (atomic)"
+        );
     }
 
     #[test]
@@ -458,8 +538,14 @@ mod tests {
             c.execute_batch("CREATE TABLE m3 (x INTEGER)")
         }
         let steps = [
-            Migration { version: 2, apply: boom_v2 },
-            Migration { version: 3, apply: mk_v3 },
+            Migration {
+                version: 2,
+                apply: boom_v2,
+            },
+            Migration {
+                version: 3,
+                apply: mk_v3,
+            },
         ];
         let c = mem();
         set_user_version(&c, 2).unwrap();

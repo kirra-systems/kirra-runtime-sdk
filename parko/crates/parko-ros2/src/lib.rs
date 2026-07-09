@@ -31,11 +31,11 @@ pub mod comparator_adapter;
 pub mod config;
 pub mod containment_gate;
 pub mod image_shim;
-pub mod pointcloud2_shim;
 pub mod imu_shim;
 pub mod odometry_shim;
 pub mod ood_feed;
 pub mod platform_profile;
+pub mod pointcloud2_shim;
 pub mod posture_state;
 pub mod radar_shim;
 pub mod scene_vetoes;
@@ -47,38 +47,38 @@ pub mod tick_pipeline;
 // Re-export the PostureTracker so parko-ros2 consumers can refer to
 // `parko_ros2::PostureTracker` directly — single implementation, shared with
 // kirra-ros2-adapter via the lean `kirra-core` crate (de-monolith Stage 5).
-pub use kirra_core::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
 pub use crate::posture_state::{fleet_to_safety, ParkoPostureState};
+pub use kirra_core::posture_tracker::{PostureTracker, POSTURE_STALENESS_TIMEOUT_MS};
 
 #[cfg(feature = "ros2")]
 pub mod node;
 
+pub use crate::clearance_gate::{
+    run_pipeline_tick_with_clearance, ClearedTickOutcome, NodeClearance,
+};
 pub use crate::command_mapping::{enforce_outgoing_twist, OutgoingTwist};
 pub use crate::comparator_adapter::ComparatorAsGovernor;
 pub use crate::config::ParkoNodeConfig;
-pub use crate::platform_profile::CourierPlatformProfile;
 pub use crate::containment_gate::{
     apply_containment_gate, command_stays_in_corridor, command_stays_in_corridor_default,
     CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S,
-};
-pub use crate::taj_corridor::{
-    corridor_from_scan, taj_scan_from_raw, CorridorSnapshot, LaserScanRawFields, EGO_REAR_COVER_M,
-};
-pub use crate::sensor_mapping::{
-    CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
-    CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping,
-    OdomMappingError, OdomOrientation, OdomSample, OwnedCameraSample, SensorInputMapping,
-};
-pub use crate::scene_vetoes::{
-    apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
 };
 pub use crate::ood_feed::{
     load_baseline, ood_feed_from_env, ood_feed_from_env_values, OodFeed, OodFeedError,
     KIRRA_OOD_BASELINE_PATH_ENV, KIRRA_OOD_ENABLED_ENV,
 };
+pub use crate::platform_profile::CourierPlatformProfile;
+pub use crate::scene_vetoes::{
+    apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
+};
+pub use crate::sensor_mapping::{
+    CameraConfig, CameraEncoding, CameraLayout, CameraMapping, CameraMappingError,
+    CameraNormalization, CameraResize, CameraSample, OdomConfig, OdomMapping, OdomMappingError,
+    OdomOrientation, OdomSample, OwnedCameraSample, SensorInputMapping,
+};
+pub use crate::taj_corridor::{
+    corridor_from_scan, taj_scan_from_raw, CorridorSnapshot, LaserScanRawFields, EGO_REAR_COVER_M,
+};
 pub use crate::tick_pipeline::{
     run_pipeline_tick, run_pipeline_tick_with_ood, TickError, TickOutcome,
-};
-pub use crate::clearance_gate::{
-    run_pipeline_tick_with_clearance, ClearedTickOutcome, NodeClearance,
 };

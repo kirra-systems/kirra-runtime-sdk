@@ -31,7 +31,10 @@ fn fault_matrix_all_classes_correct() {
 /// not present.
 #[test]
 fn replay_equal_sequence_rejects() {
-    let mut state = JudgeState { last_accepted: 7, have_accepted: true };
+    let mut state = JudgeState {
+        last_accepted: 7,
+        have_accepted: true,
+    };
     // Equal sequence ⇒ Replay.
     let equal = CommandFrame::well_formed(7, u64::MAX / 2, 1.0, 0.0);
     assert_eq!(
@@ -47,9 +50,15 @@ fn replay_equal_sequence_rejects() {
 /// Lower sequence is a regress (distinct from replay).
 #[test]
 fn lower_sequence_is_regress() {
-    let mut state = JudgeState { last_accepted: 7, have_accepted: true };
+    let mut state = JudgeState {
+        last_accepted: 7,
+        have_accepted: true,
+    };
     let lower = CommandFrame::well_formed(6, u64::MAX / 2, 1.0, 0.0);
-    assert_eq!(state.judge(&lower, 1_000), Verdict::Reject(RejectReason::SequenceRegress));
+    assert_eq!(
+        state.judge(&lower, 1_000),
+        Verdict::Reject(RejectReason::SequenceRegress)
+    );
 }
 
 /// The subscriber edge rejects oversize before the judge sees the frame.
@@ -81,26 +90,41 @@ fn judge_contract_checks() {
     let mut s = JudgeState::new();
     let mut bad = CommandFrame::well_formed(1, u64::MAX / 2, 5.0, 0.2);
     bad.magic = !FRAME_MAGIC;
-    assert_eq!(s.judge(&bad, 1_000), Verdict::Reject(RejectReason::BadMagic));
+    assert_eq!(
+        s.judge(&bad, 1_000),
+        Verdict::Reject(RejectReason::BadMagic)
+    );
 
     // Missed deadline (now > deadline).
     let mut s = JudgeState::new();
     let stale = CommandFrame::well_formed(1, 100, 5.0, 0.2);
-    assert_eq!(s.judge(&stale, 1_000), Verdict::Reject(RejectReason::DeadlineMissed));
+    assert_eq!(
+        s.judge(&stale, 1_000),
+        Verdict::Reject(RejectReason::DeadlineMissed)
+    );
 
     // Integrity flag not set.
     let mut s = JudgeState::new();
     let mut noint = CommandFrame::well_formed(1, u64::MAX / 2, 5.0, 0.2);
     noint.integrity_flag = 0;
-    assert_eq!(s.judge(&noint, 1_000), Verdict::Reject(RejectReason::IntegrityFlag));
+    assert_eq!(
+        s.judge(&noint, 1_000),
+        Verdict::Reject(RejectReason::IntegrityFlag)
+    );
 
     // Kinematic envelope (over the PROXY limit) and NaN both reject.
     let mut s = JudgeState::new();
     let fast = CommandFrame::well_formed(1, u64::MAX / 2, 999.0, 0.0);
-    assert_eq!(s.judge(&fast, 1_000), Verdict::Reject(RejectReason::KinematicLimit));
+    assert_eq!(
+        s.judge(&fast, 1_000),
+        Verdict::Reject(RejectReason::KinematicLimit)
+    );
     let mut s = JudgeState::new();
     let nan = CommandFrame::well_formed(1, u64::MAX / 2, f64::NAN, 0.0);
-    assert_eq!(s.judge(&nan, 1_000), Verdict::Reject(RejectReason::KinematicLimit));
+    assert_eq!(
+        s.judge(&nan, 1_000),
+        Verdict::Reject(RejectReason::KinematicLimit)
+    );
 }
 
 /// Sanity: a valid frame survives the zero-copy round-trip and is accepted

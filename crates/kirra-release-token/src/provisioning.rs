@@ -188,10 +188,12 @@ fn load_seed_file(path: &Path) -> Result<SigningKey, ProvisionError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = file.metadata().map_err(|e| ProvisionError::FileUnreadable {
-            path: path.to_path_buf(),
-            detail: e.to_string(),
-        })?;
+        let meta = file
+            .metadata()
+            .map_err(|e| ProvisionError::FileUnreadable {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            })?;
         let mode = meta.permissions().mode();
         if mode & 0o077 != 0 {
             return Err(ProvisionError::InsecurePermissions {
@@ -213,7 +215,10 @@ fn load_seed_file(path: &Path) -> Result<SigningKey, ProvisionError> {
     if bytes.len() != 32 {
         let got = bytes.len();
         bytes.zeroize(); // whatever the file held may be secret regardless of length
-        return Err(ProvisionError::SeedLength { path: path.to_path_buf(), got });
+        return Err(ProvisionError::SeedLength {
+            path: path.to_path_buf(),
+            got,
+        });
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bytes);
@@ -294,13 +299,28 @@ mod tests {
 
     #[test]
     fn unknown_and_empty_file_paths_are_rejected() {
-        assert!(matches!(parse_source("garbage"), Err(ProvisionError::UnknownSource(_))));
+        assert!(matches!(
+            parse_source("garbage"),
+            Err(ProvisionError::UnknownSource(_))
+        ));
         // `file:` with no path is not a valid file source.
-        assert!(matches!(parse_source("file:"), Err(ProvisionError::UnknownSource(_))));
-        assert!(matches!(parse_source("file:   "), Err(ProvisionError::UnknownSource(_))));
+        assert!(matches!(
+            parse_source("file:"),
+            Err(ProvisionError::UnknownSource(_))
+        ));
+        assert!(matches!(
+            parse_source("file:   "),
+            Err(ProvisionError::UnknownSource(_))
+        ));
         // `tpm:` with no handle is a misconfiguration, not a (deferred) TPM source.
-        assert!(matches!(parse_source("tpm:"), Err(ProvisionError::UnknownSource(_))));
-        assert!(matches!(parse_source("tpm:  "), Err(ProvisionError::UnknownSource(_))));
+        assert!(matches!(
+            parse_source("tpm:"),
+            Err(ProvisionError::UnknownSource(_))
+        ));
+        assert!(matches!(
+            parse_source("tpm:  "),
+            Err(ProvisionError::UnknownSource(_))
+        ));
     }
 
     // --- provision_signing_key: dev + tpm (no I/O) ---------------------------
@@ -367,7 +387,10 @@ mod tests {
             let token = issue_release_token(&view, &key);
             assert_eq!(verify_release(&token, &view, &key.verifying_key()), Ok(()));
             // And it is exactly the [3u8;32] seed.
-            assert_eq!(key.verifying_key(), SigningKey::from_bytes(&[3u8; 32]).verifying_key());
+            assert_eq!(
+                key.verifying_key(),
+                SigningKey::from_bytes(&[3u8; 32]).verifying_key()
+            );
 
             let _ = fs::remove_file(&path);
         }

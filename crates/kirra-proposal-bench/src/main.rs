@@ -58,9 +58,10 @@ fn render(action: &ClientEnforceAction, reason_code: u32) -> (String, String) {
             "CLAMP_BOTH".into(),
             format!("ClampBoth({linear:.3} m/s, {steering:.3} deg)"),
         ),
-        ClientEnforceAction::DenyBreach(code) => {
-            (format!("{code:?}"), format!("DenyBreach (reason_code={reason_code})"))
-        }
+        ClientEnforceAction::DenyBreach(code) => (
+            format!("{code:?}"),
+            format!("DenyBreach (reason_code={reason_code})"),
+        ),
     }
 }
 
@@ -72,12 +73,30 @@ fn main() -> std::io::Result<()> {
     sock.set_read_timeout(Some(RECV_TIMEOUT))?;
 
     let cases = [
-        Case { name: "nominal accept",      cmd: cmd(1.0, 1.0, 0.1, 0.0, 0.0) },
-        Case { name: "over-speed clamp",    cmd: cmd(50.0, 50.0, 1.0, 0.0, 0.0) },
-        Case { name: "reverse over-speed",  cmd: cmd(-50.0, -50.0, 1.0, 0.0, 0.0) },
-        Case { name: "hard steering step",  cmd: cmd(2.0, 2.0, 0.1, 40.0, 0.0) },
-        Case { name: "NaN deny",            cmd: cmd(f64::NAN, 1.0, 0.1, 0.0, 0.0) },
-        Case { name: "zero-dt deny",        cmd: cmd(1.0, 1.0, 0.0, 0.0, 0.0) },
+        Case {
+            name: "nominal accept",
+            cmd: cmd(1.0, 1.0, 0.1, 0.0, 0.0),
+        },
+        Case {
+            name: "over-speed clamp",
+            cmd: cmd(50.0, 50.0, 1.0, 0.0, 0.0),
+        },
+        Case {
+            name: "reverse over-speed",
+            cmd: cmd(-50.0, -50.0, 1.0, 0.0, 0.0),
+        },
+        Case {
+            name: "hard steering step",
+            cmd: cmd(2.0, 2.0, 0.1, 40.0, 0.0),
+        },
+        Case {
+            name: "NaN deny",
+            cmd: cmd(f64::NAN, 1.0, 0.1, 0.0, 0.0),
+        },
+        Case {
+            name: "zero-dt deny",
+            cmd: cmd(1.0, 1.0, 0.0, 0.0, 0.0),
+        },
     ];
 
     eprintln!("kirra-proposal-bench → {addr} ({} cases)\n", cases.len());

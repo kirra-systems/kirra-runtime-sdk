@@ -50,7 +50,7 @@ use kirra_core::containment::MAX_TRAJECTORY_HORIZON;
 
 pub mod behavior;
 pub use behavior::{
-    Behavioral, BehaviorConfig, LaneBoundary, LineType, SignalState, TrafficControl,
+    BehaviorConfig, Behavioral, LaneBoundary, LineType, SignalState, TrafficControl,
 };
 
 pub mod lanemap;
@@ -333,10 +333,21 @@ impl PlanOutput {
     #[must_use]
     pub fn safe_stop(at: Pose) -> Self {
         let trajectory = vec![
-            TrajectoryPoint { pose: at, velocity_mps: 0.0, time_from_start_s: 0.0 },
-            TrajectoryPoint { pose: at, velocity_mps: 0.0, time_from_start_s: 0.1 },
+            TrajectoryPoint {
+                pose: at,
+                velocity_mps: 0.0,
+                time_from_start_s: 0.0,
+            },
+            TrajectoryPoint {
+                pose: at,
+                velocity_mps: 0.0,
+                time_from_start_s: 0.1,
+            },
         ];
-        PlanOutput { trajectory, kind: ProposalKind::SafeStop }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::SafeStop,
+        }
     }
 }
 
@@ -633,7 +644,7 @@ impl GeometricPlannerConfig {
             max_accel_mps2: 1.0,
             max_decel_mps2: 1.5,
             object_lane_tolerance_m: 0.6,
-            object_stop_gap_m: 1.0,        // stop ~1 m short (the Yield standoff), not 5 m
+            object_stop_gap_m: 1.0, // stop ~1 m short (the Yield standoff), not 5 m
             object_approach_speed_mps: 1.0,
             lateral_clearance_target_m: 0.7, // just over the courier RSS band (0.6) → cleared object RSS-filtered
             lateral_offset_max_m: 1.0,
@@ -751,7 +762,12 @@ impl GeometricPlanner {
         if hold_start - ramp_len < 0.0 {
             return LateralBump::NONE;
         }
-        LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
+        LateralBump {
+            y_off,
+            ramp_len,
+            hold_start,
+            hold_end: (s_obj - s_ego) + hold_half,
+        }
     }
 
     /// **Overtake** a stopped / slow in-lane object by crossing **left** (the
@@ -835,11 +851,16 @@ impl GeometricPlanner {
         let hold_half = 1.5;
         let hold_start = (s_obj - s_ego) - hold_half;
         let ramp_len = hold_start; // start the lateral move at the ego (up0 = 0)
-        // Reject if the run-up is too short for a gentle (in-envelope) ramp.
+                                   // Reject if the run-up is too short for a gentle (in-envelope) ramp.
         if ramp_len < y_off.abs() / self.cfg.lateral_ramp_slope.max(1e-3) {
             return LateralBump::NONE;
         }
-        LateralBump { y_off, ramp_len, hold_start, hold_end: (s_obj - s_ego) + hold_half }
+        LateralBump {
+            y_off,
+            ramp_len,
+            hold_start,
+            hold_end: (s_obj - s_ego) + hold_half,
+        }
     }
 
     /// Commanded lane change: a SUSTAINED lateral shift to `target` (ramp in, then
@@ -874,7 +895,12 @@ impl GeometricPlanner {
             }
         }
         // Ramp in, then hold to the end of the horizon (hold_end → effectively ∞).
-        Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
+        Some(LateralBump {
+            y_off: target,
+            ramp_len,
+            hold_start: ramp_len,
+            hold_end: 1e9,
+        })
     }
 
     /// Commanded **pull-over**: a SUSTAINED rightward shift that brings the footprint
@@ -924,7 +950,12 @@ impl GeometricPlanner {
                 return None;
             }
         }
-        Some(LateralBump { y_off: target, ramp_len, hold_start: ramp_len, hold_end: 1e9 })
+        Some(LateralBump {
+            y_off: target,
+            ramp_len,
+            hold_start: ramp_len,
+            hold_end: 1e9,
+        })
     }
 
     /// Predictive yield (SPACE-TIME): roll a moving object forward (CTRV if a yaw
@@ -978,12 +1009,23 @@ impl GeometricPlanner {
             .filter(|p| p.id == obj.id && p.points.len() >= 2)
             .collect();
         if modes.is_empty() {
-            return self.yield_for_mode(obj, None, speed, yaw_rate, guide, s_ego, ego_speed, ego_target);
+            return self.yield_for_mode(
+                obj, None, speed, yaw_rate, guide, s_ego, ego_speed, ego_target,
+            );
         }
         modes
             .iter()
             .filter_map(|m| {
-                self.yield_for_mode(obj, Some(m), speed, yaw_rate, guide, s_ego, ego_speed, ego_target)
+                self.yield_for_mode(
+                    obj,
+                    Some(m),
+                    speed,
+                    yaw_rate,
+                    guide,
+                    s_ego,
+                    ego_speed,
+                    ego_target,
+                )
             })
             .min_by(|a, b| a.total_cmp(b))
     }
@@ -1180,7 +1222,10 @@ impl GeometricPlanner {
         // corner projects within the corridor's narrowest half-width (less the margin) — the angled
         // footprint on a curve, checked via `project_signed` (robust where an x-indexed scan is not).
         let half_width = corridor_half_width(guide, left, right);
-        let (half_len, half_wid) = (0.5 * self.cfg.vehicle_length_m, self.cfg.vehicle_half_width_m);
+        let (half_len, half_wid) = (
+            0.5 * self.cfg.vehicle_length_m,
+            self.cfg.vehicle_half_width_m,
+        );
         let lateral_limit = half_width - self.cfg.containment_margin_m;
         if lateral_limit <= half_wid {
             return guide.to_vec(); // corridor barely fits the footprint — no room to deviate
@@ -1292,7 +1337,14 @@ impl Planner for GeometricPlanner {
         let guide = if self.cfg.joint_path_optimize {
             let s0 = project_arc_length(&guide, input.ego.pose.x_m, input.ego.pose.y_m);
             let goal = (input.goal.target.x_m, input.goal.target.y_m);
-            self.optimize_guide(&guide, input.map, s0, goal, target, self.cfg.max_decel_mps2.max(1e-3))
+            self.optimize_guide(
+                &guide,
+                input.map,
+                s0,
+                goal,
+                target,
+                self.cfg.max_decel_mps2.max(1e-3),
+            )
         } else {
             guide
         };
@@ -1318,51 +1370,55 @@ impl Planner for GeometricPlanner {
                 .unwrap_or(LateralBump::NONE)
         } else {
             match input.lane_change_to_m {
-            Some(target) => self
-                .compute_lane_change_bump(
-                    target,
-                    input.map.left_boundary(),
-                    input.map.right_boundary(),
-                    input.lane_boundaries,
-                    s_ego,
-                )
-                .unwrap_or(LateralBump::NONE),
-            None => {
-                // Within-lane route-around first (stays inside the reference
-                // corridor). If that can't clear the object AND the integrator has
-                // supplied a wider drivable area (an undivided road's full width),
-                // try an overtake that crosses the centerline into it.
-                let within = self.compute_bump(
-                    &guide,
-                    input.map.left_boundary(),
-                    input.map.right_boundary(),
-                    input.objects,
-                    input.lane_boundaries,
-                    input.no_overtake_ids,
-                    s_ego,
-                );
-                match input.drivable {
-                    // Fire the cross-centerline overtake when the doer REQUESTS it (Mick's
-                    // `Overtake` intent) OR when the within-lane route-around couldn't clear
-                    // the object on its own. `compute_overtake_bump` enforces the drivable
-                    // fit, the crossable lane line, and the lateral-clearance band, returning
-                    // NONE otherwise — in which case we keep the within-lane bump. KIRRA
-                    // still bounds the pass (head-on RSS) downstream.
-                    Some(drivable) if input.request_overtake || within.y_off == 0.0 => {
-                        let pass = self.compute_overtake_bump(
-                            &guide,
-                            drivable.left_boundary(),
-                            drivable.right_boundary(),
-                            input.objects,
-                            input.lane_boundaries,
-                            input.no_overtake_ids,
-                            s_ego,
-                        );
-                        if pass.y_off != 0.0 { pass } else { within }
+                Some(target) => self
+                    .compute_lane_change_bump(
+                        target,
+                        input.map.left_boundary(),
+                        input.map.right_boundary(),
+                        input.lane_boundaries,
+                        s_ego,
+                    )
+                    .unwrap_or(LateralBump::NONE),
+                None => {
+                    // Within-lane route-around first (stays inside the reference
+                    // corridor). If that can't clear the object AND the integrator has
+                    // supplied a wider drivable area (an undivided road's full width),
+                    // try an overtake that crosses the centerline into it.
+                    let within = self.compute_bump(
+                        &guide,
+                        input.map.left_boundary(),
+                        input.map.right_boundary(),
+                        input.objects,
+                        input.lane_boundaries,
+                        input.no_overtake_ids,
+                        s_ego,
+                    );
+                    match input.drivable {
+                        // Fire the cross-centerline overtake when the doer REQUESTS it (Mick's
+                        // `Overtake` intent) OR when the within-lane route-around couldn't clear
+                        // the object on its own. `compute_overtake_bump` enforces the drivable
+                        // fit, the crossable lane line, and the lateral-clearance band, returning
+                        // NONE otherwise — in which case we keep the within-lane bump. KIRRA
+                        // still bounds the pass (head-on RSS) downstream.
+                        Some(drivable) if input.request_overtake || within.y_off == 0.0 => {
+                            let pass = self.compute_overtake_bump(
+                                &guide,
+                                drivable.left_boundary(),
+                                drivable.right_boundary(),
+                                input.objects,
+                                input.lane_boundaries,
+                                input.no_overtake_ids,
+                                s_ego,
+                            );
+                            if pass.y_off != 0.0 {
+                                pass
+                            } else {
+                                within
+                            }
+                        }
+                        _ => within,
                     }
-                    _ => within,
                 }
-            }
             }
         };
 
@@ -1386,7 +1442,8 @@ impl Planner for GeometricPlanner {
             let h = heading_at(&guide, s_obj);
             let lon_v = obj.vel.x_m * h.cos() + obj.vel.y_m * h.sin();
 
-            if lon_v > self.cfg.lead_speed_threshold_mps && lateral <= self.cfg.lead_lateral_band_m {
+            if lon_v > self.cfg.lead_speed_threshold_mps && lateral <= self.cfg.lead_lateral_band_m
+            {
                 // Follow BEHIND the lead at a gap (match speed; never draw
                 // alongside — abreast at small longitudinal gap fails RSS).
                 lead_match = Some(lead_match.map_or(lon_v, |s| s.min(lon_v)));
@@ -1414,7 +1471,13 @@ impl Planner for GeometricPlanner {
                 continue;
             }
             if let Some(s_conflict) = self.predict_yield_s(
-                obj, input.motion, input.predicted_paths, &guide, s_ego, cur, target,
+                obj,
+                input.motion,
+                input.predicted_paths,
+                &guide,
+                s_ego,
+                cur,
+                target,
             ) {
                 let yield_s = s_conflict - self.cfg.predictive_yield_gap_m;
                 if yield_s < s_limit {
@@ -1428,8 +1491,12 @@ impl Planner for GeometricPlanner {
         // line and/or a speed cap. Occy OBEYS the rule; KIRRA stays the *physical*
         // authority (it never enforces traffic law). A nearer mandatory stop line
         // overrides object/lead handling with a clean decel-to-stop.
-        let behavioral =
-            behavior::evaluate_controls(input.controls, input.ego.pose.x_m, cur, &BehaviorConfig::default());
+        let behavioral = behavior::evaluate_controls(
+            input.controls,
+            input.ego.pose.x_m,
+            cur,
+            &BehaviorConfig::default(),
+        );
         if let Some(stop_x) = behavioral.stop_x_m {
             let s_stop = project_arc_length(&guide, stop_x, input.ego.pose.y_m);
             if s_stop > s_ego && s_stop < s_limit {
@@ -1458,7 +1525,10 @@ impl Planner for GeometricPlanner {
             match limit_kind {
                 LimitKind::Lead => target.min(lead_match.unwrap_or(target)),
                 LimitKind::ObjectStop => target.min(self.cfg.object_approach_speed_mps),
-                LimitKind::Goal | LimitKind::Behavioral | LimitKind::Yield | LimitKind::PullOver => target,
+                LimitKind::Goal
+                | LimitKind::Behavioral
+                | LimitKind::Yield
+                | LimitKind::PullOver => target,
             }
         };
         if let Some(cap) = behavioral.speed_cap_mps {
@@ -1551,7 +1621,12 @@ impl Planner for GeometricPlanner {
         // (controlled stop-and-hold) — UNLESS following a lead, where the tail is
         // left at the matched cruising speed (rolling horizon). On horizon
         // truncation we likewise leave the tail as-is.
-        if reached && !lead_gap_limit && traj.last().is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS) {
+        if reached
+            && !lead_gap_limit
+            && traj
+                .last()
+                .is_none_or(|p| p.velocity_mps > STOP_EPSILON_MPS)
+        {
             let (gbx, gby) = point_at(&guide, s_limit);
             let gh = heading_at(&guide, s_limit);
             let glat = bump.at(dist);
@@ -1585,7 +1660,10 @@ impl Planner for GeometricPlanner {
             let n = traj.len();
             traj[n - 1].pose.heading_rad = traj[n - 2].pose.heading_rad;
         }
-        PlanOutput { trajectory: traj, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory: traj,
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
@@ -1620,7 +1698,12 @@ fn curvature_at(guide: &[(f64, f64)], s: f64, d: f64) -> f64 {
 /// Steering angle `δ = atan(L·κ)` ⇒ `dδ/dt = [L/(1+(Lκ)²)]·(dκ/ds)·v`; solving `dδ/dt = max_rate`
 /// for `v` gives the cap. Returns `f64::INFINITY` (no cap) on a straight / constant-curvature path
 /// (`dκ/ds ≈ 0`) or when disabled (`max_rate ≤ 0`), so it is a no-op exactly there.
-fn steering_rate_speed_cap(kappa: f64, dkappa_ds: f64, wheelbase_m: f64, max_rate_rads: f64) -> f64 {
+fn steering_rate_speed_cap(
+    kappa: f64,
+    dkappa_ds: f64,
+    wheelbase_m: f64,
+    max_rate_rads: f64,
+) -> f64 {
     let dk = dkappa_ds.abs();
     if dk <= 1e-6 || max_rate_rads <= 0.0 {
         return f64::INFINITY;
@@ -1643,7 +1726,9 @@ const JOINT_OFFSET_RAMP_M: f64 = 6.0;
 
 /// Total arc length of a polyline.
 fn polyline_len(p: &[(f64, f64)]) -> f64 {
-    p.windows(2).map(|w| dist2d(w[0].0, w[0].1, w[1].0, w[1].1)).sum()
+    p.windows(2)
+        .map(|w| dist2d(w[0].0, w[0].1, w[1].0, w[1].1))
+        .sum()
 }
 
 /// **Signed** path curvature (1/m) at arc-length `s`: the unsigned Menger [`curvature_at`] magnitude
@@ -1656,7 +1741,11 @@ fn signed_curvature_at(guide: &[(f64, f64)], s: f64, d: f64) -> f64 {
     let c = point_at(guide, s + d);
     // z of (b−a)×(c−b): > 0 ⇒ left turn.
     let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
-    if cross >= 0.0 { kappa } else { -kappa }
+    if cross >= 0.0 {
+        kappa
+    } else {
+        -kappa
+    }
 }
 
 /// A copy of `guide` displaced by an **apex-varying** perpendicular offset: at each station the
@@ -1675,7 +1764,11 @@ fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64, kappa_max: f64) ->
         if i > 0 {
             acc += dist2d(guide[i - 1].0, guide[i - 1].1, guide[i].0, guide[i].1);
         }
-        let ramp = if acc <= s_ego { 0.0 } else { ((acc - s_ego) / JOINT_OFFSET_RAMP_M).min(1.0) };
+        let ramp = if acc <= s_ego {
+            0.0
+        } else {
+            ((acc - s_ego) / JOINT_OFFSET_RAMP_M).min(1.0)
+        };
         let frac = (signed_curvature_at(guide, acc, 3.0) / kappa_max).clamp(-1.0, 1.0);
         let o = delta * frac * ramp;
         let h = heading_at(guide, acc);
@@ -1688,10 +1781,19 @@ fn offset_guide(guide: &[(f64, f64)], s_ego: f64, delta: f64, kappa_max: f64) ->
 /// `±half_len` along heading × `±half_wid` across it. Used by the joint optimizer's oriented
 /// containment so a candidate line's ANGLED footprint (its corners reach further laterally on a
 /// curve) is checked, not just the path centroid.
-fn footprint_corners(x: f64, y: f64, heading: f64, half_len: f64, half_wid: f64) -> [(f64, f64); 4] {
+fn footprint_corners(
+    x: f64,
+    y: f64,
+    heading: f64,
+    half_len: f64,
+    half_wid: f64,
+) -> [(f64, f64); 4] {
     let (c, s) = (heading.cos(), heading.sin());
     let mut out = [(0.0, 0.0); 4];
-    for (i, (sl, sw)) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)].iter().enumerate() {
+    for (i, (sl, sw)) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)]
+        .iter()
+        .enumerate()
+    {
         let (dx, dy) = (sl * half_len, sw * half_wid);
         out[i] = (x + dx * c - dy * s, y + dx * s + dy * c);
     }
@@ -1732,7 +1834,10 @@ fn point_on_path(points: &[Point], s: f64) -> (f64, f64) {
         let seg = dist2d(w[0].x_m, w[0].y_m, w[1].x_m, w[1].y_m);
         if acc + seg >= s {
             let f = if seg > 1e-9 { (s - acc) / seg } else { 0.0 };
-            return (w[0].x_m + f * (w[1].x_m - w[0].x_m), w[0].y_m + f * (w[1].y_m - w[0].y_m));
+            return (
+                w[0].x_m + f * (w[1].x_m - w[0].x_m),
+                w[0].y_m + f * (w[1].y_m - w[0].y_m),
+            );
         }
         acc += seg;
     }
@@ -1806,7 +1911,11 @@ fn point_at(poly: &[(f64, f64)], s: f64) -> (f64, f64) {
     for i in 1..poly.len() {
         if s <= cum[i] {
             let seg = cum[i] - cum[i - 1];
-            let f = if seg > 1e-9 { (s - cum[i - 1]) / seg } else { 0.0 };
+            let f = if seg > 1e-9 {
+                (s - cum[i - 1]) / seg
+            } else {
+                0.0
+            };
             return (
                 poly[i - 1].0 + f * (poly[i].0 - poly[i - 1].0),
                 poly[i - 1].1 + f * (poly[i].1 - poly[i - 1].1),
@@ -1905,7 +2014,11 @@ fn boundary_y_at(boundary: &[Point], x: f64) -> f64 {
     for w in boundary.windows(2) {
         if x <= w[1].x_m {
             let dx = w[1].x_m - w[0].x_m;
-            let f = if dx.abs() > 1e-9 { (x - w[0].x_m) / dx } else { 0.0 };
+            let f = if dx.abs() > 1e-9 {
+                (x - w[0].x_m) / dx
+            } else {
+                0.0
+            };
             return w[0].y_m + f * (w[1].y_m - w[0].y_m);
         }
     }
@@ -1924,7 +2037,12 @@ struct LateralBump {
 }
 
 impl LateralBump {
-    const NONE: Self = Self { y_off: 0.0, ramp_len: 1.0, hold_start: 0.0, hold_end: 0.0 };
+    const NONE: Self = Self {
+        y_off: 0.0,
+        ramp_len: 1.0,
+        hold_start: 0.0,
+        hold_end: 0.0,
+    };
 
     fn at(&self, s: f64) -> f64 {
         if self.y_off == 0.0 {
@@ -1960,12 +2078,22 @@ mod tests {
     fn sample_input<'a>(map: &'a dyn CorridorSource) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 3.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 50.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects: &[],
             controls: &[],
@@ -1981,14 +2109,22 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
     fn safe_stop_is_valid_stop_proposal() {
-        let out = PlanOutput::safe_stop(Pose { x_m: 1.0, y_m: 2.0, heading_rad: 0.0 });
+        let out = PlanOutput::safe_stop(Pose {
+            x_m: 1.0,
+            y_m: 2.0,
+            heading_rad: 0.0,
+        });
         assert_eq!(out.kind, ProposalKind::SafeStop);
-        assert!(out.trajectory.len() >= 2, "the checker requires >= 2 points");
+        assert!(
+            out.trajectory.len() >= 2,
+            "the checker requires >= 2 points"
+        );
         assert!(
             out.trajectory.iter().all(|p| p.velocity_mps == 0.0),
             "a safe-stop proposal is zero velocity"
@@ -2025,7 +2161,10 @@ mod tests {
     #[test]
     fn planner_mode_maps_every_posture() {
         assert_eq!(planner_mode(FleetPosture::Nominal), PlannerMode::Full);
-        assert_eq!(planner_mode(FleetPosture::Degraded), PlannerMode::Conservative);
+        assert_eq!(
+            planner_mode(FleetPosture::Degraded),
+            PlannerMode::Conservative
+        );
         assert_eq!(planner_mode(FleetPosture::LockedOut), PlannerMode::MrcOnly);
     }
 
@@ -2037,12 +2176,22 @@ mod tests {
     fn inside_corridor_input(map: &dyn CorridorSource) -> PlanInput<'_> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 3.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 25.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 25.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects: &[],
             controls: &[],
@@ -2058,7 +2207,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
@@ -2083,8 +2233,15 @@ mod tests {
             "every pose stays inside the 5 m half-width corridor"
         );
         // Ramps up from the 3 m/s current speed toward cruise.
-        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
-        assert!(vmax > 3.0, "proposal accelerates toward cruise, got vmax {vmax}");
+        let vmax = out
+            .trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max);
+        assert!(
+            vmax > 3.0,
+            "proposal accelerates toward cruise, got vmax {vmax}"
+        );
     }
 
     #[test]
@@ -2108,7 +2265,10 @@ mod tests {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let mut p = GeometricPlanner::default();
         let out = p.plan(&inside_corridor_input(&corridor));
-        assert!(out.trajectory.len() <= MAX_TRAJECTORY_HORIZON, "within checker horizon");
+        assert!(
+            out.trajectory.len() <= MAX_TRAJECTORY_HORIZON,
+            "within checker horizon"
+        );
 
         let verdict = validate_trajectory_slow(
             &out.trajectory,
@@ -2119,7 +2279,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker should admit the nominal proposal, got {verdict:?}"
         );
     }
@@ -2144,14 +2307,23 @@ mod tests {
             let jerk = (w[2] - 2.0 * w[1] + w[0]) / (dt * dt);
             max_jerk_seen = max_jerk_seen.max(jerk.abs());
         }
-        assert!(max_jerk_seen <= cfg.max_jerk_mps3 * 1.05 + 1e-9,
-            "speed-profile jerk {max_jerk_seen} exceeds max_jerk {}", cfg.max_jerk_mps3);
+        assert!(
+            max_jerk_seen <= cfg.max_jerk_mps3 * 1.05 + 1e-9,
+            "speed-profile jerk {max_jerk_seen} exceeds max_jerk {}",
+            cfg.max_jerk_mps3
+        );
         // Smooth launch: the first acceleration is well below max (ramped in), where
         // the old bang-bang profile jumped straight to max_accel on step one.
         let a0 = (v[1] - v[0]) / dt;
-        assert!(a0 < cfg.max_accel_mps2,
-            "launch acceleration {a0} should ramp, not jump to max {}", cfg.max_accel_mps2);
-        assert!(a0 > 0.0, "and the ego does accelerate from the low start speed");
+        assert!(
+            a0 < cfg.max_accel_mps2,
+            "launch acceleration {a0} should ramp, not jump to max {}",
+            cfg.max_accel_mps2
+        );
+        assert!(
+            a0 > 0.0,
+            "and the ego does accelerate from the low start speed"
+        );
     }
 
     /// A corridor that turns at x=20 (centerline kink (0,0)→(20,0)→(40,2.5)),
@@ -2165,33 +2337,66 @@ mod tests {
             Self {
                 left: vec![
                     Point { x_m: 0.0, y_m: 5.0 },
-                    Point { x_m: 20.0, y_m: 5.0 },
-                    Point { x_m: 40.0, y_m: 7.5 },
+                    Point {
+                        x_m: 20.0,
+                        y_m: 5.0,
+                    },
+                    Point {
+                        x_m: 40.0,
+                        y_m: 7.5,
+                    },
                 ],
                 right: vec![
-                    Point { x_m: 0.0, y_m: -5.0 },
-                    Point { x_m: 20.0, y_m: -5.0 },
-                    Point { x_m: 40.0, y_m: -2.5 },
+                    Point {
+                        x_m: 0.0,
+                        y_m: -5.0,
+                    },
+                    Point {
+                        x_m: 20.0,
+                        y_m: -5.0,
+                    },
+                    Point {
+                        x_m: 40.0,
+                        y_m: -2.5,
+                    },
                 ],
             }
         }
     }
     impl CorridorSource for KinkedCorridor {
-        fn left_boundary(&self) -> &[Point] { &self.left }
-        fn right_boundary(&self) -> &[Point] { &self.right }
-        fn confidence(&self) -> f32 { 0.95 }
-        fn age_ms(&self) -> u64 { 10 }
+        fn left_boundary(&self) -> &[Point] {
+            &self.left
+        }
+        fn right_boundary(&self) -> &[Point] {
+            &self.right
+        }
+        fn confidence(&self) -> f32 {
+            0.95
+        }
+        fn age_ms(&self) -> u64 {
+            10
+        }
     }
 
     fn kinked_input(map: &dyn CorridorSource) -> PlanInput<'_> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 0.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 0.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 40.0, y_m: 2.5, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 40.0,
+                    y_m: 2.5,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects: &[],
             controls: &[],
@@ -2207,7 +2412,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     /// Corridor that turns ~22° at x=20 and continues well past it; ego starts
@@ -2217,26 +2423,67 @@ mod tests {
         // x=20, then straight. Boundaries are ±5 in y about the centerline.
         KinkedCorridor {
             left: vec![
-                Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 20.0, y_m: 5.0 },
-                Point { x_m: 34.0, y_m: 25.0 }, Point { x_m: 48.0, y_m: 45.0 },
-                Point { x_m: 62.0, y_m: 65.0 },
+                Point { x_m: 0.0, y_m: 5.0 },
+                Point {
+                    x_m: 20.0,
+                    y_m: 5.0,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 25.0,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 45.0,
+                },
+                Point {
+                    x_m: 62.0,
+                    y_m: 65.0,
+                },
             ],
             right: vec![
-                Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 20.0, y_m: -5.0 },
-                Point { x_m: 34.0, y_m: 15.0 }, Point { x_m: 48.0, y_m: 35.0 },
-                Point { x_m: 62.0, y_m: 55.0 },
+                Point {
+                    x_m: 0.0,
+                    y_m: -5.0,
+                },
+                Point {
+                    x_m: 20.0,
+                    y_m: -5.0,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 15.0,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 35.0,
+                },
+                Point {
+                    x_m: 62.0,
+                    y_m: 55.0,
+                },
             ],
         }
     }
     fn curve_input(map: &dyn CorridorSource) -> PlanInput<'_> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 6.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 6.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 6.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 70.0, y_m: 20.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 70.0,
+                    y_m: 20.0,
+                    heading_rad: 0.0,
+                },
+            },
             ..kinked_input(map)
         }
     }
@@ -2248,19 +2495,30 @@ mod tests {
         // Isolate the lateral-accel (curvature) cap: disable the steering-rate cap so this test
         // varies only `comfort_lateral_accel_mps2` (the steering-rate cap has its own tests).
         let curve_min_speed = |comfort: f64| -> f64 {
-            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, max_steering_rate_rads: 0.0, ..Default::default() };
+            let cfg = GeometricPlannerConfig {
+                comfort_lateral_accel_mps2: comfort,
+                max_steering_rate_rads: 0.0,
+                ..Default::default()
+            };
             let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
-            out.trajectory.iter()
+            out.trajectory
+                .iter()
                 .filter(|p| p.pose.x_m >= 18.0 && p.pose.x_m <= 44.0)
                 .map(|p| p.velocity_mps)
                 .fold(f64::INFINITY, f64::min)
         };
-        let slowed = curve_min_speed(2.0);          // curvature-aware
-        let unslowed = curve_min_speed(1.0e9);       // cap effectively disabled
-        assert!(slowed.is_finite() && unslowed.is_finite(), "ego reaches the curve");
+        let slowed = curve_min_speed(2.0); // curvature-aware
+        let unslowed = curve_min_speed(1.0e9); // cap effectively disabled
+        assert!(
+            slowed.is_finite() && unslowed.is_finite(),
+            "ego reaches the curve"
+        );
         assert!(slowed < unslowed - 1.0,
             "curvature-aware speed slows through the bend: slowed={slowed:.2}, unslowed={unslowed:.2}");
-        assert!(slowed < 6.0, "and it actually slows below cruise in the bend, got {slowed:.2}");
+        assert!(
+            slowed < 6.0,
+            "and it actually slows below cruise in the bend, got {slowed:.2}"
+        );
 
         // The cap REDUCES the path's actual (Menger) lateral accel v²·κ vs taking
         // the bend at cruise, and keeps it under the checker's ceiling — measured
@@ -2271,9 +2529,14 @@ mod tests {
             GeometricPlannerConfig::default().path_smoothing_iterations,
         );
         let peak_lat = |comfort: f64| -> f64 {
-            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: comfort, max_steering_rate_rads: 0.0, ..Default::default() };
+            let cfg = GeometricPlannerConfig {
+                comfort_lateral_accel_mps2: comfort,
+                max_steering_rate_rads: 0.0,
+                ..Default::default()
+            };
             let out = GeometricPlanner::new(cfg).plan(&curve_input(&corr));
-            out.trajectory.iter()
+            out.trajectory
+                .iter()
                 .map(|p| {
                     let s = project_arc_length(&guide, p.pose.x_m, p.pose.y_m);
                     p.velocity_mps.powi(2) * curvature_at(&guide, s, 3.0)
@@ -2284,14 +2547,27 @@ mod tests {
         let lat_uncapped = peak_lat(1.0e9);
         assert!(lat_capped < lat_uncapped - 1.0,
             "the cap reduces peak lateral accel: capped={lat_capped:.2}, uncapped={lat_uncapped:.2}");
-        assert!(lat_capped < 3.5, "and keeps it under the checker's ceiling, got {lat_capped:.2}");
+        assert!(
+            lat_capped < 3.5,
+            "and keeps it under the checker's ceiling, got {lat_capped:.2}"
+        );
 
         let out = GeometricPlanner::default().plan(&curve_input(&corr));
         let verdict = validate_trajectory_slow(
-            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+            &out.trajectory,
+            &corr,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
         );
-        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-            "curvature-aware turn is admissible, got {verdict:?}");
+        assert!(
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
+            "curvature-aware turn is admissible, got {verdict:?}"
+        );
     }
 
     #[test]
@@ -2305,10 +2581,11 @@ mod tests {
         // the steering-rate cap, whose curvature-transition bound on a sharp unsmoothed vertex would
         // (correctly) ripple upstream and confound the "cruise on the open straight" check. The
         // steering-rate cap has its own tests (on smoothed guides, as the planner actually uses).
-        let p = GeometricPlanner::new(GeometricPlannerConfig { max_steering_rate_rads: 0.0, ..Default::default() });
-        let guide: Vec<(f64, f64)> = vec![
-            (0.0, 0.0), (30.0, 0.0), (42.0, 14.0), (90.0, 62.0),
-        ];
+        let p = GeometricPlanner::new(GeometricPlannerConfig {
+            max_steering_rate_rads: 0.0,
+            ..Default::default()
+        });
+        let guide: Vec<(f64, f64)> = vec![(0.0, 0.0), (30.0, 0.0), (42.0, 14.0), (90.0, 62.0)];
         let dist = 80.0;
         let (target, decel) = (8.0, 2.5);
         let prof = p.velocity_profile(&guide, 0.0, dist, target, decel, true);
@@ -2317,19 +2594,39 @@ mod tests {
         let at = |s: f64| sample_profile(&prof, s);
         // Reaches cruise on the early open straight (arc 10–20, before the bend).
         let early_max = (10..=20).map(|x| at(x as f64)).fold(0.0_f64, f64::max);
-        assert!(early_max > target - 0.2, "cruises where unconstrained, got {early_max:.2}");
+        assert!(
+            early_max > target - 0.2,
+            "cruises where unconstrained, got {early_max:.2}"
+        );
         // Dips for the curve (around arc 30).
-        let curve_min = (26..=38).map(|x| at(x as f64)).fold(f64::INFINITY, f64::min);
-        assert!(curve_min < target - 1.0, "slows for the curve, got {curve_min:.2}");
+        let curve_min = (26..=38)
+            .map(|x| at(x as f64))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            curve_min < target - 1.0,
+            "slows for the curve, got {curve_min:.2}"
+        );
         // Recovers after the curve (arc 50+) — not stuck slow.
         let recover = at(52.0);
-        assert!(recover > curve_min + 0.5, "speeds back up after the curve, got {recover:.2}");
+        assert!(
+            recover > curve_min + 0.5,
+            "speeds back up after the curve, got {recover:.2}"
+        );
         // Decelerates to a stop at the end.
-        assert!(*prof.last().unwrap() < 0.1, "ends stopped, got {}", prof.last().unwrap());
+        assert!(
+            *prof.last().unwrap() < 0.1,
+            "ends stopped, got {}",
+            prof.last().unwrap()
+        );
         // Every downstep is deceleration-feasible (backward-pass invariant).
         for w in prof.windows(2) {
             let max_drop = w[0] - (w[1] * w[1] + 2.0 * decel * VELOCITY_PROFILE_DS).sqrt();
-            assert!(max_drop <= 1e-6, "profile decel-infeasible: {} -> {}", w[0], w[1]);
+            assert!(
+                max_drop <= 1e-6,
+                "profile decel-infeasible: {} -> {}",
+                w[0],
+                w[1]
+            );
         }
     }
 
@@ -2360,14 +2657,26 @@ mod tests {
         };
         let raw = peak_curvature(0);
         let smooth = peak_curvature(2);
-        assert!(smooth < raw * 0.5,
-            "smoothing should at least halve peak path curvature: raw={raw}, smooth={smooth}");
-        assert!(smooth.is_finite() && smooth > 0.0, "the smoothed path still turns");
+        assert!(
+            smooth < raw * 0.5,
+            "smoothing should at least halve peak path curvature: raw={raw}, smooth={smooth}"
+        );
+        assert!(
+            smooth.is_finite() && smooth > 0.0,
+            "the smoothed path still turns"
+        );
         // The smoothed proposal is still a forward Motion that advances past the kink.
         let out = GeometricPlanner::default().plan(&kinked_input(&corr));
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 20.0, "the smoothed path drives through the kink, got max_x {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 20.0,
+            "the smoothed path drives through the kink, got max_x {max_x}"
+        );
     }
 
     #[test]
@@ -2378,10 +2687,19 @@ mod tests {
         assert_eq!(steering_rate_speed_cap(0.05, 0.02, l, 0.0), f64::INFINITY);
         // A transition → a finite, positive speed cap.
         let cap = steering_rate_speed_cap(0.05, 0.02, l, rate);
-        assert!(cap.is_finite() && cap > 0.0, "a transition produces a finite cap, got {cap}");
+        assert!(
+            cap.is_finite() && cap > 0.0,
+            "a transition produces a finite cap, got {cap}"
+        );
         // A sharper transition (larger |dκ/ds|) → tighter cap; more rate budget → looser cap.
-        assert!(steering_rate_speed_cap(0.05, 0.04, l, rate) < cap, "sharper transition ⇒ slower");
-        assert!(steering_rate_speed_cap(0.05, 0.02, l, rate * 2.0) > cap, "more rate budget ⇒ faster");
+        assert!(
+            steering_rate_speed_cap(0.05, 0.04, l, rate) < cap,
+            "sharper transition ⇒ slower"
+        );
+        assert!(
+            steering_rate_speed_cap(0.05, 0.02, l, rate * 2.0) > cap,
+            "more rate budget ⇒ faster"
+        );
         // Only the magnitude of dκ/ds matters (entering vs exiting a bend are symmetric).
         assert_eq!(steering_rate_speed_cap(0.05, -0.02, l, rate), cap);
     }
@@ -2395,7 +2713,11 @@ mod tests {
         let transition_min_speed = |rate: f64| -> f64 {
             // Disable the κ-cap so the two arms differ ONLY in the steering-rate cap — the variable
             // under test. At the bend ENTRY κ is still ramping (loose κ-cap) but dκ/ds is large.
-            let cfg = GeometricPlannerConfig { comfort_lateral_accel_mps2: 1.0e9, max_steering_rate_rads: rate, ..Default::default() };
+            let cfg = GeometricPlannerConfig {
+                comfort_lateral_accel_mps2: 1.0e9,
+                max_steering_rate_rads: rate,
+                ..Default::default()
+            };
             GeometricPlanner::new(cfg)
                 .plan(&curve_input(&corr))
                 .trajectory
@@ -2406,17 +2728,30 @@ mod tests {
         };
         let capped = transition_min_speed(0.4);
         let uncapped = transition_min_speed(0.0);
-        assert!(capped.is_finite() && uncapped.is_finite(), "the ego reaches the transition");
+        assert!(
+            capped.is_finite() && uncapped.is_finite(),
+            "the ego reaches the transition"
+        );
         assert!(capped < uncapped - 0.5,
             "the steering-rate cap slows the sharp transition: capped={capped:.2}, uncapped={uncapped:.2}");
 
         // The shipped default (both caps on) is checker-admissible through the bend.
         let out = GeometricPlanner::default().plan(&curve_input(&corr));
         let verdict = validate_trajectory_slow(
-            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+            &out.trajectory,
+            &corr,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
         );
-        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-            "the steering-rate-capped turn is admissible, got {verdict:?}");
+        assert!(
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
+            "the steering-rate-capped turn is admissible, got {verdict:?}"
+        );
     }
 
     #[test]
@@ -2425,7 +2760,10 @@ mod tests {
         // whether it is enabled or not (the WCET-critical straight path is unchanged).
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let peak = |rate: f64| -> f64 {
-            let cfg = GeometricPlannerConfig { max_steering_rate_rads: rate, ..Default::default() };
+            let cfg = GeometricPlannerConfig {
+                max_steering_rate_rads: rate,
+                ..Default::default()
+            };
             GeometricPlanner::new(cfg)
                 .plan(&sample_input(&corr))
                 .trajectory
@@ -2433,7 +2771,10 @@ mod tests {
                 .map(|p| p.velocity_mps)
                 .fold(0.0_f64, f64::max)
         };
-        assert!((peak(0.4) - peak(0.0)).abs() < 1e-9, "no curvature transition ⇒ identical profile");
+        assert!(
+            (peak(0.4) - peak(0.0)).abs() < 1e-9,
+            "no curvature transition ⇒ identical profile"
+        );
     }
 
     #[test]
@@ -2445,21 +2786,72 @@ mod tests {
         // (0,0)→(20,0)→(34,18)→(48,36)→(90,36).
         let corr = KinkedCorridor {
             left: vec![
-                Point { x_m: 0.0, y_m: 9.0 }, Point { x_m: 20.0, y_m: 9.0 },
-                Point { x_m: 34.0, y_m: 27.0 }, Point { x_m: 48.0, y_m: 45.0 }, Point { x_m: 90.0, y_m: 45.0 },
+                Point { x_m: 0.0, y_m: 9.0 },
+                Point {
+                    x_m: 20.0,
+                    y_m: 9.0,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 27.0,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 45.0,
+                },
+                Point {
+                    x_m: 90.0,
+                    y_m: 45.0,
+                },
             ],
             right: vec![
-                Point { x_m: 0.0, y_m: -9.0 }, Point { x_m: 20.0, y_m: -9.0 },
-                Point { x_m: 34.0, y_m: 9.0 }, Point { x_m: 48.0, y_m: 27.0 }, Point { x_m: 90.0, y_m: 27.0 },
+                Point {
+                    x_m: 0.0,
+                    y_m: -9.0,
+                },
+                Point {
+                    x_m: 20.0,
+                    y_m: -9.0,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 9.0,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 27.0,
+                },
+                Point {
+                    x_m: 90.0,
+                    y_m: 27.0,
+                },
             ],
         };
         let goal = (82.0, 36.0);
         let input = PlanInput {
-            ego: EgoState { pose: Pose { x_m: 6.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 6.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
-            goal: Goal { target: Pose { x_m: goal.0, y_m: goal.1, heading_rad: 0.0 } },
+            ego: EgoState {
+                pose: Pose {
+                    x_m: 6.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+                linear_x_mps: 6.0,
+                yaw_rate_rads: 0.0,
+                stamp_ms: 0,
+            },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal.0,
+                    y_m: goal.1,
+                    heading_rad: 0.0,
+                },
+            },
             ..kinked_input(&corr)
         };
-        let cfg = GeometricPlannerConfig { joint_path_optimize: true, ..Default::default() };
+        let cfg = GeometricPlannerConfig {
+            joint_path_optimize: true,
+            ..Default::default()
+        };
         let p = GeometricPlanner::new(cfg);
         let base = chaikin_smooth(
             &centerline_from(corr.left_boundary(), corr.right_boundary()),
@@ -2482,12 +2874,26 @@ mod tests {
 
         // Safety: the chosen in-corridor line is checker-admissible, driven end to end.
         let out = GeometricPlanner::new(cfg).plan(&input);
-        assert_eq!(out.kind, ProposalKind::Motion, "the optimized plan drives the bend");
-        let verdict = validate_trajectory_slow(
-            &out.trajectory, &corr, &[], &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        assert_eq!(
+            out.kind,
+            ProposalKind::Motion,
+            "the optimized plan drives the bend"
         );
-        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-            "KIRRA admits the joint-optimized line, got {verdict:?}");
+        let verdict = validate_trajectory_slow(
+            &out.trajectory,
+            &corr,
+            &[],
+            &VehicleConfig::default_urban(),
+            None,
+            FleetPosture::Nominal,
+        );
+        assert!(
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
+            "KIRRA admits the joint-optimized line, got {verdict:?}"
+        );
     }
 
     #[test]
@@ -2496,15 +2902,25 @@ mod tests {
         // centerline (zero deviation penalty) wins ⇒ the plan is byte-identical to the optimizer off.
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let plan_with = |joint: bool| {
-            let cfg = GeometricPlannerConfig { joint_path_optimize: joint, ..Default::default() };
+            let cfg = GeometricPlannerConfig {
+                joint_path_optimize: joint,
+                ..Default::default()
+            };
             GeometricPlanner::new(cfg).plan(&sample_input(&corr))
         };
         let on = plan_with(true);
         let off = plan_with(false);
-        assert_eq!(on.trajectory.len(), off.trajectory.len(), "same trajectory length");
+        assert_eq!(
+            on.trajectory.len(),
+            off.trajectory.len(),
+            "same trajectory length"
+        );
         for (a, b) in on.trajectory.iter().zip(&off.trajectory) {
-            assert!((a.pose.y_m - b.pose.y_m).abs() < 1e-9 && (a.velocity_mps - b.velocity_mps).abs() < 1e-9,
-                "straight road: the optimizer keeps the centerline ⇒ identical plan");
+            assert!(
+                (a.pose.y_m - b.pose.y_m).abs() < 1e-9
+                    && (a.velocity_mps - b.velocity_mps).abs() < 1e-9,
+                "straight road: the optimizer keeps the centerline ⇒ identical plan"
+            );
         }
     }
 
@@ -2515,21 +2931,37 @@ mod tests {
         let left = vec![(0.0, 0.0), (15.0, 0.0), (28.0, 10.0)];
         let right = vec![(0.0, 0.0), (15.0, 0.0), (28.0, -10.0)];
         let straight = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)];
-        assert!(signed_curvature_at(&left, 15.0, 3.0) > 0.0, "left turn ⇒ +κ");
-        assert!(signed_curvature_at(&right, 15.0, 3.0) < 0.0, "right turn ⇒ −κ");
-        assert!(signed_curvature_at(&straight, 15.0, 3.0).abs() < 1e-6, "straight ⇒ 0");
+        assert!(
+            signed_curvature_at(&left, 15.0, 3.0) > 0.0,
+            "left turn ⇒ +κ"
+        );
+        assert!(
+            signed_curvature_at(&right, 15.0, 3.0) < 0.0,
+            "right turn ⇒ −κ"
+        );
+        assert!(
+            signed_curvature_at(&straight, 15.0, 3.0).abs() < 1e-6,
+            "straight ⇒ 0"
+        );
     }
 
     #[test]
     fn footprint_corners_rotate_with_heading() {
         // At heading 0 the corners are axis-aligned at (±half_len, ±half_wid) about the pose.
         let c = footprint_corners(0.0, 0.0, 0.0, 2.0, 1.0);
-        assert!(c.iter().any(|p| (p.0 - 2.0).abs() < 1e-9 && (p.1 - 1.0).abs() < 1e-9));
-        assert!(c.iter().any(|p| (p.0 + 2.0).abs() < 1e-9 && (p.1 + 1.0).abs() < 1e-9));
+        assert!(c
+            .iter()
+            .any(|p| (p.0 - 2.0).abs() < 1e-9 && (p.1 - 1.0).abs() < 1e-9));
+        assert!(c
+            .iter()
+            .any(|p| (p.0 + 2.0).abs() < 1e-9 && (p.1 + 1.0).abs() < 1e-9));
         // Rotated +90°: the +length axis now points +y, so a front corner sits near (∓1, +2).
         let r = footprint_corners(0.0, 0.0, std::f64::consts::FRAC_PI_2, 2.0, 1.0);
         assert!(r.iter().any(|p| p.1 > 1.9), "the length axis swung to +y");
-        assert!(r.iter().all(|p| p.0.abs() <= 1.0 + 1e-9), "the width axis is now along x");
+        assert!(
+            r.iter().all(|p| p.0.abs() <= 1.0 + 1e-9),
+            "the width axis is now along x"
+        );
     }
 
     #[test]
@@ -2538,22 +2970,53 @@ mod tests {
         // containment rejects every offset, so the optimizer returns the centerline unchanged.
         let corr = KinkedCorridor {
             left: vec![
-                Point { x_m: 0.0, y_m: 1.3 }, Point { x_m: 20.0, y_m: 1.3 },
-                Point { x_m: 34.0, y_m: 19.0 }, Point { x_m: 48.0, y_m: 37.0 },
+                Point { x_m: 0.0, y_m: 1.3 },
+                Point {
+                    x_m: 20.0,
+                    y_m: 1.3,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 19.0,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 37.0,
+                },
             ],
             right: vec![
-                Point { x_m: 0.0, y_m: -1.3 }, Point { x_m: 20.0, y_m: -1.3 },
-                Point { x_m: 34.0, y_m: 16.4 }, Point { x_m: 48.0, y_m: 34.4 },
+                Point {
+                    x_m: 0.0,
+                    y_m: -1.3,
+                },
+                Point {
+                    x_m: 20.0,
+                    y_m: -1.3,
+                },
+                Point {
+                    x_m: 34.0,
+                    y_m: 16.4,
+                },
+                Point {
+                    x_m: 48.0,
+                    y_m: 34.4,
+                },
             ],
         };
         let base = chaikin_smooth(
             &centerline_from(corr.left_boundary(), corr.right_boundary()),
             GeometricPlannerConfig::default().path_smoothing_iterations,
         );
-        let p = GeometricPlanner::new(GeometricPlannerConfig { joint_path_optimize: true, ..Default::default() });
+        let p = GeometricPlanner::new(GeometricPlannerConfig {
+            joint_path_optimize: true,
+            ..Default::default()
+        });
         let s_ego = project_arc_length(&base, 6.0, 0.0);
         let best = p.optimize_guide(&base, &corr, s_ego, (40.0, 30.0), 8.0, 2.5);
-        assert_eq!(best, base, "no lateral room ⇒ the centerline is kept (oriented containment rejects offsets)");
+        assert_eq!(
+            best, base,
+            "no lateral room ⇒ the centerline is kept (oriented containment rejects offsets)"
+        );
     }
 
     #[test]
@@ -2607,8 +3070,15 @@ mod tests {
         // A far goal must not exceed the bounded horizon.
         let corridor = MockCorridorSource::straight_5m_half_width(10_000.0);
         let mut input = sample_input(&corridor);
-        input.goal.target = Pose { x_m: 9_000.0, y_m: 0.0, heading_rad: 0.0 };
-        let cfg = GeometricPlannerConfig { max_points: 20, ..Default::default() };
+        input.goal.target = Pose {
+            x_m: 9_000.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        };
+        let cfg = GeometricPlannerConfig {
+            max_points: 20,
+            ..Default::default()
+        };
         let mut p = GeometricPlanner::new(cfg);
         let out = p.plan(&input);
 
@@ -2633,12 +3103,20 @@ mod tests {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let traj = vec![
             TrajectoryPoint {
-                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 2.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: Pose { x_m: 12.0, y_m: 10.0, heading_rad: 1.3 },
+                pose: Pose {
+                    x_m: 12.0,
+                    y_m: 10.0,
+                    heading_rad: 1.3,
+                },
                 velocity_mps: 2.0,
                 time_from_start_s: 1.0,
             },
@@ -2665,12 +3143,20 @@ mod tests {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let traj = vec![
             TrajectoryPoint {
-                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 50.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: Pose { x_m: 15.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 15.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 50.0,
                 time_from_start_s: 0.1,
             },
@@ -2703,12 +3189,20 @@ mod tests {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let traj = vec![
             TrajectoryPoint {
-                pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 10.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 2.0,
                 time_from_start_s: 0.0,
             },
             TrajectoryPoint {
-                pose: Pose { x_m: 10.205, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 10.205,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 2.1, // a mere +0.1 m/s — subtle, but a re-acceleration
                 time_from_start_s: 0.1,
             },
@@ -2751,12 +3245,22 @@ mod tests {
     ) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects,
             controls: &[],
@@ -2772,7 +3276,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
@@ -2785,7 +3290,11 @@ mod tests {
         let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
 
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
         assert!(
             max_x < 30.0 - 3.0,
             "must stop short of the object at x=30 (with a gap), got max_x {max_x}"
@@ -2805,8 +3314,15 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
 
-        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
-        assert!(vmax <= 2.5, "approach speed capped well below cruise, got vmax {vmax}");
+        let vmax = out
+            .trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max);
+        assert!(
+            vmax <= 2.5,
+            "approach speed capped well below cruise, got vmax {vmax}"
+        );
     }
 
     #[test]
@@ -2823,7 +3339,14 @@ mod tests {
         // Occy's controlled stop short of the object → now admitted (safe same-lane stop).
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 18.0, 60.0, &objs));
-        let safe = validate_trajectory_slow(&out.trajectory, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        let safe = validate_trajectory_slow(
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+        );
         assert!(
             matches!(safe, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
             "a controlled stop a safe distance behind a stopped object is admitted, got {safe:?}"
@@ -2833,13 +3356,22 @@ mod tests {
         // distance) is still MRC'd — independence preserved.
         let into: Vec<TrajectoryPoint> = (0..5)
             .map(|i| TrajectoryPoint {
-                pose: Pose { x_m: 26.0 + i as f64, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 26.0 + i as f64,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: 8.0,
                 time_from_start_s: i as f64 * 0.1,
             })
             .collect();
-        let danger = validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
-        assert_eq!(danger, TrajectoryVerdict::MRCFallback, "driving into the object at speed is MRC'd, got {danger:?}");
+        let danger =
+            validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert_eq!(
+            danger,
+            TrajectoryVerdict::MRCFallback,
+            "driving into the object at speed is MRC'd, got {danger:?}"
+        );
     }
 
     #[test]
@@ -2853,8 +3385,15 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 10.0, 25.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 24.0, "off-path object ignored → reaches the goal, got max_x {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 24.0,
+            "off-path object ignored → reaches the goal, got max_x {max_x}"
+        );
 
         let verdict = validate_trajectory_slow(
             &out.trajectory,
@@ -2865,7 +3404,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits driving past an off-path object, got {verdict:?}"
         );
     }
@@ -2894,9 +3436,20 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        assert_eq!(out.kind, ProposalKind::Motion, "routes around, does not stop");
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y <= -1.0, "path offsets away from the object, got min_y {min_y}");
+        assert_eq!(
+            out.kind,
+            ProposalKind::Motion,
+            "routes around, does not stop"
+        );
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y <= -1.0,
+            "path offsets away from the object, got min_y {min_y}"
+        );
     }
 
     #[test]
@@ -2909,7 +3462,8 @@ mod tests {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [obj_at(10.0, 0.0)]; // dead-centre object 8 m ahead of the ego
 
-        let car = GeometricPlanner::default().plan(&input_with_objects(&corridor, 2.0, 30.0, &objs));
+        let car =
+            GeometricPlanner::default().plan(&input_with_objects(&corridor, 2.0, 30.0, &objs));
         let courier = GeometricPlanner::new(GeometricPlannerConfig::courier())
             .plan(&input_with_objects(&corridor, 2.0, 30.0, &objs));
 
@@ -2919,15 +3473,29 @@ mod tests {
         // Car holds ~5 m short; the courier advances notably closer in a single plan (its full
         // ~1 m-short stop point is reached over successive replans — receding horizon — and its
         // slow creep approach means one horizon doesn't cover the whole way).
-        assert!(reach(&courier) > reach(&car) + 1.0,
-            "courier advances closer (1 m gap vs 5 m): courier {:.1} m vs car {:.1} m", reach(&courier), reach(&car));
+        assert!(
+            reach(&courier) > reach(&car) + 1.0,
+            "courier advances closer (1 m gap vs 5 m): courier {:.1} m vs car {:.1} m",
+            reach(&courier),
+            reach(&car)
+        );
 
         // The closer courier stop is still admitted by the courier checker.
         let verdict = validate_trajectory_slow(
-            &courier.trajectory, &corridor, &objs, &VehicleConfig::courier(), None, FleetPosture::Nominal,
+            &courier.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::courier(),
+            None,
+            FleetPosture::Nominal,
         );
-        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-            "courier checker admits the closer stop, got {verdict:?}");
+        assert!(
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
+            "courier checker admits the closer stop, got {verdict:?}"
+        );
     }
 
     #[test]
@@ -2950,7 +3518,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits the route-around proposal, got {verdict:?}"
         );
     }
@@ -2965,9 +3536,20 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(max_x < 17.0, "stops short of the object at x=20, got max_x {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            max_x < 17.0,
+            "stops short of the object at x=20, got max_x {max_x}"
+        );
         assert!(min_y > -0.5, "no route-around squeeze, got min_y {min_y}");
     }
 
@@ -2994,8 +3576,15 @@ mod tests {
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
         assert_eq!(out.kind, ProposalKind::Motion, "follows the lead, not stop");
-        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
-        assert!((3.5..=4.5).contains(&vmax), "matches the lead's ~4 m/s, got {vmax}");
+        let vmax = out
+            .trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max);
+        assert!(
+            (3.5..=4.5).contains(&vmax),
+            "matches the lead's ~4 m/s, got {vmax}"
+        );
         assert!(
             out.trajectory.last().unwrap().velocity_mps > 3.0,
             "keeps following at speed (no stop-to-zero)"
@@ -3012,7 +3601,11 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
+        let vmax = out
+            .trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max);
         assert!(vmax <= 4.5, "matches the lead, not cruise, got {vmax}");
 
         let verdict = validate_trajectory_slow(
@@ -3024,7 +3617,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits the speed-matched encounter, got {verdict:?}"
         );
     }
@@ -3039,12 +3635,22 @@ mod tests {
     ) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects: &[],
             controls,
@@ -3060,19 +3666,30 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
     fn red_light_makes_occy_stop_at_the_line() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Red }];
+        let controls = [TrafficControl::TrafficLight {
+            stop_line_x_m: 20.0,
+            state: SignalState::Red,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
 
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!((18.0..=20.5).contains(&max_x), "stops at the red-light line ~20, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            (18.0..=20.5).contains(&max_x),
+            "stops at the red-light line ~20, got {max_x}"
+        );
         assert!(
             out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
             "controlled stop at the line"
@@ -3082,39 +3699,76 @@ mod tests {
     #[test]
     fn green_light_does_not_stop() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Green }];
+        let controls = [TrafficControl::TrafficLight {
+            stop_line_x_m: 20.0,
+            state: SignalState::Green,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_controls(&corridor, 8.0, 35.0, &controls));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 22.0, "green → drives through the light, got max_x {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 22.0,
+            "green → drives through the light, got max_x {max_x}"
+        );
     }
 
     #[test]
     fn speed_limit_caps_the_planner() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let controls = [TrafficControl::SpeedLimit { from_x_m: 0.0, limit_mps: 5.0 }];
+        let controls = [TrafficControl::SpeedLimit {
+            from_x_m: 0.0,
+            limit_mps: 5.0,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
 
-        let vmax = out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max);
-        assert!(vmax <= 5.2, "obeys the 5 m/s limit, not cruise 8, got {vmax}");
+        let vmax = out
+            .trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max);
+        assert!(
+            vmax <= 5.2,
+            "obeys the 5 m/s limit, not cruise 8, got {vmax}"
+        );
         assert!(vmax > 4.0, "still progresses near the limit, got {vmax}");
     }
 
     #[test]
     fn stop_sign_then_satisfied_proceeds() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let unsat = [TrafficControl::StopSign { stop_line_x_m: 20.0, satisfied: false }];
-        let sat = [TrafficControl::StopSign { stop_line_x_m: 20.0, satisfied: true }];
+        let unsat = [TrafficControl::StopSign {
+            stop_line_x_m: 20.0,
+            satisfied: false,
+        }];
+        let sat = [TrafficControl::StopSign {
+            stop_line_x_m: 20.0,
+            satisfied: true,
+        }];
         let mut p = GeometricPlanner::default();
 
         let stops = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &unsat));
-        let stop_max = stops.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(stop_max <= 20.5, "unsatisfied stop sign → stop at the line, got {stop_max}");
+        let stop_max = stops
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            stop_max <= 20.5,
+            "unsatisfied stop sign → stop at the line, got {stop_max}"
+        );
 
         let goes = p.plan(&input_with_controls(&corridor, 8.0, 35.0, &sat));
-        let go_max = goes.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        let go_max = goes
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
         assert!(go_max > 22.0, "satisfied stop sign → proceed, got {go_max}");
     }
 
@@ -3124,7 +3778,10 @@ mod tests {
         // physical checker admits (KIRRA admits the stop; it would still MRC
         // cross-traffic regardless of the signal).
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let controls = [TrafficControl::TrafficLight { stop_line_x_m: 20.0, state: SignalState::Red }];
+        let controls = [TrafficControl::TrafficLight {
+            stop_line_x_m: 20.0,
+            state: SignalState::Red,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_controls(&corridor, 8.0, 60.0, &controls));
 
@@ -3137,7 +3794,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits the controlled stop at the line, got {verdict:?}"
         );
     }
@@ -3153,12 +3813,22 @@ mod tests {
     ) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects,
             controls: &[],
@@ -3174,7 +3844,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
@@ -3186,12 +3857,22 @@ mod tests {
         // checker rejects (see the SOLID-line pair) — routing around is what clears it.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [obj_at(20.0, 2.3)];
-        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let broken = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Broken,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &broken));
 
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y <= -1.0, "broken line → routes around, got min_y {min_y}");
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y <= -1.0,
+            "broken line → routes around, got min_y {min_y}"
+        );
     }
 
     #[test]
@@ -3205,12 +3886,22 @@ mod tests {
         // collision safety.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [obj_at(20.0, 2.3)];
-        let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
+        let solid = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Solid,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_objs_lanes(&corridor, 8.0, 35.0, &objs, &solid));
 
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y > -0.5, "solid line → no route-around (no offset), got min_y {min_y}");
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y > -0.5,
+            "solid line → no route-around (no offset), got min_y {min_y}"
+        );
 
         let verdict = validate_trajectory_slow(
             &out.trajectory,
@@ -3250,8 +3941,15 @@ mod tests {
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x < 17.0, "yields short of the predicted crossing at x=20, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x < 17.0,
+            "yields short of the predicted crossing at x=20, got {max_x}"
+        );
         assert!(
             out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
             "controlled stop to yield"
@@ -3274,7 +3972,10 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits the predictive yield, got {verdict:?}"
         );
     }
@@ -3287,8 +3988,15 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 22.0, "object moving away → no yield, drives on, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 22.0,
+            "object moving away → no yield, drives on, got {max_x}"
+        );
     }
 
     #[test]
@@ -3299,8 +4007,15 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 22.0, "won't enter the lane in time → no yield, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 22.0,
+            "won't enter the lane in time → no yield, got {max_x}"
+        );
     }
 
     #[test]
@@ -3316,15 +4031,34 @@ mod tests {
         // CV (no motion state): object stays parallel → no predicted entry → drives on.
         let cv = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
         let cv_max = cv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(cv_max > 22.0, "CV: parallel object → no yield, got {cv_max}");
+        assert!(
+            cv_max > 22.0,
+            "CV: parallel object → no yield, got {cv_max}"
+        );
 
         // CTRV (yaw rate turning it into the lane): predicts the entry → yields.
-        let motion = [MotionState { id: 1, yaw_rate_rad_s: -0.4 }];
-        let inp = PlanInput { motion: &motion, ..input_with_objects(&corridor, 8.0, 35.0, &objs) };
+        let motion = [MotionState {
+            id: 1,
+            yaw_rate_rad_s: -0.4,
+        }];
+        let inp = PlanInput {
+            motion: &motion,
+            ..input_with_objects(&corridor, 8.0, 35.0, &objs)
+        };
         let ctrv = p.plan(&inp);
-        let ctrv_max = ctrv.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(ctrv_max < 21.0, "CTRV: predicts the turn-in → yields short, got {ctrv_max}");
-        assert!(ctrv_max < cv_max - 5.0, "CTRV yields meaningfully shorter than CV");
+        let ctrv_max = ctrv
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            ctrv_max < 21.0,
+            "CTRV: predicts the turn-in → yields short, got {ctrv_max}"
+        );
+        assert!(
+            ctrv_max < cv_max - 5.0,
+            "CTRV yields meaningfully shorter than CV"
+        );
     }
 
     // --- Temporal-overlap (space-time) yielding ----------------------------
@@ -3341,16 +4075,31 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 22.0,
-            "fast crosser clears before the ego arrives → drives on (no yield), got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 22.0,
+            "fast crosser clears before the ego arrives → drives on (no yield), got {max_x}"
+        );
         // And it remains checker-admissible (the crosser's snapshot is 5 m aside).
         let verdict = validate_trajectory_slow(
-            &out.trajectory, &corridor, &objs, &VehicleConfig::default_urban(), None,
+            &out.trajectory,
+            &corridor,
+            &objs,
+            &VehicleConfig::default_urban(),
+            None,
             FleetPosture::Nominal,
         );
-        assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-            "no-yield trajectory is admissible, got {verdict:?}");
+        assert!(
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
+            "no-yield trajectory is admissible, got {verdict:?}"
+        );
     }
 
     #[test]
@@ -3364,10 +4113,19 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_with_objects(&corridor, 8.0, 40.0, &objs));
 
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x < 23.0, "persisting in-lane crosser → yields short of it, got {max_x}");
-        assert!(out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
-            "controlled stop to yield");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x < 23.0,
+            "persisting in-lane crosser → yields short of it, got {max_x}"
+        );
+        assert!(
+            out.trajectory.last().unwrap().velocity_mps <= STOP_EPSILON_MPS,
+            "controlled stop to yield"
+        );
     }
 
     // --- Intention priors (lane-following predicted path) ------------------
@@ -3386,22 +4144,50 @@ mod tests {
         // Kinematic (no predicted path) → extrapolated drift-in → yields short.
         let mut p = GeometricPlanner::default();
         let kin = p.plan(&input_with_objects(&corridor, 8.0, 40.0, &objs));
-        let kin_max = kin.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(kin_max < 22.0, "kinematic: extrapolated drift-in → yields, got {kin_max}");
+        let kin_max = kin
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            kin_max < 22.0,
+            "kinematic: extrapolated drift-in → yields, got {kin_max}"
+        );
 
         // Intention prior: the lane-following path keeps it at y=4 → no entry → drives on.
-        let lane_path = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 90.0, y_m: 4.0 }];
-        let paths = [PredictedPath { id: 1, points: &lane_path }];
+        let lane_path = [
+            Point {
+                x_m: 20.0,
+                y_m: 4.0,
+            },
+            Point {
+                x_m: 90.0,
+                y_m: 4.0,
+            },
+        ];
+        let paths = [PredictedPath {
+            id: 1,
+            points: &lane_path,
+        }];
         let inp = PlanInput {
             predicted_paths: &paths,
             cedes_to_ego_ids: &[],
             ..input_with_objects(&corridor, 8.0, 40.0, &objs)
         };
         let intent = p.plan(&inp);
-        let intent_max = intent.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(intent_max > 30.0,
-            "intent: lane-keeping vehicle → no yield, drives on, got {intent_max}");
-        assert!(intent_max > kin_max + 8.0, "intent drives meaningfully further than kinematic");
+        let intent_max = intent
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            intent_max > 30.0,
+            "intent: lane-keeping vehicle → no yield, drives on, got {intent_max}"
+        );
+        assert!(
+            intent_max > kin_max + 8.0,
+            "intent drives meaningfully further than kinematic"
+        );
     }
 
     #[test]
@@ -3411,8 +4197,20 @@ mod tests {
         // "never yield", it follows the supplied path.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [crossing_obj_at(20.0, 4.0, 5.0, 0.0)]; // moving parallel
-        let turn_in = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 28.0, y_m: 0.0 }];
-        let paths = [PredictedPath { id: 1, points: &turn_in }];
+        let turn_in = [
+            Point {
+                x_m: 20.0,
+                y_m: 4.0,
+            },
+            Point {
+                x_m: 28.0,
+                y_m: 0.0,
+            },
+        ];
+        let paths = [PredictedPath {
+            id: 1,
+            points: &turn_in,
+        }];
         let mut p = GeometricPlanner::default();
         let inp = PlanInput {
             predicted_paths: &paths,
@@ -3420,8 +4218,15 @@ mod tests {
             ..input_with_objects(&corridor, 8.0, 40.0, &objs)
         };
         let out = p.plan(&inp);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x < 26.0, "path turns into the lane → yields, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x < 26.0,
+            "path turns into the lane → yields, got {max_x}"
+        );
     }
 
     #[test]
@@ -3432,33 +4237,74 @@ mod tests {
         // against the worst case (the cut-in) — a single dangerous hypothesis is enough.
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [crossing_obj_at(20.0, 4.0, 5.0, 0.0)];
-        let lane_keep = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 90.0, y_m: 4.0 }];
-        let cut_in = [Point { x_m: 20.0, y_m: 4.0 }, Point { x_m: 28.0, y_m: 0.0 }];
+        let lane_keep = [
+            Point {
+                x_m: 20.0,
+                y_m: 4.0,
+            },
+            Point {
+                x_m: 90.0,
+                y_m: 4.0,
+            },
+        ];
+        let cut_in = [
+            Point {
+                x_m: 20.0,
+                y_m: 4.0,
+            },
+            Point {
+                x_m: 28.0,
+                y_m: 0.0,
+            },
+        ];
         let mut p = GeometricPlanner::default();
 
         // Benign mode alone → drives on (control).
-        let benign = [PredictedPath { id: 1, points: &lane_keep }];
+        let benign = [PredictedPath {
+            id: 1,
+            points: &lane_keep,
+        }];
         let benign_out = p.plan(&PlanInput {
             predicted_paths: &benign,
             cedes_to_ego_ids: &[],
             ..input_with_objects(&corridor, 8.0, 40.0, &objs)
         });
-        let benign_max = benign_out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(benign_max > 30.0, "benign mode alone → no yield, got {benign_max}");
+        let benign_max = benign_out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            benign_max > 30.0,
+            "benign mode alone → no yield, got {benign_max}"
+        );
 
         // Both modes present → must yield against the cut-in, regardless of order.
         for order in [[lane_keep, cut_in], [cut_in, lane_keep]] {
             let modes = [
-                PredictedPath { id: 1, points: &order[0] },
-                PredictedPath { id: 1, points: &order[1] },
+                PredictedPath {
+                    id: 1,
+                    points: &order[0],
+                },
+                PredictedPath {
+                    id: 1,
+                    points: &order[1],
+                },
             ];
             let out = p.plan(&PlanInput {
                 predicted_paths: &modes,
                 cedes_to_ego_ids: &[],
                 ..input_with_objects(&corridor, 8.0, 40.0, &objs)
             });
-            let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-            assert!(max_x < 26.0, "worst-case (cut-in) mode forces a yield, got {max_x}");
+            let max_x = out
+                .trajectory
+                .iter()
+                .map(|t| t.pose.x_m)
+                .fold(0.0, f64::max);
+            assert!(
+                max_x < 26.0,
+                "worst-case (cut-in) mode forces a yield, got {max_x}"
+            );
         }
     }
 
@@ -3475,8 +4321,15 @@ mod tests {
         let mut p = GeometricPlanner::default();
 
         let yielded = p.plan(&input_with_objects(&corridor, 8.0, 35.0, &objs));
-        let y_max = yielded.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(y_max < 17.0, "default → yields to the crossing agent, got {y_max}");
+        let y_max = yielded
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            y_max < 17.0,
+            "default → yields to the crossing agent, got {y_max}"
+        );
 
         let cede = [1u64];
         let inp = PlanInput {
@@ -3484,8 +4337,15 @@ mod tests {
             ..input_with_objects(&corridor, 8.0, 35.0, &objs)
         };
         let proceeded = p.plan(&inp);
-        let p_max = proceeded.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(p_max > 22.0, "ceding agent → ego asserts priority and proceeds, got {p_max}");
+        let p_max = proceeded
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            p_max > 22.0,
+            "ceding agent → ego asserts priority and proceeds, got {p_max}"
+        );
     }
 
     #[test]
@@ -3498,8 +4358,24 @@ mod tests {
         let objs = [crossing_obj_at(20.0, 5.0, 0.0, -3.0)]; // id 1, in the crossing lane
 
         let map = LaneGraph::new()
-            .with_lane(Lane::straight(100, 0.0, 0.0, 100.0, 2.5, LineType::Solid, LineType::Solid))
-            .with_lane(Lane::straight(200, 5.0, 0.0, 40.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(
+                100,
+                0.0,
+                0.0,
+                100.0,
+                2.5,
+                LineType::Solid,
+                LineType::Solid,
+            ))
+            .with_lane(Lane::straight(
+                200,
+                5.0,
+                0.0,
+                40.0,
+                2.5,
+                LineType::Solid,
+                LineType::Solid,
+            ))
             .with_right_of_way(100, 200);
 
         // The integration call: ego POSE + objects → both junction sets.
@@ -3515,8 +4391,15 @@ mod tests {
             ..input_with_objects(&corridor, 8.0, 35.0, &objs)
         };
         let out = p.plan(&inp);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 22.0, "map-derived cede list → ego proceeds, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 22.0,
+            "map-derived cede list → ego proceeds, got {max_x}"
+        );
     }
 
     #[test]
@@ -3538,9 +4421,19 @@ mod tests {
             ..input_with_objects(&corridor, 8.0, 45.0, &objs)
         };
         let out = p.plan(&inp);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 18.0, "proceeds past the ceding agent's conflict, got {max_x}");
-        assert!(max_x < 30.0, "but still yields to the non-ceding agent, got {max_x}");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 18.0,
+            "proceeds past the ceding agent's conflict, got {max_x}"
+        );
+        assert!(
+            max_x < 30.0,
+            "but still yields to the non-ceding agent, got {max_x}"
+        );
     }
 
     // --- Commanded lane change ---------------------------------------------
@@ -3554,12 +4447,22 @@ mod tests {
     ) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: ego_x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: ego_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: goal_x, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: goal_x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects: &[],
             controls: &[],
@@ -3575,7 +4478,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     #[test]
@@ -3583,12 +4487,22 @@ mod tests {
         // Commanded shift to the right lane (-3 m) across a BROKEN line → permitted.
         // The path ramps over and HOLDS the offset (does not return like a bump).
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let broken = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Broken,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &broken));
 
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y <= -2.5, "shifts toward the target lane, got min_y {min_y}");
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y <= -2.5,
+            "shifts toward the target lane, got min_y {min_y}"
+        );
         // Held, not returned: the last point stays in the new lane.
         assert!(
             out.trajectory.last().unwrap().pose.y_m <= -2.0,
@@ -3600,18 +4514,31 @@ mod tests {
     #[test]
     fn lane_change_blocked_by_solid_line_stays_in_lane() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
+        let solid = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Solid,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &solid));
 
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y > -0.5, "solid line → no lane change, stays in lane, got {min_y}");
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y > -0.5,
+            "solid line → no lane change, stays in lane, got {min_y}"
+        );
     }
 
     #[test]
     fn lane_change_is_checker_admissible() {
         let corridor = MockCorridorSource::straight_5m_half_width(100.0);
-        let broken = [LaneBoundary { y_m: -0.5, line: LineType::Broken }];
+        let broken = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Broken,
+        }];
         let mut p = GeometricPlanner::default();
         let out = p.plan(&input_lane_change(&corridor, 8.0, 40.0, -3.0, &broken));
 
@@ -3624,11 +4551,11 @@ mod tests {
             FleetPosture::Nominal,
         );
         assert!(
-            matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+            matches!(
+                verdict,
+                TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+            ),
             "checker admits the lane-change trajectory, got {verdict:?}"
         );
     }
 }
-
-
-

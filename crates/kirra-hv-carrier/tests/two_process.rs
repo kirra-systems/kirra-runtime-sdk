@@ -42,7 +42,10 @@ fn governor_process_reads_the_guest_process_command() {
         .arg(format!("{}", payload.linear_velocity_mps))
         .status()
         .expect("spawn shm_peer");
-    assert!(status.success(), "peer should accept the published command: {status:?}");
+    assert!(
+        status.success(),
+        "peer should accept the published command: {status:?}"
+    );
 
     // `guest` still owns the region here; it unlinks on drop after the peer ran.
     drop(guest);

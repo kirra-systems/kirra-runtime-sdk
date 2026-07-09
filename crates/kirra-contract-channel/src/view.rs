@@ -138,11 +138,18 @@ impl GovernorContractView {
         if bytes.len() < CANONICAL_IMAGE_LEN {
             return None;
         }
-        let u32_at = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+        let u32_at =
+            |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
         let u64_at = |o: usize| {
             u64::from_le_bytes([
-                bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3], bytes[o + 4], bytes[o + 5],
-                bytes[o + 6], bytes[o + 7],
+                bytes[o],
+                bytes[o + 1],
+                bytes[o + 2],
+                bytes[o + 3],
+                bytes[o + 4],
+                bytes[o + 5],
+                bytes[o + 6],
+                bytes[o + 7],
             ])
         };
         let mut command = [0u8; MAX_COMMAND_BYTES];

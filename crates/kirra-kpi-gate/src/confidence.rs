@@ -44,7 +44,11 @@ pub struct ConfidenceInterval {
 
 impl ConfidenceInterval {
     /// The fail-closed maximal-uncertainty interval for an empty sample.
-    const EMPTY: Self = Self { point: 0.0, lo: 0.0, hi: 1.0 };
+    const EMPTY: Self = Self {
+        point: 0.0,
+        lo: 0.0,
+        hi: 1.0,
+    };
 }
 
 /// Wilson score interval for `successes`/`trials` at the two-sided `z`
@@ -218,14 +222,27 @@ mod tests {
 
     #[test]
     fn wilson_stays_in_unit_interval_and_brackets_interior_points() {
-        for &(k, n) in &[(0u64, 10u64), (1, 10), (5, 10), (8, 10), (10, 10), (250, 300)] {
+        for &(k, n) in &[
+            (0u64, 10u64),
+            (1, 10),
+            (5, 10),
+            (8, 10),
+            (10, 10),
+            (250, 300),
+        ] {
             let ci = wilson_interval(k, n, Z_95);
-            assert!(ci.lo >= 0.0 && ci.hi <= 1.0 && ci.lo <= ci.hi, "clamped/ordered: {ci:?}");
+            assert!(
+                ci.lo >= 0.0 && ci.hi <= 1.0 && ci.lo <= ci.hi,
+                "clamped/ordered: {ci:?}"
+            );
             // The Wilson interval brackets the point estimate for INTERIOR k; at the
             // 0/n extremes the score interval legitimately pulls toward ½ and need
             // not contain the MLE (a known, correct property).
             if k > 0 && k < n {
-                assert!(ci.lo <= ci.point && ci.point <= ci.hi, "brackets interior point: {ci:?}");
+                assert!(
+                    ci.lo <= ci.point && ci.point <= ci.hi,
+                    "brackets interior point: {ci:?}"
+                );
             }
         }
     }
@@ -252,12 +269,20 @@ mod tests {
         let cp0 = clopper_pearson_interval(0, 10, ALPHA_95);
         assert_eq!(cp0.lo, 0.0);
         let expect_hi = 1.0 - 0.025_f64.powf(0.1);
-        assert!(approx(cp0.hi, expect_hi, 1e-6), "k=0 hi {} vs {expect_hi}", cp0.hi);
+        assert!(
+            approx(cp0.hi, expect_hi, 1e-6),
+            "k=0 hi {} vs {expect_hi}",
+            cp0.hi
+        );
         // k = n = 10: lo = (α/2)^(1/n), hi = 1.
         let cpn = clopper_pearson_interval(10, 10, ALPHA_95);
         assert_eq!(cpn.hi, 1.0);
         let expect_lo = 0.025_f64.powf(0.1);
-        assert!(approx(cpn.lo, expect_lo, 1e-6), "k=n lo {} vs {expect_lo}", cpn.lo);
+        assert!(
+            approx(cpn.lo, expect_lo, 1e-6),
+            "k=n lo {} vs {expect_lo}",
+            cpn.lo
+        );
     }
 
     #[test]
@@ -273,8 +298,18 @@ mod tests {
         // Exact coverage is wider than the score interval for an interior point.
         let w = wilson_interval(8, 10, Z_95);
         let cp = clopper_pearson_interval(8, 10, ALPHA_95);
-        assert!(cp.lo <= w.lo, "CP lo {} should be ≤ Wilson lo {}", cp.lo, w.lo);
-        assert!(cp.hi >= w.hi, "CP hi {} should be ≥ Wilson hi {}", cp.hi, w.hi);
+        assert!(
+            cp.lo <= w.lo,
+            "CP lo {} should be ≤ Wilson lo {}",
+            cp.lo,
+            w.lo
+        );
+        assert!(
+            cp.hi >= w.hi,
+            "CP hi {} should be ≥ Wilson hi {}",
+            cp.hi,
+            w.hi
+        );
     }
 
     #[test]
@@ -286,6 +321,10 @@ mod tests {
         let b = regularized_incomplete_beta(0.6, 2.0, 3.0);
         assert!(a < b, "monotone: {a} !< {b}");
         // I_x(1,1) is the uniform CDF, i.e. x.
-        assert!(approx(regularized_incomplete_beta(0.42, 1.0, 1.0), 0.42, 1e-9));
+        assert!(approx(
+            regularized_incomplete_beta(0.42, 1.0, 1.0),
+            0.42,
+            1e-9
+        ));
     }
 }

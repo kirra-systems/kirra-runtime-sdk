@@ -11,10 +11,28 @@ pub struct KinematicContract {
 }
 
 impl SafetyContract for KinematicContract {
-    #[inline] fn min_bound(&self) -> f64 { -self.max_linear_velocity }
-    #[inline] fn max_bound(&self) -> f64 { self.max_linear_velocity }
-    #[inline] fn max_angular_rate(&self) -> f64 { self.max_angular_velocity }
-    #[inline] fn max_rate(&self) -> f64 { self.max_linear_acceleration }
-    #[inline] fn fallback(&self) -> f64 { self.fallback_linear_speed }
-    #[inline] fn scale_factor(&self) -> f64 { 1.0 }
+    #[inline]
+    fn min_bound(&self) -> f64 {
+        -self.max_linear_velocity
+    }
+    #[inline]
+    fn max_bound(&self) -> f64 {
+        self.max_linear_velocity
+    }
+    #[inline]
+    fn max_angular_rate(&self) -> f64 {
+        self.max_angular_velocity
+    }
+    #[inline]
+    fn max_rate(&self) -> f64 {
+        self.max_linear_acceleration
+    }
+    #[inline]
+    fn fallback(&self) -> f64 {
+        self.fallback_linear_speed
+    }
+    #[inline]
+    fn scale_factor(&self) -> f64 {
+        1.0
+    }
 }

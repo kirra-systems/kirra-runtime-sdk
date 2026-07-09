@@ -136,7 +136,11 @@ mod tests {
     use parko_kirra::AngularVelocityBound;
 
     fn nominal_state() -> DiffDriveState {
-        DiffDriveState { previous: None, delta_time_s: 0.1, posture: SafetyPosture::Nominal }
+        DiffDriveState {
+            previous: None,
+            delta_time_s: 0.1,
+            posture: SafetyPosture::Nominal,
+        }
     }
 
     /// The profile IS parko's SOTIF record — no drift between the live checker
@@ -151,8 +155,14 @@ mod tests {
         );
         let fp = p.footprint();
         assert_eq!(fp.width_m, 0.6, "footprint matches the SDK courier() 0.6 m");
-        assert_eq!(fp.length_m, 0.9, "footprint matches the SDK courier() 0.9 m");
-        assert_eq!(fp.wheelbase_m, 0.0, "diff-drive center convention (no wheelbase)");
+        assert_eq!(
+            fp.length_m, 0.9,
+            "footprint matches the SDK courier() 0.9 m"
+        );
+        assert_eq!(
+            fp.wheelbase_m, 0.0,
+            "diff-drive center convention (no wheelbase)"
+        );
     }
 
     /// The whole point of Phase 2: the live node must bound on the COURIER
@@ -189,9 +199,16 @@ mod tests {
         // Angular-envelope test; RSS is out of scope → externally-gated governor.
         let profile = CourierPlatformProfile::courier_reference();
         let platform = profile.platform_with(profile.angular_governor().with_external_rss_gate());
-        let cmd = ControlCommand { linear_velocity: 0.0, angular_velocity: 0.5, timestamp_ms: 0 };
+        let cmd = ControlCommand {
+            linear_velocity: 0.0,
+            angular_velocity: 0.5,
+            timestamp_ms: 0,
+        };
         let verdict = platform.evaluate(&cmd, &nominal_state());
-        assert!(verdict.is_admitted(), "in-place yaw within the bound must be admitted");
+        assert!(
+            verdict.is_admitted(),
+            "in-place yaw within the bound must be admitted"
+        );
         assert!(
             matches!(verdict.0, EnforcementAction::Allow),
             "a sane in-place yaw (0.5 < 0.833 rad/s) passes UNCLAMPED; got {:?}",
@@ -206,7 +223,11 @@ mod tests {
     fn courier_clamps_excessive_in_place_rotation() {
         let profile = CourierPlatformProfile::courier_reference();
         let platform = profile.platform_with(profile.angular_governor().with_external_rss_gate());
-        let cmd = ControlCommand { linear_velocity: 0.0, angular_velocity: 1.5, timestamp_ms: 0 };
+        let cmd = ControlCommand {
+            linear_velocity: 0.0,
+            angular_velocity: 1.5,
+            timestamp_ms: 0,
+        };
         let verdict = platform.evaluate(&cmd, &nominal_state());
         match verdict.0 {
             EnforcementAction::ClampAngularVelocity(w) => assert!(
@@ -231,8 +252,18 @@ mod tests {
         let platform = CourierPlatformProfile::courier_reference().platform();
         let n = 8;
         let dx = 100.0 / (n as f64 - 1.0);
-        let left: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: 1.0 }).collect();
-        let right: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: -1.0 }).collect();
+        let left: Vec<Point> = (0..n)
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: 1.0,
+            })
+            .collect();
+        let right: Vec<Point> = (0..n)
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: -1.0,
+            })
+            .collect();
         let corridor = Corridor {
             left: &left,
             right: &right,
@@ -242,7 +273,11 @@ mod tests {
             max_age_ms: 500,
         };
 
-        let centered = vec![Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 }];
+        let centered = vec![Pose {
+            x_m: 50.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        }];
         assert!(
             matches!(
                 validate_platform_containment(&platform, &centered, &corridor, FrameTrust::Trusted),
@@ -251,7 +286,11 @@ mod tests {
             "a 0.6 m courier fits a 2 m corridor centered"
         );
 
-        let off = vec![Pose { x_m: 50.0, y_m: 0.9, heading_rad: 0.0 }];
+        let off = vec![Pose {
+            x_m: 50.0,
+            y_m: 0.9,
+            heading_rad: 0.0,
+        }];
         assert!(
             matches!(
                 validate_platform_containment(&platform, &off, &corridor, FrameTrust::Trusted),

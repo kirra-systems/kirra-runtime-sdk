@@ -62,12 +62,16 @@ fn trt_int8_qdq_builds_and_runs_the_exported_planner() {
             "STRICT (PARKO_TRT_REQUIRE_EP): no loadable ORT runtime at ORT_DYLIB_PATH \
              ({dylib:?}) — refusing (fail-closed).",
         );
-        eprintln!("SKIP: ORT runtime lib not present ({dylib:?}) — int8-QDQ probe is Jetson-gated.");
+        eprintln!(
+            "SKIP: ORT runtime lib not present ({dylib:?}) — int8-QDQ probe is Jetson-gated."
+        );
         return;
     }
 
     let cache = std::env::temp_dir().join("parko_trt_int8_qdq_probe_cache");
-    let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+    let cfg = TrtConfig {
+        engine_cache_path: cache.to_string_lossy().into_owned(),
+    };
 
     let backend = match TrtBackend::with_precision(&model_path, &cfg, TrtPrecision::Int8Qdq) {
         Ok(b) => b,
@@ -90,12 +94,19 @@ fn trt_int8_qdq_builds_and_runs_the_exported_planner() {
     assert!(!posture.fp16, "Int8Qdq posture must not also set fp16");
     assert!(!posture.full_precision_guaranteed());
 
-    let model = backend.load_model(&model_path).expect("introspect the QDQ planner model");
-    let in_shape = model.input_shapes.get("features").expect("input 'features' missing");
+    let model = backend
+        .load_model(&model_path)
+        .expect("introspect the QDQ planner model");
+    let in_shape = model
+        .input_shapes
+        .get("features")
+        .expect("input 'features' missing");
     assert_eq!(in_shape, &vec![1, 4], "planner scorer input is [1,4]");
 
     // Warm-up: force the INT8 engine build now (fail-closed on failure).
-    let report = backend.warm_up_report(&model).expect("INT8 engine build must succeed");
+    let report = backend
+        .warm_up_report(&model)
+        .expect("INT8 engine build must succeed");
     eprintln!(
         "int8 engine warm-up: {} ms, engine_sha={:?}",
         report.warmed_ms, report.engine_sha256
@@ -105,7 +116,10 @@ fn trt_int8_qdq_builds_and_runs_the_exported_planner() {
     let features = [0.25f32, 0.7, 0.36, 1.0];
     let mut named = HashMap::new();
     named.insert("features".to_string(), TensorStorage::Borrowed(&features));
-    let batch = TensorBatch { named_tensors: named, metadata: HashMap::new() };
+    let batch = TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    };
 
     let run = |b: &TrtBackend| -> Vec<f32> {
         let out = b.run(&model, &batch).expect("INT8 QDQ inference must run");
@@ -119,7 +133,11 @@ fn trt_int8_qdq_builds_and_runs_the_exported_planner() {
     // Fixed engine + fixed input ⇒ the DECISION (argmax) must be stable.
     let again = run(&backend);
     let arg = |v: &[f32]| (0..v.len()).max_by(|&a, &b| v[a].total_cmp(&v[b])).unwrap();
-    assert_eq!(arg(&scores), arg(&again), "argmax must be stable run-to-run");
+    assert_eq!(
+        arg(&scores),
+        arg(&again),
+        "argmax must be stable run-to-run"
+    );
 
     println!(
         "INT8-QDQ PROBE PASSED — engine built ({} ms), scores {scores:?}, argmax {}",

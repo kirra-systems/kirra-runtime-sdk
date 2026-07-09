@@ -130,7 +130,8 @@ impl<'a> Reader<'a> {
         self.take(2).map(|b| u16::from_be_bytes([b[0], b[1]]))
     }
     fn u32(&mut self) -> Option<u32> {
-        self.take(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        self.take(4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
     /// A `TPM2B_*`: a `u16` size prefix followed by that many bytes.
     fn tpm2b(&mut self) -> Option<&'a [u8]> {
@@ -158,7 +159,7 @@ fn parse_quote(buf: &[u8]) -> Option<ParsedQuote<'_>> {
     let extra_data = r.tpm2b()?; // TPM2B_DATA — the nonce
     let _clock_info = r.take(CLOCK_INFO_LEN)?;
     let _firmware_version = r.take(8)?; // UINT64
-    // TPMS_QUOTE_INFO: TPML_PCR_SELECTION { count, [TPMS_PCR_SELECTION] } + TPM2B_DIGEST
+                                        // TPMS_QUOTE_INFO: TPML_PCR_SELECTION { count, [TPMS_PCR_SELECTION] } + TPM2B_DIGEST
     let count = r.u32()?;
     if count > MAX_PCR_SELECTIONS {
         return None; // hostile/garbage count — fail closed
@@ -171,15 +172,18 @@ fn parse_quote(buf: &[u8]) -> Option<ParsedQuote<'_>> {
         // PCR16 → byte 16/8 = 2, bit 16%8 = 0.
         let byte_idx = PCR16_INDEX / 8;
         let bit = 1u8 << (PCR16_INDEX % 8);
-        if hash_alg == TPM_ALG_SHA256
-            && select.len() > byte_idx
-            && (select[byte_idx] & bit) != 0
-        {
+        if hash_alg == TPM_ALG_SHA256 && select.len() > byte_idx && (select[byte_idx] & bit) != 0 {
             pcr16_selected = true;
         }
     }
     let pcr_digest = r.tpm2b()?; // TPM2B_DIGEST — hash over the selected PCRs
-    Some(ParsedQuote { magic, typ, extra_data, pcr16_selected, pcr_digest })
+    Some(ParsedQuote {
+        magic,
+        typ,
+        extra_data,
+        pcr16_selected,
+        pcr_digest,
+    })
 }
 
 /// Verify a TPM 2.0 quote (`TPMS_ATTEST` of type QUOTE) for measured-boot
@@ -289,7 +293,7 @@ pub fn marshal_pcr16_quote(nonce: &[u8], pcr16_value: &[u8]) -> Vec<u8> {
     q.extend_from_slice(nonce);
     q.extend_from_slice(&[0u8; CLOCK_INFO_LEN]); // clockInfo
     q.extend_from_slice(&0u64.to_be_bytes()); // firmwareVersion
-    // TPML_PCR_SELECTION: one selection, SHA-256, PCR16 set.
+                                              // TPML_PCR_SELECTION: one selection, SHA-256, PCR16 set.
     q.extend_from_slice(&1u32.to_be_bytes());
     q.extend_from_slice(&TPM_ALG_SHA256.to_be_bytes());
     q.push(3u8); // sizeofSelect (3 octets → PCR0..23)
@@ -313,10 +317,15 @@ mod tests {
     }
 
     fn pem(vk: &VerifyingKey) -> String {
-        const PFX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        const PFX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         let mut der = PFX.to_vec();
         der.extend_from_slice(vk.as_bytes());
-        format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", B64.encode(&der))
+        format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            B64.encode(&der)
+        )
     }
 
     fn tpm2b(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -328,7 +337,13 @@ mod tests {
     /// test can sign it and exercise the full verification path. `select_pcr16`
     /// toggles the PCR16 bit; the other fields are configurable to drive each
     /// rejection case.
-    fn marshal_quote(magic: u32, typ: u16, nonce: &[u8], select_pcr16: bool, pcr_digest: &[u8]) -> Vec<u8> {
+    fn marshal_quote(
+        magic: u32,
+        typ: u16,
+        nonce: &[u8],
+        select_pcr16: bool,
+        pcr_digest: &[u8],
+    ) -> Vec<u8> {
         let mut q = Vec::new();
         q.extend_from_slice(&magic.to_be_bytes());
         q.extend_from_slice(&typ.to_be_bytes());
@@ -336,7 +351,7 @@ mod tests {
         tpm2b(&mut q, nonce); // extraData
         q.extend_from_slice(&[0u8; CLOCK_INFO_LEN]); // clockInfo
         q.extend_from_slice(&0u64.to_be_bytes()); // firmwareVersion
-        // TPML_PCR_SELECTION: count = 1
+                                                  // TPML_PCR_SELECTION: count = 1
         q.extend_from_slice(&1u32.to_be_bytes());
         q.extend_from_slice(&TPM_ALG_SHA256.to_be_bytes()); // hash
         q.push(3u8); // sizeofSelect (3 octets → 24 PCRs)
@@ -359,10 +374,22 @@ mod tests {
     #[test]
     fn tpm_quote_valid_verifies() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &sk);
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Ok(())
         );
     }
@@ -371,10 +398,22 @@ mod tests {
     fn tpm_quote_bad_signature_rejected() {
         let sk = ephemeral();
         let attacker = SigningKey::from_bytes(&[0x11; 32]);
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &attacker); // signed by the WRONG key
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::SignatureInvalid)
         );
     }
@@ -385,7 +424,13 @@ mod tests {
         let q = marshal_quote(0x1234_5678, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
         let (qh, sh) = signed(&q, &sk); // correctly signed, but not TPM-generated
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::NotTpmGenerated)
         );
     }
@@ -393,10 +438,22 @@ mod tests {
     #[test]
     fn tpm_quote_wrong_type_rejected() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, 0x8017 /* CERTIFY */, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            0x8017, /* CERTIFY */
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &sk);
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::NotAQuote)
         );
     }
@@ -404,11 +461,23 @@ mod tests {
     #[test]
     fn tpm_quote_nonce_mismatch_rejected() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &sk);
         // The verifier expects a DIFFERENT nonce than the one in the quote.
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), b"different-nonce", &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                b"different-nonce",
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::NonceMismatch)
         );
     }
@@ -416,10 +485,22 @@ mod tests {
     #[test]
     fn tpm_quote_pcr16_not_selected_rejected() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, false, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            false,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &sk);
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::Pcr16NotSelected)
         );
     }
@@ -427,11 +508,23 @@ mod tests {
     #[test]
     fn tpm_quote_pcr_digest_mismatch_rejected() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &[0xCD; 32]);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &[0xCD; 32],
+        );
         let (qh, sh) = signed(&q, &sk);
         // The quote attests digest 0xCD…, but the registration expected 0xAB….
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::PcrDigestMismatch)
         );
     }
@@ -439,11 +532,23 @@ mod tests {
     #[test]
     fn tpm_quote_truncated_is_malformed() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let truncated = &q[..q.len() - 10]; // chop the tail → short read while parsing
         let (qh, sh) = signed(truncated, &sk); // sign the truncated bytes so the sig passes
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::MalformedQuote)
         );
     }
@@ -451,7 +556,13 @@ mod tests {
     #[test]
     fn tpm_quote_absent_key_fails_closed() {
         let sk = ephemeral();
-        let q = marshal_quote(TPM_GENERATED_VALUE, TPM_ST_ATTEST_QUOTE, NONCE, true, &DIGEST);
+        let q = marshal_quote(
+            TPM_GENERATED_VALUE,
+            TPM_ST_ATTEST_QUOTE,
+            NONCE,
+            true,
+            &DIGEST,
+        );
         let (qh, sh) = signed(&q, &sk);
         assert_eq!(
             verify_tpm_quote(None, NONCE, &hex::encode(DIGEST), &qh, &sh),
@@ -473,7 +584,13 @@ mod tests {
         q.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // absurd selection count
         let (qh, sh) = signed(&q, &sk);
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), NONCE, &hex::encode(DIGEST), &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                NONCE,
+                &hex::encode(DIGEST),
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::MalformedQuote)
         );
     }
@@ -512,7 +629,13 @@ mod tests {
         let (qh, sh) = signed(&q, &sk);
         let expected = expected_single_pcr_digest_hex(&hex::encode(pcr16_value)).unwrap();
         assert_eq!(
-            verify_tpm_quote(Some(&pem(&sk.verifying_key())), &nonce_b, &expected, &qh, &sh),
+            verify_tpm_quote(
+                Some(&pem(&sk.verifying_key())),
+                &nonce_b,
+                &expected,
+                &qh,
+                &sh
+            ),
             Err(TpmQuoteError::NonceMismatch)
         );
     }

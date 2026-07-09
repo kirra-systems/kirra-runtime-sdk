@@ -26,6 +26,12 @@ iceoryx2 = { version = "=0.9.2", default-features = false }
 # never enters the core/SDK tree (the #275 isolation holds). `frozen.rs` carries
 # this crate's GovernorContractView over iceoryx2 and validates with its validate().
 kirra-contract-channel = { path = "../../crates/kirra-contract-channel" }
+# WP-21b production adoption: the ASSEMBLED EP-01 loop (GovernorStation ->
+# release token -> ActuatorStation) runs over the iceoryx2 carrier in
+# `inline.rs`. Same direction (spike -> SDK crates); the #275 isolation holds.
+kirra-inline-governor = { path = "../../crates/kirra-inline-governor" }
+kirra-core = { path = "../../crates/kirra-core" }
+ed25519-dalek = "2"
 # CPU affinity (sched_setaffinity) + SCHED_FIFO for the latency_bench busy-wait /
 # isolated-core mode — the deployment lowest-latency lever. Unix-only; the spike
 # is a host (Linux) tool. Already in the tree transitively via iceoryx2.

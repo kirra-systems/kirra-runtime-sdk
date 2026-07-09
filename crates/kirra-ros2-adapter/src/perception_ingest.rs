@@ -21,7 +21,8 @@
 // Range guard, parko-kirra, and the verifier HTTP/fabric path (D3b) are staged.
 
 use kirra_core::perception_monitor::{
-    ingest_perception_output, tracked_object_from_parts, PerceptionCapPublisher, TrackedObject, Vec2,
+    ingest_perception_output, tracked_object_from_parts, PerceptionCapPublisher, TrackedObject,
+    Vec2,
 };
 
 use crate::state::PerceivedObject;
@@ -58,8 +59,14 @@ pub fn perceived_to_tracked(objects: &[PerceivedObject]) -> Vec<TrackedObject> {
         .map(|o| {
             tracked_object_from_parts(
                 o.id,
-                Vec2 { x: o.pos.x_m, y: o.pos.y_m },
-                Vec2 { x: o.vel.x_m, y: o.vel.y_m },
+                Vec2 {
+                    x: o.pos.x_m,
+                    y: o.pos.y_m,
+                },
+                Vec2 {
+                    x: o.vel.x_m,
+                    y: o.vel.y_m,
+                },
             )
         })
         .collect()
@@ -102,8 +109,14 @@ mod tests {
         }
     }
 
-    fn publisher(cache: &kirra_core::perception_monitor::SharedPerceptionCap) -> PerceptionCapPublisher {
-        PerceptionCapPublisher::new(cache.clone(), KinematicPlausibilityContract::urban_reference(), 500)
+    fn publisher(
+        cache: &kirra_core::perception_monitor::SharedPerceptionCap,
+    ) -> PerceptionCapPublisher {
+        PerceptionCapPublisher::new(
+            cache.clone(),
+            KinematicPlausibilityContract::urban_reference(),
+            500,
+        )
     }
 
     // ---- shim ----
@@ -204,9 +217,7 @@ mod tests {
         let verdict = validate_vehicle_command(&cmd_at(30.0), &tightened);
         assert_eq!(
             verdict,
-            EnforceAction::ClampLinear(
-                kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS
-            )
+            EnforceAction::ClampLinear(kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS)
         );
     }
 
@@ -229,8 +240,14 @@ mod tests {
         let base = VehicleKinematicsContract::nominal_reference_profile();
         let tightened = apply_perception_cap(&base, eff);
         // Identical to baseline: 20 m/s under the 35 m/s vehicle max → Allow.
-        assert_eq!(validate_vehicle_command(&cmd_at(20.0), &tightened), EnforceAction::Allow);
-        assert_eq!(tightened.effective_max_speed_mps(), base.effective_max_speed_mps());
+        assert_eq!(
+            validate_vehicle_command(&cmd_at(20.0), &tightened),
+            EnforceAction::Allow
+        );
+        assert_eq!(
+            tightened.effective_max_speed_mps(),
+            base.effective_max_speed_mps()
+        );
     }
 
     // ---- env gate default off ----

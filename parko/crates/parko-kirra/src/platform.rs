@@ -101,7 +101,13 @@ impl<G: SafetyGovernor> DiffDrivePlatform<G> {
         max_brake_mps2: f64,
         stop_epsilon_mps: f64,
     ) -> Self {
-        Self { governor, footprint, max_speed_mps, max_brake_mps2, stop_epsilon_mps }
+        Self {
+            governor,
+            footprint,
+            max_speed_mps,
+            max_brake_mps2,
+            stop_epsilon_mps,
+        }
     }
 
     /// Build a center-referenced [`VehicleFootprint`] for a `width_m × length_m`
@@ -167,7 +173,11 @@ mod tests {
     }
 
     fn state(posture: SafetyPosture) -> DiffDriveState {
-        DiffDriveState { previous: None, delta_time_s: 0.1, posture }
+        DiffDriveState {
+            previous: None,
+            delta_time_s: 0.1,
+            posture,
+        }
     }
 
     /// The wrapper's verdict is exactly the governor's verdict (verbatim).
@@ -175,7 +185,11 @@ mod tests {
     fn diffdrive_evaluate_wraps_governor() {
         let p = platform();
         let gov = KirraGovernor::new();
-        let cmd = ControlCommand { linear_velocity: 0.5, angular_velocity: 0.2, timestamp_ms: 0 };
+        let cmd = ControlCommand {
+            linear_velocity: 0.5,
+            angular_velocity: 0.2,
+            timestamp_ms: 0,
+        };
         let st = state(SafetyPosture::Nominal);
         let via_trait = p.evaluate(&cmd, &st);
         let direct = gov.evaluate(&cmd, st.previous.as_ref(), st.delta_time_s, st.posture);
@@ -193,9 +207,15 @@ mod tests {
         assert!(allow.is_admitted());
         assert_eq!(allow.deny_reason(), None);
 
-        let deny = DiffDriveVerdict(EnforcementAction::Deny { reason: "TEST_DENY".to_string() });
+        let deny = DiffDriveVerdict(EnforcementAction::Deny {
+            reason: "TEST_DENY".to_string(),
+        });
         assert!(!deny.is_admitted(), "a Deny must not be admitted");
-        assert_eq!(deny.deny_reason(), Some("TEST_DENY"), "a Deny must surface its runtime reason");
+        assert_eq!(
+            deny.deny_reason(),
+            Some("TEST_DENY"),
+            "a Deny must surface its runtime reason"
+        );
     }
 
     #[test]
@@ -204,7 +224,10 @@ mod tests {
         for v in [
             EnforcementAction::ClampLinearVelocity(0.3),
             EnforcementAction::ClampAngularVelocity(0.1),
-            EnforcementAction::ClampMotion { linear: Some(0.2), angular: None },
+            EnforcementAction::ClampMotion {
+                linear: Some(0.2),
+                angular: None,
+            },
         ] {
             assert!(DiffDriveVerdict(v).is_admitted());
         }
@@ -224,8 +247,14 @@ mod tests {
     #[test]
     fn centered_footprint_is_symmetric() {
         let fp = DiffDrivePlatform::<KirraGovernor>::centered_footprint(0.6, 0.9);
-        assert_eq!(fp.wheelbase_m, 0.0, "diff-drive uses the center convention (no wheelbase)");
-        assert_eq!(fp.overhang_front_m, fp.overhang_rear_m, "overhangs symmetric about the center pose");
+        assert_eq!(
+            fp.wheelbase_m, 0.0,
+            "diff-drive uses the center convention (no wheelbase)"
+        );
+        assert_eq!(
+            fp.overhang_front_m, fp.overhang_rear_m,
+            "overhangs symmetric about the center pose"
+        );
         assert_eq!(fp.overhang_front_m, 0.45);
     }
 
@@ -240,11 +269,21 @@ mod tests {
         use kirra_core::platform_kinematics::validate_platform_containment;
 
         let p = platform(); // 0.6 m × 0.9 m diff-drive robot, center convention
-        // Corridor half-width 1.0 m: robot half-width 0.3 + 0.40 margin = 0.70 < 1.0 → fits centered.
+                            // Corridor half-width 1.0 m: robot half-width 0.3 + 0.40 margin = 0.70 < 1.0 → fits centered.
         let n = 8;
         let dx = 100.0 / (n as f64 - 1.0);
-        let left: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: 1.0 }).collect();
-        let right: Vec<Point> = (0..n).map(|i| Point { x_m: i as f64 * dx, y_m: -1.0 }).collect();
+        let left: Vec<Point> = (0..n)
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: 1.0,
+            })
+            .collect();
+        let right: Vec<Point> = (0..n)
+            .map(|i| Point {
+                x_m: i as f64 * dx,
+                y_m: -1.0,
+            })
+            .collect();
         let corridor = Corridor {
             left: &left,
             right: &right,
@@ -254,7 +293,11 @@ mod tests {
             max_age_ms: 500,
         };
 
-        let centered = vec![Pose { x_m: 50.0, y_m: 0.0, heading_rad: 0.0 }];
+        let centered = vec![Pose {
+            x_m: 50.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        }];
         assert!(
             matches!(
                 validate_platform_containment(&p, &centered, &corridor, FrameTrust::Trusted),
@@ -264,7 +307,11 @@ mod tests {
         );
 
         // Shoved to the edge → its left edge (y = 1.2) departs the corridor.
-        let off = vec![Pose { x_m: 50.0, y_m: 0.9, heading_rad: 0.0 }];
+        let off = vec![Pose {
+            x_m: 50.0,
+            y_m: 0.9,
+            heading_rad: 0.0,
+        }];
         assert!(
             matches!(
                 validate_platform_containment(&p, &off, &corridor, FrameTrust::Trusted),

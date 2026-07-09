@@ -43,7 +43,10 @@ impl FastLoopTracker {
     /// slow loop produces a new accepted trajectory — NOT every fast tick (that would pin the
     /// cursor at ~0 and defeat the point).
     pub fn promote(&mut self, plan: PlanOutput, now_ms: u64) {
-        self.active = Some(Tracked { plan, promoted_at_ms: now_ms });
+        self.active = Some(Tracked {
+            plan,
+            promoted_at_ms: now_ms,
+        });
     }
 
     /// The command to apply at `now_ms`: the active trajectory sampled at the elapsed time
@@ -58,7 +61,10 @@ impl FastLoopTracker {
             .trajectory
             .iter()
             .find(|p| p.time_from_start_s >= elapsed_s)
-            .map(|p| TrackedCommand { pose: p.pose, velocity_mps: p.velocity_mps })
+            .map(|p| TrackedCommand {
+                pose: p.pose,
+                velocity_mps: p.velocity_mps,
+            })
     }
 
     /// Whether the committed trajectory is spent at `now_ms` (the cursor is past its last pose,
@@ -69,7 +75,10 @@ impl FastLoopTracker {
             None => true,
             Some(t) => {
                 let elapsed_s = now_ms.saturating_sub(t.promoted_at_ms) as f64 / 1000.0;
-                t.plan.trajectory.last().is_none_or(|p| p.time_from_start_s < elapsed_s)
+                t.plan
+                    .trajectory
+                    .last()
+                    .is_none_or(|p| p.time_from_start_s < elapsed_s)
             }
         }
     }
@@ -89,14 +98,21 @@ mod tests {
         for i in 0..=20 {
             let t = i as f64 * 0.1;
             trajectory.push(TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: v,
                 time_from_start_s: t,
             });
             v += 0.5; // +0.5 m/s each 0.1 s step
             x += v * 0.1;
         }
-        PlanOutput { trajectory, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::Motion,
+        }
     }
 
     #[test]
@@ -110,8 +126,14 @@ mod tests {
         let a = tr.track(1_100).unwrap(); // elapsed 0.1 s
         let b = tr.track(1_500).unwrap(); // elapsed 0.5 s
         let c = tr.track(2_000).unwrap(); // elapsed 1.0 s
-        assert!(a.velocity_mps < b.velocity_mps && b.velocity_mps < c.velocity_mps, "velocity climbs along the committed plan");
-        assert!(a.pose.x_m < b.pose.x_m && b.pose.x_m < c.pose.x_m, "position advances along the committed plan");
+        assert!(
+            a.velocity_mps < b.velocity_mps && b.velocity_mps < c.velocity_mps,
+            "velocity climbs along the committed plan"
+        );
+        assert!(
+            a.pose.x_m < b.pose.x_m && b.pose.x_m < c.pose.x_m,
+            "position advances along the committed plan"
+        );
     }
 
     #[test]
@@ -124,7 +146,13 @@ mod tests {
         tr.promote(accelerating_plan(), 0); // spans 0..=2.0 s
         assert!(!tr.is_exhausted(1_000), "mid-trajectory is not exhausted");
         assert!(tr.track(1_000).is_some());
-        assert!(tr.is_exhausted(2_100), "past the last pose (2.0 s) → exhausted");
-        assert!(tr.track(2_100).is_none(), "exhausted → no command (caller MRCs)");
+        assert!(
+            tr.is_exhausted(2_100),
+            "past the last pose (2.0 s) → exhausted"
+        );
+        assert!(
+            tr.track(2_100).is_none(),
+            "exhausted → no command (caller MRCs)"
+        );
     }
 }

@@ -20,10 +20,13 @@ pub struct UnstructuredTextParser;
 
 impl UnstructuredTextParser {
     pub fn parse_llm_json_intent(&self, raw_json: &str) -> Result<AgentAction, &'static str> {
-        let payload: LlmSchemaPayload = serde_json::from_str(raw_json).map_err(|_| "JSON_DESERIALIZE_ERROR")?;
+        let payload: LlmSchemaPayload =
+            serde_json::from_str(raw_json).map_err(|_| "JSON_DESERIALIZE_ERROR")?;
         match payload {
             LlmSchemaPayload::Move { velocity } => Ok(AgentAction::MoveLinear { velocity }),
-            LlmSchemaPayload::Rotate { angular_velocity } => Ok(AgentAction::Rotate { angular_velocity }),
+            LlmSchemaPayload::Rotate { angular_velocity } => {
+                Ok(AgentAction::Rotate { angular_velocity })
+            }
             LlmSchemaPayload::Pump { gpm } => Ok(AgentAction::SetPumpRate { gpm }),
             LlmSchemaPayload::Stop => Ok(AgentAction::EmergencyStop),
         }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use parko_core::backend::{BackendCapabilities, BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage};
+use parko_core::backend::{
+    BackendCapabilities, BackendDescriptor, InferenceBackend, TensorBatch, TensorStorage,
+};
 use parko_onnx::OrtBackend;
 
 /// `PARKO_ONNX_REQUIRE_ORT` truthy → a loadable ORT runtime is REQUIRED: a
@@ -53,7 +55,10 @@ fn model_integrity_allowlist_gates_the_real_mnist_artifact() {
     let wrong = ModelAllowList::from_parts(["0".repeat(64)], false);
     let err = verify_model_file(model_path, &wrong).unwrap_err();
     assert!(
-        matches!(err, parko_core::backend::BackendError::IntegrityRejected { .. }),
+        matches!(
+            err,
+            parko_core::backend::BackendError::IntegrityRejected { .. }
+        ),
         "an unlisted (substituted) model must be rejected, got {err:?}"
     );
 
@@ -75,8 +80,7 @@ fn mnist_end_to_end_inference() {
     }
     let model_path = "tests/data/mnist-12.onnx";
 
-    let backend = OrtBackend::new(model_path)
-        .expect("failed to construct OrtBackend");
+    let backend = OrtBackend::new(model_path).expect("failed to construct OrtBackend");
 
     let model = backend
         .load_model(model_path)
@@ -94,17 +98,18 @@ fn mnist_end_to_end_inference() {
         .get(output_name)
         .expect("MNIST output node 'Plus214_Output_0' not found");
 
-    assert_eq!(input_shape, &vec![1, 1, 28, 28], "MNIST input shape mismatch");
+    assert_eq!(
+        input_shape,
+        &vec![1, 1, 28, 28],
+        "MNIST input shape mismatch"
+    );
     assert_eq!(output_shape, &vec![1, 10], "MNIST output shape mismatch");
 
     let total_elems: usize = input_shape.iter().product();
     let flat_image = vec![0.0f32; total_elems];
 
     let mut named = HashMap::new();
-    named.insert(
-        input_name.to_string(),
-        TensorStorage::Borrowed(&flat_image),
-    );
+    named.insert(input_name.to_string(), TensorStorage::Borrowed(&flat_image));
 
     let batch = TensorBatch {
         named_tensors: named,
@@ -143,8 +148,16 @@ fn mnist_end_to_end_inference() {
     // (which only catches an ORT/OV *divergence*), so an identical drift in both —
     // or a skipped OpenVINO job — can no longer pass silently here.
     const GOLDEN: [f32; 10] = [
-        -0.044856027, 0.007791661, 0.06810082, 0.02999374, -0.12640963, 0.14021875,
-        -0.055284902, -0.049383815, 0.08432205, -0.054540414,
+        -0.044856027,
+        0.007791661,
+        0.06810082,
+        0.02999374,
+        -0.12640963,
+        0.14021875,
+        -0.055284902,
+        -0.049383815,
+        0.08432205,
+        -0.054540414,
     ];
     const TOL: f32 = 1e-2;
     for (i, (got, want)) in scores.iter().zip(GOLDEN.iter()).enumerate() {
@@ -176,12 +189,25 @@ fn test_ort_backend_capabilities() {
     let model_path = "tests/data/mnist-12.onnx";
     let backend = OrtBackend::new(model_path).expect("failed to construct OrtBackend");
     let caps = backend.capabilities();
-    assert!(!caps.supports_int8, "CPU ONNX baseline does not support INT8");
-    assert!(!caps.supports_fp16, "CPU ONNX baseline does not support FP16");
-    assert_eq!(caps.max_batch_size, None, "CPU ONNX baseline has no batch-size limit");
+    assert!(
+        !caps.supports_int8,
+        "CPU ONNX baseline does not support INT8"
+    );
+    assert!(
+        !caps.supports_fp16,
+        "CPU ONNX baseline does not support FP16"
+    );
+    assert_eq!(
+        caps.max_batch_size, None,
+        "CPU ONNX baseline has no batch-size limit"
+    );
     assert_eq!(
         caps,
-        BackendCapabilities { supports_int8: false, supports_fp16: false, max_batch_size: None },
+        BackendCapabilities {
+            supports_int8: false,
+            supports_fp16: false,
+            max_batch_size: None
+        },
         "capabilities must match documented CPU ONNX baseline"
     );
 }
@@ -207,8 +233,10 @@ mod cuda_ep {
     #[test]
     fn cuda_config_default_is_fail_closed() {
         let cfg = CudaConfig::default();
-        assert!(!cfg.allow_cpu_fallback,
-            "CUDA must default to fail-closed — no silent CPU fallback");
+        assert!(
+            !cfg.allow_cpu_fallback,
+            "CUDA must default to fail-closed — no silent CPU fallback"
+        );
         assert_eq!(cfg.device_id, 0, "default CUDA device is 0");
     }
 
@@ -224,13 +252,18 @@ mod cuda_ep {
         let cuda = match OrtBackend::new_cuda(model_path) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("SKIP: CUDA EP unavailable (no GPU / CUDA ORT provider) — {e:?}. \
-                           This test runs only in the GPU CI job.");
+                eprintln!(
+                    "SKIP: CUDA EP unavailable (no GPU / CUDA ORT provider) — {e:?}. \
+                           This test runs only in the GPU CI job."
+                );
                 return;
             }
         };
-        assert_eq!(cuda.descriptor(), BackendDescriptor::Cuda,
-            "the CUDA backend must report the Cuda descriptor");
+        assert_eq!(
+            cuda.descriptor(),
+            BackendDescriptor::Cuda,
+            "the CUDA backend must report the Cuda descriptor"
+        );
 
         let cpu = OrtBackend::new(model_path).expect("CPU backend");
 
@@ -240,13 +273,21 @@ mod cuda_ep {
 
         let input_name = "Input3";
         let output_name = "Plus214_Output_0";
-        let total: usize = model_cpu.input_shapes.get(input_name).unwrap().iter().product();
+        let total: usize = model_cpu
+            .input_shapes
+            .get(input_name)
+            .unwrap()
+            .iter()
+            .product();
         let img = vec![0.0f32; total];
 
         let batch = |img: &'static [f32]| {
             let mut m = HashMap::new();
             m.insert(input_name.to_string(), TensorStorage::Borrowed(img));
-            TensorBatch { named_tensors: m, metadata: HashMap::new() }
+            TensorBatch {
+                named_tensors: m,
+                metadata: HashMap::new(),
+            }
         };
         // Leak a stable slice for the 'static Borrowed lifetime (test-only).
         let img: &'static [f32] = Box::leak(img.into_boxed_slice());
@@ -262,8 +303,10 @@ mod cuda_ep {
         const TOL: f32 = 1e-3;
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
             assert!(y.is_finite(), "non-finite CUDA score at {i}: {y}");
-            assert!((x - y).abs() <= TOL,
-                "CUDA vs CPU mismatch at class {i}: cpu={x}, cuda={y}, |Δ|>{TOL}");
+            assert!(
+                (x - y).abs() <= TOL,
+                "CUDA vs CPU mismatch at class {i}: cpu={x}, cuda={y}, |Δ|>{TOL}"
+            );
         }
         println!("CUDA matches CPU within {TOL}. cpu={a:?} cuda={b:?}");
     }

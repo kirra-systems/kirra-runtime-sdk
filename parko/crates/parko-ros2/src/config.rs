@@ -286,7 +286,10 @@ mod tests {
     #[test]
     fn default_num_threads_is_single_threaded_reproducible() {
         let cfg = ParkoNodeConfig::default();
-        assert_eq!(cfg.num_threads, 1, "default must be single-threaded (preserves #152)");
+        assert_eq!(
+            cfg.num_threads, 1,
+            "default must be single-threaded (preserves #152)"
+        );
         // The ONE source both backends read.
         let t = cfg.inference_threads();
         assert_eq!(t.num_threads, 1);
@@ -295,16 +298,24 @@ mod tests {
 
     #[test]
     fn inference_threads_reflects_configured_count() {
-        let cfg = ParkoNodeConfig { num_threads: 4, ..ParkoNodeConfig::default() };
+        let cfg = ParkoNodeConfig {
+            num_threads: 4,
+            ..ParkoNodeConfig::default()
+        };
         assert_eq!(cfg.inference_threads().num_threads, 4);
-        assert!(!cfg.inference_threads().bitwise_reproducible(),
-            "raising threads gives up bitwise reproducibility");
+        assert!(
+            !cfg.inference_threads().bitwise_reproducible(),
+            "raising threads gives up bitwise reproducibility"
+        );
     }
 
     #[test]
     fn sg6_detection_sources_default_off_and_threshold_is_parko_core_default() {
         let cfg = ParkoNodeConfig::default();
-        assert!(cfg.imu_topic.is_none(), "IMU source off by default (reduced coverage, stated)");
+        assert!(
+            cfg.imu_topic.is_none(),
+            "IMU source off by default (reduced coverage, stated)"
+        );
         assert!(cfg.contact_topic.is_none(), "contact source off by default");
         // The threshold mirrors parko-core's ImpactCfg default, and impact_cfg()
         // round-trips it.
@@ -315,9 +326,14 @@ mod tests {
 
     #[test]
     fn impact_cfg_reflects_a_tuned_threshold() {
-        let cfg = ParkoNodeConfig { spike_threshold_mps2: 22.5, ..ParkoNodeConfig::default() };
-        assert!((cfg.impact_cfg().spike_threshold_mps2 - 22.5).abs() < 1e-9,
-            "impact_cfg() must carry the deployment-tuned threshold");
+        let cfg = ParkoNodeConfig {
+            spike_threshold_mps2: 22.5,
+            ..ParkoNodeConfig::default()
+        };
+        assert!(
+            (cfg.impact_cfg().spike_threshold_mps2 - 22.5).abs() < 1e-9,
+            "impact_cfg() must carry the deployment-tuned threshold"
+        );
     }
 
     #[test]
@@ -338,7 +354,10 @@ mod tests {
         // containment gate is not armed (byte-identical to pre-Phase-3). The
         // health thresholds default to the kernel slow-loop values.
         let cfg = ParkoNodeConfig::default();
-        assert!(cfg.lidar_topic.is_none(), "lidar/containment gate must be opt-in");
+        assert!(
+            cfg.lidar_topic.is_none(),
+            "lidar/containment gate must be opt-in"
+        );
         assert!((cfg.corridor_min_confidence - 0.5).abs() < 1e-9);
         assert_eq!(cfg.corridor_max_age_ms, 500);
     }
@@ -364,7 +383,9 @@ mod tests {
         // The seconds_f64 → Duration round-trip would yield 0 ns at
         // exactly 0.0, which would spin the timer; the floor of 1 ms
         // guards against config typos.
-        assert!(cfg.tick_period() >= Duration::from_micros(900),
-            "tick_period must floor above zero to avoid a busy-spin");
+        assert!(
+            cfg.tick_period() >= Duration::from_micros(900),
+            "tick_period must floor above zero to avoid a busy-spin"
+        );
     }
 }

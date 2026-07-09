@@ -45,11 +45,16 @@ fn main() {
     // `is_file()` (not `exists()`): a directory here is a misconfiguration that
     // would sail past the guard into ort's panicking dlopen.
     if dylib.is_empty() || !std::path::Path::new(&dylib).is_file() {
-        skip_or_refuse(&format!("no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?})"));
+        skip_or_refuse(&format!(
+            "no loadable ORT runtime at ORT_DYLIB_PATH ({dylib:?})"
+        ));
     }
 
     let artifacts = std::env::var("KIRRA_DOER_ARTIFACTS").unwrap_or_else(|_| {
-        format!("{}/../../../artifacts/doer-eval", env!("CARGO_MANIFEST_DIR"))
+        format!(
+            "{}/../../../artifacts/doer-eval",
+            env!("CARGO_MANIFEST_DIR")
+        )
     });
 
     // A malformed ladder is a MISCONFIGURATION → a controlled nonzero-exit
@@ -78,9 +83,10 @@ fn main() {
         let (model_path, trt_precision) = match rung {
             PrecisionMode::FP32 => (format!("{artifacts}/planner_fp32.onnx"), TrtPrecision::Full),
             PrecisionMode::FP16 => (format!("{artifacts}/planner_fp32.onnx"), TrtPrecision::Fp16),
-            PrecisionMode::INT8 => {
-                (format!("{artifacts}/planner_int8_qdq.onnx"), TrtPrecision::Int8Qdq)
-            }
+            PrecisionMode::INT8 => (
+                format!("{artifacts}/planner_int8_qdq.onnx"),
+                TrtPrecision::Int8Qdq,
+            ),
             // PrecisionMode is #[non_exhaustive]; a future mode with no artifact
             // mapping here must fail the rung, not the process.
             other => {
@@ -93,14 +99,18 @@ fn main() {
         // a distinguishable error so the exhausted-ladder path refuses instead of
         // skipping (the run-the-export remedy is in the message).
         if !std::path::Path::new(&model_path).is_file() {
-            return Err(parko_core::backend::BackendError::InitializationError(format!(
-                "artifact missing: {model_path} — run \
+            return Err(parko_core::backend::BackendError::InitializationError(
+                format!(
+                    "artifact missing: {model_path} — run \
                  `cargo run -p kirra-doer-eval --example export_artifacts` (root workspace)"
-            )));
+                ),
+            ));
         }
         // Distinct engine cache per precision — engines are precision-specific.
         let cache = std::env::temp_dir().join(format!("kirra_precision_select_{rung:?}"));
-        let cfg = TrtConfig { engine_cache_path: cache.to_string_lossy().into_owned() };
+        let cfg = TrtConfig {
+            engine_cache_path: cache.to_string_lossy().into_owned(),
+        };
         let backend = TrtBackend::with_precision(&model_path, &cfg, trt_precision)?;
         let model = backend.load_model(&model_path)?;
         backend.warm_up(&model)?; // fail-closed engine build = the proof
@@ -129,7 +139,9 @@ fn main() {
             // paths) is a misconfiguration and must refuse, never read as skipped.
             let msg = e.to_string();
             if msg.contains("TensorRT EP registration failed") {
-                skip_or_refuse(&format!("ladder exhausted — TensorRT EP unavailable: {msg}"));
+                skip_or_refuse(&format!(
+                    "ladder exhausted — TensorRT EP unavailable: {msg}"
+                ));
             }
             eprintln!("REFUSED: ladder exhausted for non-EP reasons (misconfiguration): {msg}");
             std::process::exit(1);

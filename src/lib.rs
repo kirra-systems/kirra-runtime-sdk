@@ -34,52 +34,52 @@
 //! - `examples/c/kirra_ffi_demo.c` — the same over the C ABI
 //!   (`examples/c/build_and_run.sh`).
 
-pub mod kirra_core;
-pub mod governor_guard;
-pub mod modbus_adapter;
-pub mod config;
-pub mod env_config;
-pub mod kinematics_contract;
-pub mod ros2_adapter;
 pub mod action_filter;
 pub mod action_policy;
-pub mod security;
+pub mod attestation;
+pub mod audit_chain;
+pub mod audit_shipper;
+pub mod audit_writer;
 pub mod authz;
-pub mod telemetry;
-pub mod metrics;
-pub mod health;
-pub mod output;
-pub mod gateway;
-pub mod robotics_alignment;
+pub mod campaign_monitor;
+pub mod cert_expiry_monitor;
+pub mod clock;
+pub mod config;
 pub mod dds_bridge;
 #[cfg(feature = "cyclonedds")]
 pub mod dds_cyclonedds;
+pub mod env_config;
 pub mod ffi;
-#[cfg(feature = "tpm")]
-pub mod tpm;
-pub mod tpm_quote;
-pub mod startup_sentinel;
-pub mod attestation;
-pub mod verifier;
-pub mod verifier_store;
-pub mod store_handle;
+pub mod gateway;
+pub mod governor_guard;
+pub mod health;
 pub mod key_registry;
-pub mod posture_cache;
+pub mod kinematics_contract;
+pub mod kirra_core;
+pub mod metrics;
+pub mod modbus_adapter;
 pub mod ota_campaign;
-pub mod campaign_monitor;
-pub mod cert_expiry_monitor;
+pub mod output;
+pub mod posture_cache;
 pub mod posture_engine;
 pub mod posture_engine_v2;
 pub mod posture_tracker;
 pub mod recovery_hysteresis;
-pub mod telemetry_watchdog;
-pub mod clock;
+pub mod robotics_alignment;
+pub mod ros2_adapter;
 pub mod scenario_runner;
-pub mod audit_chain;
-pub mod audit_shipper;
-pub mod audit_writer;
-pub mod verdicts;
+pub mod security;
 pub mod spi_ledger;
+pub mod startup_sentinel;
+pub mod store_handle;
+pub mod telemetry;
+pub mod telemetry_watchdog;
+#[cfg(feature = "tpm")]
+pub mod tpm;
+pub mod tpm_quote;
+pub mod verdicts;
+pub mod verifier;
+pub mod verifier_store;
 // Clause 2 release-token binding (ADR-0006 / HVCHAN-001 §3 steps 5-7): digest →
 // Ed25519 release token → actuator verify-before-release, over the
 // kirra-contract-channel GovernorContractView; reuses the existing crypto.
@@ -93,23 +93,23 @@ pub mod command_source;
 // Learning-loop capture channel (Phase 1, #190) — sibling of audit_writer;
 // non-blocking, default-OFF side channel recording the verdict/correction.
 pub mod capture;
-pub mod wcet_gate;
-pub mod traceability_gate;
 pub mod federation;
 pub mod federation_reconciliation;
+pub mod traceability_gate;
+pub mod wcet_gate;
 // R2: `impl FleetTrustStore for VerifierStore` — the narrow durable seam the QM
 // fleet transport drives instead of depending on this crate's `VerifierStore`.
-pub mod fleet_trust_store;
-pub mod protocol_adapter;
 pub mod adapters;
+pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
 pub mod fabric;
-pub mod standby_monitor;
+pub mod fleet_trust_store;
+pub mod kinematics_sim;
 pub mod lease; // WP-19/G-21 lease-based failover timing model (pure)
+pub mod protocol_adapter;
+pub mod standby_monitor;
 /// Background-task supervisor (review finding C2): re-spawns dead safety loops and
 /// escalates the fleet to fail-closed LockedOut if a critical loop is wedged.
 pub mod supervisor;
-pub mod execution_manager; // WP-20/G-11 declarative task manifest + startup dependency DAG
-pub mod kinematics_sim;
 
 #[cfg(test)]
 mod tests;
@@ -178,7 +178,9 @@ impl std::fmt::Display for MitigationCode {
             MitigationCode::InvalidTimeDeltaRejectedFailsafe => {
                 f.write_str("INVALID_TIME_DELTA_REJECTED_FAILSAFE")
             }
-            MitigationCode::EnvelopeClampTakesPriority => f.write_str("ENVELOPE_CLAMP_TAKES_PRIORITY"),
+            MitigationCode::EnvelopeClampTakesPriority => {
+                f.write_str("ENVELOPE_CLAMP_TAKES_PRIORITY")
+            }
             MitigationCode::RateClampEnforced { max_rate } => {
                 // Unit-NEUTRAL: this generic verdict serves every scalar governor —
                 // kinematic (m/s²) AND flow (GPM/s, e.g. the water-flow Modbus
@@ -193,13 +195,22 @@ impl std::fmt::Display for MitigationCode {
                 f.write_str("PASSTHROUGH_UNRESTRICTED_NORMAL")
             }
             MitigationCode::DegradedPostureClamp { cap_min, cap_max } => {
-                write!(f, "DEGRADED_POSTURE_CLAMP: Bounded inside [{cap_min} - {cap_max}]")
+                write!(
+                    f,
+                    "DEGRADED_POSTURE_CLAMP: Bounded inside [{cap_min} - {cap_max}]"
+                )
             }
             MitigationCode::DegradedDecelToStopHold { held } => {
-                write!(f, "DEGRADED_DECEL_TO_STOP_HOLD: Non-increasing hold at {held}")
+                write!(
+                    f,
+                    "DEGRADED_DECEL_TO_STOP_HOLD: Non-increasing hold at {held}"
+                )
             }
             MitigationCode::ShadowModeHoldEnforced { retained } => {
-                write!(f, "SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {retained:.1}")
+                write!(
+                    f,
+                    "SHADOW_MODE_HOLD_ENFORCED: Fixed value retained: {retained:.1}"
+                )
             }
             MitigationCode::CriticalLockoutFallback => {
                 f.write_str("CRITICAL_LOCKOUT: Active fallback state commanded")
@@ -242,7 +253,11 @@ mod mitigation_code_tests {
             "PASSTHROUGH_UNRESTRICTED_NORMAL"
         );
         assert_eq!(
-            MitigationCode::DegradedPostureClamp { cap_min: 0.0, cap_max: 5.0 }.to_string(),
+            MitigationCode::DegradedPostureClamp {
+                cap_min: 0.0,
+                cap_max: 5.0
+            }
+            .to_string(),
             "DEGRADED_POSTURE_CLAMP: Bounded inside [0 - 5]"
         );
         assert_eq!(

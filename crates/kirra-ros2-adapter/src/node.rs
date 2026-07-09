@@ -40,21 +40,20 @@ use tokio::sync::mpsc;
 
 use kirra_hv_carrier::PosixShmRegion;
 
-pub use crate::control_ingress::IngressControlCommand;
 use crate::contract_producer::{proposal_payload, ProposalSequencer};
+pub use crate::control_ingress::IngressControlCommand;
 use crate::control_ingress::{fail_closed_control_command, parse_control_command_json};
 use crate::corridor::CorridorSource;
-use crate::state::{
-    AdaptorState, TrajectoryPoint, TrajectoryVerdict,
-    SUBSCRIPTION_STALENESS_TIMEOUT_MS,
-};
-use crate::validation::{
-    check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
-};
-use crate::prediction::slow_loop_modes;
 use crate::perception_redundancy::{
     more_restrictive_cap, perception_redundancy_enabled, resolve_redundancy_cap,
     DivergenceEscalator, RedundancyConfig,
+};
+use crate::prediction::slow_loop_modes;
+use crate::state::{
+    AdaptorState, TrajectoryPoint, TrajectoryVerdict, SUBSCRIPTION_STALENESS_TIMEOUT_MS,
+};
+use crate::validation::{
+    check_command_conforms, validate_trajectory_slow_capped, ConformanceVerdict, IncomingControl,
 };
 
 /// Horizon / step for the multi-modal predictive-RSS mode rollout in the slow loop (matches the
@@ -162,7 +161,9 @@ fn wall_clock_ms() -> u64 {
 /// trip staleness → fleet-wide MRC. Wall time (`wall_clock_ms`) is reserved for
 /// audit/correlation record timestamps ONLY. Hot path — inlined.
 #[inline]
-fn now_ms_fresh() -> u64 { crate::state::monotonic_now_ms() }
+fn now_ms_fresh() -> u64 {
+    crate::state::monotonic_now_ms()
+}
 
 /// Nominal fast-loop control cycle (100 Hz → 10 ms) as seconds — the
 /// `delta_time_s` stamped on a published cross-partition proposal's kinematic
@@ -179,7 +180,9 @@ const CONTRACT_DEADLINE_BUDGET_NS: u64 = 20_000_000;
 /// (AOU-TIMESYNC-001), derived from the same monotonic ms source as the freshness
 /// checks. The real boundary-clock primitive is QNX target work (#274/#278).
 #[inline]
-fn now_ns_fresh() -> u64 { now_ms_fresh().saturating_mul(1_000_000) }
+fn now_ns_fresh() -> u64 {
+    now_ms_fresh().saturating_mul(1_000_000)
+}
 
 /// Trajectory ingress payload. The subscription callback (Phase 2B —
 /// when Lanelet2 wiring lands) deserializes
@@ -288,8 +291,7 @@ pub async fn run_adapter(
 
     let (trajectory_tx, trajectory_rx) =
         mpsc::channel::<IngressTrajectory>(TRAJECTORY_CHANNEL_CAPACITY);
-    let (control_tx, control_rx) =
-        mpsc::channel::<IngressControlCommand>(CONTROL_CHANNEL_CAPACITY);
+    let (control_tx, control_rx) = mpsc::channel::<IngressControlCommand>(CONTROL_CHANNEL_CAPACITY);
 
     // ----- Subscriptions ------------------------------------------------
     //
@@ -317,10 +319,12 @@ pub async fn run_adapter(
     // deployment without redundancy adds no subscription. Remap `~/input/objects_secondary` to
     // the redundant detector's topic in the launch file.
     let obj_b_stream = if perception_redundancy_enabled() {
-        Some(node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
-            "~/input/objects_secondary",
-            ingress_sensor_qos(), // N1
-        )?)
+        Some(
+            node.subscribe::<r2r::autoware_perception_msgs::msg::PredictedObjects>(
+                "~/input/objects_secondary",
+                ingress_sensor_qos(), // N1
+            )?,
+        )
     } else {
         None
     };
@@ -472,7 +476,9 @@ pub async fn run_adapter(
                 }
             }
         }
-        tracing::error!("control_cmd subscription stream closed — fast loop will stop receiving commands");
+        tracing::error!(
+            "control_cmd subscription stream closed — fast loop will stop receiving commands"
+        );
     });
 
     let obj_state = Arc::clone(&state);
@@ -621,8 +627,9 @@ pub async fn run_adapter(
             // fails closed (state-3 MRC) when objects go silent. If objects are
             // stale/never-seen, sweep an MRC-floor cap proactively.
             let now_mono = now_ms_fresh();
-            let objects_ms =
-                slow_state.last_objects_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let objects_ms = slow_state
+                .last_objects_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
             let objects_fresh = objects_ms != 0
                 && now_mono.saturating_sub(objects_ms) <= subscription_staleness_timeout_ms();
             if objects_fresh {
@@ -630,11 +637,8 @@ pub async fn run_adapter(
             } else {
                 perception_publisher.sweep_staleness(now_mono);
             }
-            let effective_perception_cap = resolve_perception_cap(
-                perception_derate_enabled(),
-                &perception_cache,
-                now_mono,
-            );
+            let effective_perception_cap =
+                resolve_perception_cap(perception_derate_enabled(), &perception_cache, now_mono);
 
             // Perception-divergence assurance monitor (True-Redundancy analog, gap #2b) — now
             // LIVE: cross-check the primary perception channel against the optional redundant
@@ -644,8 +648,9 @@ pub async fn run_adapter(
             // with no change to the WCET-critical per-pose checker. Disabled (no channel B
             // configured) → no-op, byte-identical prior behaviour.
             let objects_b = slow_state.snapshot_objects_secondary();
-            let objects_b_ms =
-                slow_state.last_objects_b_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let objects_b_ms = slow_state
+                .last_objects_b_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
             let objects_b_fresh = objects_b_ms != 0
                 && now_mono.saturating_sub(objects_b_ms) <= subscription_staleness_timeout_ms();
             let redundancy_cap = resolve_redundancy_cap(
@@ -675,8 +680,9 @@ pub async fn run_adapter(
             // multi-modal. A stale / unconfigured yaw feed degrades to CV-only (the CV mode +
             // snapshot RSS still bound the object); it is dropped, not trusted, never a fault.
             let object_yaw_rates = slow_state.snapshot_object_yaw_rates();
-            let object_yaw_ms =
-                slow_state.last_object_yaw_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let object_yaw_ms = slow_state
+                .last_object_yaw_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
             let object_yaw_fresh = object_yaw_ms != 0
                 && now_mono.saturating_sub(object_yaw_ms) <= subscription_staleness_timeout_ms();
             let predicted_owned = slow_loop_modes(
@@ -739,14 +745,28 @@ pub async fn run_adapter(
             // (Branch A) directly from the logs. A never-seen slot (last_*_ms == 0)
             // reports u64::MAX rather than a misleadingly-huge "age since epoch".
             let now_fresh = now_ms_fresh();
-            let age_of =
-                |t: u64| if t == 0 { u64::MAX } else { now_fresh.saturating_sub(t) };
-            let traj_age_ms =
-                age_of(slow_state.last_trajectory_ms.load(std::sync::atomic::Ordering::Relaxed));
-            let objects_age_ms =
-                age_of(slow_state.last_objects_ms.load(std::sync::atomic::Ordering::Relaxed));
-            let odom_age_ms =
-                age_of(slow_state.last_odom_ms.load(std::sync::atomic::Ordering::Relaxed));
+            let age_of = |t: u64| {
+                if t == 0 {
+                    u64::MAX
+                } else {
+                    now_fresh.saturating_sub(t)
+                }
+            };
+            let traj_age_ms = age_of(
+                slow_state
+                    .last_trajectory_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+            let objects_age_ms = age_of(
+                slow_state
+                    .last_objects_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+            let odom_age_ms = age_of(
+                slow_state
+                    .last_odom_ms
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
             tracing::info!(
                 asset_id = %traj.asset_id,
                 trajectory_id = traj.trajectory_id,
@@ -879,7 +899,7 @@ pub async fn run_adapter(
             let cmd = IncomingControl {
                 velocity_mps: in_cmd.linear_velocity_mps,
                 steering_rad: in_cmd.steering_angle_rad,
-                stamp_ms:     in_cmd.stamp_ms,
+                stamp_ms: in_cmd.stamp_ms,
             };
             // SAFETY: SG9 | REQ: subscription-liveness | TEST: test_stale_subscription_mrcs
             // Subscription staleness check (SG9) — adapter's own
@@ -891,10 +911,7 @@ pub async fn run_adapter(
             // closed even if a stale AcceptedTrajectory + a clean
             // command would otherwise pass.
             if fast_state.any_subscription_stale(now_ms, staleness_timeout_ms) {
-                let out = mrc_command(
-                    in_cmd.asset_id.clone(),
-                    fast_state.config.max_decel_mps2,
-                );
+                let out = mrc_command(in_cmd.asset_id.clone(), fast_state.config.max_decel_mps2);
                 if let Err(e) = fast_loop_out_tx.try_send(out) {
                     tracing::error!(
                         asset_id = %in_cmd.asset_id,
@@ -912,15 +929,14 @@ pub async fn run_adapter(
             let odom = fast_state.snapshot_odom().unwrap_or_default();
             let traj = fast_state.snapshot(&in_cmd.asset_id);
             let verdict = match traj.as_ref() {
-                Some(t) => check_command_conforms(
-                    &cmd, t, &odom, &fast_state.config, now_ms,
-                ),
+                Some(t) => check_command_conforms(&cmd, t, &odom, &fast_state.config, now_ms),
                 None => ConformanceVerdict::MRCFallback,
             };
             let out = match verdict {
                 ConformanceVerdict::Accept => cmd_to_output(&in_cmd.asset_id, &cmd),
-                ConformanceVerdict::MRCFallback =>
-                    mrc_command(in_cmd.asset_id.clone(), fast_state.config.max_decel_mps2),
+                ConformanceVerdict::MRCFallback => {
+                    mrc_command(in_cmd.asset_id.clone(), fast_state.config.max_decel_mps2)
+                }
             };
             if let Err(e) = fast_loop_out_tx.try_send(out) {
                 tracing::error!(
@@ -1039,9 +1055,7 @@ pub async fn run_adapter(
                 );
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::error!(
-                    "control channel CLOSED — fast loop is gone; adapter must restart"
-                );
+                tracing::error!("control channel CLOSED — fast loop is gone; adapter must restart");
             }
         }
     }

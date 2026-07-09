@@ -73,9 +73,7 @@ pub fn radar_scan_to_detections(returns: &[RadarReturnRaw]) -> Vec<RadarDetectio
 /// caller; enable `radar-ros2` alongside a ROS env that provides `radar_msgs`
 /// when the radar path is wired.
 #[cfg(feature = "radar-ros2")]
-pub fn radar_scan_msg_to_detections(
-    msg: &r2r::radar_msgs::msg::RadarScan,
-) -> Vec<RadarDetection> {
+pub fn radar_scan_msg_to_detections(msg: &r2r::radar_msgs::msg::RadarScan) -> Vec<RadarDetection> {
     let raws: Vec<RadarReturnRaw> = msg
         .returns
         .iter()
@@ -97,7 +95,13 @@ mod tests {
     /// Distinct values per field so a mis-map (esp. doppler→velocity,
     /// amplitude→rcs) is visible.
     fn ret(range: f32, az: f32, el: f32, dop: f32, amp: f32) -> RadarReturnRaw {
-        RadarReturnRaw { range, azimuth: az, elevation: el, doppler_velocity: dop, amplitude: amp }
+        RadarReturnRaw {
+            range,
+            azimuth: az,
+            elevation: el,
+            doppler_velocity: dop,
+            amplitude: amp,
+        }
     }
 
     #[test]

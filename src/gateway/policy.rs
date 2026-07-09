@@ -147,20 +147,38 @@ mod tests {
 
     #[test]
     fn test_classifies_read_telemetry() {
-        assert_eq!(classify_http_command("GET", "/telemetry/status"), OperationalCommand::ReadTelemetry);
-        assert_eq!(classify_http_command("GET", "/metrics"),          OperationalCommand::ReadTelemetry);
-        assert_eq!(classify_http_command("GET", "/health/live"),      OperationalCommand::ReadTelemetry);
+        assert_eq!(
+            classify_http_command("GET", "/telemetry/status"),
+            OperationalCommand::ReadTelemetry
+        );
+        assert_eq!(
+            classify_http_command("GET", "/metrics"),
+            OperationalCommand::ReadTelemetry
+        );
+        assert_eq!(
+            classify_http_command("GET", "/health/live"),
+            OperationalCommand::ReadTelemetry
+        );
     }
 
     #[test]
     fn test_classifies_cmd_vel_as_write_state() {
-        assert_eq!(classify_http_command("POST", "/cmd_vel"), OperationalCommand::WriteState);
+        assert_eq!(
+            classify_http_command("POST", "/cmd_vel"),
+            OperationalCommand::WriteState
+        );
     }
 
     #[test]
     fn test_classifies_actuator_as_write_state() {
-        assert_eq!(classify_http_command("POST", "/actuator/servo"), OperationalCommand::WriteState);
-        assert_eq!(classify_http_command("PUT",  "/actuator/valve"), OperationalCommand::WriteState);
+        assert_eq!(
+            classify_http_command("POST", "/actuator/servo"),
+            OperationalCommand::WriteState
+        );
+        assert_eq!(
+            classify_http_command("PUT", "/actuator/valve"),
+            OperationalCommand::WriteState
+        );
     }
 
     /// Option A / ADR-0011: the ONE actuator route mounted behind the inner
@@ -199,13 +217,19 @@ mod tests {
         // WS-1 (#G7): the principal mint (exact) and the parameterised revoke must
         // classify as WriteState — NOT Unknown (which the outer posture gate denies
         // in every posture, incl. Nominal — that would brick the routes).
-        assert_eq!(classify_http_command("POST", "/system/principals"), OperationalCommand::WriteState);
+        assert_eq!(
+            classify_http_command("POST", "/system/principals"),
+            OperationalCommand::WriteState
+        );
         assert_eq!(
             classify_http_command("POST", "/system/principals/svc-a/revoke"),
             OperationalCommand::WriteState
         );
         // The GET list is a read.
-        assert_eq!(classify_http_command("GET", "/system/principals"), OperationalCommand::ReadTelemetry);
+        assert_eq!(
+            classify_http_command("GET", "/system/principals"),
+            OperationalCommand::ReadTelemetry
+        );
     }
 
     #[test]
@@ -229,10 +253,22 @@ mod tests {
 
     #[test]
     fn test_classifies_system_mutations() {
-        assert_eq!(classify_http_command("POST",   "/firmware/update"), OperationalCommand::SystemMutation);
-        assert_eq!(classify_http_command("POST",   "/reboot"),          OperationalCommand::SystemMutation);
-        assert_eq!(classify_http_command("PUT",    "/config/network"),  OperationalCommand::SystemMutation);
-        assert_eq!(classify_http_command("DELETE", "/anything"),        OperationalCommand::SystemMutation);
+        assert_eq!(
+            classify_http_command("POST", "/firmware/update"),
+            OperationalCommand::SystemMutation
+        );
+        assert_eq!(
+            classify_http_command("POST", "/reboot"),
+            OperationalCommand::SystemMutation
+        );
+        assert_eq!(
+            classify_http_command("PUT", "/config/network"),
+            OperationalCommand::SystemMutation
+        );
+        assert_eq!(
+            classify_http_command("DELETE", "/anything"),
+            OperationalCommand::SystemMutation
+        );
     }
 
     #[test]
@@ -240,8 +276,14 @@ mod tests {
         // Unknown HTTP methods map to OperationalCommand::Unknown, which is
         // denied in ALL posture states including Nominal — closing the implicit
         // fallback bypass identified in the v1 gateway policy specification.
-        assert_eq!(classify_http_command("PATCH",  "/unknown"), OperationalCommand::Unknown);
-        assert_eq!(classify_http_command("FROBNI", "/x"),       OperationalCommand::Unknown);
+        assert_eq!(
+            classify_http_command("PATCH", "/unknown"),
+            OperationalCommand::Unknown
+        );
+        assert_eq!(
+            classify_http_command("FROBNI", "/x"),
+            OperationalCommand::Unknown
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -376,7 +418,9 @@ mod tests {
     /// Verifies REQ: unknown-path-denied-allowlist (#69 / SG-006) end-to-end.
     #[test]
     fn test_unrecognized_write_path_denied_in_all_postures() {
-        use crate::posture_cache::{should_route_command, CachedFleetPosture, POSTURE_CACHE_TTL_MS};
+        use crate::posture_cache::{
+            should_route_command, CachedFleetPosture, POSTURE_CACHE_TTL_MS,
+        };
         use kirra_core::FleetPosture;
 
         let cmd = classify_http_command("POST", "/admin/shutdown");

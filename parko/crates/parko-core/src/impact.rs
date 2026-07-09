@@ -59,7 +59,11 @@ impl Default for ImpactCfg {
         // VALIDATION-PENDING placeholder — a hard, collision-grade deceleration.
         // NOT a certified value. Threshold left at 30.0 across the #321 convention
         // change so the default path has ZERO regression; M=1/N=1 = single-tick.
-        Self { spike_threshold_mps2: 30.0, confirmation_m: 1, confirmation_n: 1 }
+        Self {
+            spike_threshold_mps2: 30.0,
+            confirmation_m: 1,
+            confirmation_n: 1,
+        }
     }
 }
 
@@ -189,7 +193,11 @@ pub fn impact_cfg_for_class(class: VehicleClass) -> ImpactCfg {
         },
     };
     // The built-in profiles are compile-time constants and must always be valid.
-    debug_assert!(cfg.validate().is_ok(), "built-in {class:?} ImpactCfg invalid: {:?}", cfg.validate());
+    debug_assert!(
+        cfg.validate().is_ok(),
+        "built-in {class:?} ImpactCfg invalid: {:?}",
+        cfg.validate()
+    );
     cfg
 }
 
@@ -482,9 +490,9 @@ impl Default for VanishedCfg {
     fn default() -> Self {
         // VALIDATION-PENDING placeholders (not certified values):
         Self {
-            r_close_m: 2.0,        // person-near-vehicle close range
-            v_agent_max_mps: 3.0,  // brisk human gait — conservative (tight band)
-            slack_m: 0.5,          // band edge noise
+            r_close_m: 2.0,       // person-near-vehicle close range
+            v_agent_max_mps: 3.0, // brisk human gait — conservative (tight band)
+            slack_m: 0.5,         // band edge noise
         }
     }
 }
@@ -582,16 +590,19 @@ impl VanishedObjectDetector {
 
         // A finite gap within the close radius makes an agent a "close agent".
         // NaN never qualifies (errs toward latching).
-        let close_present = agents
-            .iter()
-            .any(|a| a.actual_longitudinal_gap_m.is_finite() && a.actual_longitudinal_gap_m <= cfg.r_close_m);
+        let close_present = agents.iter().any(|a| {
+            a.actual_longitudinal_gap_m.is_finite() && a.actual_longitudinal_gap_m <= cfg.r_close_m
+        });
 
         let pending = match self.pending {
             None => {
                 // No prior obligation → nothing could have vanished. Open one iff
                 // a close agent is present now.
                 if close_present {
-                    self.pending = Some(PendingClose { first_seen_ms: now_ms, last_valid_frame_ms: now_ms });
+                    self.pending = Some(PendingClose {
+                        first_seen_ms: now_ms,
+                        last_valid_frame_ms: now_ms,
+                    });
                 }
                 return false;
             }
@@ -607,9 +618,9 @@ impl VanishedObjectDetector {
         // at the band edge counts as PRESENT — ties go to "still tracked". The
         // fail-closed latch direction is preserved because what latches is the
         // ABSENCE of any agent within the band, not a boundary tie. NaN ignored.
-        let within_band = agents
-            .iter()
-            .any(|a| a.actual_longitudinal_gap_m.is_finite() && a.actual_longitudinal_gap_m <= r_band);
+        let within_band = agents.iter().any(|a| {
+            a.actual_longitudinal_gap_m.is_finite() && a.actual_longitudinal_gap_m <= r_band
+        });
 
         if within_band {
             if close_present {
@@ -660,10 +671,20 @@ mod tests {
     fn vehicle_class_from_str_is_fail_closed() {
         use core::str::FromStr;
         assert_eq!(VehicleClass::from_str("courier"), Ok(VehicleClass::Courier));
-        assert_eq!(VehicleClass::from_str("DELIVERY-AV"), Ok(VehicleClass::DeliveryAv));
-        assert_eq!(VehicleClass::from_str("  Robotaxi "), Ok(VehicleClass::Robotaxi));
+        assert_eq!(
+            VehicleClass::from_str("DELIVERY-AV"),
+            Ok(VehicleClass::DeliveryAv)
+        );
+        assert_eq!(
+            VehicleClass::from_str("  Robotaxi "),
+            Ok(VehicleClass::Robotaxi)
+        );
         // round-trip via as_str
-        for c in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+        for c in [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ] {
             assert_eq!(VehicleClass::from_str(c.as_str()), Ok(c));
         }
         // typos / empty / unknown → Err (never a silent fallback)
@@ -675,10 +696,17 @@ mod tests {
 
     #[test]
     fn impact_cfg_for_class_is_constructible_for_every_class() {
-        for class in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+        for class in [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ] {
             let c = impact_cfg_for_class(class);
-            assert!(c.spike_threshold_mps2.is_finite() && c.spike_threshold_mps2 > 0.0,
-                "{class:?} threshold must be a positive finite value, got {}", c.spike_threshold_mps2);
+            assert!(
+                c.spike_threshold_mps2.is_finite() && c.spike_threshold_mps2 > 0.0,
+                "{class:?} threshold must be a positive finite value, got {}",
+                c.spike_threshold_mps2
+            );
         }
     }
 
@@ -689,45 +717,86 @@ mod tests {
         let courier = impact_cfg_for_class(VehicleClass::Courier).spike_threshold_mps2;
         let delivery = impact_cfg_for_class(VehicleClass::DeliveryAv).spike_threshold_mps2;
         let robotaxi = impact_cfg_for_class(VehicleClass::Robotaxi).spike_threshold_mps2;
-        assert!(courier < delivery && delivery < robotaxi,
-            "threshold ordering courier {courier} < delivery-av {delivery} < robotaxi {robotaxi}");
+        assert!(
+            courier < delivery && delivery < robotaxi,
+            "threshold ordering courier {courier} < delivery-av {delivery} < robotaxi {robotaxi}"
+        );
         // The #321 convention change moves robotaxi OFF the raw-norm default (30.0):
         // it is now an explicit deviation threshold.
-        assert!((robotaxi - ImpactCfg::default().spike_threshold_mps2).abs() > f64::EPSILON,
-            "robotaxi deviation threshold ({robotaxi}) is no longer the raw-norm default (30.0)");
+        assert!(
+            (robotaxi - ImpactCfg::default().spike_threshold_mps2).abs() > f64::EPSILON,
+            "robotaxi deviation threshold ({robotaxi}) is no longer the raw-norm default (30.0)"
+        );
         // The courier number is the #321 fix: ABOVE 1.0 (noise) and BELOW the ~9.81
         // gravity floor (the old 8.0 raw-norm was below gravity → false-latched at rest).
-        assert!(courier > 1.0 && courier < 9.80665,
-            "courier deviation threshold {courier} sits between noise and gravity");
+        assert!(
+            courier > 1.0 && courier < 9.80665,
+            "courier deviation threshold {courier} sits between noise and gravity"
+        );
     }
 
     #[test]
     fn impact_cfg_validate_rejects_nonsense() {
         // threshold <= 1.0 → Err
-        assert!(ImpactCfg { spike_threshold_mps2: 1.0, confirmation_m: 1, confirmation_n: 1 }
-            .validate().is_err());
-        assert!(ImpactCfg { spike_threshold_mps2: 0.5, confirmation_m: 1, confirmation_n: 1 }
-            .validate().is_err());
+        assert!(ImpactCfg {
+            spike_threshold_mps2: 1.0,
+            confirmation_m: 1,
+            confirmation_n: 1
+        }
+        .validate()
+        .is_err());
+        assert!(ImpactCfg {
+            spike_threshold_mps2: 0.5,
+            confirmation_m: 1,
+            confirmation_n: 1
+        }
+        .validate()
+        .is_err());
         // M < 1 → Err
-        assert!(ImpactCfg { spike_threshold_mps2: 5.0, confirmation_m: 0, confirmation_n: 1 }
-            .validate().is_err());
+        assert!(ImpactCfg {
+            spike_threshold_mps2: 5.0,
+            confirmation_m: 0,
+            confirmation_n: 1
+        }
+        .validate()
+        .is_err());
         // N < M → Err
-        assert!(ImpactCfg { spike_threshold_mps2: 5.0, confirmation_m: 3, confirmation_n: 2 }
-            .validate().is_err());
+        assert!(ImpactCfg {
+            spike_threshold_mps2: 5.0,
+            confirmation_m: 3,
+            confirmation_n: 2
+        }
+        .validate()
+        .is_err());
         // a sane cfg validates
-        assert!(ImpactCfg { spike_threshold_mps2: 2.5, confirmation_m: 2, confirmation_n: 3 }
-            .validate().is_ok());
+        assert!(ImpactCfg {
+            spike_threshold_mps2: 2.5,
+            confirmation_m: 2,
+            confirmation_n: 3
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
     fn every_class_impact_cfg_passes_validation() {
         // Exhaustive over the family (M <= N, threshold > 1.0) — the built-in
         // profiles must always be valid.
-        for class in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+        for class in [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ] {
             let cfg = impact_cfg_for_class(class);
-            assert!(cfg.validate().is_ok(), "{class:?} cfg failed validation: {:?}", cfg.validate());
-            assert!(cfg.confirmation_m >= 1 && cfg.confirmation_n >= cfg.confirmation_m,
-                "{class:?} M/N invariant");
+            assert!(
+                cfg.validate().is_ok(),
+                "{class:?} cfg failed validation: {:?}",
+                cfg.validate()
+            );
+            assert!(
+                cfg.confirmation_m >= 1 && cfg.confirmation_n >= cfg.confirmation_m,
+                "{class:?} M/N invariant"
+            );
         }
         assert!(ImpactCfg::default().validate().is_ok());
     }
@@ -739,12 +808,19 @@ mod tests {
     }
 
     fn clean() -> ImpactEvidence {
-        ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: false, vanished_object: false }
+        ImpactEvidence {
+            imu_accel_spike_mps2: 0.5,
+            contact_sensor: false,
+            vanished_object: false,
+        }
     }
 
     #[test]
     fn test_contact_latches() {
-        let e = ImpactEvidence { contact_sensor: true, ..clean() };
+        let e = ImpactEvidence {
+            contact_sensor: true,
+            ..clean()
+        };
         assert!(is_impact(&e, &cfg()));
         let mut l = ImpactLatch::new();
         l.observe(&e, &cfg());
@@ -753,7 +829,10 @@ mod tests {
 
     #[test]
     fn test_finite_spike_over_threshold_latches() {
-        let e = ImpactEvidence { imu_accel_spike_mps2: 45.0, ..clean() };
+        let e = ImpactEvidence {
+            imu_accel_spike_mps2: 45.0,
+            ..clean()
+        };
         let mut l = ImpactLatch::new();
         l.observe(&e, &cfg());
         assert!(l.is_latched(), "a finite spike above the threshold latches");
@@ -762,10 +841,16 @@ mod tests {
     /// SG6: the vanished-object (person-under-vehicle) case latches ALONE.
     #[test]
     fn test_vanished_object_latches_alone() {
-        let e = ImpactEvidence { vanished_object: true, ..clean() };
+        let e = ImpactEvidence {
+            vanished_object: true,
+            ..clean()
+        };
         let mut l = ImpactLatch::new();
         l.observe(&e, &cfg());
-        assert!(l.is_latched(), "a vanished close-range agent latches on its own");
+        assert!(
+            l.is_latched(),
+            "a vanished close-range agent latches on its own"
+        );
     }
 
     #[test]
@@ -779,31 +864,55 @@ mod tests {
     #[test]
     fn test_latch_is_sticky() {
         let mut l = ImpactLatch::new();
-        l.observe(&ImpactEvidence { contact_sensor: true, ..clean() }, &cfg());
+        l.observe(
+            &ImpactEvidence {
+                contact_sensor: true,
+                ..clean()
+            },
+            &cfg(),
+        );
         assert!(l.is_latched());
         // Subsequent clean ticks must NOT un-latch.
         l.observe(&clean(), &cfg());
         l.observe(&clean(), &cfg());
-        assert!(l.is_latched(), "latch is sticky — clean evidence must not clear it");
+        assert!(
+            l.is_latched(),
+            "latch is sticky — clean evidence must not clear it"
+        );
     }
 
     #[test]
     fn test_explicit_clearance_clears() {
         let mut l = ImpactLatch::new();
-        l.observe(&ImpactEvidence { contact_sensor: true, ..clean() }, &cfg());
+        l.observe(
+            &ImpactEvidence {
+                contact_sensor: true,
+                ..clean()
+            },
+            &cfg(),
+        );
         assert!(l.is_latched());
         l.clear(false); // a non-clearance is a no-op
         assert!(l.is_latched(), "clear(false) must not release the latch");
         l.clear(true); // explicit clearance
-        assert!(!l.is_latched(), "an explicit clearance signal clears the latch");
+        assert!(
+            !l.is_latched(),
+            "an explicit clearance signal clears the latch"
+        );
     }
 
     /// A non-finite IMU spike alone does NOT latch (no immobilizing on a glitch).
     #[test]
     fn test_nonfinite_imu_no_spurious_latch() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let e = ImpactEvidence { imu_accel_spike_mps2: bad, ..clean() };
-            assert!(!is_impact(&e, &cfg()), "non-finite IMU alone must not latch ({bad})");
+            let e = ImpactEvidence {
+                imu_accel_spike_mps2: bad,
+                ..clean()
+            };
+            assert!(
+                !is_impact(&e, &cfg()),
+                "non-finite IMU alone must not latch ({bad})"
+            );
         }
     }
 
@@ -811,10 +920,24 @@ mod tests {
     /// (fusion is OR; the bad reading just contributes `false` to the IMU term).
     #[test]
     fn test_nonfinite_does_not_suppress_contact_or_vanished() {
-        let with_contact = ImpactEvidence { imu_accel_spike_mps2: f64::NAN, contact_sensor: true, vanished_object: false };
-        assert!(is_impact(&with_contact, &cfg()), "NaN IMU must not suppress a contact latch");
-        let with_vanished = ImpactEvidence { imu_accel_spike_mps2: f64::NAN, contact_sensor: false, vanished_object: true };
-        assert!(is_impact(&with_vanished, &cfg()), "NaN IMU must not suppress a vanished latch");
+        let with_contact = ImpactEvidence {
+            imu_accel_spike_mps2: f64::NAN,
+            contact_sensor: true,
+            vanished_object: false,
+        };
+        assert!(
+            is_impact(&with_contact, &cfg()),
+            "NaN IMU must not suppress a contact latch"
+        );
+        let with_vanished = ImpactEvidence {
+            imu_accel_spike_mps2: f64::NAN,
+            contact_sensor: false,
+            vanished_object: true,
+        };
+        assert!(
+            is_impact(&with_vanished, &cfg()),
+            "NaN IMU must not suppress a vanished latch"
+        );
     }
 
     /// A non-finite reading must NOT read as a clean "no impact" that releases an
@@ -822,20 +945,48 @@ mod tests {
     #[test]
     fn test_nonfinite_does_not_clear_a_latch() {
         let mut l = ImpactLatch::new();
-        l.observe(&ImpactEvidence { contact_sensor: true, ..clean() }, &cfg());
+        l.observe(
+            &ImpactEvidence {
+                contact_sensor: true,
+                ..clean()
+            },
+            &cfg(),
+        );
         assert!(l.is_latched());
-        l.observe(&ImpactEvidence { imu_accel_spike_mps2: f64::NAN, contact_sensor: false, vanished_object: false }, &cfg());
-        assert!(l.is_latched(), "a non-finite reading must not release the latch (not a clean 'no impact')");
+        l.observe(
+            &ImpactEvidence {
+                imu_accel_spike_mps2: f64::NAN,
+                contact_sensor: false,
+                vanished_object: false,
+            },
+            &cfg(),
+        );
+        assert!(
+            l.is_latched(),
+            "a non-finite reading must not release the latch (not a clean 'no impact')"
+        );
     }
 
     /// Hand-checked boundary: a spike EXACTLY at the threshold does NOT latch
     /// (strict `>`); one ulp above does.
     #[test]
     fn test_spike_threshold_boundary() {
-        let at = ImpactEvidence { imu_accel_spike_mps2: 30.0, ..clean() };
-        assert!(!is_impact(&at, &cfg()), "spike exactly at threshold must NOT latch (strict >)");
-        let above = ImpactEvidence { imu_accel_spike_mps2: 30.0 + 1e-6, ..clean() };
-        assert!(is_impact(&above, &cfg()), "spike just above threshold latches");
+        let at = ImpactEvidence {
+            imu_accel_spike_mps2: 30.0,
+            ..clean()
+        };
+        assert!(
+            !is_impact(&at, &cfg()),
+            "spike exactly at threshold must NOT latch (strict >)"
+        );
+        let above = ImpactEvidence {
+            imu_accel_spike_mps2: 30.0 + 1e-6,
+            ..clean()
+        };
+        assert!(
+            is_impact(&above, &cfg()),
+            "spike just above threshold latches"
+        );
     }
 
     // ───────────────────── #103 clearance-confirmation loop ─────────────────
@@ -843,11 +994,17 @@ mod tests {
     const MAX_AGE: u64 = DEFAULT_MAX_GRANT_AGE_MS; // 60_000
 
     fn contact() -> ImpactEvidence {
-        ImpactEvidence { contact_sensor: true, ..clean() }
+        ImpactEvidence {
+            contact_sensor: true,
+            ..clean()
+        }
     }
     /// A well-formed grant issued `age_ms` before `now`.
     fn grant(now: u64, age_ms: u64) -> OperatorClearanceGrant {
-        OperatorClearanceGrant { operator_id: "op-7".into(), granted_at_ms: now - age_ms }
+        OperatorClearanceGrant {
+            operator_id: "op-7".into(),
+            granted_at_ms: now - age_ms,
+        }
     }
     /// Drive a fresh loop into EscalationRaised. Post-#328 the first latching
     /// observe escalates in one step; a second clean observe is a harmless no-op.
@@ -866,7 +1023,10 @@ mod tests {
         let mut l = escalated();
         for t in 0..50 {
             l.observe(&clean(), &cfg(), 2_000 + t);
-            assert!(l.is_immobilized(), "clean evidence must never release the loop");
+            assert!(
+                l.is_immobilized(),
+                "clean evidence must never release the loop"
+            );
         }
     }
 
@@ -876,15 +1036,31 @@ mod tests {
     fn test_malformed_grants_rejected_still_immobilized() {
         let now = 100_000u64;
         let bad = [
-            OperatorClearanceGrant { operator_id: String::new(), granted_at_ms: now }, // empty id
-            OperatorClearanceGrant { operator_id: "op".into(), granted_at_ms: now + 5 }, // future
-            OperatorClearanceGrant { operator_id: "op".into(), granted_at_ms: now - (MAX_AGE + 1) }, // stale
+            OperatorClearanceGrant {
+                operator_id: String::new(),
+                granted_at_ms: now,
+            }, // empty id
+            OperatorClearanceGrant {
+                operator_id: "op".into(),
+                granted_at_ms: now + 5,
+            }, // future
+            OperatorClearanceGrant {
+                operator_id: "op".into(),
+                granted_at_ms: now - (MAX_AGE + 1),
+            }, // stale
         ];
         for g in bad {
             let mut l = escalated();
             let r = l.try_clear(&g, now, MAX_AGE);
-            assert_eq!(r, Err(ClearanceRejection::MalformedGrant), "malformed grant must be rejected: {g:?}");
-            assert!(l.is_immobilized(), "state must be unchanged after a rejected grant");
+            assert_eq!(
+                r,
+                Err(ClearanceRejection::MalformedGrant),
+                "malformed grant must be rejected: {g:?}"
+            );
+            assert!(
+                l.is_immobilized(),
+                "state must be unchanged after a rejected grant"
+            );
             assert_eq!(l.state(), ClearanceState::EscalationRaised);
         }
     }
@@ -907,8 +1083,15 @@ mod tests {
         let mut l = ClearanceLoop::new();
         assert!(!l.escalation_pending());
         l.observe(&contact(), &cfg(), 1_000);
-        assert_eq!(l.state(), ClearanceState::EscalationRaised, "#328: latch raises escalation in one step");
-        assert!(l.escalation_pending(), "raised on the latching observe — no one-tick gap");
+        assert_eq!(
+            l.state(),
+            ClearanceState::EscalationRaised,
+            "#328: latch raises escalation in one step"
+        );
+        assert!(
+            l.escalation_pending(),
+            "raised on the latching observe — no one-tick gap"
+        );
         // stays pending, no oscillation, no second raise
         for t in 0..10 {
             l.observe(&clean(), &cfg(), 1_100 + t);
@@ -923,9 +1106,16 @@ mod tests {
     fn test_latch_and_escalation_raised_in_one_observe() {
         let mut l = ClearanceLoop::new();
         l.observe(&contact(), &cfg(), 1_000);
-        assert_eq!(l.state(), ClearanceState::EscalationRaised, "one latching observe → EscalationRaised");
+        assert_eq!(
+            l.state(),
+            ClearanceState::EscalationRaised,
+            "one latching observe → EscalationRaised"
+        );
         assert!(l.is_immobilized(), "veto live on the latching tick");
-        assert!(l.escalation_pending(), "escalation raised on the latching tick (no next-tick wait)");
+        assert!(
+            l.escalation_pending(),
+            "escalation raised on the latching tick (no next-tick wait)"
+        );
     }
 
     /// Re-impact while EscalationRaised does not raise a second time.
@@ -933,7 +1123,11 @@ mod tests {
     fn test_reimpact_during_escalation_no_second_raise() {
         let mut l = escalated();
         l.observe(&contact(), &cfg(), 3_000); // re-impact
-        assert_eq!(l.state(), ClearanceState::EscalationRaised, "re-impact stays escalated");
+        assert_eq!(
+            l.state(),
+            ClearanceState::EscalationRaised,
+            "re-impact stays escalated"
+        );
         assert!(l.escalation_pending());
     }
 
@@ -948,7 +1142,10 @@ mod tests {
         // in one step.
         l.observe(&contact(), &cfg(), now + 1_000);
         assert_eq!(l.state(), ClearanceState::EscalationRaised);
-        assert!(l.escalation_pending(), "a new impact after clearance raises a fresh escalation");
+        assert!(
+            l.escalation_pending(),
+            "a new impact after clearance raises a fresh escalation"
+        );
     }
 
     /// A clear attempt on Normal is rejected (NotImmobilized), not silently
@@ -959,7 +1156,11 @@ mod tests {
         let mut l = ClearanceLoop::new();
         assert_eq!(l.state(), ClearanceState::Normal);
         let r = l.try_clear(&grant(now, 10), now, MAX_AGE);
-        assert_eq!(r, Err(ClearanceRejection::NotImmobilized), "clearing Normal must be a recorded rejection");
+        assert_eq!(
+            r,
+            Err(ClearanceRejection::NotImmobilized),
+            "clearing Normal must be a recorded rejection"
+        );
         assert_eq!(l.state(), ClearanceState::Normal);
     }
 
@@ -971,10 +1172,20 @@ mod tests {
         let mut l = ClearanceLoop::new();
         assert!(!l.is_immobilized()); // Normal
         l.observe(&contact(), &cfg(), 1_000);
-        assert_eq!(l.state(), ClearanceState::EscalationRaised, "#328: one step to EscalationRaised");
-        assert!(l.is_immobilized(), "veto active immediately on the latching tick");
+        assert_eq!(
+            l.state(),
+            ClearanceState::EscalationRaised,
+            "#328: one step to EscalationRaised"
+        );
+        assert!(
+            l.is_immobilized(),
+            "veto active immediately on the latching tick"
+        );
         l.observe(&clean(), &cfg(), 1_001);
-        assert!(l.is_immobilized(), "veto stays active across immobilized ticks");
+        assert!(
+            l.is_immobilized(),
+            "veto stays active across immobilized ticks"
+        );
         let now = 2_000u64;
         l.try_clear(&grant(now, 10), now, MAX_AGE).unwrap();
         assert!(!l.is_immobilized(), "released only after the grant");
@@ -985,9 +1196,18 @@ mod tests {
     #[test]
     fn test_grant_age_boundary_inclusive() {
         let now = 100_000u64;
-        let exactly = OperatorClearanceGrant { operator_id: "op".into(), granted_at_ms: now - MAX_AGE };
-        assert!(exactly.is_well_formed(now, MAX_AGE), "exactly max age is well-formed (inclusive)");
-        let older = OperatorClearanceGrant { operator_id: "op".into(), granted_at_ms: now - (MAX_AGE + 1) };
+        let exactly = OperatorClearanceGrant {
+            operator_id: "op".into(),
+            granted_at_ms: now - MAX_AGE,
+        };
+        assert!(
+            exactly.is_well_formed(now, MAX_AGE),
+            "exactly max age is well-formed (inclusive)"
+        );
+        let older = OperatorClearanceGrant {
+            operator_id: "op".into(),
+            granted_at_ms: now - (MAX_AGE + 1),
+        };
         assert!(!older.is_well_formed(now, MAX_AGE), "one ms older is stale");
     }
 
@@ -995,11 +1215,20 @@ mod tests {
     #[test]
     fn test_future_dated_grant_malformed() {
         let now = 100_000u64;
-        let future = OperatorClearanceGrant { operator_id: "op".into(), granted_at_ms: now + 1 };
-        assert!(!future.is_well_formed(now, MAX_AGE), "a future-dated grant must be malformed");
+        let future = OperatorClearanceGrant {
+            operator_id: "op".into(),
+            granted_at_ms: now + 1,
+        };
+        assert!(
+            !future.is_well_formed(now, MAX_AGE),
+            "a future-dated grant must be malformed"
+        );
         // and is rejected by try_clear
         let mut l = escalated();
-        assert_eq!(l.try_clear(&future, now, MAX_AGE), Err(ClearanceRejection::MalformedGrant));
+        assert_eq!(
+            l.try_clear(&future, now, MAX_AGE),
+            Err(ClearanceRejection::MalformedGrant)
+        );
         assert!(l.is_immobilized());
     }
 
@@ -1033,7 +1262,10 @@ mod tests {
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg())); // close → obligation, no verdict
         assert!(d.has_pending());
         // dt=0.1s → band=2.0+0.3+0.5=2.8; growth=0.3 <= r_close=2.0 → conclusive.
-        assert!(d.observe(&AgentScene::KnownEmpty, 100, &vcfg()), "small-band KnownEmpty must vanish");
+        assert!(
+            d.observe(&AgentScene::KnownEmpty, 100, &vcfg()),
+            "small-band KnownEmpty must vanish"
+        );
         assert!(!d.has_pending(), "obligation consumed by the vanish");
     }
 
@@ -1045,7 +1277,10 @@ mod tests {
         let mut d = VanishedObjectDetector::new();
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg()));
         // dt=0.1s → band=2.8; agent at 2.0+ε (within band, beyond r_close).
-        assert!(!d.observe(&agents(&[2.0 + 1e-6]), 100, &vcfg()), "departed-within-band must not vanish");
+        assert!(
+            !d.observe(&agents(&[2.0 + 1e-6]), 100, &vcfg()),
+            "departed-within-band must not vanish"
+        );
         assert!(!d.has_pending(), "obligation released — departed trackably");
     }
 
@@ -1056,17 +1291,26 @@ mod tests {
         // SHORT: close@0, Absent@50 (gap, persists), KnownEmpty@200.
         let mut d = VanishedObjectDetector::new();
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg()));
-        assert!(!d.observe(&AgentScene::Absent, 50, &vcfg()), "gap tick yields no verdict");
+        assert!(
+            !d.observe(&AgentScene::Absent, 50, &vcfg()),
+            "gap tick yields no verdict"
+        );
         assert!(d.has_pending(), "obligation persists across the gap");
         // dt from last_valid(0) = 0.2s → growth=0.6 <= 2.0 → conclusive; band=3.1.
-        assert!(d.observe(&AgentScene::KnownEmpty, 200, &vcfg()), "short gap then empty → vanish");
+        assert!(
+            d.observe(&AgentScene::KnownEmpty, 200, &vcfg()),
+            "short gap then empty → vanish"
+        );
 
         // LONG: close@0, Absent@5000 (gap), KnownEmpty@10000.
         let mut d = VanishedObjectDetector::new();
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg()));
         assert!(!d.observe(&AgentScene::Absent, 5_000, &vcfg()));
         // dt=10s → growth=30.0 > r_close=2.0 → past plausibility; band=32.5.
-        assert!(!d.observe(&AgentScene::KnownEmpty, 10_000, &vcfg()), "long gap → not vanished");
+        assert!(
+            !d.observe(&AgentScene::KnownEmpty, 10_000, &vcfg()),
+            "long gap → not vanished"
+        );
         assert!(!d.has_pending());
     }
 
@@ -1075,8 +1319,14 @@ mod tests {
     fn test_never_close_never_vanishes() {
         let mut d = VanishedObjectDetector::new();
         for t in (0..500).step_by(100) {
-            assert!(!d.observe(&agents(&[5.0]), t, &vcfg()), "far agent never vanishes");
-            assert!(!d.observe(&AgentScene::KnownEmpty, t + 50, &vcfg()), "no obligation → no vanish");
+            assert!(
+                !d.observe(&agents(&[5.0]), t, &vcfg()),
+                "far agent never vanishes"
+            );
+            assert!(
+                !d.observe(&AgentScene::KnownEmpty, t + 50, &vcfg()),
+                "no obligation → no vanish"
+            );
             assert!(!d.has_pending());
         }
     }
@@ -1087,7 +1337,10 @@ mod tests {
     fn test_empty_vec_is_gap_not_departure() {
         let mut d = VanishedObjectDetector::new();
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg())); // obligation
-        assert!(!d.observe(&AgentScene::Agents(vec![]), 100, &vcfg()), "empty-vec is a gap → no verdict");
+        assert!(
+            !d.observe(&AgentScene::Agents(vec![]), 100, &vcfg()),
+            "empty-vec is a gap → no verdict"
+        );
         assert!(d.has_pending(), "empty-vec must not release the obligation");
         // The obligation survives to vanish on the next valid (small-band) frame.
         assert!(d.observe(&AgentScene::KnownEmpty, 200, &vcfg()));
@@ -1102,13 +1355,22 @@ mod tests {
         let mut d = VanishedObjectDetector::new();
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg()));
         // dt=0.1 small band; the only agent has a NaN gap → not within band → vanish.
-        assert!(d.observe(&agents(&[f64::NAN]), 100, &vcfg()), "NaN agent cannot satisfy the band");
+        assert!(
+            d.observe(&agents(&[f64::NAN]), 100, &vcfg()),
+            "NaN agent cannot satisfy the band"
+        );
 
         // Prior-frame NaN does not create an obligation.
         let mut d = VanishedObjectDetector::new();
-        assert!(!d.observe(&agents(&[f64::NAN]), 0, &vcfg()), "NaN gap is not a close agent");
+        assert!(
+            !d.observe(&agents(&[f64::NAN]), 0, &vcfg()),
+            "NaN gap is not a close agent"
+        );
         assert!(!d.has_pending(), "no obligation from a NaN-only frame");
-        assert!(!d.observe(&AgentScene::KnownEmpty, 100, &vcfg()), "no obligation → no vanish");
+        assert!(
+            !d.observe(&AgentScene::KnownEmpty, 100, &vcfg()),
+            "no obligation → no vanish"
+        );
     }
 
     /// Band boundary is INCLUSIVE: an agent observed exactly at R_band counts as
@@ -1119,7 +1381,10 @@ mod tests {
         assert!(!d.observe(&agents(&[1.0]), 0, &vcfg()));
         // dt=0.1s → R_band = 2.0 + 3.0*0.1 + 0.5 = 2.8 exactly.
         let r_band = 2.0 + 3.0 * 0.1 + 0.5;
-        assert!(!d.observe(&agents(&[r_band]), 100, &vcfg()), "agent exactly at R_band is present (inclusive)");
+        assert!(
+            !d.observe(&agents(&[r_band]), 100, &vcfg()),
+            "agent exactly at R_band is present (inclusive)"
+        );
         assert!(!d.has_pending(), "released — within band, beyond r_close");
     }
 
@@ -1129,7 +1394,10 @@ mod tests {
     fn test_refresh_close_across_ticks() {
         let mut d = VanishedObjectDetector::new();
         for t in (0..1_000).step_by(100) {
-            assert!(!d.observe(&agents(&[1.0]), t, &vcfg()), "still-close never vanishes");
+            assert!(
+                !d.observe(&agents(&[1.0]), t, &vcfg()),
+                "still-close never vanishes"
+            );
             assert!(d.has_pending(), "obligation refreshed while close");
         }
     }

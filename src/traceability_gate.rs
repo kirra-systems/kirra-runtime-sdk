@@ -320,7 +320,6 @@ fn parse_safety_line(line: &str) -> Option<(Vec<u8>, String, Vec<String>)> {
 mod ci_gate_tests {
     use super::*;
 
-
     #[test]
     fn every_enforced_sg_has_at_least_one_tagged_site() {
         let tags = walk_safety_tags();
@@ -333,7 +332,8 @@ mod ci_gate_tests {
                  or the site exists but isn't annotated per docs/safety/TRACEABILITY.md. \
                  Add a `// SAFETY: SG{} | REQ: <id> | TEST: <name>` line above the \
                  enforcing code site.",
-                sg, sg,
+                sg,
+                sg,
             );
         }
     }
@@ -450,7 +450,13 @@ mod ci_gate_tests {
         let md = "| TR-001 | req | `src/x.rs:f` | `test_alpha` ✓, `test_beta` ✗ |\n\
                   not a tr row `test_gamma` ✓\n";
         let m = parse_rtm_markers(md);
-        assert_eq!(m, vec![("test_alpha".to_string(), true), ("test_beta".to_string(), false)]);
+        assert_eq!(
+            m,
+            vec![
+                ("test_alpha".to_string(), true),
+                ("test_beta".to_string(), false)
+            ]
+        );
         // An implementation ref (path/colon token) carries no marker → not captured.
         assert!(!m.iter().any(|(n, _)| n.contains('/')));
     }
@@ -487,11 +493,20 @@ mod ci_gate_tests {
         );
         assert!(names.contains("alpha"), "plain fn");
         assert!(names.contains("beta"), "async generic fn");
-        assert!(names.contains("spread_across"), "whitespace before `(` still resolves");
-        assert!(!names.contains("delta"), "`notfn_` must not match at a word boundary");
+        assert!(
+            names.contains("spread_across"),
+            "whitespace before `(` still resolves"
+        );
+        assert!(
+            !names.contains("delta"),
+            "`notfn_` must not match at a word boundary"
+        );
         // The prose `fn that dereferences ...` must NOT seed `that` — it is not
         // followed by `(` or `<` (Copilot #851): a comment can't create a fn name.
-        assert!(!names.contains("that"), "a `fn` in prose must not be captured");
+        assert!(
+            !names.contains("that"),
+            "a `fn` in prose must not be captured"
+        );
     }
 
     #[test]

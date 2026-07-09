@@ -22,11 +22,11 @@
 //! That invariance is what makes "swap in a learned planner, the safety case is unchanged" a
 //! literal, tested claim rather than an aspiration.
 
+use kirra_core::FleetPosture;
 use kirra_planner::{
     plan_for_intent, EgoState, GeometricPlanner, Goal, LearnedPlanner, MickIntent, PlanInput,
     PlanOutput, Planner, Pose, ProposalKind, Teacher, TrajectoryPoint,
 };
-use kirra_core::FleetPosture;
 use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
@@ -55,7 +55,11 @@ impl Planner for RecklessDoer {
         let trajectory = (0..50)
             .map(|i| {
                 let p = TrajectoryPoint {
-                    pose: Pose { x_m: ego.x_m + s * cos_h, y_m: ego.y_m + s * sin_h, heading_rad: heading },
+                    pose: Pose {
+                        x_m: ego.x_m + s * cos_h,
+                        y_m: ego.y_m + s * sin_h,
+                        heading_rad: heading,
+                    },
                     velocity_mps: v,
                     time_from_start_s: i as f64 * dt,
                 };
@@ -64,14 +68,32 @@ impl Planner for RecklessDoer {
                 p
             })
             .collect();
-        PlanOutput { trajectory, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
 fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> PlanInput<'a> {
     PlanInput {
-        ego: EgoState { pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 2.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
-        goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+        ego: EgoState {
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            linear_x_mps: 2.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
+        goal: Goal {
+            target: Pose {
+                x_m: 40.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -92,13 +114,30 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
 }
 
 fn stopped_car(x: f64) -> PerceivedObject {
-    PerceivedObject { id: 1, pos: Point { x_m: x, y_m: 0.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+    PerceivedObject {
+        id: 1,
+        pos: Point { x_m: x, y_m: 0.0 },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }
 }
 
 /// KIRRA's verdict — the one authority every doer answers to. Note its inputs: the trajectory and
 /// the world. There is **no doer parameter**; that absence is the property under test.
-fn kirra_verdict(out: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
-    validate_trajectory_slow(&out.trajectory, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
+fn kirra_verdict(
+    out: &PlanOutput,
+    corr: &dyn CorridorSource,
+    objs: &[PerceivedObject],
+) -> TrajectoryVerdict {
+    validate_trajectory_slow(
+        &out.trajectory,
+        corr,
+        objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    )
 }
 
 fn admitted(v: TrajectoryVerdict) -> bool {
@@ -106,7 +145,10 @@ fn admitted(v: TrajectoryVerdict) -> bool {
 }
 
 fn reach(out: &PlanOutput) -> f64 {
-    out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max)
+    out.trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(0.0, f64::max)
 }
 
 /// The heterogeneous author fleet, each driven through `intent` + `w` behind the one generic seam.
@@ -114,10 +156,34 @@ fn reach(out: &PlanOutput) -> f64 {
 /// test can show the admit/reject partition crosses doer families.
 fn fleet(intent: &MickIntent, w: &PlanInput<'_>) -> Vec<(&'static str, bool, PlanOutput)> {
     vec![
-        ("Occy/geometric", true, plan_for_intent(&mut GeometricPlanner::default(), intent, w)),
-        ("Learned/SafetyAware", true, plan_for_intent(&mut LearnedPlanner::trained(SEED, Teacher::SafetyAware), intent, w)),
-        ("Learned/ProgressOnly", false, plan_for_intent(&mut LearnedPlanner::trained(SEED, Teacher::ProgressOnly), intent, w)),
-        ("Reckless/black-box", false, plan_for_intent(&mut RecklessDoer, intent, w)),
+        (
+            "Occy/geometric",
+            true,
+            plan_for_intent(&mut GeometricPlanner::default(), intent, w),
+        ),
+        (
+            "Learned/SafetyAware",
+            true,
+            plan_for_intent(
+                &mut LearnedPlanner::trained(SEED, Teacher::SafetyAware),
+                intent,
+                w,
+            ),
+        ),
+        (
+            "Learned/ProgressOnly",
+            false,
+            plan_for_intent(
+                &mut LearnedPlanner::trained(SEED, Teacher::ProgressOnly),
+                intent,
+                w,
+            ),
+        ),
+        (
+            "Reckless/black-box",
+            false,
+            plan_for_intent(&mut RecklessDoer, intent, w),
+        ),
     ]
 }
 
@@ -128,7 +194,10 @@ fn kirra_verdict_is_doer_blind_predicted_by_trajectory_geometry_alone() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
     let objs = [stopped_car(HAZARD_X)];
     let w = world(&corr, &objs);
-    let intent = MickIntent::GoTo { x_m: 40.0, y_m: 0.0 };
+    let intent = MickIntent::GoTo {
+        x_m: 40.0,
+        y_m: 0.0,
+    };
 
     let mut admitted_labels = Vec::new();
     for (label, _aligned, out) in fleet(&intent, &w) {
@@ -148,7 +217,11 @@ fn kirra_verdict_is_doer_blind_predicted_by_trajectory_geometry_alone() {
 
         // (3) Pure function / determinism: the same trajectory + world yields the same verdict —
         //     no hidden state, no author input leaks in.
-        assert_eq!(v, kirra_verdict(&out, &corr, &objs), "{label}: the verdict is a deterministic pure function of the trajectory");
+        assert_eq!(
+            v,
+            kirra_verdict(&out, &corr, &objs),
+            "{label}: the verdict is a deterministic pure function of the trajectory"
+        );
 
         if admitted(v) {
             admitted_labels.push(label);
@@ -171,11 +244,21 @@ fn kirra_verdict_is_doer_blind_predicted_by_trajectory_geometry_alone() {
 fn on_a_clear_road_every_author_is_admitted() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
     let w = world(&corr, &[]);
-    let intent = MickIntent::GoTo { x_m: 40.0, y_m: 0.0 };
+    let intent = MickIntent::GoTo {
+        x_m: 40.0,
+        y_m: 0.0,
+    };
 
     for (label, _aligned, out) in fleet(&intent, &w) {
-        assert!(reach(&out) > 15.0, "{label}: makes progress toward the goal on a clear road, got {:.1}", reach(&out));
-        assert!(admitted(kirra_verdict(&out, &corr, &[])), "{label}: KIRRA admits it with nothing to hit — the bound is precise");
+        assert!(
+            reach(&out) > 15.0,
+            "{label}: makes progress toward the goal on a clear road, got {:.1}",
+            reach(&out)
+        );
+        assert!(
+            admitted(kirra_verdict(&out, &corr, &[])),
+            "{label}: KIRRA admits it with nothing to hit — the bound is precise"
+        );
     }
 }
 
@@ -186,18 +269,30 @@ fn every_rejected_author_falls_back_to_an_admissible_safe_stop() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
     let objs = [stopped_car(HAZARD_X)];
     let w = world(&corr, &objs);
-    let intent = MickIntent::GoTo { x_m: 40.0, y_m: 0.0 };
+    let intent = MickIntent::GoTo {
+        x_m: 40.0,
+        y_m: 0.0,
+    };
 
     let rejected: Vec<_> = fleet(&intent, &w)
         .into_iter()
         .filter(|(_, _, out)| !admitted(kirra_verdict(out, &corr, &objs)))
         .collect();
-    assert!(!rejected.is_empty(), "the scene must reject at least one author for this to mean anything");
+    assert!(
+        !rejected.is_empty(),
+        "the scene must reject at least one author for this to mean anything"
+    );
 
     let fallback = PlanOutput::safe_stop(w.ego.pose);
-    assert!(admitted(kirra_verdict(&fallback, &corr, &objs)), "the safe-stop fallback is admissible");
+    assert!(
+        admitted(kirra_verdict(&fallback, &corr, &objs)),
+        "the safe-stop fallback is admissible"
+    );
     for (label, _, _) in rejected {
         // The fallback is the same for every author — the recovery does not depend on the doer.
-        assert!(admitted(kirra_verdict(&fallback, &corr, &objs)), "{label}: falls back to the admissible safe-stop");
+        assert!(
+            admitted(kirra_verdict(&fallback, &corr, &objs)),
+            "{label}: falls back to the admissible safe-stop"
+        );
     }
 }

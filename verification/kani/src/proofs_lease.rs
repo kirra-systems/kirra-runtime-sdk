@@ -35,14 +35,24 @@ mod proofs {
         let p = LeaseParams::from_ttl(ttl);
 
         assert!(p.ttl_ms >= MIN_LEASE_TTL_MS && p.ttl_ms <= MAX_LEASE_TTL_MS);
-        assert!(p.renew_interval_ms >= 1, "renew cadence never degenerates to 0");
-        assert_eq!(p.renew_interval_ms, p.ttl_ms / 2, "renew at half-life, exact");
+        assert!(
+            p.renew_interval_ms >= 1,
+            "renew cadence never degenerates to 0"
+        );
+        assert_eq!(
+            p.renew_interval_ms,
+            p.ttl_ms / 2,
+            "renew at half-life, exact"
+        );
         assert_eq!(
             p.promote_after_ms,
             p.ttl_ms + p.renew_interval_ms,
             "promote deadline is exact — the MAX clamp forbids overflow wrap"
         );
-        assert!(p.demote_before_promote(), "THE split-brain invariant, all u64");
+        assert!(
+            p.demote_before_promote(),
+            "THE split-brain invariant, all u64"
+        );
     }
 
     /// L2 — window ordering: promotion is possible only strictly after the
@@ -134,8 +144,13 @@ mod mirrors {
     fn l2_mirror_ordering_at_boundaries() {
         for &ttl in PROBES {
             let p = LeaseParams::from_ttl(ttl);
-            for elapsed in [0, p.ttl_ms - 1, p.ttl_ms, p.promote_after_ms - 1, p.promote_after_ms]
-            {
+            for elapsed in [
+                0,
+                p.ttl_ms - 1,
+                p.ttl_ms,
+                p.promote_after_ms - 1,
+                p.promote_after_ms,
+            ] {
                 if should_promote(elapsed, &p) {
                     assert!(lease_expired(elapsed, &p), "ttl={ttl} elapsed={elapsed}");
                 }
@@ -149,7 +164,13 @@ mod mirrors {
     fn l3_mirror_skew_fails_safe() {
         for &ttl in PROBES {
             let p = LeaseParams::from_ttl(ttl);
-            for (now, last) in [(0, 0), (0, u64::MAX), (5, 5), (100, 101), (u64::MAX, u64::MAX)] {
+            for (now, last) in [
+                (0, 0),
+                (0, u64::MAX),
+                (5, 5),
+                (100, 101),
+                (u64::MAX, u64::MAX),
+            ] {
                 assert!(!promotion_due_since_renew(now, last, &p));
                 assert!(!holder_must_self_demote(now, last, &p));
             }

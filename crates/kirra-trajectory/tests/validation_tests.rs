@@ -8,14 +8,14 @@
 // the corridor seam (Phase 2B replaces it with the real
 // Lanelet2CorridorSource).
 
+use kirra_core::frame_integrity::FrameTrust;
+use kirra_core::FleetPosture;
 use kirra_trajectory::{
     config::VehicleConfig,
     corridor::{MockCorridorSource, Point},
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
     validation::validate_trajectory_slow,
 };
-use kirra_core::frame_integrity::FrameTrust;
-use kirra_core::FleetPosture;
 
 /// Build a straight n-pose trajectory along +X at uniform velocity.
 ///
@@ -43,23 +43,31 @@ fn straight_trajectory(num_poses: usize, velocity_mps: f64, dt: f64) -> Vec<Traj
 
 #[test]
 fn test_clean_trajectory_accepts() {
-    let trajectory = straight_trajectory(10, 5.0, 0.1);  // 5 m/s for 1 s
+    let trajectory = straight_trajectory(10, 5.0, 0.1); // 5 m/s for 1 s
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
 
     let start = std::time::Instant::now();
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     let elapsed_us = start.elapsed().as_micros();
 
     // Print the WCET for the report.
     eprintln!("clean_trajectory_accepts elapsed_us = {elapsed_us}");
 
-    assert_eq!(verdict, TrajectoryVerdict::Accept,
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Accept,
         "10-pose straight trajectory at 5 m/s within a 5 m half-width corridor with no \
-         objects must Accept; got {verdict:?}");
+         objects must Accept; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -79,10 +87,18 @@ fn test_corridor_departure_rejects() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "pose outside the corridor must MRC; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "pose outside the corridor must MRC; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -108,10 +124,18 @@ fn test_rss_violation_rejects() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "object 4 m ahead at ego 10 m/s must trigger RSS MRC; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "object 4 m ahead at ego 10 m/s must trigger RSS MRC; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -131,16 +155,27 @@ fn test_finite_far_object_is_skipped_and_accepts() {
     let cfg = VehicleConfig::default_urban();
     let objects = vec![PerceivedObject {
         id: 1,
-        pos: Point { x_m: 50.0, y_m: 20.0 }, // far ahead AND 20 m off to the side
+        pos: Point {
+            x_m: 50.0,
+            y_m: 20.0,
+        }, // far ahead AND 20 m off to the side
         velocity_mps: 0.0,
         heading_rad: 0.0,
         vel: Point { x_m: 0.0, y_m: 0.0 },
     }];
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::Accept,
-        "a finite, far, off-corridor object must be skipped (Accept); got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Accept,
+        "a finite, far, off-corridor object must be skipped (Accept); got {verdict:?}"
+    );
 }
 
 /// H-2: each non-finite object field independently fails closed to MRCFallback.
@@ -154,28 +189,87 @@ fn test_nonfinite_object_field_fails_closed_h2() {
     // above). Each variant corrupts exactly one field with NaN or Inf.
     let base = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 50.0, y_m: 20.0 },
+        pos: Point {
+            x_m: 50.0,
+            y_m: 20.0,
+        },
         velocity_mps: 0.0,
         heading_rad: 0.0,
         vel: Point { x_m: 0.0, y_m: 0.0 },
     };
 
     let variants: Vec<(&str, PerceivedObject)> = vec![
-        ("pos.x_m=NaN", PerceivedObject { pos: Point { x_m: f64::NAN, y_m: 0.0 }, ..base }),
-        ("pos.y_m=Inf", PerceivedObject { pos: Point { x_m: 50.0, y_m: f64::INFINITY }, ..base }),
-        ("velocity_mps=NaN", PerceivedObject { velocity_mps: f64::NAN, ..base }),
-        ("heading_rad=NaN", PerceivedObject { heading_rad: f64::NAN, ..base }),
-        ("vel.x_m=Inf", PerceivedObject { vel: Point { x_m: f64::INFINITY, y_m: 0.0 }, ..base }),
-        ("vel.y_m=-Inf", PerceivedObject { vel: Point { x_m: 0.0, y_m: f64::NEG_INFINITY }, ..base }),
+        (
+            "pos.x_m=NaN",
+            PerceivedObject {
+                pos: Point {
+                    x_m: f64::NAN,
+                    y_m: 0.0,
+                },
+                ..base
+            },
+        ),
+        (
+            "pos.y_m=Inf",
+            PerceivedObject {
+                pos: Point {
+                    x_m: 50.0,
+                    y_m: f64::INFINITY,
+                },
+                ..base
+            },
+        ),
+        (
+            "velocity_mps=NaN",
+            PerceivedObject {
+                velocity_mps: f64::NAN,
+                ..base
+            },
+        ),
+        (
+            "heading_rad=NaN",
+            PerceivedObject {
+                heading_rad: f64::NAN,
+                ..base
+            },
+        ),
+        (
+            "vel.x_m=Inf",
+            PerceivedObject {
+                vel: Point {
+                    x_m: f64::INFINITY,
+                    y_m: 0.0,
+                },
+                ..base
+            },
+        ),
+        (
+            "vel.y_m=-Inf",
+            PerceivedObject {
+                vel: Point {
+                    x_m: 0.0,
+                    y_m: f64::NEG_INFINITY,
+                },
+                ..base
+            },
+        ),
     ];
 
     for (label, obj) in variants {
         let verdict = validate_trajectory_slow(
-            &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal,
+            &trajectory,
+            &corridor,
+            &[obj],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
         );
-        assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
+        assert_eq!(
+            verdict,
+            TrajectoryVerdict::MRCFallback,
             "H-2: a non-finite object field ({label}) must fail closed to MRC, not be \
-             silently skipped; got {verdict:?}");
+             silently skipped; got {verdict:?}"
+        );
     }
 }
 
@@ -204,17 +298,28 @@ fn courier_admits_a_side_object_a_robotaxi_refuses() {
     // Robotaxi (default_urban, band 4.0 m) — REFUSES.
     let robotaxi = straight_trajectory(5, 10.0, 0.1);
     let v_taxi = validate_trajectory_slow(
-        &robotaxi, &corridor, &objects,
-        &VehicleConfig::default_urban(), None, FleetPosture::Nominal,
+        &robotaxi,
+        &corridor,
+        &objects,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(v_taxi, TrajectoryVerdict::MRCFallback,
-        "robotaxi: a 1 m-ahead object within the 4 m band is RSS-evaluated → MRC; got {v_taxi:?}");
+    assert_eq!(
+        v_taxi,
+        TrajectoryVerdict::MRCFallback,
+        "robotaxi: a 1 m-ahead object within the 4 m band is RSS-evaluated → MRC; got {v_taxi:?}"
+    );
 
     // Courier (band 0.6 m, robot speed) — ADMITS the SAME scene.
     let courier = straight_trajectory(5, 2.0, 0.1);
     let v_courier = validate_trajectory_slow(
-        &courier, &corridor, &objects,
-        &VehicleConfig::courier(), None, FleetPosture::Nominal,
+        &courier,
+        &corridor,
+        &objects,
+        &VehicleConfig::courier(),
+        None,
+        FleetPosture::Nominal,
     );
     assert!(matches!(v_courier, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "courier: the same object is beyond the 0.6 m band → containment covers it → admitted; got {v_courier:?}");
@@ -259,10 +364,18 @@ fn oncoming_vehicle_triggers_head_on_rss_mrc() {
     // Heading π → opposing travel → head-on closure at |8 + 12| effective.
     let objects = vec![obj_at(20.0, 12.0, std::f64::consts::PI)];
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "an oncoming vehicle ~15 m ahead must trigger the head-on bound; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "an oncoming vehicle ~15 m ahead must trigger the head-on bound; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -274,7 +387,12 @@ fn same_direction_lead_at_identical_gap_is_admitted() {
     // (12 > ego 8) → near-zero required gap → admitted. Only the heading differs.
     let objects = vec![obj_at(20.0, 12.0, 0.0)];
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert!(
         matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
@@ -293,19 +411,42 @@ fn snapshot_rss_uses_velocity_vector_not_orientation_dc1() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
 
-    let vel = Point { x_m: 0.5, y_m: -2.0 }; // mostly-lateral motion toward the ego lane
+    let vel = Point {
+        x_m: 0.5,
+        y_m: -2.0,
+    }; // mostly-lateral motion toward the ego lane
     let pos = Point { x_m: 8.0, y_m: 3.0 };
     let speed = vel.x_m.hypot(vel.y_m);
-    let facing_forward = PerceivedObject { id: 1, pos, velocity_mps: speed, heading_rad: 0.0, vel };
+    let facing_forward = PerceivedObject {
+        id: 1,
+        pos,
+        velocity_mps: speed,
+        heading_rad: 0.0,
+        vel,
+    };
     let facing_motion = PerceivedObject {
-        id: 1, pos, velocity_mps: speed, heading_rad: vel.y_m.atan2(vel.x_m), vel,
+        id: 1,
+        pos,
+        velocity_mps: speed,
+        heading_rad: vel.y_m.atan2(vel.x_m),
+        vel,
     };
 
     let v_forward = validate_trajectory_slow(
-        &trajectory, &corridor, std::slice::from_ref(&facing_forward), &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        std::slice::from_ref(&facing_forward),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     let v_motion = validate_trajectory_slow(
-        &trajectory, &corridor, std::slice::from_ref(&facing_motion), &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        std::slice::from_ref(&facing_motion),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(
         format!("{v_forward:?}"), format!("{v_motion:?}"),
@@ -332,7 +473,11 @@ fn snapshot_rss_lateral_rotation_is_frame_correct_at_nonzero_heading() {
     let (sin_h, cos_h) = heading.sin_cos();
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: heading },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: heading,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
@@ -357,7 +502,12 @@ fn snapshot_rss_lateral_rotation_is_frame_correct_at_nonzero_heading() {
         vel: Point { x_m: 2.0, y_m: 2.0 },
     };
     let v = validate_trajectory_slow(
-        &ego, &corridor, std::slice::from_ref(&parallel), &cfg, None, FleetPosture::Nominal,
+        &ego,
+        &corridor,
+        std::slice::from_ref(&parallel),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(
         v,
@@ -372,10 +522,18 @@ fn snapshot_rss_lateral_rotation_is_frame_correct_at_nonzero_heading() {
         pos,
         velocity_mps: (2.0f64).hypot(2.0),
         heading_rad: heading - std::f64::consts::FRAC_PI_2,
-        vel: Point { x_m: 2.0, y_m: -2.0 },
+        vel: Point {
+            x_m: 2.0,
+            y_m: -2.0,
+        },
     };
     let v = validate_trajectory_slow(
-        &ego, &corridor, std::slice::from_ref(&cutting_in), &cfg, None, FleetPosture::Nominal,
+        &ego,
+        &corridor,
+        std::slice::from_ref(&cutting_in),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(
         v,
@@ -396,13 +554,24 @@ fn snapshot_rss_catches_a_forward_facing_lateral_cut_in_dc1() {
     let cfg = VehicleConfig::default_urban();
     let obj = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 13.0, y_m: 1.0 }, // dx 3 (in the conflict band), small lateral gap
+        pos: Point {
+            x_m: 13.0,
+            y_m: 1.0,
+        }, // dx 3 (in the conflict band), small lateral gap
         velocity_mps: 2.5,
-        heading_rad: 0.0,                    // facing forward, but...
-        vel: Point { x_m: 0.0, y_m: -2.5 },  // ...moving laterally toward the ego
+        heading_rad: 0.0, // facing forward, but...
+        vel: Point {
+            x_m: 0.0,
+            y_m: -2.5,
+        }, // ...moving laterally toward the ego
     };
     let verdict = validate_trajectory_slow(
-        &ego, &corridor, std::slice::from_ref(&obj), &cfg, None, FleetPosture::Nominal,
+        &ego,
+        &corridor,
+        std::slice::from_ref(&obj),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(
         verdict, TrajectoryVerdict::MRCFallback,
@@ -422,14 +591,22 @@ fn test_kinematic_deny_rejects() {
     // can't be JSON-encoded so we use the dt=0 path.
     let trajectory = vec![
         TrajectoryPoint {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 5.0,
             time_from_start_s: 0.0,
         },
         TrajectoryPoint {
-            pose: Pose { x_m: 5.5, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.5,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 5.0,
-            time_from_start_s: 0.0,  // dt = 0 → InvalidTimeDelta
+            time_from_start_s: 0.0, // dt = 0 → InvalidTimeDelta
         },
     ];
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
@@ -437,10 +614,18 @@ fn test_kinematic_deny_rejects() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "P1 InvalidTimeDelta DenyBreach must MRC; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "P1 InvalidTimeDelta DenyBreach must MRC; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -459,12 +644,20 @@ fn test_clamp_returns_clamp() {
     // intervention is per-pose ClampLinear → expect Clamp.
     let trajectory = vec![
         TrajectoryPoint {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 5.0,
             time_from_start_s: 0.0,
         },
         TrajectoryPoint {
-            pose: Pose { x_m: 13.75, y_m: 0.0, heading_rad: 0.0 },  // start + avg vel * dt
+            pose: Pose {
+                x_m: 13.75,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            }, // start + avg vel * dt
             velocity_mps: 30.0,
             time_from_start_s: 0.5,
         },
@@ -474,11 +667,19 @@ fn test_clamp_returns_clamp() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::Clamp,
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Clamp,
         "trajectory with per-pose ClampLinear (P3 accel ceiling) but containment + RSS \
-         clean must produce Clamp; got {verdict:?}");
+         clean must produce Clamp; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -504,10 +705,18 @@ fn nominal_posture_clean_trajectory_accepts() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::Accept,
-        "Nominal posture + clean trajectory must Accept; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Accept,
+        "Nominal posture + clean trajectory must Accept; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -523,7 +732,12 @@ fn degraded_posture_caps_kinematics_to_mrc() {
 
     // Sanity: Nominal accepts.
     let nominal_verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(nominal_verdict, TrajectoryVerdict::Accept,
         "10 m/s trajectory under Nominal must Accept (within 35 m/s vehicle max); got {nominal_verdict:?}");
@@ -531,7 +745,12 @@ fn degraded_posture_caps_kinematics_to_mrc() {
     // Degraded must clamp (per-pose ClampLinear fires against the 5 m/s
     // MRC cap; containment + RSS remain green so the aggregate is Clamp).
     let degraded_verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Degraded,
     );
     assert_eq!(degraded_verdict, TrajectoryVerdict::Clamp,
         "10 m/s trajectory under Degraded must Clamp against the 5 m/s MRC cap; got {degraded_verdict:?}");
@@ -553,7 +772,11 @@ fn degraded_reaccel_from_stop_mrcs() {
         .enumerate()
         .map(|(i, &v)| {
             let p = TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: v,
                 time_from_start_s: (i as f64) * dt,
             };
@@ -566,11 +789,19 @@ fn degraded_reaccel_from_stop_mrcs() {
     let cfg = VehicleConfig::default_urban();
 
     let degraded_verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Degraded,
     );
-    assert_eq!(degraded_verdict, TrajectoryVerdict::MRCFallback,
+    assert_eq!(
+        degraded_verdict,
+        TrajectoryVerdict::MRCFallback,
         "Degraded must refuse a re-acceleration-from-stop trajectory (no autonomous \
-         re-initiation of motion); got {degraded_verdict:?}");
+         re-initiation of motion); got {degraded_verdict:?}"
+    );
 }
 
 #[test]
@@ -586,7 +817,11 @@ fn degraded_decel_to_stop_trajectory_is_admitted() {
         .enumerate()
         .map(|(i, &v)| {
             let p = TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: v,
                 time_from_start_s: (i as f64) * dt,
             };
@@ -599,10 +834,18 @@ fn degraded_decel_to_stop_trajectory_is_admitted() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Degraded,
     );
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "Degraded decel-to-stop trajectory must be admitted (not MRCFallback); got {verdict:?}"
     );
 }
@@ -617,10 +860,18 @@ fn locked_out_short_circuits_to_mrcfallback() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::LockedOut,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::LockedOut,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "LockedOut posture must MRC regardless of trajectory shape; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "LockedOut posture must MRC regardless of trajectory shape; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -631,7 +882,12 @@ fn locked_out_short_circuits_even_on_empty_trajectory() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::LockedOut,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::LockedOut,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback);
 }
@@ -648,10 +904,18 @@ fn degraded_with_corridor_breach_still_mrcs() {
     let objects: Vec<PerceivedObject> = Vec::new();
     let cfg = VehicleConfig::default_urban();
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Degraded,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Degraded,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "Degraded + corridor breach must still MRC — most-restrictive-wins; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "Degraded + corridor breach must still MRC — most-restrictive-wins; got {verdict:?}"
+    );
 }
 
 // (`nominal_behavior_matches_prior_default` — the AdaptorState construction-
@@ -697,9 +961,11 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
 
     // Sanity: 30 m/s is below the vehicle physical max — so the test
     // really is probing the ODD cap, not the vehicle ceiling.
-    assert!(30.0 < cfg.max_speed_mps,
+    assert!(
+        30.0 < cfg.max_speed_mps,
         "test premise: 30 m/s must be below the vehicle physical max ({})",
-        cfg.max_speed_mps);
+        cfg.max_speed_mps
+    );
     assert_eq!(
         cfg.odd_speed_cap_mps,
         Some(kirra_core::kinematics_contract::URBAN_ODD_SPEED_CAP_MPS),
@@ -707,12 +973,20 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
     );
 
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
-    assert_eq!(verdict, TrajectoryVerdict::Clamp,
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Clamp,
         "30 m/s under Nominal posture must Clamp against the 22.35 m/s ODD cap, \
          NOT Accept-at-30. Before H2 + M1 reconciliation this case silently passed \
-         at 35 m/s vehicle max. Got: {verdict:?}");
+         at 35 m/s vehicle max. Got: {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +1003,11 @@ fn decel_to_stop_trajectory(v0: f64, decel: f64, dt: f64, n: usize) -> Vec<Traje
     (0..n)
         .map(|i| {
             let p = TrajectoryPoint {
-                pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: x,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: v,
                 time_from_start_s: i as f64 * dt,
             };
@@ -750,10 +1028,23 @@ fn occlusion_rejects_a_trajectory_that_outruns_assured_clear_distance() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(5.0), None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        Some(5.0),
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "10 m/s into 5 m of visibility outruns the assured clear distance; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "10 m/s into 5 m of visibility outruns the assured clear distance; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -766,10 +1057,23 @@ fn occlusion_bound_is_gated_off_when_no_visibility_is_supplied() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "with no visibility input the occlusion bound is a no-op; got {verdict:?}");
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "with no visibility input the occlusion bound is a no-op; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -783,16 +1087,42 @@ fn untrusted_frame_mrcs_an_otherwise_clean_trajectory() {
     let cfg = VehicleConfig::default_urban();
 
     let trusted = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert_ne!(trusted, TrajectoryVerdict::MRCFallback,
-        "a clean trajectory under a Trusted frame must not MRC; got {trusted:?}");
+    assert_ne!(
+        trusted,
+        TrajectoryVerdict::MRCFallback,
+        "a clean trajectory under a Trusted frame must not MRC; got {trusted:?}"
+    );
 
     let untrusted = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, None, None, None, FrameTrust::Untrusted,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Untrusted,
     );
-    assert_eq!(untrusted, TrajectoryVerdict::MRCFallback,
-        "the SAME clean trajectory must MRC under an Untrusted frame; got {untrusted:?}");
+    assert_eq!(
+        untrusted,
+        TrajectoryVerdict::MRCFallback,
+        "the SAME clean trajectory must MRC under an Untrusted frame; got {untrusted:?}"
+    );
 }
 
 #[test]
@@ -805,10 +1135,25 @@ fn occlusion_admits_a_decel_to_stop_within_visibility() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal, None, Some(20.0), None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        Some(20.0),
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "a decel-to-stop within the assured clear distance is admissible; got {verdict:?}");
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "a decel-to-stop within the assured clear distance is admissible; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -819,12 +1164,22 @@ use kirra_trajectory::validation::{PredictedMode, PredictedSample};
 
 /// Build a predicted mode: an object moving in a straight line from `(x0,y0)` at
 /// `(vx,vy)` m/s, sampled every 0.5 s over `horizon_s`.
-fn linear_mode(id: u64, x0: f64, y0: f64, vx: f64, vy: f64, horizon_s: f64) -> Vec<PredictedSample> {
+fn linear_mode(
+    id: u64,
+    x0: f64,
+    y0: f64,
+    vx: f64,
+    vy: f64,
+    horizon_s: f64,
+) -> Vec<PredictedSample> {
     let mut t = 0.0;
     let mut out = Vec::new();
     while t <= horizon_s + 1e-9 {
         out.push(PredictedSample {
-            pos: Point { x_m: x0 + vx * t, y_m: y0 + vy * t },
+            pos: Point {
+                x_m: x0 + vx * t,
+                y_m: y0 + vy * t,
+            },
             time_from_start_s: t,
         });
         t += 0.5;
@@ -842,13 +1197,31 @@ fn predictive_rss_does_not_regress_a_lane_keeping_neighbor() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
     let samples = linear_mode(1, 6.0, -3.5, 9.0, 0.0, 2.0); // fast, but stays at y=-3.5
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "a neighbor predicted to keep its lane must not be rejected; got {verdict:?}");
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "a neighbor predicted to keep its lane must not be rejected; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -863,19 +1236,56 @@ fn predictive_rss_catches_a_predicted_cut_in() {
     // Phase 1 (t 0→1.0): cross from (9,-3.5) to (9,0). Phase 2 (t 1.0→2.0): creep
     // forward in-lane at ~0.6 m/s — 1 m ahead of the ego when it arrives at x=8 (t=1.0).
     let samples = [
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -1.75 }, time_from_start_s: 0.5 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: 0.0 }, time_from_start_s: 1.0 },
-        PredictedSample { pos: Point { x_m: 9.3, y_m: 0.0 }, time_from_start_s: 1.5 },
-        PredictedSample { pos: Point { x_m: 9.6, y_m: 0.0 }, time_from_start_s: 2.0 },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -1.75,
+            },
+            time_from_start_s: 0.5,
+        },
+        PredictedSample {
+            pos: Point { x_m: 9.0, y_m: 0.0 },
+            time_from_start_s: 1.0,
+        },
+        PredictedSample {
+            pos: Point { x_m: 9.3, y_m: 0.0 },
+            time_from_start_s: 1.5,
+        },
+        PredictedSample {
+            pos: Point { x_m: 9.6, y_m: 0.0 },
+            time_from_start_s: 2.0,
+        },
     ];
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "a predicted cut-in into the ego's path must be refused; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a predicted cut-in into the ego's path must be refused; got {verdict:?}"
+    );
 }
 
 /// A stopped ego held at a 45° heading (`sin_h = cos_h ≈ 0.707`), so the
@@ -903,7 +1313,11 @@ fn predictive_rss_rotation_is_frame_correct_at_nonzero_ego_heading() {
     // rotation is load-bearing while containment stays satisfied.
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: FRAC_PI_4,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
@@ -912,7 +1326,10 @@ fn predictive_rss_rotation_is_frame_correct_at_nonzero_ego_heading() {
     let cfg = VehicleConfig::default_urban();
 
     // ego-frame (dx_ego, dy_ego) → world, about the ego at (10,0) facing 45°.
-    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    let to_world = |dx: f64, dy: f64| Point {
+        x_m: 10.0 + dx * c - dy * s,
+        y_m: dx * s + dy * c,
+    };
 
     // CUT-IN: 3 m ahead, sweeping the lateral band 4.0 → 0.0 (closing) at fixed
     // longitudinal distance — a mid-band lateral cut-in in the ego frame.
@@ -924,9 +1341,22 @@ fn predictive_rss_rotation_is_frame_correct_at_nonzero_ego_heading() {
             time_from_start_s: i as f64 * 0.5,
         })
         .collect();
-    let modes = [PredictedMode { object_id: 1, samples: &cut_in }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &cut_in,
+    }];
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert_eq!(
         verdict,
@@ -943,17 +1373,36 @@ fn predictive_rss_rotation_is_frame_correct_at_nonzero_ego_heading() {
             let t = i as f64 * 0.5;
             let base = to_world(3.0, 3.5);
             PredictedSample {
-                pos: Point { x_m: base.x_m + c * t, y_m: base.y_m + s * t },
+                pos: Point {
+                    x_m: base.x_m + c * t,
+                    y_m: base.y_m + s * t,
+                },
                 time_from_start_s: t,
             }
         })
         .collect();
-    let modes = [PredictedMode { object_id: 2, samples: &parallel }];
+    let modes = [PredictedMode {
+        object_id: 2,
+        samples: &parallel,
+    }];
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a parallel traveler at a 45° ego heading is laterally clear and must be \
          admitted — a corrupted rotation reads phantom lateral motion and MRCs it; got {verdict:?}"
     );
@@ -973,14 +1422,21 @@ fn predictive_rss_lateral_brake_parameter_is_load_bearing() {
     let (s, c) = FRAC_PI_4.sin_cos();
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: FRAC_PI_4,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
         .collect();
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    let to_world = |dx: f64, dy: f64| Point {
+        x_m: 10.0 + dx * c - dy * s,
+        y_m: dx * s + dy * c,
+    };
 
     // 3 m ahead; a WEAK lateral closure — dy_ego 3.5 → 3.1 over the windows
     // (~0.2 m/s), staying in the mid-band [2.5, 4.0). Cut-in fires (0.2 > the
@@ -990,14 +1446,33 @@ fn predictive_rss_lateral_brake_parameter_is_load_bearing() {
     let samples: Vec<PredictedSample> = [3.5, 3.4, 3.3, 3.2, 3.1]
         .iter()
         .enumerate()
-        .map(|(i, &dy)| PredictedSample { pos: to_world(3.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .map(|(i, &dy)| PredictedSample {
+            pos: to_world(3.0, dy),
+            time_from_start_s: i as f64 * 0.5,
+        })
         .collect();
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a weak mid-band cut-in is admissible under the correct lateral brake; a \
          corrupted (weaker) brake would over-reject it — got {verdict:?}"
     );
@@ -1019,7 +1494,11 @@ fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
     let (s, c) = FRAC_PI_4.sin_cos();
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: FRAC_PI_4,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
@@ -1032,17 +1511,30 @@ fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
     // (correct) > 2.3 → MRC; ≈ 2.04 m (brake 4.2 mutant) < 2.3 → admit.
     let obj = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 10.0 + 3.0 * c - 2.3 * s, y_m: 3.0 * s + 2.3 * c },
+        pos: Point {
+            x_m: 10.0 + 3.0 * c - 2.3 * s,
+            y_m: 3.0 * s + 2.3 * c,
+        },
         velocity_mps: 1.0,
         heading_rad: 0.0,
         vel: Point { x_m: s, y_m: -c },
     };
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, std::slice::from_ref(&obj), &cfg, None, FleetPosture::Nominal,
-        None, None, None, None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        std::slice::from_ref(&obj),
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
     assert_eq!(
-        verdict, TrajectoryVerdict::MRCFallback,
+        verdict,
+        TrajectoryVerdict::MRCFallback,
         "a moderate snapshot cut-in must be refused under the correct lateral \
          brake; a too-strong brake would wrongly admit it — got {verdict:?}"
     );
@@ -1060,26 +1552,52 @@ fn predictive_rss_far_cut_in_is_gated_by_the_conflict_window() {
     let (s, c) = FRAC_PI_4.sin_cos();
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: FRAC_PI_4,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
         .collect();
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    let to_world = |dx: f64, dy: f64| Point {
+        x_m: 10.0 + dx * c - dy * s,
+        y_m: dx * s + dy * c,
+    };
     // 10 m ahead (> the 8 m window) but cutting in hard: dy_ego 2.5 → 0.5 (~2 m/s).
     let samples: Vec<PredictedSample> = [2.5, 1.5, 0.5]
         .iter()
         .enumerate()
-        .map(|(i, &dy)| PredictedSample { pos: to_world(10.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .map(|(i, &dy)| PredictedSample {
+            pos: to_world(10.0, dy),
+            time_from_start_s: i as f64 * 0.5,
+        })
         .collect();
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "a cut-in beyond the longitudinal conflict window is out of scope and must \
          be admitted — the && gate must not fire on the cut-in alone; got {verdict:?}"
     );
@@ -1096,27 +1614,51 @@ fn predictive_rss_lateral_brake_over_relaxation_still_rejects() {
     let (s, c) = FRAC_PI_4.sin_cos();
     let ego: Vec<TrajectoryPoint> = (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 10.0, y_m: 0.0, heading_rad: FRAC_PI_4 },
+            pose: Pose {
+                x_m: 10.0,
+                y_m: 0.0,
+                heading_rad: FRAC_PI_4,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
         .collect();
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    let to_world = |dx: f64, dy: f64| Point { x_m: 10.0 + dx * c - dy * s, y_m: dx * s + dy * c };
+    let to_world = |dx: f64, dy: f64| Point {
+        x_m: 10.0 + dx * c - dy * s,
+        y_m: dx * s + dy * c,
+    };
     // 3 m ahead (inside the window), cutting in ~1 m/s: dy_ego 3.4 → 2.9 → ...
     // lat_required ≈ 3.74 m (correct) > 3.4 → MRC; ≈ 2.84 m (brake 4.2) < 3.4 → admit.
     let samples: Vec<PredictedSample> = [3.4, 2.9, 2.4]
         .iter()
         .enumerate()
-        .map(|(i, &dy)| PredictedSample { pos: to_world(3.0, dy), time_from_start_s: i as f64 * 0.5 })
+        .map(|(i, &dy)| PredictedSample {
+            pos: to_world(3.0, dy),
+            time_from_start_s: i as f64 * 0.5,
+        })
         .collect();
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert_eq!(
-        verdict, TrajectoryVerdict::MRCFallback,
+        verdict,
+        TrajectoryVerdict::MRCFallback,
         "a moderate predicted cut-in inside the window must be refused; an \
          over-relaxed (too-strong) lateral brake would wrongly admit it — got {verdict:?}"
     );
@@ -1137,16 +1679,59 @@ fn predictive_rss_catches_a_mid_band_lateral_cut_in() {
     // x fixed at 13 (dx_ego = 3 m, longitudinally safe for a stopped ego, < 8 m conflict
     // band); y sweeps 4.0 → 0.0 at ~2 m/s — crossing the 2.5–4.0 m mid-band while closing.
     let samples = [
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 4.0 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 3.0 }, time_from_start_s: 0.5 },
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.0 }, time_from_start_s: 1.0 },
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 1.0 }, time_from_start_s: 1.5 },
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 0.0 }, time_from_start_s: 2.0 },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 4.0,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 3.0,
+            },
+            time_from_start_s: 0.5,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 2.0,
+            },
+            time_from_start_s: 1.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 1.0,
+            },
+            time_from_start_s: 1.5,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 0.0,
+            },
+            time_from_start_s: 2.0,
+        },
     ];
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
 
     let verdict = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "a mid-band predicted lateral cut-in at a safe longitudinal distance must be refused; got {verdict:?}");
@@ -1182,19 +1767,47 @@ fn produced_cv_mode_catches_a_cut_in_the_snapshot_rss_misses() {
 
     // Snapshot-only (object passed, no produced modes): laterally clear now → admitted.
     let snapshot_only = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(snapshot_only, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "snapshot RSS alone sees the object as out-of-lane → admits; got {snapshot_only:?}");
+    assert!(
+        matches!(
+            snapshot_only,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "snapshot RSS alone sees the object as out-of-lane → admits; got {snapshot_only:?}"
+    );
 
     // With the PRODUCED CV mode, the predicted cut-in is caught → refused.
     let owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.5);
     let modes: Vec<_> = owned.iter().map(|m| m.as_mode()).collect();
     let with_modes = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(with_modes, TrajectoryVerdict::MRCFallback,
-        "the produced CV mode catches the cut-in the snapshot missed; got {with_modes:?}");
+    assert_eq!(
+        with_modes,
+        TrajectoryVerdict::MRCFallback,
+        "the produced CV mode catches the cut-in the snapshot missed; got {with_modes:?}"
+    );
 }
 
 #[test]
@@ -1212,20 +1825,49 @@ fn produced_ctrv_mode_catches_a_turn_in_that_cv_misses_multimodal_payoff() {
     let cv_owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.5);
     let cv_modes: Vec<_> = cv_owned.iter().map(|m| m.as_mode()).collect();
     let cv = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&cv_modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&cv_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "CV alone: a lane-parallel object is admitted; got {cv:?}");
+    assert!(
+        matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "CV alone: a lane-parallel object is admitted; got {cv:?}"
+    );
 
     // CV + CTRV (yaw rate turning it into the ego lane): the turn-in hypothesis refuses.
     let mm_owned = predicted_modes_from_objects(&[obj], &[(1, 0.9)], &[], 3.0, 0.5);
-    assert_eq!(mm_owned.len(), 2, "the turning object yields BOTH a CV and a CTRV mode");
+    assert_eq!(
+        mm_owned.len(),
+        2,
+        "the turning object yields BOTH a CV and a CTRV mode"
+    );
     let mm_modes: Vec<_> = mm_owned.iter().map(|m| m.as_mode()).collect();
     let mm = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&mm_modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&mm_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(mm, TrajectoryVerdict::MRCFallback,
-        "the produced CTRV turn-in mode catches what CV missed; got {mm:?}");
+    assert_eq!(
+        mm,
+        TrajectoryVerdict::MRCFallback,
+        "the produced CTRV turn-in mode catches what CV missed; got {mm:?}"
+    );
 }
 
 #[test]
@@ -1239,28 +1881,71 @@ fn produced_lane_follow_mode_catches_a_curving_in_object_that_cv_misses() {
     let cfg = VehicleConfig::default_urban();
     let obj = perceived(1, 16.0, -5.0, 2.5, 0.0); // moving +x in the right lane (CV stays clear)
     let path = [
-        Point { x_m: 16.0, y_m: -5.0 }, Point { x_m: 17.0, y_m: -2.5 },
-        Point { x_m: 18.0, y_m: 0.0 }, Point { x_m: 18.0, y_m: 0.01 },
+        Point {
+            x_m: 16.0,
+            y_m: -5.0,
+        },
+        Point {
+            x_m: 17.0,
+            y_m: -2.5,
+        },
+        Point {
+            x_m: 18.0,
+            y_m: 0.0,
+        },
+        Point {
+            x_m: 18.0,
+            y_m: 0.01,
+        },
     ];
 
     // CV-only: the object holds y=-5 → admitted.
     let cv_owned = predicted_modes_from_objects(&[obj], &[], &[], 3.0, 0.3);
     let cv_modes: Vec<_> = cv_owned.iter().map(|m| m.as_mode()).collect();
     let cv = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&cv_modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&cv_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "CV alone: a lane-parallel object is admitted; got {cv:?}");
+    assert!(
+        matches!(cv, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "CV alone: a lane-parallel object is admitted; got {cv:?}"
+    );
 
     // CV + lane-follow: the bend-in hypothesis brings it into the ego path → refuse.
     let lf_owned = predicted_modes_from_objects(&[obj], &[], &[(1, &path[..])], 3.0, 0.3);
-    assert_eq!(lf_owned.len(), 2, "the object yields BOTH a CV and a lane-follow mode");
+    assert_eq!(
+        lf_owned.len(),
+        2,
+        "the object yields BOTH a CV and a lane-follow mode"
+    );
     let lf_modes: Vec<_> = lf_owned.iter().map(|m| m.as_mode()).collect();
     let lf = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[obj], &cfg, None, FleetPosture::Nominal, None, None, Some(&lf_modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[obj],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&lf_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(lf, TrajectoryVerdict::MRCFallback,
-        "the produced lane-follow mode catches the curving-in object CV missed; got {lf:?}");
+    assert_eq!(
+        lf,
+        TrajectoryVerdict::MRCFallback,
+        "the produced lane-follow mode catches the curving-in object CV missed; got {lf:?}"
+    );
 }
 
 #[test]
@@ -1272,10 +1957,23 @@ fn predictive_rss_is_a_no_op_when_no_modes_are_supplied() {
     let cfg = VehicleConfig::default_urban();
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "with no predicted modes the predictive pass is a no-op; got {verdict:?}");
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "with no predicted modes the predictive pass is a no-op; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1292,17 +1990,51 @@ fn predictive_rss_fails_closed_on_modes_supplied_but_all_unevaluable_b3() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
     let samples = [
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 0.0,
+        },
     ];
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "modes supplied but all unevaluable (equal timestamps) must fail closed; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "modes supplied but all unevaluable (equal timestamps) must fail closed; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1314,14 +2046,36 @@ fn predictive_rss_fails_closed_on_modes_with_no_evaluable_window_b3() {
     let trajectory = straight_trajectory(20, 6.0, 0.1);
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    let samples = [PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 0.0 }];
-    let modes = [PredictedMode { object_id: 1, samples: &samples }];
+    let samples = [PredictedSample {
+        pos: Point {
+            x_m: 9.0,
+            y_m: -3.5,
+        },
+        time_from_start_s: 0.0,
+    }];
+    let modes = [PredictedMode {
+        object_id: 1,
+        samples: &samples,
+    }];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "a non-empty mode set with no evaluable window must fail closed; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a non-empty mode set with no evaluable window must fail closed; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1344,22 +2098,59 @@ fn predictive_rss_fails_closed_per_object_when_one_mode_is_unevaluable() {
     // Object 1 — evaluable and safe (far off to the side; evaluated then skipped
     // by the lateral-alignment gate). Satisfies the set-level flag on its own.
     let evaluable_safe = [
-        PredictedSample { pos: Point { x_m: 50.0, y_m: -10.0 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 50.0, y_m: -10.0 }, time_from_start_s: 0.1 },
+        PredictedSample {
+            pos: Point {
+                x_m: 50.0,
+                y_m: -10.0,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 50.0,
+                y_m: -10.0,
+            },
+            time_from_start_s: 0.1,
+        },
     ];
     // Object 2 — has windows (dt > 0) but every sample's time is outside the ego
     // span, so no ego pose matches within tolerance: unevaluable.
     let windowed_unevaluable = [
-        PredictedSample { pos: Point { x_m: 9.0, y_m: -3.5 }, time_from_start_s: 100.0 },
-        PredictedSample { pos: Point { x_m: 6.0, y_m: 0.0 }, time_from_start_s: 100.1 },
+        PredictedSample {
+            pos: Point {
+                x_m: 9.0,
+                y_m: -3.5,
+            },
+            time_from_start_s: 100.0,
+        },
+        PredictedSample {
+            pos: Point { x_m: 6.0, y_m: 0.0 },
+            time_from_start_s: 100.1,
+        },
     ];
     let modes = [
-        PredictedMode { object_id: 1, samples: &evaluable_safe },
-        PredictedMode { object_id: 2, samples: &windowed_unevaluable },
+        PredictedMode {
+            object_id: 1,
+            samples: &evaluable_safe,
+        },
+        PredictedMode {
+            object_id: 2,
+            samples: &windowed_unevaluable,
+        },
     ];
 
     let verdict = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&modes), None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&modes),
+        None,
+        FrameTrust::Trusted,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "one object's unevaluable mode must fail closed even when another object's mode is evaluable; got {verdict:?}");
@@ -1375,7 +2166,11 @@ fn predictive_rss_fails_closed_per_object_when_one_mode_is_unevaluable() {
 fn held_ego(x_m: f64) -> Vec<TrajectoryPoint> {
     (0..3)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * 0.1,
         })
@@ -1383,7 +2178,13 @@ fn held_ego(x_m: f64) -> Vec<TrajectoryPoint> {
 }
 
 fn stopped_object(x_m: f64, y_m: f64) -> PerceivedObject {
-    PerceivedObject { id: 1, pos: Point { x_m, y_m }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+    PerceivedObject {
+        id: 1,
+        pos: Point { x_m, y_m },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }
 }
 
 #[test]
@@ -1398,7 +2199,11 @@ fn rss_conjunction_admits_a_safe_stationary_queue() {
         let gap = gap_dm as f64 / 10.0; // 2.0 .. 8.0 m, 0.1 m steps
         let objs = [stopped_object(10.0 + gap, 0.0)];
         let v = validate_trajectory_slow(&ego, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
-        assert_ne!(v, TrajectoryVerdict::MRCFallback, "a stopped queue at gap {gap} m must be admitted, got {v:?}");
+        assert_ne!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "a stopped queue at gap {gap} m must be admitted, got {v:?}"
+        );
     }
 }
 
@@ -1412,13 +2217,22 @@ fn rss_conjunction_still_rejects_driving_into_a_stopped_object() {
     for speed in [3.0, 5.0, 7.0, 9.0] {
         let into: Vec<TrajectoryPoint> = (0..3)
             .map(|i| TrajectoryPoint {
-                pose: Pose { x_m: 27.0 + (i as f64), y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 27.0 + (i as f64),
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 velocity_mps: speed,
                 time_from_start_s: (i as f64) * 0.1,
             })
             .collect();
-        let v = validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
-        assert_eq!(v, TrajectoryVerdict::MRCFallback, "driving into a stopped object at {speed} m/s must be MRC'd, got {v:?}");
+        let v =
+            validate_trajectory_slow(&into, &corridor, &objs, &cfg, None, FleetPosture::Nominal);
+        assert_eq!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "driving into a stopped object at {speed} m/s must be MRC'd, got {v:?}"
+        );
     }
 }
 
@@ -1437,13 +2251,30 @@ fn rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distanc
         // across the ego (lateral velocity component) → a cut-in.
         let cut_in = PerceivedObject {
             id: 2,
-            pos: Point { x_m: 13.0, y_m: 0.3 },
+            pos: Point {
+                x_m: 13.0,
+                y_m: 0.3,
+            },
             velocity_mps: lat_speed,
             heading_rad: std::f64::consts::FRAC_PI_2,
-            vel: Point { x_m: 0.0, y_m: lat_speed },
+            vel: Point {
+                x_m: 0.0,
+                y_m: lat_speed,
+            },
         };
-        let v = validate_trajectory_slow(&ego, &corridor, &[cut_in], &cfg, None, FleetPosture::Nominal);
-        assert_eq!(v, TrajectoryVerdict::MRCFallback, "a lateral cut-in at {lat_speed} m/s must be MRC'd, got {v:?}");
+        let v = validate_trajectory_slow(
+            &ego,
+            &corridor,
+            &[cut_in],
+            &cfg,
+            None,
+            FleetPosture::Nominal,
+        );
+        assert_eq!(
+            v,
+            TrajectoryVerdict::MRCFallback,
+            "a lateral cut-in at {lat_speed} m/s must be MRC'd, got {v:?}"
+        );
     }
 }
 
@@ -1470,19 +2301,48 @@ fn snapshot_overlap_gate_is_the_sole_reason_an_in_band_closing_object_mrcs() {
         pos: Point { x_m: x, y_m: 2.0 },
         velocity_mps: 6.0,
         heading_rad: std::f64::consts::PI, // facing −X: head-on, no lateral component
-        vel: Point { x_m: -6.0, y_m: 0.0 },
+        vel: Point {
+            x_m: -6.0,
+            y_m: 0.0,
+        },
     };
     // NEAR + closing (dx = 3 m, longitudinally unsafe) → MRC via the gate.
-    let near = validate_trajectory_slow(&ego, &corridor, &[closing(13.0)], &cfg, None, FleetPosture::Nominal);
-    assert_eq!(near, TrajectoryVerdict::MRCFallback,
-        "an in-band (2.0<2.5), head-on-closing object must MRC via the overlap gate; got {near:?}");
+    let near = validate_trajectory_slow(
+        &ego,
+        &corridor,
+        &[closing(13.0)],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+    );
+    assert_eq!(
+        near,
+        TrajectoryVerdict::MRCFallback,
+        "an in-band (2.0<2.5), head-on-closing object must MRC via the overlap gate; got {near:?}"
+    );
     // (a) FAR + closing (dx = 60 m, longitudinally safe) → admitted.
-    let far = validate_trajectory_slow(&ego, &corridor, &[closing(70.0)], &cfg, None, FleetPosture::Nominal);
-    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "the same object 60 m away must be admitted; got {far:?}");
+    let far = validate_trajectory_slow(
+        &ego,
+        &corridor,
+        &[closing(70.0)],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+    );
+    assert!(
+        matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same object 60 m away must be admitted; got {far:?}"
+    );
     // (b) NEAR but stationary (not closing) → admitted: the lateral branch does
     // not fire at a 2.0 m offset, so only the closing-case gate MRCs.
-    let near_still = validate_trajectory_slow(&ego, &corridor, &[stopped_object(13.0, 2.0)], &cfg, None, FleetPosture::Nominal);
+    let near_still = validate_trajectory_slow(
+        &ego,
+        &corridor,
+        &[stopped_object(13.0, 2.0)],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+    );
     assert!(matches!(near_still, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a stationary in-band object at 2.0 m offset must be admitted (no lateral MRC); got {near_still:?}");
 }
@@ -1503,29 +2363,93 @@ fn predictive_overlap_gate_is_the_sole_reason_an_in_band_closing_mode_breaches()
     // overlap 2.5): the predictive lateral branch does NOT fire, so the breach is
     // the overlap gate's alone (a `< → ==`/`>` mutant on it stops the breach).
     let near_samples = [
-        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.4 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 11.0, y_m: 2.4 }, time_from_start_s: 0.5 },
-        PredictedSample { pos: Point { x_m: 9.0, y_m: 2.4 }, time_from_start_s: 1.0 },
+        PredictedSample {
+            pos: Point {
+                x_m: 13.0,
+                y_m: 2.4,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 11.0,
+                y_m: 2.4,
+            },
+            time_from_start_s: 0.5,
+        },
+        PredictedSample {
+            pos: Point { x_m: 9.0, y_m: 2.4 },
+            time_from_start_s: 1.0,
+        },
     ];
-    let near_modes = [PredictedMode { object_id: 1, samples: &near_samples }];
+    let near_modes = [PredictedMode {
+        object_id: 1,
+        samples: &near_samples,
+    }];
     let near = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&near_modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&near_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert_eq!(near, TrajectoryVerdict::MRCFallback,
-        "an in-band, head-on-closing predicted mode must breach via the overlap gate; got {near:?}");
+    assert_eq!(
+        near,
+        TrajectoryVerdict::MRCFallback,
+        "an in-band, head-on-closing predicted mode must breach via the overlap gate; got {near:?}"
+    );
     // Control: same closing motion but far ahead (x 63→59) → longitudinally
     // safe, admitted.
     let far_samples = [
-        PredictedSample { pos: Point { x_m: 63.0, y_m: 2.0 }, time_from_start_s: 0.0 },
-        PredictedSample { pos: Point { x_m: 61.0, y_m: 2.0 }, time_from_start_s: 0.5 },
-        PredictedSample { pos: Point { x_m: 59.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+        PredictedSample {
+            pos: Point {
+                x_m: 63.0,
+                y_m: 2.0,
+            },
+            time_from_start_s: 0.0,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 61.0,
+                y_m: 2.0,
+            },
+            time_from_start_s: 0.5,
+        },
+        PredictedSample {
+            pos: Point {
+                x_m: 59.0,
+                y_m: 2.0,
+            },
+            time_from_start_s: 1.0,
+        },
     ];
-    let far_modes = [PredictedMode { object_id: 1, samples: &far_samples }];
+    let far_modes = [PredictedMode {
+        object_id: 1,
+        samples: &far_samples,
+    }];
     let far = validate_trajectory_slow_capped(
-        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&far_modes), None, FrameTrust::Trusted,
+        &ego,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        Some(&far_modes),
+        None,
+        FrameTrust::Trusted,
     );
-    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "the same mode far ahead must be admitted; got {far:?}");
+    assert!(
+        matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same mode far ahead must be admitted; got {far:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1538,7 +2462,11 @@ fn predictive_overlap_gate_is_the_sole_reason_an_in_band_closing_mode_breaches()
 fn in_place_rotation(num_poses: usize, omega_rad_s: f64, dt: f64) -> Vec<TrajectoryPoint> {
     (0..num_poses)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: (i as f64) * omega_rad_s * dt },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: (i as f64) * omega_rad_s * dt,
+            },
             velocity_mps: 0.0,
             time_from_start_s: (i as f64) * dt,
         })
@@ -1552,9 +2480,13 @@ fn courier_in_place_rotation_at_sane_yaw_is_admitted() {
     let traj = in_place_rotation(6, 0.5, 0.1);
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
-    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "a sane in-place yaw must be admitted; got {verdict:?}");
+    let verdict =
+        validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a sane in-place yaw must be admitted; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1563,9 +2495,13 @@ fn courier_in_place_rotation_at_excessive_yaw_mrcs() {
     let traj = in_place_rotation(6, 1.5, 0.1);
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
-    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "an excessive in-place yaw must MRC (was silently passed pre-ADR-0029); got {verdict:?}");
+    let verdict =
+        validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "an excessive in-place yaw must MRC (was silently passed pre-ADR-0029); got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1576,8 +2512,12 @@ fn ackermann_trajectory_has_no_angular_channel() {
     let traj = in_place_rotation(6, 1.5, 0.1);
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    assert!(cfg.angular.is_none(), "robotaxi must carry no angular channel");
-    let verdict = validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
+    assert!(
+        cfg.angular.is_none(),
+        "robotaxi must carry no angular channel"
+    );
+    let verdict =
+        validate_trajectory_slow(&traj, &corridor, &[], &cfg, None, FleetPosture::Nominal);
     assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
         "robotaxi (angular None) must NOT angular-MRC — byte-identical to pre-ADR-0029; got {verdict:?}");
 }
@@ -1598,14 +2538,22 @@ fn ackermann_trajectory_has_no_angular_channel() {
 fn in_place_rotation_seq(omegas: &[f64], dt: f64) -> Vec<TrajectoryPoint> {
     let mut heading = 0.0_f64;
     let mut pts = vec![TrajectoryPoint {
-        pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+        pose: Pose {
+            x_m: 5.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
         velocity_mps: 0.0,
         time_from_start_s: 0.0,
     }];
     for (i, &w) in omegas.iter().enumerate() {
         heading += w * dt;
         pts.push(TrajectoryPoint {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: heading },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: heading,
+            },
             velocity_mps: 0.0,
             time_from_start_s: ((i + 1) as f64) * dt,
         });
@@ -1615,7 +2563,11 @@ fn in_place_rotation_seq(omegas: &[f64], dt: f64) -> Vec<TrajectoryPoint> {
 
 /// Ego odometry snapshot carrying a current yaw rate (linear stopped).
 fn odom_yaw(yaw_rate_rads: f64) -> kirra_trajectory::state::EgoOdom {
-    kirra_trajectory::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
+    kirra_trajectory::state::EgoOdom {
+        linear_x_mps: 0.0,
+        yaw_rate_rads,
+        stamp_ms: 0,
+    }
 }
 
 #[test]
@@ -1628,10 +2580,18 @@ fn courier_degraded_angular_reinitiation_from_stop_mrcs() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
     let verdict = validate_trajectory_slow(
-        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Degraded,
+        &traj,
+        &corridor,
+        &[],
+        &cfg,
+        Some(&odom_yaw(0.0)),
+        FleetPosture::Degraded,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "Degraded must refuse angular re-initiation from a stop (HOLD); got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "Degraded must refuse angular re-initiation from a stop (HOLD); got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1643,10 +2603,18 @@ fn courier_degraded_angular_speed_increase_mrcs() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
     let verdict = validate_trajectory_slow(
-        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.1)), FleetPosture::Degraded,
+        &traj,
+        &corridor,
+        &[],
+        &cfg,
+        Some(&odom_yaw(0.1)),
+        FleetPosture::Degraded,
     );
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "Degraded must refuse an angular speed increase; got {verdict:?}");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "Degraded must refuse an angular speed increase; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1660,10 +2628,18 @@ fn courier_degraded_angular_converging_to_stop_is_admitted() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
     let verdict = validate_trajectory_slow(
-        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.3)), FleetPosture::Degraded,
+        &traj,
+        &corridor,
+        &[],
+        &cfg,
+        Some(&odom_yaw(0.3)),
+        FleetPosture::Degraded,
     );
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "a converging-to-stop yaw trajectory must be admitted under Degraded; got {verdict:?}");
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a converging-to-stop yaw trajectory must be admitted under Degraded; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1676,10 +2652,18 @@ fn courier_degraded_angular_gate_is_degraded_only() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::courier();
     let verdict = validate_trajectory_slow(
-        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Nominal,
+        &traj,
+        &corridor,
+        &[],
+        &cfg,
+        Some(&odom_yaw(0.0)),
+        FleetPosture::Nominal,
     );
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "the angular stop-and-HOLD gate must not fire under Nominal; got {verdict:?}");
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "the angular stop-and-HOLD gate must not fire under Nominal; got {verdict:?}"
+    );
 }
 
 #[test]
@@ -1693,10 +2677,18 @@ fn ackermann_degraded_has_no_angular_stop_gate() {
     let cfg = VehicleConfig::default_urban();
     assert!(cfg.angular.is_none());
     let verdict = validate_trajectory_slow(
-        &traj, &corridor, &[], &cfg, Some(&odom_yaw(0.0)), FleetPosture::Degraded,
+        &traj,
+        &corridor,
+        &[],
+        &cfg,
+        Some(&odom_yaw(0.0)),
+        FleetPosture::Degraded,
     );
-    assert_ne!(verdict, TrajectoryVerdict::MRCFallback,
-        "robotaxi (angular None) must carry no angular stop gate; got {verdict:?}");
+    assert_ne!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "robotaxi (angular None) must carry no angular stop gate; got {verdict:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,13 +2710,24 @@ fn high_speed_cut_in_beyond_8m_is_caught_dc2() {
     let cfg = VehicleConfig::default_urban(); // ODD cap 22.35 > 18 → no kinematics clamp
     let objects = vec![PerceivedObject {
         id: 1,
-        pos: Point { x_m: 19.0, y_m: 3.0 }, // ~12 m ahead, in the 2.5–4 m band
+        pos: Point {
+            x_m: 19.0,
+            y_m: 3.0,
+        }, // ~12 m ahead, in the 2.5–4 m band
         velocity_mps: 3.0,
         heading_rad: -std::f64::consts::FRAC_PI_2, // facing its motion direction
-        vel: Point { x_m: 0.0, y_m: -3.0 },        // closing laterally toward y = 0
+        vel: Point {
+            x_m: 0.0,
+            y_m: -3.0,
+        }, // closing laterally toward y = 0
     }];
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
         "an 18 m/s ego must refuse a lateral cut-in ~12 m ahead (beyond the old 8 m ceiling); got {verdict:?}");
@@ -1743,13 +2746,21 @@ fn stationary_side_object_in_band_beyond_8m_stays_admitted_683() {
     let cfg = VehicleConfig::default_urban();
     let objects = vec![PerceivedObject {
         id: 1,
-        pos: Point { x_m: 19.0, y_m: 3.0 }, // ~12 m ahead, 3 m to the side, STATIONARY
+        pos: Point {
+            x_m: 19.0,
+            y_m: 3.0,
+        }, // ~12 m ahead, 3 m to the side, STATIONARY
         velocity_mps: 0.0,
         heading_rad: 0.0,
         vel: Point { x_m: 0.0, y_m: 0.0 },
     }];
     let verdict = validate_trajectory_slow(
-        &trajectory, &corridor, &objects, &cfg, None, FleetPosture::Nominal,
+        &trajectory,
+        &corridor,
+        &objects,
+        &cfg,
+        None,
+        FleetPosture::Nominal,
     );
     assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
         "a stationary object 3 m to the side stays admitted inside the widened window; got {verdict:?}");
@@ -1764,7 +2775,10 @@ fn stationary_side_object_in_band_beyond_8m_stays_admitted_683() {
 use kirra_trajectory::vru::{PedestrianScene, PerceivedPedestrian, VruRssParams};
 
 fn vru_scene(peds: &[PerceivedPedestrian]) -> PedestrianScene<'_> {
-    PedestrianScene { pedestrians: peds, params: VruRssParams::default() }
+    PedestrianScene {
+        pedestrians: peds,
+        params: VruRssParams::default(),
+    }
 }
 
 fn walker(id: u64, x: f64, y: f64) -> PerceivedPedestrian {
@@ -1777,16 +2791,22 @@ fn walker(id: u64, x: f64, y: f64) -> PerceivedPedestrian {
     }
 }
 
-fn vru_verdict(
-    trajectory: &[TrajectoryPoint],
-    peds: &[PerceivedPedestrian],
-) -> TrajectoryVerdict {
+fn vru_verdict(trajectory: &[TrajectoryPoint], peds: &[PerceivedPedestrian]) -> TrajectoryVerdict {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
     let scene = vru_scene(peds);
     validate_trajectory_slow_capped(
-        trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal,
-        None, None, None, Some(&scene), FrameTrust::Trusted,
+        trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        Some(&scene),
+        FrameTrust::Trusted,
     )
 }
 
@@ -1795,8 +2815,11 @@ fn vru_verdict(
 fn vru_pedestrian_in_path_mrcs() {
     let trajectory = straight_trajectory(10, 5.0, 0.1); // 5 m/s from x=5
     let verdict = vru_verdict(&trajectory, &[walker(1, 12.0, 0.0)]);
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "a pedestrian 7 m ahead of a 5 m/s ego is inside the reachable-set bound");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a pedestrian 7 m ahead of a 5 m/s ego is inside the reachable-set bound"
+    );
 }
 
 /// A pedestrian far beyond the envelope → the trajectory is admitted.
@@ -1804,8 +2827,11 @@ fn vru_pedestrian_in_path_mrcs() {
 fn vru_far_pedestrian_admits() {
     let trajectory = straight_trajectory(10, 5.0, 0.1);
     let verdict = vru_verdict(&trajectory, &[walker(1, 60.0, 0.0)]);
-    assert_eq!(verdict, TrajectoryVerdict::Accept,
-        "a pedestrian ~50 m ahead must not bind a 1 s, 5 m/s trajectory");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::Accept,
+        "a pedestrian ~50 m ahead must not bind a 1 s, 5 m/s trajectory"
+    );
 }
 
 /// THE STOP-PROPOSAL INVARIANT at the checker level: a stopped trajectory
@@ -1815,14 +2841,23 @@ fn vru_far_pedestrian_admits() {
 fn vru_safe_stop_next_to_pedestrian_admits() {
     let stop: Vec<TrajectoryPoint> = (0..5)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: 0.0,
             time_from_start_s: f64::from(i) * 0.1,
         })
         .collect();
     let verdict = vru_verdict(&stop, &[walker(1, 5.6, 0.4)]);
-    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
-        "a stationary trajectory imposes no VRU requirement (responsibility rule); got {verdict:?}");
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "a stationary trajectory imposes no VRU requirement (responsibility rule); got {verdict:?}"
+    );
 }
 
 /// Omnidirectionality: a kerbside pedestrian laterally OUTSIDE the
@@ -1833,8 +2868,11 @@ fn vru_kerbside_pedestrian_binds_despite_lateral_clearance() {
     let cfg = VehicleConfig::default_urban();
     let lateral = cfg.rss_lateral_alignment_tolerance_m + 0.5; // outside the vehicle band
     let verdict = vru_verdict(&trajectory, &[walker(1, 9.0, lateral)]);
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "a kerbside pedestrian outside the vehicle lateral band must still bind (they can step in)");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "a kerbside pedestrian outside the vehicle lateral band must still bind (they can step in)"
+    );
 }
 
 /// Derate-only invariant: absent VRU input is byte-identical to the
@@ -1845,8 +2883,17 @@ fn vru_absent_channel_is_byte_identical() {
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
     let without = validate_trajectory_slow_capped(
-        &trajectory, &corridor, &[], &cfg, None, FleetPosture::Nominal,
-        None, None, None, None, FrameTrust::Trusted,
+        &trajectory,
+        &corridor,
+        &[],
+        &cfg,
+        None,
+        FleetPosture::Nominal,
+        None,
+        None,
+        None,
+        None,
+        FrameTrust::Trusted,
     );
     let empty = vru_verdict(&trajectory, &[]);
     assert_eq!(without, TrajectoryVerdict::Accept);
@@ -1858,6 +2905,9 @@ fn vru_absent_channel_is_byte_identical() {
 fn vru_non_finite_pedestrian_mrcs() {
     let trajectory = straight_trajectory(10, 5.0, 0.1);
     let verdict = vru_verdict(&trajectory, &[walker(1, f64::NAN, 0.0)]);
-    assert_eq!(verdict, TrajectoryVerdict::MRCFallback,
-        "an unlocalizable pedestrian must fail closed");
+    assert_eq!(
+        verdict,
+        TrajectoryVerdict::MRCFallback,
+        "an unlocalizable pedestrian must fail closed"
+    );
 }

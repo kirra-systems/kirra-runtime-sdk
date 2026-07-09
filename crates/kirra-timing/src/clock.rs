@@ -54,7 +54,9 @@ impl StdMonotonicClock {
     /// Anchor the epoch at "now". All `now_nanos` reads are relative to it.
     #[must_use]
     pub fn new() -> Self {
-        Self { epoch: std::time::Instant::now() }
+        Self {
+            epoch: std::time::Instant::now(),
+        }
     }
 }
 

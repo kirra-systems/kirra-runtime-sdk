@@ -50,7 +50,8 @@ impl OllamaClient {
     /// and `KIRRA_MICK_MODEL` (default [`DEFAULT_MODEL`]). Chauffeur persona.
     #[must_use]
     pub fn new() -> Self {
-        let base_url = std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
+        let base_url =
+            std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
         let model = std::env::var("KIRRA_MICK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Self::with(base_url, model)
     }
@@ -62,7 +63,12 @@ impl OllamaClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new());
-        Self { base_url: base_url.into(), model: model.into(), http, persona: kirra_planner::Persona::Chauffeur }
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            http,
+            persona: kirra_planner::Persona::Chauffeur,
+        }
     }
 
     /// Set the persona — its constrained-decode schema gates the model's output tags (so a
@@ -168,10 +174,16 @@ mod tests {
     fn unreachable_ollama_fails_closed() {
         // Port 1 has nothing listening → immediate connection refusal.
         let client = OllamaClient::with("http://127.0.0.1:1", DEFAULT_MODEL);
-        assert!(client.complete("hi").is_err(), "an unreachable Ollama must fail closed");
+        assert!(
+            client.complete("hi").is_err(),
+            "an unreachable Ollama must fail closed"
+        );
 
         let mut mick = LlmBrain::new(OllamaClient::with("http://127.0.0.1:1", DEFAULT_MODEL));
-        assert!(mick.decide(&ctx()).is_err(), "LlmBrain HOLDs when the model is unreachable");
+        assert!(
+            mick.decide(&ctx()).is_err(),
+            "LlmBrain HOLDs when the model is unreachable"
+        );
     }
 
     #[test]
@@ -192,8 +204,13 @@ mod tests {
             format: kirra_planner::intent_schema(),
         };
         let wire: serde_json::Value = serde_json::to_value(&body).expect("body serializes");
-        assert_eq!(wire["format"]["type"], "object", "format is a schema object, not \"json\"");
-        let tags = wire["format"]["properties"]["intent"]["enum"].as_array().expect("intent enum present");
+        assert_eq!(
+            wire["format"]["type"], "object",
+            "format is a schema object, not \"json\""
+        );
+        let tags = wire["format"]["properties"]["intent"]["enum"]
+            .as_array()
+            .expect("intent enum present");
         assert!(
             tags.iter().any(|t| t == "pull_over") && tags.iter().any(|t| t == "go_to"),
             "the constrained tag set is carried on the wire"
@@ -206,7 +223,9 @@ mod tests {
     #[ignore = "requires a local Ollama serving the configured model"]
     fn live_ollama_returns_a_typed_intent() {
         let mut mick = LlmBrain::new(OllamaClient::new());
-        let intent = mick.decide(&ctx()).expect("a running Ollama should yield a typed intent");
+        let intent = mick
+            .decide(&ctx())
+            .expect("a running Ollama should yield a typed intent");
         // Any of the typed intents is acceptable — we only assert it parsed to one.
         println!("live Gemma chose: {intent:?}");
     }

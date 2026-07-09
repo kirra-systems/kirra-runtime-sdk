@@ -122,7 +122,10 @@ enum Received {
     /// The decoded command AND the exact validated snapshot it came from — the
     /// snapshot is the release-token signing input (HVCHAN §3.5-6), carried so the
     /// governor signs the same bytes it validated.
-    Command { command: ProposedVehicleCommand, view: GovernorContractView },
+    Command {
+        command: ProposedVehicleCommand,
+        view: GovernorContractView,
+    },
     Snapshot(SnapshotFault),
     Contract(ContractFault),
     Codec(CommandCodecError),
@@ -146,7 +149,10 @@ fn receive<R: ContractReader>(
         Err(err) => return Received::Codec(err),
     };
     watermark.record(&snapshot);
-    Received::Command { command: payload.into(), view: snapshot }
+    Received::Command {
+        command: payload.into(),
+        view: snapshot,
+    }
 }
 
 /// Apply a kinematic verdict to the decoded command: `Allow`/`Clamp*` become
@@ -204,9 +210,13 @@ pub fn decide<R: ContractReader>(
     max_retries: u32,
 ) -> GovernorOutcome {
     match receive(reader, watermark, now_nanos, max_retries) {
-        Received::Command { command, .. } => apply(validate_vehicle_command(&command, contract), command),
+        Received::Command { command, .. } => {
+            apply(validate_vehicle_command(&command, contract), command)
+        }
         // Any transport/codec fault → fail closed to the safe stop.
-        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => GovernorOutcome::SafeStop,
+        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => {
+            GovernorOutcome::SafeStop
+        }
     }
 }
 
@@ -285,11 +295,15 @@ pub fn decide_cycle<R: ContractReader>(
                 GovernorOutcome::Actuate(actuated) => enforced_view(actuated, &view),
                 GovernorOutcome::SafeStop => view,
             };
-            GovernorCycle { outcome, view: Some(view) }
+            GovernorCycle {
+                outcome,
+                view: Some(view),
+            }
         }
-        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => {
-            GovernorCycle { outcome: GovernorOutcome::SafeStop, view: None }
-        }
+        Received::Snapshot(_) | Received::Contract(_) | Received::Codec(_) => GovernorCycle {
+            outcome: GovernorOutcome::SafeStop,
+            view: None,
+        },
     }
 }
 
@@ -406,8 +420,10 @@ mod tests {
         let mut wm = AcceptedWatermark::new();
 
         let g1 = publish_payload(&region, 0, 1, 10_000, &in_envelope());
-        assert!(consume_and_bound(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES)
-            .is_actuatable());
+        assert!(
+            consume_and_bound(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES)
+                .is_actuatable()
+        );
         assert_eq!(wm.last(), Some((2, 1)));
 
         // Re-publish the SAME sequence 1 (generation advances). Contract rejects.
@@ -523,7 +539,9 @@ mod tests {
                 "over-speed must be clamped into the envelope, got {}",
                 c.linear_velocity_mps
             ),
-            GovernorOutcome::SafeStop => panic!("nominal over-speed must clamp (Actuate), not safe-stop"),
+            GovernorOutcome::SafeStop => {
+                panic!("nominal over-speed must clamp (Actuate), not safe-stop")
+            }
         }
     }
 
@@ -563,9 +581,14 @@ mod tests {
 
         publish_payload(&region, 0, 1, 10_000, &in_envelope());
         let cycle = decide_cycle(&region, &mut wm, 5_000, &contract, MAX_SNAPSHOT_RETRIES);
-        assert_eq!(cycle.outcome, GovernorOutcome::Actuate(in_envelope().into()));
+        assert_eq!(
+            cycle.outcome,
+            GovernorOutcome::Actuate(in_envelope().into())
+        );
         // The view is present and IS the exact validated snapshot (the sign input).
-        let view = cycle.view.expect("actuatable → view present for the release token");
+        let view = cycle
+            .view
+            .expect("actuatable → view present for the release token");
         assert_eq!(view.sequence, 1);
         assert_eq!(
             VehicleCommandPayload::from_validated_view(&view),

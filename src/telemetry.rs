@@ -33,25 +33,45 @@ pub struct StructuredEventInput<'a> {
     pub narrative: &'a str,
 }
 
-pub struct EnterpriseTelemetryGateway { node_identifier: String }
+pub struct EnterpriseTelemetryGateway {
+    node_identifier: String,
+}
 
 impl EnterpriseTelemetryGateway {
-    pub fn new(node_id: &str) -> Self { Self { node_identifier: node_id.to_string() } }
+    pub fn new(node_id: &str) -> Self {
+        Self {
+            node_identifier: node_id.to_string(),
+        }
+    }
 
     #[inline]
     pub fn generate_correlation_id(&self, tx_id: u16) -> String {
         let seq = CORRELATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        format!("KIRRA-NODE-{}-{:04X}-SEQ-{}", self.node_identifier, tx_id, seq)
+        format!(
+            "KIRRA-NODE-{}-{:04X}-SEQ-{}",
+            self.node_identifier, tx_id, seq
+        )
     }
 
     pub fn emit_structured_event(&self, input: &StructuredEventInput<'_>) -> String {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let event = StructuredLogEvent {
-            timestamp_epoch_secs: now, severity: input.severity.to_string(), node_id: self.node_identifier.clone(),
-            correlation_id: self.generate_correlation_id(input.tx_id), transaction_id: input.tx_id, register_offset: input.offset,
-            raw_demand: input.raw, sanitized_output: input.sanitized, trust_score: input.score, trust_mode: input.mode.to_string(),
+            timestamp_epoch_secs: now,
+            severity: input.severity.to_string(),
+            node_id: self.node_identifier.clone(),
+            correlation_id: self.generate_correlation_id(input.tx_id),
+            transaction_id: input.tx_id,
+            register_offset: input.offset,
+            raw_demand: input.raw,
+            sanitized_output: input.sanitized,
+            trust_score: input.score,
+            trust_mode: input.mode.to_string(),
             event_narrative: input.narrative.to_string(),
         };
-        serde_json::to_string(&event).unwrap_or_else(|_| r#"{"error":"TELEMETRY_SERIALIZATION_FAILED"}"#.to_string())
+        serde_json::to_string(&event)
+            .unwrap_or_else(|_| r#"{"error":"TELEMETRY_SERIALIZATION_FAILED"}"#.to_string())
     }
 }

@@ -352,12 +352,20 @@ mod tests {
         s.insert_campaign(&c).unwrap();
         let loaded = s.load_campaign("camp-1").unwrap().expect("present");
         assert_eq!(loaded, c);
-        assert_eq!(loaded.uptane_metadata_json.as_deref(), Some(r#"{"timestamp":{"version":3}}"#));
+        assert_eq!(
+            loaded.uptane_metadata_json.as_deref(),
+            Some(r#"{"timestamp":{"version":3}}"#)
+        );
         // A legacy campaign without metadata loads as None.
         let mut legacy = draft();
         legacy.campaign_id = "camp-legacy".into();
         s.insert_campaign(&legacy).unwrap();
-        assert!(s.load_campaign("camp-legacy").unwrap().unwrap().uptane_metadata_json.is_none());
+        assert!(s
+            .load_campaign("camp-legacy")
+            .unwrap()
+            .unwrap()
+            .uptane_metadata_json
+            .is_none());
     }
 
     /// EP-13 live-upgrade drill: a REAL v1-era database (ota_campaigns without
@@ -393,12 +401,25 @@ mod tests {
             .unwrap();
         }
         let mut s = VerifierStore::new(path.to_str().unwrap()).expect("v1 DB migrates on open");
-        let legacy = s.load_campaign("camp-old").unwrap().expect("legacy row survives");
-        assert!(legacy.uptane_metadata_json.is_none(), "pre-migration row reads None");
+        let legacy = s
+            .load_campaign("camp-old")
+            .unwrap()
+            .expect("legacy row survives");
+        assert!(
+            legacy.uptane_metadata_json.is_none(),
+            "pre-migration row reads None"
+        );
         let mut c = draft();
         c.uptane_metadata_json = Some("{}".to_string());
         s.insert_campaign(&c).unwrap();
-        assert_eq!(s.load_campaign("camp-1").unwrap().unwrap().uptane_metadata_json.as_deref(), Some("{}"));
+        assert_eq!(
+            s.load_campaign("camp-1")
+                .unwrap()
+                .unwrap()
+                .uptane_metadata_json
+                .as_deref(),
+            Some("{}")
+        );
     }
 
     #[test]
@@ -584,14 +605,20 @@ mod tests {
         };
 
         // Signed report → attested.
-        s.upsert_node_artifact_status(&mk(DIGEST, 1_000, true)).unwrap();
+        s.upsert_node_artifact_status(&mk(DIGEST, 1_000, true))
+            .unwrap();
         assert!(attested_of(&s));
         // A LATER UNSIGNED report for the SAME digest must NOT clear attestation
         // (a token holder can't erase unforgeable evidence with an unsigned report).
-        s.upsert_node_artifact_status(&mk(DIGEST, 2_000, false)).unwrap();
-        assert!(attested_of(&s), "same-digest unsigned report preserves attested");
+        s.upsert_node_artifact_status(&mk(DIGEST, 2_000, false))
+            .unwrap();
+        assert!(
+            attested_of(&s),
+            "same-digest unsigned report preserves attested"
+        );
         // A report for a DIFFERENT digest is a fresh claim → attestation must re-earn.
-        s.upsert_node_artifact_status(&mk(other, 3_000, false)).unwrap();
+        s.upsert_node_artifact_status(&mk(other, 3_000, false))
+            .unwrap();
         assert!(!attested_of(&s), "a different digest resets attested");
     }
 

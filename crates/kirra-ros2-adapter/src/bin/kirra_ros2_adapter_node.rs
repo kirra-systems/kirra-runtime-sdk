@@ -47,16 +47,16 @@ enum CorridorSourceKind {
 #[derive(Debug, Clone)]
 struct CliArgs {
     corridor_source: CorridorSourceKind,
-    map_bin_path:    Option<String>,
-    lanelet_ids:     Vec<i64>,
+    map_bin_path: Option<String>,
+    lanelet_ids: Vec<i64>,
 }
 
 impl Default for CliArgs {
     fn default() -> Self {
         Self {
             corridor_source: CorridorSourceKind::Mock,
-            map_bin_path:    None,
-            lanelet_ids:     Vec::new(),
+            map_bin_path: None,
+            lanelet_ids: Vec::new(),
         }
     }
 }
@@ -71,37 +71,44 @@ fn parse_cli() -> Result<CliArgs, String> {
         match raw[i].as_str() {
             "--corridor-source" => {
                 i += 1;
-                let v = raw.get(i)
+                let v = raw
+                    .get(i)
                     .ok_or("--corridor-source needs a value (mock|lanelet2)")?;
                 args.corridor_source = match v.as_str() {
-                    "mock"     => CorridorSourceKind::Mock,
+                    "mock" => CorridorSourceKind::Mock,
                     "lanelet2" => CorridorSourceKind::Lanelet2,
-                    other => return Err(format!(
-                        "--corridor-source: unknown value {other:?} (expected mock|lanelet2)")),
+                    other => {
+                        return Err(format!(
+                            "--corridor-source: unknown value {other:?} (expected mock|lanelet2)"
+                        ))
+                    }
                 };
             }
             "--map-bin" => {
                 i += 1;
-                args.map_bin_path = Some(
-                    raw.get(i).ok_or("--map-bin needs a path")?.clone(),
-                );
+                args.map_bin_path = Some(raw.get(i).ok_or("--map-bin needs a path")?.clone());
             }
             "--lanelet-ids" => {
                 i += 1;
                 let csv = raw.get(i).ok_or("--lanelet-ids needs a CSV list")?;
                 args.lanelet_ids = csv
                     .split(',')
-                    .map(|s| s.trim().parse::<i64>()
-                        .map_err(|e| format!("--lanelet-ids: parse error: {e}")))
+                    .map(|s| {
+                        s.trim()
+                            .parse::<i64>()
+                            .map_err(|e| format!("--lanelet-ids: parse error: {e}"))
+                    })
                     .collect::<Result<_, _>>()?;
             }
             "--help" | "-h" => {
-                eprintln!("kirra_ros2_adapter_node — S131 Governor adapter\n\
+                eprintln!(
+                    "kirra_ros2_adapter_node — S131 Governor adapter\n\
                   Usage:\n\
                     kirra_ros2_adapter_node [--corridor-source <mock|lanelet2>]\n\
                                             [--map-bin <path/to/map.osm.bin>]\n\
                                             [--lanelet-ids <id1,id2,...>]\n\
-                  Default: --corridor-source mock (no Lanelet2 install needed).");
+                  Default: --corridor-source mock (no Lanelet2 install needed)."
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -112,7 +119,7 @@ fn parse_cli() -> Result<CliArgs, String> {
         && (args.map_bin_path.is_none() || args.lanelet_ids.is_empty())
     {
         return Err(
-            "--corridor-source lanelet2 requires both --map-bin and --lanelet-ids".to_string()
+            "--corridor-source lanelet2 requires both --map-bin and --lanelet-ids".to_string(),
         );
     }
     Ok(args)
@@ -140,15 +147,17 @@ fn build_corridor(args: &CliArgs) -> Result<Arc<dyn CorridorSource>, Box<dyn std
         }
         #[cfg(feature = "lanelet2")]
         CorridorSourceKind::Lanelet2 => {
-            let path = args.map_bin_path.as_deref()
+            let path = args
+                .map_bin_path
+                .as_deref()
                 .expect("CLI parser guards: --map-bin required for lanelet2");
             tracing::info!(map_bin = %path, ids = ?args.lanelet_ids,
                 "corridor source: Lanelet2 (loading map)");
-            let bin = std::fs::read(path)
-                .map_err(|e| format!("failed to read --map-bin {path}: {e}"))?;
-            let src = Lanelet2CorridorSource::from_map_bin_and_route(
-                &bin, &args.lanelet_ids, 0.95, 0,
-            ).map_err(|e| format!("Lanelet2CorridorSource: {e}"))?;
+            let bin =
+                std::fs::read(path).map_err(|e| format!("failed to read --map-bin {path}: {e}"))?;
+            let src =
+                Lanelet2CorridorSource::from_map_bin_and_route(&bin, &args.lanelet_ids, 0.95, 0)
+                    .map_err(|e| format!("Lanelet2CorridorSource: {e}"))?;
             Ok(Arc::new(src))
         }
         // FAIL-CLOSED: a real corridor was requested but this binary was built
@@ -156,18 +165,17 @@ fn build_corridor(args: &CliArgs) -> Result<Arc<dyn CorridorSource>, Box<dyn std
         // corridor — a deployment that asked for a map-derived drivable-space
         // corridor must not run on a 5 m straight-line stand-in. Hard error.
         #[cfg(not(feature = "lanelet2"))]
-        CorridorSourceKind::Lanelet2 => {
-            Err(format!(
-                "corridor source `lanelet2` (map-bin {:?}) was requested, but this \
+        CorridorSourceKind::Lanelet2 => Err(format!(
+            "corridor source `lanelet2` (map-bin {:?}) was requested, but this \
                  binary was built WITHOUT the `lanelet2` feature. The real \
                  Lanelet2CorridorSource is unavailable. Rebuild with \
                  `--features ros2,lanelet2` (requires ros-${{ROS_DISTRO}}-lanelet2 + \
                  libboost-serialization-dev + libeigen3-dev), or use \
                  `--corridor-source mock`. Refusing to downgrade a requested real \
                  corridor to the mock.",
-                args.map_bin_path,
-            ).into())
-        }
+            args.map_bin_path,
+        )
+        .into()),
     }
 }
 
@@ -234,7 +242,8 @@ async fn main() {
         PostureSourceDecision::NoSource => {
             tracing::info!(
                 "M1b: KIRRA_POSTURE_STREAM_URL not set; using M1 default \
-                 (no-source tracker — posture stays Nominal)");
+                 (no-source tracker — posture stays Nominal)"
+            );
             AdaptorState::new()
         }
         PostureSourceDecision::ConfiguredNoTransport { reason } => {
@@ -265,11 +274,10 @@ async fn main() {
     // ConfiguredNoTransport branch deliberately omits it so the tracker
     // holds Degraded.
     let posture_task = match decision {
-        PostureSourceDecision::Live(cfg) => {
-            Some(spawn_posture_source(Arc::clone(&state), cfg))
+        PostureSourceDecision::Live(cfg) => Some(spawn_posture_source(Arc::clone(&state), cfg)),
+        PostureSourceDecision::NoSource | PostureSourceDecision::ConfiguredNoTransport { .. } => {
+            None
         }
-        PostureSourceDecision::NoSource
-        | PostureSourceDecision::ConfiguredNoTransport { .. } => None,
     };
 
     // The adapter's main task: r2r Context + Node + subscriptions +
@@ -334,7 +342,9 @@ enum PostureSourceDecision {
 /// (the `x-kirra-client-id` header for identity-gated routes) is
 /// optional and defaults to `"kirra-ros2-adapter"`.
 fn classify_posture_source() -> PostureSourceDecision {
-    let Some(url) = std::env::var("KIRRA_POSTURE_STREAM_URL").ok().filter(|s| !s.is_empty())
+    let Some(url) = std::env::var("KIRRA_POSTURE_STREAM_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
     else {
         return PostureSourceDecision::NoSource;
     };
@@ -350,7 +360,9 @@ fn classify_posture_source() -> PostureSourceDecision {
             };
         }
     };
-    let client_id = std::env::var("KIRRA_POSTURE_CLIENT_ID").ok().filter(|s| !s.is_empty())
+    let client_id = std::env::var("KIRRA_POSTURE_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "kirra-ros2-adapter".to_string());
     PostureSourceDecision::Live(PostureSourceConfig {
         verifier_base_url: url,

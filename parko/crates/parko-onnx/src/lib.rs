@@ -34,18 +34,21 @@ impl OrtBackend {
     /// determinism posture mirrored by parko-openvino's ACCURACY mode) is
     /// fixed. The thread count MUST come from the same `InferenceThreads` the
     /// OpenVINO backend reads — see `parko_core::InferenceThreads`.
-    pub fn with_threads(
-        model_path: &str,
-        threads: InferenceThreads,
-    ) -> Result<Self, BackendError> {
+    pub fn with_threads(model_path: &str, threads: InferenceThreads) -> Result<Self, BackendError> {
         let session = Session::builder()
             .map_err(|e| BackendError::InitializationError(format!("ort builder error: {:?}", e)))?
             .with_intra_threads(threads.num_threads)
-            .map_err(|e| BackendError::InitializationError(format!("ort intra_threads error: {:?}", e)))?
+            .map_err(|e| {
+                BackendError::InitializationError(format!("ort intra_threads error: {:?}", e))
+            })?
             .with_optimization_level(GraphOptimizationLevel::Disable)
-            .map_err(|e| BackendError::InitializationError(format!("ort opt_level error: {:?}", e)))?
+            .map_err(|e| {
+                BackendError::InitializationError(format!("ort opt_level error: {:?}", e))
+            })?
             .commit_from_file(model_path)
-            .map_err(|e| BackendError::InitializationError(format!("ort session init error: {:?}", e)))?;
+            .map_err(|e| {
+                BackendError::InitializationError(format!("ort session init error: {:?}", e))
+            })?;
 
         // Record the execution posture (determinism status is audit-relevant).
         tracing::info!(
@@ -106,9 +109,11 @@ impl InferenceBackend for OrtBackend {
         self.core.load_model(path)
     }
 
-    fn run(&self, model: &ModelHandle, inputs: &TensorBatch)
-        -> Result<TensorBatch<'static>, BackendError>
-    {
+    fn run(
+        &self,
+        model: &ModelHandle,
+        inputs: &TensorBatch,
+    ) -> Result<TensorBatch<'static>, BackendError> {
         self.core.run(model, inputs)
     }
 
@@ -169,7 +174,10 @@ pub struct CudaConfig {
 impl Default for CudaConfig {
     fn default() -> Self {
         // Device 0, FAIL-CLOSED (no silent CPU fallback).
-        Self { device_id: 0, allow_cpu_fallback: false }
+        Self {
+            device_id: 0,
+            allow_cpu_fallback: false,
+        }
     }
 }
 
@@ -186,10 +194,12 @@ fn build_cuda_session(model_path: &str, cfg: &CudaConfig) -> Result<Session, Bac
     Session::builder()
         .map_err(|e| BackendError::InitializationError(format!("ort builder error: {e:?}")))?
         .with_execution_providers([cuda_ep])
-        .map_err(|e| BackendError::InitializationError(format!(
-            "CUDA EP registration failed (fail-closed; no silent CPU fallback). The dlopened \
+        .map_err(|e| {
+            BackendError::InitializationError(format!(
+                "CUDA EP registration failed (fail-closed; no silent CPU fallback). The dlopened \
              ONNX Runtime lacks a usable CUDA provider, or no GPU/driver is present: {e:?}"
-        )))?
+            ))
+        })?
         .commit_from_file(model_path)
         .map_err(|e| BackendError::InitializationError(format!("ort session init error: {e:?}")))
 }
@@ -241,13 +251,21 @@ impl OrtBackend {
                 // a degraded-CUDA run is never mistaken for the native CPU backend.
                 let threads = InferenceThreads::default();
                 let session = Session::builder()
-                    .map_err(|e| BackendError::InitializationError(format!("ort builder error: {e:?}")))?
+                    .map_err(|e| {
+                        BackendError::InitializationError(format!("ort builder error: {e:?}"))
+                    })?
                     .with_intra_threads(threads.num_threads)
-                    .map_err(|e| BackendError::InitializationError(format!("ort intra_threads error: {e:?}")))?
+                    .map_err(|e| {
+                        BackendError::InitializationError(format!("ort intra_threads error: {e:?}"))
+                    })?
                     .with_optimization_level(GraphOptimizationLevel::Disable)
-                    .map_err(|e| BackendError::InitializationError(format!("ort opt_level error: {e:?}")))?
+                    .map_err(|e| {
+                        BackendError::InitializationError(format!("ort opt_level error: {e:?}"))
+                    })?
                     .commit_from_file(model_path)
-                    .map_err(|e| BackendError::InitializationError(format!("ort session init error: {e:?}")))?;
+                    .map_err(|e| {
+                        BackendError::InitializationError(format!("ort session init error: {e:?}"))
+                    })?;
                 Ok(Self {
                     core: OrtRunCore::new(session, "ort_cuda_degraded_cpu"),
                     descriptor: BackendDescriptor::Cpu,

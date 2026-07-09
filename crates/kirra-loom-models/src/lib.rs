@@ -84,7 +84,10 @@ fn generations_are_unique_and_init_is_monotone() {
         // above the fetch_max seed — a racing recalc can never undo the init floor.
         let final_gen = gen.load(SeqCst);
         assert!(final_gen > *ids.iter().max().unwrap());
-        assert!(final_gen >= 5, "fetch_max init floor must survive a racing recalc");
+        assert!(
+            final_gen >= 5,
+            "fetch_max init floor must survive a racing recalc"
+        );
     });
 }
 

@@ -40,11 +40,11 @@ pub mod ood;
 pub mod rss;
 pub mod runtime;
 // SG4 — WATER_UNTRAVERSABLE governor veto (depth-free, bounded-worst-case, #98).
-pub mod water;
 pub mod safety;
 pub mod scheduler;
 pub mod sensor;
 pub mod telemetry;
+pub mod water;
 // Q-0 (doer chipset tuning): the performance contract + eval harness — the
 // pass/fail measuring stick for per-silicon inference (parko/QUANTIZATION_DESIGN.md).
 pub mod perf_contract;
@@ -58,15 +58,8 @@ pub use audit::{
 };
 
 pub use backend::{
-    BackendCapabilities,
-    BackendDescriptor,
-    BackendError,
-    InferenceBackend,
-    InferenceThreads,
-    ModelHandle,
-    PrecisionMode,
-    TensorBatch,
-    TensorStorage,
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, InferenceThreads,
+    ModelHandle, PrecisionMode, TensorBatch, TensorStorage,
 };
 
 pub use model_integrity::{
@@ -83,7 +76,7 @@ pub use ood::{
 
 pub use backend_selector::{
     backend_permitted, current_platform, descriptor_from_env_str, register_backend_factory,
-    BackendFactory, BackendSelector, KIRRA_BACKEND_ENV, TargetPlatform,
+    BackendFactory, BackendSelector, TargetPlatform, KIRRA_BACKEND_ENV,
 };
 
 pub use perf_contract::{
@@ -95,42 +88,36 @@ pub use precision::{
 };
 
 pub use backends::mock::MockBackend;
-#[cfg(feature = "backend-tensorrt")]
-pub use backends::TensorRTStubBackend;
-#[cfg(feature = "backend-qnn")]
-pub use backends::QnnStubBackend;
-#[cfg(feature = "backend-tidl")]
-pub use backends::TidlStubBackend;
-#[cfg(feature = "backend-openvino")]
-pub use backends::OpenVinoStubBackend;
 #[cfg(feature = "backend-amd")]
 pub use backends::AmdStubBackend;
+#[cfg(feature = "backend-openvino")]
+pub use backends::OpenVinoStubBackend;
+#[cfg(feature = "backend-qnn")]
+pub use backends::QnnStubBackend;
+#[cfg(feature = "backend-tensorrt")]
+pub use backends::TensorRTStubBackend;
+#[cfg(feature = "backend-tidl")]
+pub use backends::TidlStubBackend;
 pub use clock::{Clock, MockClock, WallClock};
 pub use commands::ControlCommand;
-pub use control_loop::ControlLoop;
-pub use runtime::{RuntimeClock, RuntimeState, TickStatus};
-pub use rss::{
-    lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed, AgentScene,
-    OcclusionScene, RssAgent, RssParams, RssState, MAX_RSS_AGENTS,
-};
 pub use commit_zone::{
     commit_zone_blocked, exit_clearance_verified, non_yielding_clearance, CommitZoneCfg,
     CommitZoneMap, CommitZoneScene, ExitClearanceEvidence, NonYieldingAgent, NonYieldingScene,
 };
+pub use control_loop::ControlLoop;
 pub use impact::{
     impact_cfg_for_class, is_impact, ClearanceLoop, ClearanceRejection, ClearanceState, ImpactCfg,
     ImpactEvidence, ImpactLatch, OperatorClearanceGrant, VanishedCfg, VanishedObjectDetector,
     VehicleClass, DEFAULT_MAX_GRANT_AGE_MS,
 };
 pub use localization::{gate_commit_zone_scene, gate_water_scene};
+pub use rss::{
+    lateral_safe_distance, longitudinal_safe_distance, occlusion_limited_speed, AgentScene,
+    OcclusionScene, RssAgent, RssParams, RssState, MAX_RSS_AGENTS,
+};
+pub use runtime::{RuntimeClock, RuntimeState, TickStatus};
 pub use safety::{EnforcementAction, SafetyGovernor, SafetyPosture};
-pub use water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};
 pub use scheduler::{DegradationThresholds, InferenceLoop};
 pub use sensor::{SensorFrame, SensorStream};
-pub use telemetry::{
-    CumulativeJitterEvaluator,
-    PostureSnapshot,
-    RuntimeTelemetry,
-    ThermalState,
-};
-
+pub use telemetry::{CumulativeJitterEvaluator, PostureSnapshot, RuntimeTelemetry, ThermalState};
+pub use water::{water_untraversable_veto, TraversalEvidence, WaterScene, WaterVetoConfig};

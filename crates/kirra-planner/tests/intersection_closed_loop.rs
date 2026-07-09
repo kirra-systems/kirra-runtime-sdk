@@ -38,14 +38,25 @@ fn junction() -> LaneGraph {
     let arc: Vec<Point> = (0..=12)
         .map(|i| {
             let t = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * (i as f64 / 12.0);
-            Point { x_m: APPROACH_END + r * t.cos(), y_m: r + r * t.sin() }
+            Point {
+                x_m: APPROACH_END + r * t.cos(),
+                y_m: r + r * t.sin(),
+            }
         })
         .collect();
     LaneGraph::new()
         .with_lane(
-            Lane::straight(1, 0.0, 0.0, APPROACH_END, 3.0, LineType::Solid, LineType::Solid)
-                .with_control(LaneControl::TrafficLight)
-                .with_edge(LaneEdge::Successor { to: 2 }),
+            Lane::straight(
+                1,
+                0.0,
+                0.0,
+                APPROACH_END,
+                3.0,
+                LineType::Solid,
+                LineType::Solid,
+            )
+            .with_control(LaneControl::TrafficLight)
+            .with_edge(LaneEdge::Successor { to: 2 }),
         )
         .with_lane(Lane {
             id: 2,
@@ -59,7 +70,16 @@ fn junction() -> LaneGraph {
         })
         .with_lane(Lane {
             id: 5,
-            centerline: vec![Point { x_m: APPROACH_END + r, y_m: r }, Point { x_m: APPROACH_END + r, y_m: r + 20.0 }],
+            centerline: vec![
+                Point {
+                    x_m: APPROACH_END + r,
+                    y_m: r,
+                },
+                Point {
+                    x_m: APPROACH_END + r,
+                    y_m: r + 20.0,
+                },
+            ],
             half_width_m: 3.0,
             left_line: LineType::Solid,
             right_line: LineType::Solid,
@@ -109,41 +129,91 @@ use kirra_trajectory::state::PerceivedObject;
 #[test]
 fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {
     let g = junction();
-    let route: LaneCorridor = g.route(1, 5).and_then(|r| g.route_corridor(&r, 0.95, 5)).expect("route");
+    let route: LaneCorridor = g
+        .route(1, 5)
+        .and_then(|r| g.route_corridor(&r, 0.95, 5))
+        .expect("route");
     // A stationary vehicle in the crossing lane (id 7), well off the left-turn path — the ego
     // has map right-of-way over it on approach (the cede is derived), and it never interferes.
-    let objs = [PerceivedObject { id: 7, pos: Point { x_m: 33.0, y_m: -10.0 }, velocity_mps: 0.0, heading_rad: std::f64::consts::FRAC_PI_2, vel: Point { x_m: 0.0, y_m: 0.0 } }];
-    let goal = Pose { x_m: APPROACH_END + TURN_RADIUS, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
+    let objs = [PerceivedObject {
+        id: 7,
+        pos: Point {
+            x_m: 33.0,
+            y_m: -10.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let goal = Pose {
+        x_m: APPROACH_END + TURN_RADIUS,
+        y_m: 28.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+    };
 
     // The model asks to TURN LEFT. The red light HOLDs it at the line; on green the route-
     // progress grounding continues the committed arc, the fast-loop tracker drives it through,
     // and (with curved-lane `contains` fixed) per-tick `lane_at` resolves on the arc so the turn
     // completes — a fully model-chosen TurnAt, end to end.
-    let mut driver = MickDriver::new(ScriptedBrain::new(vec![MickIntent::TurnAt { direction: TurnDirection::Left }; 60]));
+    let mut driver = MickDriver::new(ScriptedBrain::new(vec![
+        MickIntent::TurnAt {
+            direction: TurnDirection::Left
+        };
+        60
+    ]));
     let mut occy = GeometricPlanner::default();
     let mut tracker = FastLoopTracker::new();
 
-    let mut ego = EgoState { pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 5.0, yaw_rate_rads: 0.0, stamp_ms: 0 };
+    let mut ego = EgoState {
+        pose: Pose {
+            x_m: 16.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
+        linear_x_mps: 5.0,
+        yaw_rate_rads: 0.0,
+        stamp_ms: 0,
+    };
     let mut last_replan_ms: Option<u64> = None;
 
     let mut red_max_x = f64::MIN;
-    let cede_at_approach = g.junction_context(Point { x_m: ego.pose.x_m, y_m: ego.pose.y_m }, &objs).cedes_to_ego;
+    let cede_at_approach = g
+        .junction_context(
+            Point {
+                x_m: ego.pose.x_m,
+                y_m: ego.pose.y_m,
+            },
+            &objs,
+        )
+        .cedes_to_ego;
     let mut ego_max_y = f64::MIN;
     let mut ego_max_heading = f64::MIN;
     let (mut promotions, mut admitted_promotions) = (0u32, 0u32);
 
     for tick in 1..=TICKS {
         let now_ms = tick as u64 * FAST_DT_MS;
-        let light = if now_ms < GREEN_AT_MS { SignalState::Red } else { SignalState::Green };
+        let light = if now_ms < GREEN_AT_MS {
+            SignalState::Red
+        } else {
+            SignalState::Green
+        };
         let signals = [(1u64, light)];
 
         // SLOW loop (System-2 → Occy → KIRRA): re-plan at the slow cadence or when the
         // committed trajectory is spent. Only an ADMITTED plan is promoted to the tracker.
-        let replan_due = tracker.is_exhausted(now_ms) || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
+        let replan_due = tracker.is_exhausted(now_ms)
+            || last_replan_ms.is_none_or(|t| now_ms.saturating_sub(t) >= REPLAN_MS);
         if replan_due {
             let w = world(ego, &route, &objs, &signals, &g, goal);
             let plan = driver.drive_tick(&w, &mut occy, now_ms);
-            let v = validate_trajectory_slow(&plan.trajectory, &route, &objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
+            let v = validate_trajectory_slow(
+                &plan.trajectory,
+                &route,
+                &objs,
+                &VehicleConfig::default_urban(),
+                None,
+                FleetPosture::Nominal,
+            );
             promotions += 1;
             if matches!(v, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp) {
                 admitted_promotions += 1;
@@ -154,11 +224,23 @@ fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {
 
         // FAST loop: track the committed trajectory by elapsed time; MRC if none/exhausted.
         ego = match tracker.track(now_ms) {
-            Some(cmd) => EgoState { pose: cmd.pose, linear_x_mps: cmd.velocity_mps, yaw_rate_rads: 0.0, stamp_ms: now_ms },
-            None => EgoState { pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0), yaw_rate_rads: 0.0, stamp_ms: now_ms },
+            Some(cmd) => EgoState {
+                pose: cmd.pose,
+                linear_x_mps: cmd.velocity_mps,
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
+            },
+            None => EgoState {
+                pose: ego.pose,
+                linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
+            },
         };
 
-        if light == SignalState::Red { red_max_x = red_max_x.max(ego.pose.x_m); }
+        if light == SignalState::Red {
+            red_max_x = red_max_x.max(ego.pose.x_m);
+        }
         ego_max_y = ego_max_y.max(ego.pose.y_m);
         ego_max_heading = ego_max_heading.max(ego.pose.heading_rad);
     }
@@ -169,15 +251,28 @@ fn gemma_holds_on_red_then_completes_the_left_turn_kirra_bounding_throughout() {
     //     trajectory — a rejected re-plan is never promoted (the loop holds the last admitted
     //     one or MRCs), and KIRRA DID admit the trajectories that drove the turn. (Some transient
     //     and post-completion re-plans are rejected; the fast loop correctly never tracks those.)
-    assert!(admitted_promotions > 0, "KIRRA admitted the trajectories the fast loop tracked");
+    assert!(
+        admitted_promotions > 0,
+        "KIRRA admitted the trajectories the fast loop tracked"
+    );
     // (2) #528 — the map's right-of-way derives the crossing vehicle into the cede set.
-    assert_eq!(cede_at_approach, vec![7], "the crossing vehicle is derived into the cede set (right-of-way)");
+    assert_eq!(
+        cede_at_approach,
+        vec![7],
+        "the crossing vehicle is derived into the cede set (right-of-way)"
+    );
     // (3) #531 — the RED light HOLDs the ego at/before the stop line (it never crosses).
     assert!(red_max_x <= APPROACH_END + 0.6, "the ego HOLDs at/before the stop line while RED (never crosses x={APPROACH_END}), got red_max_x {red_max_x}");
     // (4) the ego COMPLETES the left turn: it climbs the arc up into the exit lane and its
     //     heading swings from east all the way to north (π/2) — the FastLoopTracker accelerates
     //     it from the red-light standstill and holds the curve, where the toy 0.1 s-sample
     //     conformance only crept off the line.
-    assert!(ego_max_y > 10.0, "the ego completes the turn up the arc into the exit, got ego_max_y {ego_max_y}");
-    assert!(ego_max_heading > 1.4, "the ego's heading swings east→north (≈π/2), got max heading {ego_max_heading}");
+    assert!(
+        ego_max_y > 10.0,
+        "the ego completes the turn up the arc into the exit, got ego_max_y {ego_max_y}"
+    );
+    assert!(
+        ego_max_heading > 1.4,
+        "the ego's heading swings east→north (≈π/2), got max heading {ego_max_heading}"
+    );
 }

@@ -43,12 +43,22 @@ fn world<'a>(
 ) -> PlanInput<'a> {
     PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: ego_speed,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 40.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -81,8 +91,16 @@ fn car(x: f64, y: f64) -> PerceivedObject {
 #[test]
 fn artifact_parses_with_the_scoped_identity() {
     let p = load();
-    assert_eq!(p.teacher(), Teacher::SafetyAware, "the shipped doer is the safety-aware one");
-    assert_eq!(p.config(), &ScorerConfigV2::full(), "the shipped doer is the FULL config");
+    assert_eq!(
+        p.teacher(),
+        Teacher::SafetyAware,
+        "the shipped doer is the safety-aware one"
+    );
+    assert_eq!(
+        p.config(),
+        &ScorerConfigV2::full(),
+        "the shipped doer is the FULL config"
+    );
 }
 
 /// TEACHER-SCORE REGRET on a held-out parameter grid: ego speed × hazard

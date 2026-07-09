@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use crate::backend::{
-    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend,
-    ModelHandle, PrecisionMode, TensorBatch,
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
+    PrecisionMode, TensorBatch,
 };
 
 /// Zero-output stub for CI builds — no TI TIDL hardware required.
@@ -53,6 +53,9 @@ mod tests {
 
     #[test]
     fn test_tidl_stub_capabilities_are_default() {
-        assert_eq!(TidlStubBackend.capabilities(), BackendCapabilities::default());
+        assert_eq!(
+            TidlStubBackend.capabilities(),
+            BackendCapabilities::default()
+        );
     }
 }

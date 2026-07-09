@@ -62,7 +62,11 @@ fn effective_config_digest_commits_to_the_audit_chain_and_verifies() {
     .expect("valid standby config");
     assert_ne!(cfg.effective_digest(), standby.effective_digest());
     store
-        .append_clearance_audit_event("EffectiveConfigDigest", &config_event_payload(&standby), 2_000)
+        .append_clearance_audit_event(
+            "EffectiveConfigDigest",
+            &config_event_payload(&standby),
+            2_000,
+        )
         .expect("append second digest");
     assert_eq!(store.audit_chain_len().expect("len"), len_before + 2);
     assert!(store.verify_audit_chain_integrity().expect("verify again"));

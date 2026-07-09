@@ -162,19 +162,13 @@ mod tests {
             esc_c.fetch_add(1, Ordering::SeqCst);
         });
 
-        let _sup = spawn_supervised(
-            "test-critical",
-            true,
-            true,
-            Some(escalate),
-            move || {
-                let runs_inner = Arc::clone(&runs_c);
-                async move {
-                    runs_inner.fetch_add(1, Ordering::SeqCst);
-                    panic!("deterministic test panic");
-                }
-            },
-        );
+        let _sup = spawn_supervised("test-critical", true, true, Some(escalate), move || {
+            let runs_inner = Arc::clone(&runs_c);
+            async move {
+                runs_inner.fetch_add(1, Ordering::SeqCst);
+                panic!("deterministic test panic");
+            }
+        });
 
         // Advance virtual time through enough backoff cycles to blow the budget.
         // Budget is 5 within 60s; each ordinary restart waits 500ms, then the
@@ -209,26 +203,28 @@ mod tests {
             esc_c.fetch_add(1, Ordering::SeqCst);
         });
 
-        let _sup = spawn_supervised(
-            "test-completes",
-            true,
-            false,
-            Some(escalate),
-            move || {
-                let runs_inner = Arc::clone(&runs_c);
-                async move {
-                    runs_inner.fetch_add(1, Ordering::SeqCst);
-                    // returns normally
-                }
-            },
-        );
+        let _sup = spawn_supervised("test-completes", true, false, Some(escalate), move || {
+            let runs_inner = Arc::clone(&runs_c);
+            async move {
+                runs_inner.fetch_add(1, Ordering::SeqCst);
+                // returns normally
+            }
+        });
 
         for _ in 0..5 {
             tokio::time::sleep(Duration::from_millis(600)).await;
             tokio::task::yield_now().await;
         }
 
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "task must run once and not be restarted");
-        assert_eq!(escalations.load(Ordering::SeqCst), 0, "no escalation on a legitimate exit");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "task must run once and not be restarted"
+        );
+        assert_eq!(
+            escalations.load(Ordering::SeqCst),
+            0,
+            "no escalation on a legitimate exit"
+        );
     }
 }

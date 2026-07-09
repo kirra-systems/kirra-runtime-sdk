@@ -123,13 +123,25 @@ pub struct EvalRow {
 /// Why a row failed the contract (empty set ⇒ pass).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractFailure {
-    LatencyExceeded { p99_ns: u64, budget_ns: u64 },
-    QualityBelowFloor { quality: f64, floor: f64 },
-    AdmissibilityRegressed { row: f64, reference: f64, budget: f64 },
+    LatencyExceeded {
+        p99_ns: u64,
+        budget_ns: u64,
+    },
+    QualityBelowFloor {
+        quality: f64,
+        floor: f64,
+    },
+    AdmissibilityRegressed {
+        row: f64,
+        reference: f64,
+        budget: f64,
+    },
     /// A malformed contract threshold or an out-of-range row/reference metric.
     /// The gate fails closed rather than silently passing on garbage input
     /// (e.g. a NaN `quality_floor`, a negative budget, or `admissibility > 1`).
-    InvalidInput { reason: &'static str },
+    InvalidInput {
+        reason: &'static str,
+    },
 }
 
 /// The verdict for one row against the contract + FP32 reference.
@@ -259,7 +271,13 @@ mod tests {
     use std::collections::HashMap;
 
     fn stats(p99: u64) -> LatencyStats {
-        LatencyStats { count: 1, min_ns: 1, p50_ns: 1, p99_ns: p99, max_ns: p99 }
+        LatencyStats {
+            count: 1,
+            min_ns: 1,
+            p50_ns: 1,
+            p99_ns: p99,
+            max_ns: p99,
+        }
     }
 
     fn row(precision: PrecisionMode, p99: u64, quality: f64, admissibility: f64) -> EvalRow {
@@ -320,7 +338,10 @@ mod tests {
         let slow = row(PrecisionMode::FP16, 20_000_000, 0.99, 0.98); // p99 > 10 ms
         let v = evaluate(&slow, &reference, &c);
         assert!(!v.passed());
-        assert!(matches!(v.failures[0], ContractFailure::LatencyExceeded { .. }));
+        assert!(matches!(
+            v.failures[0],
+            ContractFailure::LatencyExceeded { .. }
+        ));
     }
 
     #[test]
@@ -329,7 +350,10 @@ mod tests {
         let reference = row(PrecisionMode::FP32, 5_000_000, 0.99, 0.98);
         let bad = row(PrecisionMode::INT8, 2_000_000, 0.80, 0.98); // 0.80 < 0.90 floor
         let v = evaluate(&bad, &reference, &c);
-        assert!(v.failures.contains(&ContractFailure::QualityBelowFloor { quality: 0.80, floor: 0.90 }));
+        assert!(v.failures.contains(&ContractFailure::QualityBelowFloor {
+            quality: 0.80,
+            floor: 0.90
+        }));
     }
 
     #[test]
@@ -376,7 +400,10 @@ mod tests {
         for bad_a in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let bad = row(PrecisionMode::INT8, 2_000_000, 0.95, bad_a);
             let v = evaluate(&bad, &reference, &c);
-            assert!(!v.passed(), "non-finite admissibility {bad_a} must fail closed");
+            assert!(
+                !v.passed(),
+                "non-finite admissibility {bad_a} must fail closed"
+            );
             assert!(v
                 .failures
                 .iter()
@@ -433,7 +460,10 @@ mod tests {
     fn zero_iters_is_a_typed_error_not_a_panic() {
         let backend = MockBackend::new(HashMap::new(), BackendDescriptor::Cpu);
         let model = backend.load_model("planner").unwrap();
-        let inputs = TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() };
+        let inputs = TensorBatch {
+            named_tensors: HashMap::new(),
+            metadata: HashMap::new(),
+        };
         let err = run_latency(&backend, &model, &inputs, 0, 5).unwrap_err();
         assert!(matches!(err, BackendError::ExecutionFailure(_)));
         assert_eq!(backend.call_count(), 0, "no calls when iters == 0");
@@ -445,7 +475,10 @@ mod tests {
         out.insert("scores".to_string(), vec![1.0_f32, 2.0, 3.0]);
         let backend = MockBackend::new(out, BackendDescriptor::Cpu);
         let model = backend.load_model("planner").unwrap();
-        let inputs = TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() };
+        let inputs = TensorBatch {
+            named_tensors: HashMap::new(),
+            metadata: HashMap::new(),
+        };
 
         let s = run_latency(&backend, &model, &inputs, 200, 20).unwrap();
         assert_eq!(s.count, 200);

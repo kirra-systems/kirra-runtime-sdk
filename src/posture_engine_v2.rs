@@ -46,23 +46,23 @@ pub enum LockoutReason {
 impl fmt::Display for LockoutReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let code = match self {
-            Self::DagLockedOut          => "DAG_LOCKED_OUT",
-            Self::PostureCacheStale     => "POSTURE_CACHE_STALE",
-            Self::PostureCacheEmpty     => "POSTURE_CACHE_EMPTY",
-            Self::PostureCachePoisoned  => "POSTURE_CACHE_POISONED",
-            Self::PostureEngineFailure  => "POSTURE_ENGINE_FAILURE",
-            Self::WatchdogTimeout       => "WATCHDOG_TIMEOUT",
-            Self::ManualLockout         => "MANUAL_LOCKOUT",
+            Self::DagLockedOut => "DAG_LOCKED_OUT",
+            Self::PostureCacheStale => "POSTURE_CACHE_STALE",
+            Self::PostureCacheEmpty => "POSTURE_CACHE_EMPTY",
+            Self::PostureCachePoisoned => "POSTURE_CACHE_POISONED",
+            Self::PostureEngineFailure => "POSTURE_ENGINE_FAILURE",
+            Self::WatchdogTimeout => "WATCHDOG_TIMEOUT",
+            Self::ManualLockout => "MANUAL_LOCKOUT",
             Self::FrameIntegrityUntrusted => "FRAME_INTEGRITY_UNTRUSTED",
-            Self::GovernorDivergence      => "GOVERNOR_DIVERGENCE",
+            Self::GovernorDivergence => "GOVERNOR_DIVERGENCE",
         };
         write!(f, "{code}")
     }
 }
 
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::posture_cache::SharedPostureCache;
 use crate::verifier::FleetPosture;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_ms_engine() -> u64 {
     SystemTime::now()
@@ -97,7 +97,10 @@ pub fn resolve_posture_with_reason(
                         last_posture = ?cached.posture,
                         "Posture cache stale — failing closed"
                     );
-                    (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheStale))
+                    (
+                        FleetPosture::LockedOut,
+                        Some(LockoutReason::PostureCacheStale),
+                    )
                 } else {
                     (cached.posture, None)
                 }
@@ -107,7 +110,10 @@ pub fn resolve_posture_with_reason(
                     reason = %LockoutReason::PostureCacheEmpty,
                     "Posture cache empty (cold start or reset) — failing closed"
                 );
-                (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheEmpty))
+                (
+                    FleetPosture::LockedOut,
+                    Some(LockoutReason::PostureCacheEmpty),
+                )
             }
         },
         Err(_) => {
@@ -115,7 +121,10 @@ pub fn resolve_posture_with_reason(
                 reason = %LockoutReason::PostureCachePoisoned,
                 "Posture cache RwLock poisoned — failing closed"
             );
-            (FleetPosture::LockedOut, Some(LockoutReason::PostureCachePoisoned))
+            (
+                FleetPosture::LockedOut,
+                Some(LockoutReason::PostureCachePoisoned),
+            )
         }
     }
 }
@@ -156,9 +165,17 @@ pub fn resolve_posture_snapshot_silent(
                     (cached.posture, None, cached.generation)
                 }
             }
-            None => (FleetPosture::LockedOut, Some(LockoutReason::PostureCacheEmpty), 0),
+            None => (
+                FleetPosture::LockedOut,
+                Some(LockoutReason::PostureCacheEmpty),
+                0,
+            ),
         },
-        Err(_) => (FleetPosture::LockedOut, Some(LockoutReason::PostureCachePoisoned), 0),
+        Err(_) => (
+            FleetPosture::LockedOut,
+            Some(LockoutReason::PostureCachePoisoned),
+            0,
+        ),
     }
 }
 
@@ -202,13 +219,13 @@ pub fn resolve_post_promotion_posture(
 // SECTION 3: PostureEngineTask — serialized recalculation with coalescing
 // ============================================================================
 
-use tokio::sync::mpsc;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use crate::verifier::AppState;
-use parko_core::RssState;
-use kirra_core::frame_integrity::FrameTrust;
 use crate::recovery_hysteresis::{AV_RECOVERY_STREAK_THRESHOLD, AV_RECOVERY_WINDOW_MS};
+use crate::verifier::AppState;
+use kirra_core::frame_integrity::FrameTrust;
+use parko_core::RssState;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Trigger reason sent to the posture engine worker.
 #[derive(Debug, Clone)]
@@ -252,23 +269,29 @@ pub enum PostureRecalcTrigger {
 impl fmt::Display for PostureRecalcTrigger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NodeTrustChanged { node_id, reason } =>
-                write!(f, "NodeTrustChanged({node_id}, {reason})"),
-            Self::WatchdogTimeout { node_id, timeout_ms } =>
-                write!(f, "WatchdogTimeout({node_id}, {timeout_ms}ms)"),
-            Self::ManualTrigger { operator_id } =>
-                write!(f, "ManualTrigger({operator_id})"),
-            Self::DependencyGraphChanged =>
-                write!(f, "DependencyGraphChanged"),
-            Self::RssViolation(rss) =>
-                write!(f, "RssViolation(safe={}, lon={:.2}, lat={:.2})",
-                    rss.safe, rss.longitudinal_margin, rss.lateral_margin),
-            Self::FrameIntegrityChanged { trust } =>
-                write!(f, "FrameIntegrityChanged({trust:?})"),
-            Self::GovernorDivergence { significant, escalated } =>
-                write!(f, "GovernorDivergence(significant={significant}, escalated={escalated})"),
-            Self::PeriodicRefresh =>
-                write!(f, "PeriodicRefresh"),
+            Self::NodeTrustChanged { node_id, reason } => {
+                write!(f, "NodeTrustChanged({node_id}, {reason})")
+            }
+            Self::WatchdogTimeout {
+                node_id,
+                timeout_ms,
+            } => write!(f, "WatchdogTimeout({node_id}, {timeout_ms}ms)"),
+            Self::ManualTrigger { operator_id } => write!(f, "ManualTrigger({operator_id})"),
+            Self::DependencyGraphChanged => write!(f, "DependencyGraphChanged"),
+            Self::RssViolation(rss) => write!(
+                f,
+                "RssViolation(safe={}, lon={:.2}, lat={:.2})",
+                rss.safe, rss.longitudinal_margin, rss.lateral_margin
+            ),
+            Self::FrameIntegrityChanged { trust } => write!(f, "FrameIntegrityChanged({trust:?})"),
+            Self::GovernorDivergence {
+                significant,
+                escalated,
+            } => write!(
+                f,
+                "GovernorDivergence(significant={significant}, escalated={escalated})"
+            ),
+            Self::PeriodicRefresh => write!(f, "PeriodicRefresh"),
         }
     }
 }
@@ -321,7 +344,7 @@ pub fn apply_rss_state(app: &Arc<AppState>, rss: &RssState, now_ms: u64) {
                 );
             } else {
                 tracing::debug!(
-                    count    = streak.count,
+                    count = streak.count,
                     required = AV_RECOVERY_STREAK_THRESHOLD,
                     "RSS recovery streak advancing"
                 );
@@ -488,7 +511,8 @@ pub fn apply_governor_divergence_state(
                 }
                 streak.count += 1;
                 if streak.count >= AV_RECOVERY_STREAK_THRESHOLD {
-                    app.divergence_degraded_active.store(false, Ordering::SeqCst);
+                    app.divergence_degraded_active
+                        .store(false, Ordering::SeqCst);
                     streak.count = 0;
                     streak.start_ms = 0;
                     tracing::info!(
@@ -532,7 +556,8 @@ pub fn start_posture_engine_worker(
     crate::supervisor::spawn_supervised(
         "posture_engine_worker",
         /* critical   */ true,
-        /* run-forever */ false, // a closed trigger channel is a legitimate shutdown exit
+        /* run-forever */
+        false, // a closed trigger channel is a legitimate shutdown exit
         Some(escalate),
         move || {
             let app = Arc::clone(&app);
@@ -567,7 +592,9 @@ pub fn start_posture_engine_worker(
                     let first = match rx.recv().await {
                         Some(t) => t,
                         None => {
-                            tracing::info!("Posture engine worker: trigger channel closed, exiting");
+                            tracing::info!(
+                                "Posture engine worker: trigger channel closed, exiting"
+                            );
                             break;
                         }
                     };
@@ -612,8 +639,16 @@ pub fn start_posture_engine_worker(
                                 PostureRecalcTrigger::FrameIntegrityChanged { trust } => {
                                     apply_frame_integrity_state(&app_b, trust, now);
                                 }
-                                PostureRecalcTrigger::GovernorDivergence { significant, escalated } => {
-                                    apply_governor_divergence_state(&app_b, significant, escalated, now);
+                                PostureRecalcTrigger::GovernorDivergence {
+                                    significant,
+                                    escalated,
+                                } => {
+                                    apply_governor_divergence_state(
+                                        &app_b,
+                                        significant,
+                                        escalated,
+                                        now,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -649,15 +684,36 @@ mod posture_engine_v2_tests {
 
     #[test]
     fn test_lockout_reason_display_strings_are_stable() {
-        assert_eq!(LockoutReason::DagLockedOut.to_string(),         "DAG_LOCKED_OUT");
-        assert_eq!(LockoutReason::PostureCacheStale.to_string(),    "POSTURE_CACHE_STALE");
-        assert_eq!(LockoutReason::PostureCacheEmpty.to_string(),    "POSTURE_CACHE_EMPTY");
-        assert_eq!(LockoutReason::PostureCachePoisoned.to_string(), "POSTURE_CACHE_POISONED");
-        assert_eq!(LockoutReason::PostureEngineFailure.to_string(), "POSTURE_ENGINE_FAILURE");
-        assert_eq!(LockoutReason::WatchdogTimeout.to_string(),      "WATCHDOG_TIMEOUT");
-        assert_eq!(LockoutReason::ManualLockout.to_string(),        "MANUAL_LOCKOUT");
-        assert_eq!(LockoutReason::FrameIntegrityUntrusted.to_string(), "FRAME_INTEGRITY_UNTRUSTED");
-        assert_eq!(LockoutReason::GovernorDivergence.to_string(),   "GOVERNOR_DIVERGENCE");
+        assert_eq!(LockoutReason::DagLockedOut.to_string(), "DAG_LOCKED_OUT");
+        assert_eq!(
+            LockoutReason::PostureCacheStale.to_string(),
+            "POSTURE_CACHE_STALE"
+        );
+        assert_eq!(
+            LockoutReason::PostureCacheEmpty.to_string(),
+            "POSTURE_CACHE_EMPTY"
+        );
+        assert_eq!(
+            LockoutReason::PostureCachePoisoned.to_string(),
+            "POSTURE_CACHE_POISONED"
+        );
+        assert_eq!(
+            LockoutReason::PostureEngineFailure.to_string(),
+            "POSTURE_ENGINE_FAILURE"
+        );
+        assert_eq!(
+            LockoutReason::WatchdogTimeout.to_string(),
+            "WATCHDOG_TIMEOUT"
+        );
+        assert_eq!(LockoutReason::ManualLockout.to_string(), "MANUAL_LOCKOUT");
+        assert_eq!(
+            LockoutReason::FrameIntegrityUntrusted.to_string(),
+            "FRAME_INTEGRITY_UNTRUSTED"
+        );
+        assert_eq!(
+            LockoutReason::GovernorDivergence.to_string(),
+            "GOVERNOR_DIVERGENCE"
+        );
     }
 
     /// #774 F1+F5 — the silent scrape resolver agrees with the logging gate
@@ -670,9 +726,13 @@ mod posture_engine_v2_tests {
         use crate::posture_cache::{CachedFleetPosture, POSTURE_CACHE_TTL_MS};
 
         let mk = |posture: FleetPosture, generated_at_ms: u64, generation: u64| {
-            let c: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
-                CachedFleetPosture { posture, generated_at_ms, ttl_ms: POSTURE_CACHE_TTL_MS, generation },
-            )));
+            let c: SharedPostureCache =
+                Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture {
+                    posture,
+                    generated_at_ms,
+                    ttl_ms: POSTURE_CACHE_TTL_MS,
+                    generation,
+                })));
             c
         };
         let now = now_ms_engine();
@@ -687,7 +747,11 @@ mod posture_engine_v2_tests {
 
         // Stale (generated far in the past): both fail closed to LockedOut/Stale;
         // silent still reports the STALE entry's generation (coherent snapshot).
-        let stale = mk(FleetPosture::Nominal, now.saturating_sub(POSTURE_CACHE_TTL_MS * 4), 7);
+        let stale = mk(
+            FleetPosture::Nominal,
+            now.saturating_sub(POSTURE_CACHE_TTL_MS * 4),
+            7,
+        );
         let (lp, lr) = resolve_posture_with_reason(&stale, POSTURE_CACHE_TTL_MS);
         let (sp, sr, sg) = resolve_posture_snapshot_silent(&stale, POSTURE_CACHE_TTL_MS);
         assert_eq!(lp, sp, "stale: posture must agree");
@@ -747,8 +811,10 @@ mod posture_engine_v2_tests {
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
         }
-        assert!(!app.divergence_degraded_active.load(Ordering::SeqCst),
-            "a full agreeing recovery streak must clear divergence_degraded_active");
+        assert!(
+            !app.divergence_degraded_active.load(Ordering::SeqCst),
+            "a full agreeing recovery streak must clear divergence_degraded_active"
+        );
     }
 
     /// An expired window restarts the earn-back: agreeing ticks spread past
@@ -766,8 +832,10 @@ mod posture_engine_v2_tests {
                 2_000 + i as u64 * (AV_RECOVERY_WINDOW_MS + 1),
             );
         }
-        assert!(app.divergence_degraded_active.load(Ordering::SeqCst),
-            "agreeing ticks spread past the window must never clear the degradation");
+        assert!(
+            app.divergence_degraded_active.load(Ordering::SeqCst),
+            "agreeing ticks spread past the window must never clear the degradation"
+        );
     }
 
     /// The lockout flag is sticky: agreement — even a full recovery streak that
@@ -779,12 +847,15 @@ mod posture_engine_v2_tests {
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_governor_divergence_state(&app, false, false, 1_010 + i as u64 * 10);
         }
-        assert!(!app.divergence_degraded_active.load(Ordering::SeqCst),
-            "the degraded flag earn-back still works under a sticky lockout");
-        assert!(app.divergence_lockout_active.load(Ordering::SeqCst),
-            "agreement must never clear the sticky divergence lockout");
+        assert!(
+            !app.divergence_degraded_active.load(Ordering::SeqCst),
+            "the degraded flag earn-back still works under a sticky lockout"
+        );
+        assert!(
+            app.divergence_lockout_active.load(Ordering::SeqCst),
+            "agreement must never clear the sticky divergence lockout"
+        );
     }
-
 
     #[test]
     fn test_frame_degraded_escalates_immediately() {
@@ -792,8 +863,10 @@ mod posture_engine_v2_tests {
         // A SINGLE Degraded tick sets the flag — no grace period.
         apply_frame_integrity_state(&app, FrameTrust::Degraded, 1_000);
         assert!(app.frame_degraded_active.load(Ordering::SeqCst));
-        assert!(!app.frame_lockout_active.load(Ordering::SeqCst),
-            "Degraded must not by itself lock out");
+        assert!(
+            !app.frame_lockout_active.load(Ordering::SeqCst),
+            "Degraded must not by itself lock out"
+        );
     }
 
     #[test]
@@ -802,14 +875,18 @@ mod posture_engine_v2_tests {
         // First Untrusted tick → immediate Degraded, not yet LockedOut.
         apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000);
         assert!(app.frame_degraded_active.load(Ordering::SeqCst));
-        assert!(!app.frame_lockout_active.load(Ordering::SeqCst),
-            "a single Untrusted tick is the transient decel-to-stop MRC, not LockedOut");
+        assert!(
+            !app.frame_lockout_active.load(Ordering::SeqCst),
+            "a single Untrusted tick is the transient decel-to-stop MRC, not LockedOut"
+        );
         // Sustained Untrusted within the window → sticky LockedOut.
         for i in 1..AV_RECOVERY_STREAK_THRESHOLD {
             apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
         }
-        assert!(app.frame_lockout_active.load(Ordering::SeqCst),
-            "sustained Untrusted ({AV_RECOVERY_STREAK_THRESHOLD} ticks) must escalate to LockedOut");
+        assert!(
+            app.frame_lockout_active.load(Ordering::SeqCst),
+            "sustained Untrusted ({AV_RECOVERY_STREAK_THRESHOLD} ticks) must escalate to LockedOut"
+        );
     }
 
     #[test]
@@ -821,8 +898,10 @@ mod posture_engine_v2_tests {
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_frame_integrity_state(&app, FrameTrust::Trusted, 1_010 + i as u64 * 10);
         }
-        assert!(!app.frame_degraded_active.load(Ordering::SeqCst),
-            "a full Trusted recovery streak must clear frame_degraded_active");
+        assert!(
+            !app.frame_degraded_active.load(Ordering::SeqCst),
+            "a full Trusted recovery streak must clear frame_degraded_active"
+        );
     }
 
     #[test]
@@ -831,18 +910,25 @@ mod posture_engine_v2_tests {
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD {
             apply_frame_integrity_state(&app, FrameTrust::Untrusted, 1_000 + i as u64 * 10);
         }
-        assert!(app.frame_lockout_active.load(Ordering::SeqCst), "precondition: locked out");
+        assert!(
+            app.frame_lockout_active.load(Ordering::SeqCst),
+            "precondition: locked out"
+        );
         // Trusted recovery does NOT clear a sustained-fault lockout (human reset only).
         for i in 0..AV_RECOVERY_STREAK_THRESHOLD * 2 {
             apply_frame_integrity_state(&app, FrameTrust::Trusted, 2_000 + i as u64 * 10);
         }
-        assert!(app.frame_lockout_active.load(Ordering::SeqCst),
-            "frame_lockout_active must be sticky — only a human/HA reset clears it");
+        assert!(
+            app.frame_lockout_active.load(Ordering::SeqCst),
+            "frame_lockout_active must be sticky — only a human/HA reset clears it"
+        );
     }
 
     #[test]
     fn test_frame_integrity_trigger_display() {
-        let t = PostureRecalcTrigger::FrameIntegrityChanged { trust: FrameTrust::Untrusted };
+        let t = PostureRecalcTrigger::FrameIntegrityChanged {
+            trust: FrameTrust::Untrusted,
+        };
         let s = t.to_string();
         assert!(s.contains("FrameIntegrityChanged"));
         assert!(s.contains("Untrusted"));
@@ -868,8 +954,8 @@ mod posture_engine_v2_tests {
 
     #[test]
     fn test_fresh_nominal_cache_returns_nominal_with_no_reason() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         let cached = CachedFleetPosture {
             posture: FleetPosture::Nominal,
@@ -880,13 +966,16 @@ mod posture_engine_v2_tests {
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
         assert_eq!(posture, FleetPosture::Nominal);
-        assert_eq!(reason, None, "fresh cache must not produce a lockout reason");
+        assert_eq!(
+            reason, None,
+            "fresh cache must not produce a lockout reason"
+        );
     }
 
     #[test]
     fn test_stale_cache_returns_locked_out_with_stale_reason() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         let stale_ts = now_ms_engine().saturating_sub(20_000);
         let cached = CachedFleetPosture {
@@ -903,8 +992,8 @@ mod posture_engine_v2_tests {
 
     #[test]
     fn test_backward_clock_step_cache_fails_closed_b3() {
-        use std::sync::Arc;
         use crate::posture_cache::CachedFleetPosture;
+        use std::sync::Arc;
 
         // B3: `resolve_posture_with_reason` must match
         // `CachedFleetPosture::is_stale`: if wall time moves backward and the
@@ -935,8 +1024,8 @@ mod posture_engine_v2_tests {
     /// `POSTURE_CACHE_TTL_MS` as the TTL (same constant the bin passes).
     #[test]
     fn test_stale_boundary_cache_fails_closed_at_runtime_ttl() {
-        use std::sync::Arc;
         use crate::posture_cache::{CachedFleetPosture, POSTURE_CACHE_TTL_MS};
+        use std::sync::Arc;
 
         let stale_ts = now_ms_engine().saturating_sub(POSTURE_CACHE_TTL_MS + 1);
         let cached = CachedFleetPosture {
@@ -947,8 +1036,11 @@ mod posture_engine_v2_tests {
         };
         let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(cached)));
         let (posture, reason) = resolve_posture_with_reason(&cache, POSTURE_CACHE_TTL_MS);
-        assert_eq!(posture, FleetPosture::LockedOut,
-            "an entry older than POSTURE_CACHE_TTL_MS must NOT be served as current");
+        assert_eq!(
+            posture,
+            FleetPosture::LockedOut,
+            "an entry older than POSTURE_CACHE_TTL_MS must NOT be served as current"
+        );
         assert_eq!(reason, Some(LockoutReason::PostureCacheStale));
     }
 
@@ -981,10 +1073,14 @@ mod posture_engine_v2_tests {
             tx.send(PostureRecalcTrigger::NodeTrustChanged {
                 node_id: format!("node_{i}"),
                 reason: "TEST".to_string(),
-            }).await.expect("channel must accept trigger");
+            })
+            .await
+            .expect("channel must accept trigger");
         }
         let mut count = 0;
-        while rx.try_recv().is_ok() { count += 1; }
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
         assert_eq!(count, 10, "all triggers must be buffered");
     }
 
@@ -999,8 +1095,10 @@ mod posture_engine_v2_tests {
     #[test]
     fn test_periodic_refresh_display_is_distinct() {
         let s = PostureRecalcTrigger::PeriodicRefresh.to_string();
-        assert_eq!(s, "PeriodicRefresh",
-            "PeriodicRefresh Display must be the bare variant name (no state to print)");
+        assert_eq!(
+            s, "PeriodicRefresh",
+            "PeriodicRefresh Display must be the bare variant name (no state to print)"
+        );
     }
 
     /// SG9 / GAP 13: every `PostureRecalcTrigger` variant must render a
@@ -1050,10 +1148,16 @@ mod posture_engine_v2_tests {
         assert!(cache.is_poisoned(), "test setup: lock must be poisoned");
 
         let (posture, reason) = resolve_posture_with_reason(&cache, 10_000);
-        assert_eq!(posture, FleetPosture::LockedOut,
-            "a poisoned cache must fail closed to LockedOut");
-        assert_eq!(reason, Some(LockoutReason::PostureCachePoisoned),
-            "must surface the PostureCachePoisoned reason");
+        assert_eq!(
+            posture,
+            FleetPosture::LockedOut,
+            "a poisoned cache must fail closed to LockedOut"
+        );
+        assert_eq!(
+            reason,
+            Some(LockoutReason::PostureCachePoisoned),
+            "must surface the PostureCachePoisoned reason"
+        );
     }
 
     /// PeriodicRefresh on an Active instance must re-stamp the cache —
@@ -1064,10 +1168,12 @@ mod posture_engine_v2_tests {
     /// observe a fresh entry after each tick.
     #[tokio::test]
     async fn test_periodic_refresh_restamps_cache_without_changing_posture() {
-        use std::sync::Arc;
-        use crate::verifier::{AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode};
-        use crate::verifier_store::VerifierStore;
         use crate::posture_cache::SharedPostureCache;
+        use crate::verifier::{
+            AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
+        };
+        use crate::verifier_store::VerifierStore;
+        use std::sync::Arc;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -1090,7 +1196,11 @@ mod posture_engine_v2_tests {
         .unwrap();
 
         crate::posture_engine::recalculate_and_broadcast(&app, &cache);
-        let first = cache.read().unwrap().as_ref().cloned()
+        let first = cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .cloned()
             .expect("initial recalc must populate the cache");
         assert_eq!(first.posture, FleetPosture::Nominal);
 
@@ -1099,16 +1209,29 @@ mod posture_engine_v2_tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
 
         crate::posture_engine::recalculate_and_broadcast(&app, &cache);
-        let second = cache.read().unwrap().as_ref().cloned()
+        let second = cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .cloned()
             .expect("periodic refresh must keep the cache populated");
 
-        assert!(second.generation > first.generation,
+        assert!(
+            second.generation > first.generation,
             "periodic refresh must produce a strictly-increasing generation \
-             (was {} → {})", first.generation, second.generation);
-        assert!(second.generated_at_ms >= first.generated_at_ms,
-            "periodic refresh must re-stamp generated_at_ms (monotonic)");
-        assert_eq!(second.posture, FleetPosture::Nominal,
-            "PeriodicRefresh on unchanged state must NOT alter the cached posture");
+             (was {} → {})",
+            first.generation,
+            second.generation
+        );
+        assert!(
+            second.generated_at_ms >= first.generated_at_ms,
+            "periodic refresh must re-stamp generated_at_ms (monotonic)"
+        );
+        assert_eq!(
+            second.posture,
+            FleetPosture::Nominal,
+            "PeriodicRefresh on unchanged state must NOT alter the cached posture"
+        );
     }
 
     /// M1: end-to-end worker path — a trigger sent to `start_posture_engine_worker`
@@ -1117,13 +1240,13 @@ mod posture_engine_v2_tests {
     /// state and preserves the coalescing single-consumer contract.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_recalc_runs_off_pool_and_populates_cache_m1() {
-        use std::sync::Arc;
-        use std::time::Duration;
+        use crate::posture_cache::SharedPostureCache;
         use crate::verifier::{
             AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
         };
         use crate::verifier_store::VerifierStore;
-        use crate::posture_cache::SharedPostureCache;
+        use std::sync::Arc;
+        use std::time::Duration;
 
         let store = VerifierStore::new(":memory:").unwrap();
         let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
@@ -1160,9 +1283,8 @@ mod posture_engine_v2_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        let cached = cached.expect(
-            "worker must populate the cache via the spawn_blocking recalc path within 2s",
-        );
+        let cached = cached
+            .expect("worker must populate the cache via the spawn_blocking recalc path within 2s");
         assert_eq!(
             cached.posture,
             FleetPosture::Nominal,

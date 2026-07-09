@@ -47,7 +47,13 @@ impl VerifierStore {
                  created_at_ms = excluded.created_at_ms,
                  revoked_at_ms = NULL,
                  not_after_ms  = excluded.not_after_ms",
-            params![principal_id, cert_sha256, role, now_ms as i64, not_after_i64],
+            params![
+                principal_id,
+                cert_sha256,
+                role,
+                now_ms as i64,
+                not_after_i64
+            ],
         )?;
         Ok(())
     }
@@ -155,18 +161,26 @@ mod tests {
     #[test]
     fn register_then_resolve_by_fingerprint() {
         let mut s = store();
-        s.register_cert_principal("svc-a", "fp-a", "integrator", None, 1_000).unwrap();
-        let rec = s.load_cert_principal_by_fingerprint("fp-a").unwrap().expect("present");
+        s.register_cert_principal("svc-a", "fp-a", "integrator", None, 1_000)
+            .unwrap();
+        let rec = s
+            .load_cert_principal_by_fingerprint("fp-a")
+            .unwrap()
+            .expect("present");
         assert_eq!(rec.principal_id, "svc-a");
         assert_eq!(rec.role, "integrator");
         assert!(rec.is_active());
-        assert!(s.load_cert_principal_by_fingerprint("nope").unwrap().is_none());
+        assert!(s
+            .load_cert_principal_by_fingerprint("nope")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn rotation_overwrites_fingerprint_and_clears_revocation() {
         let mut s = store();
-        s.register_cert_principal("svc-a", "fp-old", "integrator", None, 1_000).unwrap();
+        s.register_cert_principal("svc-a", "fp-old", "integrator", None, 1_000)
+            .unwrap();
         assert!(s.revoke_cert_principal("svc-a", 2_000).unwrap());
         assert!(s
             .load_cert_principal_by_fingerprint("fp-old")
@@ -175,12 +189,18 @@ mod tests {
             .revoked_at_ms
             .is_some());
         // Re-register rotates the pinned cert and reactivates.
-        s.register_cert_principal("svc-a", "fp-new", "auditor", None, 3_000).unwrap();
+        s.register_cert_principal("svc-a", "fp-new", "auditor", None, 3_000)
+            .unwrap();
         assert!(
-            s.load_cert_principal_by_fingerprint("fp-old").unwrap().is_none(),
+            s.load_cert_principal_by_fingerprint("fp-old")
+                .unwrap()
+                .is_none(),
             "the rotated-out fingerprint no longer resolves"
         );
-        let rec = s.load_cert_principal_by_fingerprint("fp-new").unwrap().unwrap();
+        let rec = s
+            .load_cert_principal_by_fingerprint("fp-new")
+            .unwrap()
+            .unwrap();
         assert_eq!(rec.role, "auditor");
         assert!(rec.is_active());
     }
@@ -188,10 +208,20 @@ mod tests {
     #[test]
     fn revoke_is_idempotent_and_reports_transition() {
         let mut s = store();
-        s.register_cert_principal("svc-a", "fp", "operator", None, 1_000).unwrap();
-        assert!(s.revoke_cert_principal("svc-a", 2_000).unwrap(), "first revoke transitions");
-        assert!(!s.revoke_cert_principal("svc-a", 3_000).unwrap(), "second revoke is a no-op");
-        assert!(!s.revoke_cert_principal("absent", 3_000).unwrap(), "absent principal → false");
+        s.register_cert_principal("svc-a", "fp", "operator", None, 1_000)
+            .unwrap();
+        assert!(
+            s.revoke_cert_principal("svc-a", 2_000).unwrap(),
+            "first revoke transitions"
+        );
+        assert!(
+            !s.revoke_cert_principal("svc-a", 3_000).unwrap(),
+            "second revoke is a no-op"
+        );
+        assert!(
+            !s.revoke_cert_principal("absent", 3_000).unwrap(),
+            "absent principal → false"
+        );
     }
 
     #[test]
@@ -201,11 +231,17 @@ mod tests {
         // (the handler maps this to 409). `ON CONFLICT(principal_id)` only rotates
         // the SAME id, so it does not absorb this case.
         let mut s = store();
-        s.register_cert_principal("svc-a", "shared-fp", "operator", None, 1_000).unwrap();
+        s.register_cert_principal("svc-a", "shared-fp", "operator", None, 1_000)
+            .unwrap();
         let err = s.register_cert_principal("svc-b", "shared-fp", "operator", None, 1_000);
-        assert!(err.is_err(), "a second principal on the same fingerprint must conflict");
+        assert!(
+            err.is_err(),
+            "a second principal on the same fingerprint must conflict"
+        );
         // Re-pinning the SAME principal with the same fp is fine (idempotent rotate).
-        assert!(s.register_cert_principal("svc-a", "shared-fp", "auditor", None, 2_000).is_ok());
+        assert!(s
+            .register_cert_principal("svc-a", "shared-fp", "auditor", None, 2_000)
+            .is_ok());
     }
 
     #[test]
@@ -213,13 +249,33 @@ mod tests {
         // A cert principal and a token principal are separate credentials, even with
         // the same principal_id string — different tables, resolved by different keys.
         let mut s = store();
-        s.register_api_principal("svc-a", "tokhash", "admin", 1_000).unwrap();
-        s.register_cert_principal("svc-a", "certfp", "auditor", None, 1_000).unwrap();
-        assert_eq!(s.load_api_principal_by_token_hash("tokhash").unwrap().unwrap().role, "admin");
-        assert_eq!(s.load_cert_principal_by_fingerprint("certfp").unwrap().unwrap().role, "auditor");
+        s.register_api_principal("svc-a", "tokhash", "admin", 1_000)
+            .unwrap();
+        s.register_cert_principal("svc-a", "certfp", "auditor", None, 1_000)
+            .unwrap();
+        assert_eq!(
+            s.load_api_principal_by_token_hash("tokhash")
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin"
+        );
+        assert_eq!(
+            s.load_cert_principal_by_fingerprint("certfp")
+                .unwrap()
+                .unwrap()
+                .role,
+            "auditor"
+        );
         // Cross-lookups miss.
-        assert!(s.load_cert_principal_by_fingerprint("tokhash").unwrap().is_none());
-        assert!(s.load_api_principal_by_token_hash("certfp").unwrap().is_none());
+        assert!(s
+            .load_cert_principal_by_fingerprint("tokhash")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .load_api_principal_by_token_hash("certfp")
+            .unwrap()
+            .is_none());
     }
 
     // --- WP-15 (MGA G-19) cert lifecycle: expiry ----------------------------
@@ -228,12 +284,19 @@ mod tests {
     fn expiry_is_persisted_and_gates_validity_at_a_time() {
         let mut s = store();
         // notAfter = 5_000. Valid before, expired at/after (inclusive boundary).
-        s.register_cert_principal("svc-a", "fp", "integrator", Some(5_000), 1_000).unwrap();
+        s.register_cert_principal("svc-a", "fp", "integrator", Some(5_000), 1_000)
+            .unwrap();
         let rec = s.load_cert_principal_by_fingerprint("fp").unwrap().unwrap();
         assert_eq!(rec.not_after_ms, Some(5_000));
-        assert!(rec.is_active(), "expiry is independent of the revocation flag");
+        assert!(
+            rec.is_active(),
+            "expiry is independent of the revocation flag"
+        );
         assert!(rec.is_valid_at(4_999), "before notAfter → valid");
-        assert!(!rec.is_valid_at(5_000), "notAfter is an inclusive bound → expired at the instant");
+        assert!(
+            !rec.is_valid_at(5_000),
+            "notAfter is an inclusive bound → expired at the instant"
+        );
         assert!(!rec.is_valid_at(6_000), "past notAfter → expired");
         assert!(rec.is_expired(5_000) && !rec.is_expired(4_999));
     }
@@ -241,10 +304,14 @@ mod tests {
     #[test]
     fn untracked_expiry_never_ages_out() {
         let mut s = store();
-        s.register_cert_principal("svc-a", "fp", "integrator", None, 1_000).unwrap();
+        s.register_cert_principal("svc-a", "fp", "integrator", None, 1_000)
+            .unwrap();
         let rec = s.load_cert_principal_by_fingerprint("fp").unwrap().unwrap();
         assert_eq!(rec.not_after_ms, None);
-        assert!(!rec.is_expired(u64::MAX), "no tracked expiry → never expired");
+        assert!(
+            !rec.is_expired(u64::MAX),
+            "no tracked expiry → never expired"
+        );
         assert!(rec.is_valid_at(u64::MAX));
     }
 
@@ -254,16 +321,26 @@ mod tests {
         // (and the renewed leaf's fingerprint) extends validity — no restart, and a
         // resolution that was expired becomes valid again immediately.
         let mut s = store();
-        s.register_cert_principal("svc-a", "fp-old", "integrator", Some(5_000), 1_000).unwrap();
-        let expired = s.load_cert_principal_by_fingerprint("fp-old").unwrap().unwrap();
+        s.register_cert_principal("svc-a", "fp-old", "integrator", Some(5_000), 1_000)
+            .unwrap();
+        let expired = s
+            .load_cert_principal_by_fingerprint("fp-old")
+            .unwrap()
+            .unwrap();
         assert!(!expired.is_valid_at(6_000), "lapsed before renewal");
         // Renew: new leaf fingerprint + later expiry.
-        s.register_cert_principal("svc-a", "fp-new", "integrator", Some(20_000), 6_000).unwrap();
+        s.register_cert_principal("svc-a", "fp-new", "integrator", Some(20_000), 6_000)
+            .unwrap();
         assert!(
-            s.load_cert_principal_by_fingerprint("fp-old").unwrap().is_none(),
+            s.load_cert_principal_by_fingerprint("fp-old")
+                .unwrap()
+                .is_none(),
             "the old (expired) leaf no longer resolves after renewal"
         );
-        let renewed = s.load_cert_principal_by_fingerprint("fp-new").unwrap().unwrap();
+        let renewed = s
+            .load_cert_principal_by_fingerprint("fp-new")
+            .unwrap()
+            .unwrap();
         assert!(renewed.is_valid_at(6_000) && renewed.is_valid_at(19_999));
         assert_eq!(renewed.not_after_ms, Some(20_000));
     }
@@ -274,9 +351,14 @@ mod tests {
         // and read back as a huge "never expires" value (fail-OPEN). Refuse it.
         let mut s = store();
         let err = s.register_cert_principal("svc", "fp", "integrator", Some(u64::MAX), 1_000);
-        assert!(err.is_err(), "an expiry beyond i64::MAX must be refused, not truncated");
         assert!(
-            s.load_cert_principal_by_fingerprint("fp").unwrap().is_none(),
+            err.is_err(),
+            "an expiry beyond i64::MAX must be refused, not truncated"
+        );
+        assert!(
+            s.load_cert_principal_by_fingerprint("fp")
+                .unwrap()
+                .is_none(),
             "the refused registration persisted nothing"
         );
         // The largest representable value is accepted.
@@ -291,13 +373,24 @@ mod tests {
         // corruption/tamper) must fail CLOSED — read as already-expired, never as a
         // huge never-expiring u64. Inject one directly (bypassing the checked write).
         let mut s = store();
-        s.register_cert_principal("svc", "fp", "integrator", Some(5_000), 1_000).unwrap();
+        s.register_cert_principal("svc", "fp", "integrator", Some(5_000), 1_000)
+            .unwrap();
         s.conn
-            .execute("UPDATE cert_principals SET not_after_ms = -1 WHERE principal_id = 'svc'", [])
+            .execute(
+                "UPDATE cert_principals SET not_after_ms = -1 WHERE principal_id = 'svc'",
+                [],
+            )
             .unwrap();
         let rec = s.load_cert_principal_by_fingerprint("fp").unwrap().unwrap();
-        assert_eq!(rec.not_after_ms, Some(0), "negative clamps to epoch-0, not a huge u64");
-        assert!(rec.is_expired(1), "a tampered negative expiry reads as always-expired");
+        assert_eq!(
+            rec.not_after_ms,
+            Some(0),
+            "negative clamps to epoch-0, not a huge u64"
+        );
+        assert!(
+            rec.is_expired(1),
+            "a tampered negative expiry reads as always-expired"
+        );
         assert!(!rec.is_valid_at(0), "and never authorizes");
     }
 
@@ -305,15 +398,20 @@ mod tests {
     fn expiry_summary_classifies_every_lifecycle_state() {
         let mut s = store();
         // active, comfortably in-window (warn window below covers it as expiring_soon)
-        s.register_cert_principal("soon", "fp-soon", "integrator", Some(10_500), 1_000).unwrap();
+        s.register_cert_principal("soon", "fp-soon", "integrator", Some(10_500), 1_000)
+            .unwrap();
         // active, far from expiry
-        s.register_cert_principal("far", "fp-far", "integrator", Some(100_000), 1_000).unwrap();
+        s.register_cert_principal("far", "fp-far", "integrator", Some(100_000), 1_000)
+            .unwrap();
         // active, no expiry tracked
-        s.register_cert_principal("forever", "fp-forever", "integrator", None, 1_000).unwrap();
+        s.register_cert_principal("forever", "fp-forever", "integrator", None, 1_000)
+            .unwrap();
         // expired (not revoked)
-        s.register_cert_principal("stale", "fp-stale", "integrator", Some(5_000), 1_000).unwrap();
+        s.register_cert_principal("stale", "fp-stale", "integrator", Some(5_000), 1_000)
+            .unwrap();
         // revoked (revocation wins over its expiry)
-        s.register_cert_principal("gone", "fp-gone", "integrator", Some(100_000), 1_000).unwrap();
+        s.register_cert_principal("gone", "fp-gone", "integrator", Some(100_000), 1_000)
+            .unwrap();
         assert!(s.revoke_cert_principal("gone", 2_000).unwrap());
 
         // now = 10_000; warn window = 1_000 → "soon" (exp 10_500, Δ=500) is within, "far" is not.
@@ -322,7 +420,10 @@ mod tests {
         assert_eq!(sum.revoked, 1);
         assert_eq!(sum.expired, 1, "the lapsed, non-revoked cert");
         assert_eq!(sum.active, 3, "soon + far + forever");
-        assert_eq!(sum.expiring_soon, 1, "only 'soon' is inside the 1s warn window");
+        assert_eq!(
+            sum.expiring_soon, 1,
+            "only 'soon' is inside the 1s warn window"
+        );
         assert_eq!(sum.no_expiry, 1, "'forever' has no tracked expiry");
     }
 }

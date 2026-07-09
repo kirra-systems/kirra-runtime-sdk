@@ -59,14 +59,26 @@ fn guest_main(args: &[String]) -> ExitCode {
         eprintln!("guest: region generation is odd (torn)");
         return ExitCode::from(1);
     }
-    publish(&region, committed, &payload(linvel).to_view(committed, seq, 0, deadline));
+    publish(
+        &region,
+        committed,
+        &payload(linvel).to_view(committed, seq, 0, deadline),
+    );
     ExitCode::SUCCESS
 }
 
 fn spawn_guest(name: &str, linvel: f64, seq: u64, deadline: u64) -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
     Command::new(exe)
-        .args(["--guest", name, &linvel.to_string(), &seq.to_string(), &deadline.to_string()])
+        .args([
+            "--guest",
+            name,
+            &linvel.to_string(),
+            &seq.to_string(),
+            &deadline.to_string(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -91,7 +103,13 @@ fn governor_main() -> ExitCode {
     // The scripted cycles: (label, linvel, seq, deadline, expect_release).
     let script: &[(&str, f64, u64, u64, bool)] = &[
         ("in-envelope 10 m/s", 10.0, 1, FUTURE_DEADLINE, true),
-        ("over-envelope 50 m/s (clamped)", 50.0, 2, FUTURE_DEADLINE, true),
+        (
+            "over-envelope 50 m/s (clamped)",
+            50.0,
+            2,
+            FUTURE_DEADLINE,
+            true,
+        ),
         ("expired deadline", 10.0, 3, 1, false),
         ("replayed sequence 2", 10.0, 2, FUTURE_DEADLINE, false),
         ("recovery at sequence 4", 12.0, 4, FUTURE_DEADLINE, true),
@@ -135,11 +153,18 @@ fn governor_main() -> ExitCode {
     for i in 0..iters {
         let seq = 100 + i; // strictly above the script's last released sequence
         let gen = region.load_generation();
-        publish(&region, gen, &payload(10.0).to_view(gen, seq, 0, FUTURE_DEADLINE));
+        publish(
+            &region,
+            gen,
+            &payload(10.0).to_view(gen, seq, 0, FUTURE_DEADLINE),
+        );
         let t0 = Instant::now();
         let out = govern_and_release(&mut governor, &mut actuator, &reader, 0);
         let dt = t0.elapsed();
-        assert!(out.is_ok(), "latency loop cycle {i} unexpectedly refused: {out:?}");
+        assert!(
+            out.is_ok(),
+            "latency loop cycle {i} unexpectedly refused: {out:?}"
+        );
         std::hint::black_box(out.is_ok());
         samples.push(dt);
     }
@@ -157,7 +182,10 @@ fn governor_main() -> ExitCode {
     );
 
     drop(region);
-    println!("\n===== DEMO {} =====", if all_ok { "PASS" } else { "FAIL" });
+    println!(
+        "\n===== DEMO {} =====",
+        if all_ok { "PASS" } else { "FAIL" }
+    );
     if all_ok {
         ExitCode::SUCCESS
     } else {

@@ -34,9 +34,7 @@ use axum::Router;
 use tower::ServiceExt; // for `oneshot`
 
 use kirra_verifier::gateway::policy_layer::enforce_posture_routing;
-use kirra_verifier::posture_cache::{
-    CachedFleetPosture, ServiceState, SharedPostureCache,
-};
+use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 use kirra_verifier::verifier_store::VerifierStore;
 
@@ -55,8 +53,7 @@ fn build_state_cold() -> Arc<ServiceState> {
 fn build_state(initial: Option<CachedFleetPosture>) -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(initial));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(initial));
     Arc::new(ServiceState {
         app,
         posture_cache,
@@ -64,7 +61,9 @@ fn build_state(initial: Option<CachedFleetPosture>) -> Arc<ServiceState> {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
@@ -95,17 +94,14 @@ fn build_test_app(svc: Arc<ServiceState>) -> Router {
         .route("/health", get(ok_handler))
         .route("/ready", get(ok_handler));
 
-    let read_routes = Router::new()
-        .route("/fleet/posture", get(ok_handler));
+    let read_routes = Router::new().route("/fleet/posture", get(ok_handler));
 
-    let actuator_routes = Router::new()
-        .route("/actuator/motion/command", post(ok_handler));
+    let actuator_routes = Router::new().route("/actuator/motion/command", post(ok_handler));
 
     // A generic state-write route (classifies as WriteState, has NO inner
     // kinematic gate) — used to prove Option A relaxes ONLY the inner-gated
     // actuator route under Degraded, while every other write stays 503.
-    let generic_write_routes = Router::new()
-        .route("/fleet/dependencies", post(ok_handler));
+    let generic_write_routes = Router::new().route("/fleet/dependencies", post(ok_handler));
 
     Router::new()
         .merge(probe_routes)
@@ -229,16 +225,14 @@ async fn test_bare_options_without_preflight_headers_is_gated() {
 async fn test_cold_start_read_denied_but_health_reachable() {
     // Two separate apps because Router consumption by oneshot is not
     // shareable across calls.
-    let read_status =
-        req_status(build_test_app(build_state_cold()), "GET", "/fleet/posture").await;
+    let read_status = req_status(build_test_app(build_state_cold()), "GET", "/fleet/posture").await;
     assert_eq!(
         read_status,
         StatusCode::SERVICE_UNAVAILABLE,
         "Cold-start functional READ must be denied 503; got {read_status}"
     );
 
-    let health_status =
-        req_status(build_test_app(build_state_cold()), "GET", "/health").await;
+    let health_status = req_status(build_test_app(build_state_cold()), "GET", "/health").await;
     assert_eq!(
         health_status,
         StatusCode::OK,
@@ -347,8 +341,12 @@ async fn test_health_exempt_under_lockedout() {
     // production binary doesn't mount it either today). The gate exempts
     // it nonetheless — so it must NOT return 503; a 404 from axum's
     // route-miss path is the expected non-blocked outcome.
-    let metrics_status =
-        req_status(build_test_app(build_state_with_posture(FleetPosture::LockedOut)), "GET", "/metrics").await;
+    let metrics_status = req_status(
+        build_test_app(build_state_with_posture(FleetPosture::LockedOut)),
+        "GET",
+        "/metrics",
+    )
+    .await;
     assert_ne!(
         metrics_status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -372,8 +370,15 @@ async fn test_actuator_live_epoch_fence_admits_the_owner() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
     let now = kirra_verifier::posture_cache::now_ms();
     // Claim epoch 1 durably, and hold it in memory (this instance IS the owner).
-    let claimed = svc.app.store.with(|s| s.try_claim_epoch(0, "primary", now).unwrap());
-    assert_eq!(claimed, Some(1), "fresh in-memory store claims epoch 1 from genesis 0");
+    let claimed = svc
+        .app
+        .store
+        .with(|s| s.try_claim_epoch(0, "primary", now).unwrap());
+    assert_eq!(
+        claimed,
+        Some(1),
+        "fresh in-memory store claims epoch 1 from genesis 0"
+    );
     svc.app.held_epoch.store(1, Ordering::SeqCst);
 
     let status = req_status(build_test_app(svc), "POST", "/actuator/motion/command").await;
@@ -389,13 +394,26 @@ async fn test_actuator_live_epoch_fence_rejects_a_superseded_primary() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
     let now = kirra_verifier::posture_cache::now_ms();
     // This instance claimed epoch 1 and holds it...
-    assert_eq!(svc.app.store.with(|s| s.try_claim_epoch(0, "old", now).unwrap()), Some(1));
+    assert_eq!(
+        svc.app
+            .store
+            .with(|s| s.try_claim_epoch(0, "old", now).unwrap()),
+        Some(1)
+    );
     svc.app.held_epoch.store(1, Ordering::SeqCst);
     // ...then a NEW primary claims epoch 2 durably (failover). The old primary's
     // in-memory held_epoch (1) is now stale; its cached_db_epoch hasn't caught up.
-    assert_eq!(svc.app.store.with(|s| s.try_claim_epoch(1, "new", now).unwrap()), Some(2));
+    assert_eq!(
+        svc.app
+            .store
+            .with(|s| s.try_claim_epoch(1, "new", now).unwrap()),
+        Some(2)
+    );
 
-    assert!(svc.app.is_active(), "precondition: still Active before the fenced request");
+    assert!(
+        svc.app.is_active(),
+        "precondition: still Active before the fenced request"
+    );
     let status = req_status(
         build_test_app(Arc::clone(&svc)),
         "POST",

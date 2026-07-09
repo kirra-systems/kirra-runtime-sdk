@@ -15,16 +15,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::audit_writer::{
     fleet_posture_str, AuditWriteJob, KinematicViolationPayload, ProposedCommandPayload,
 };
-use crate::gateway::kinematics_contract::{
-    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction,
-    ProposedVehicleCommand,
-};
 use crate::gateway::contract_profiles::{contract_for, global_vehicle_class, mrc_fallback_for};
+use crate::gateway::kinematics_contract::{
+    enforce_degraded_decel_to_stop, validate_vehicle_command, EnforceAction, ProposedVehicleCommand,
+};
 use crate::gateway::perception_monitor::{apply_perception_cap, resolve_perception_cap};
 use crate::gateway::policy::{classify_http_command, OperationalCommand};
-use crate::posture_cache::{
-    now_ms as posture_now_ms, CachedFleetPosture, ServiceState,
-};
+use crate::posture_cache::{now_ms as posture_now_ms, CachedFleetPosture, ServiceState};
 use crate::verifier::FleetPosture;
 use crate::verifier_store::FenceError;
 
@@ -276,11 +273,17 @@ pub async fn enforce_actuator_safety_envelope(
     impl Drop for EnvelopeLatencyGuard {
         fn drop(&mut self) {
             let micros = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
-            self.svc.app.fleet_metrics.actuator_envelope_latency.record_micros(micros);
+            self.svc
+                .app
+                .fleet_metrics
+                .actuator_envelope_latency
+                .record_micros(micros);
         }
     }
-    let _latency_guard =
-        EnvelopeLatencyGuard { svc: Arc::clone(&svc), started: std::time::Instant::now() };
+    let _latency_guard = EnvelopeLatencyGuard {
+        svc: Arc::clone(&svc),
+        started: std::time::Instant::now(),
+    };
 
     let posture = resolve_posture(&svc);
 
@@ -329,25 +332,18 @@ pub async fn enforce_actuator_safety_envelope(
             // Nominal contract via `apply_perception_cap` BEFORE the verdict
             // call. `validate_vehicle_command`/`effective_max_speed_mps` are
             // unchanged; the only added per-command cost is this O(1) read.
-            let eff_cap = resolve_perception_cap(
-                svc.perception_monitor_enabled,
-                &svc.perception_cap,
-                now,
-            );
+            let eff_cap =
+                resolve_perception_cap(svc.perception_monitor_enabled, &svc.perception_cap, now);
             // #312: select the Nominal contract by the deployment's vehicle class
             // (robotaxi = the frozen reference instance, byte-identical). Set once
             // at startup, fail-closed; O(1) OnceLock read on the verdict path.
-            let contract = apply_perception_cap(
-                &contract_for(global_vehicle_class()),
-                eff_cap,
-            );
+            let contract = apply_perception_cap(&contract_for(global_vehicle_class()), eff_cap);
             validate_vehicle_command(&proposed_cmd, &contract)
         }
         // #312: the MRC fallback is the same class's degraded sibling.
-        FleetPosture::Degraded => enforce_degraded_decel_to_stop(
-            &proposed_cmd,
-            &mrc_fallback_for(global_vehicle_class()),
-        ),
+        FleetPosture::Degraded => {
+            enforce_degraded_decel_to_stop(&proposed_cmd, &mrc_fallback_for(global_vehicle_class()))
+        }
         FleetPosture::LockedOut => unreachable!("LockedOut short-circuited above"),
     };
 
@@ -377,13 +373,17 @@ pub async fn enforce_actuator_safety_envelope(
         match tx.try_send(rec) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                svc.app.capture_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                svc.app
+                    .capture_drops
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(
                     "capture queue FULL — dropping verdict record (best-effort; safety never waits)"
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                svc.app.capture_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                svc.app
+                    .capture_drops
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!("capture writer task GONE — verdict record dropped");
             }
         }
@@ -392,7 +392,9 @@ pub async fn enforce_actuator_safety_envelope(
     match verdict {
         EnforceAction::Allow => {
             // Thread the verdict to the handler so the response reports it.
-            parts.extensions.insert(EnforcementOutcome::allow(&proposed_cmd));
+            parts
+                .extensions
+                .insert(EnforcementOutcome::allow(&proposed_cmd));
             let rebuilt = Request::from_parts(parts, Body::from(bytes));
             Ok(next.run(rebuilt).await)
         }
@@ -405,8 +407,8 @@ pub async fn enforce_actuator_safety_envelope(
             );
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.linear_velocity_mps = safe_speed;
-            let serialized = serde_json::to_vec(&clamped_cmd)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let serialized =
+                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             parts
                 .extensions
                 .insert(EnforcementOutcome::clamp_linear(&proposed_cmd, safe_speed));
@@ -422,11 +424,12 @@ pub async fn enforce_actuator_safety_envelope(
             );
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.steering_angle_deg = safe_angle;
-            let serialized = serde_json::to_vec(&clamped_cmd)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            parts
-                .extensions
-                .insert(EnforcementOutcome::clamp_steering(&proposed_cmd, safe_angle));
+            let serialized =
+                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            parts.extensions.insert(EnforcementOutcome::clamp_steering(
+                &proposed_cmd,
+                safe_angle,
+            ));
             let rebuilt = Request::from_parts(parts, Body::from(serialized));
             Ok(next.run(rebuilt).await)
         }
@@ -446,11 +449,13 @@ pub async fn enforce_actuator_safety_envelope(
             let mut clamped_cmd = proposed_cmd.clone();
             clamped_cmd.linear_velocity_mps = linear;
             clamped_cmd.steering_angle_deg = steering;
-            let serialized = serde_json::to_vec(&clamped_cmd)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            parts
-                .extensions
-                .insert(EnforcementOutcome::clamp_both(&proposed_cmd, linear, steering));
+            let serialized =
+                serde_json::to_vec(&clamped_cmd).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            parts.extensions.insert(EnforcementOutcome::clamp_both(
+                &proposed_cmd,
+                linear,
+                steering,
+            ));
             let rebuilt = Request::from_parts(parts, Body::from(serialized));
             Ok(next.run(rebuilt).await)
         }
@@ -506,14 +511,18 @@ pub async fn enforce_actuator_safety_envelope(
                 match tx.try_send(job) {
                     Ok(()) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        svc.app.audit_write_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        svc.app
+                            .audit_write_drops
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             reason = %code,
                             "audit queue FULL — dropping kinematic DenyBreach record; sequence gap will be detectable in the chain"
                         );
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        svc.app.audit_write_drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        svc.app
+                            .audit_write_drops
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             reason = %code,
                             "audit writer task GONE — kinematic DenyBreach record dropped"
@@ -752,7 +761,10 @@ pub async fn enforce_posture_routing(
         // the heartbeat writer, both Release; Acquire here pairs with both.
         OperationalCommand::WriteState | OperationalCommand::SystemMutation => {
             let held = svc.app.held_epoch.load(std::sync::atomic::Ordering::SeqCst);
-            let db = svc.app.cached_db_epoch.load(std::sync::atomic::Ordering::Acquire);
+            let db = svc
+                .app
+                .cached_db_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
             match mutation_fence_verdict(svc.app.is_active(), held, db) {
                 MutationFence::Admit => {}
                 MutationFence::DenyNotActive => {
@@ -804,9 +816,7 @@ pub async fn enforce_posture_routing(
     // /metrics label can never drift from the verdict (the prior
     // `classify_gate_denial` re-implemented the tree and could mislabel a new
     // denial cause during an incident).
-    if let Err(reason) =
-        crate::posture_cache::route_command_verdict(&snapshot, gate_now_ms, cmd)
-    {
+    if let Err(reason) = crate::posture_cache::route_command_verdict(&snapshot, gate_now_ms, cmd) {
         // WS-0.5: count the dropped command for /metrics, labeled by reason.
         svc.app.fleet_metrics.record_gate_denial(reason);
         tracing::warn!(
@@ -885,8 +895,7 @@ mod gate_denial_metrics_tests {
                     FleetPosture::Degraded => {
                         if matches!(
                             cmd,
-                            OperationalCommand::ReadTelemetry
-                                | OperationalCommand::ActuatorMotion
+                            OperationalCommand::ReadTelemetry | OperationalCommand::ActuatorMotion
                         ) {
                             Ok(())
                         } else {
@@ -1034,7 +1043,10 @@ mod actuator_middleware_tests {
         let new_epoch = claim_epoch(&svc_new, 1, "new-primary", 2_000);
         assert_eq!(new_epoch, 2);
 
-        assert!(svc_old.app.is_active(), "old primary still thinks it is Active");
+        assert!(
+            svc_old.app.is_active(),
+            "old primary still thinks it is Active"
+        );
         assert!(svc_new.app.is_active(), "new primary is Active");
 
         assert!(
@@ -1066,12 +1078,9 @@ mod actuator_middleware_tests {
         let svc = service_from_store(VerifierStore::new(":memory:").expect("store"));
         let epoch = claim_epoch(&svc, 0, "primary", 1_000);
         assert_eq!(epoch, 1);
-        svc.app
-            .store
-            .with(|store| store.delete_ha_state_for_test());
+        svc.app.store.with(|store| store.delete_ha_state_for_test());
 
-        let res =
-            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
+        let res = assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
         assert!(res.is_err(), "unreadable epoch must deny actuator command");
         assert!(
             !svc.app.is_active(),
@@ -1100,8 +1109,7 @@ mod actuator_middleware_tests {
             "local held epoch remains stale until the actuator assertion fences it"
         );
 
-        let res =
-            assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
+        let res = assert_actuator_epoch_or_demote(&svc, "POST", "/actuator/motion/command").await;
         assert!(res.is_err(), "stale held epoch must reject actuator write");
         assert!(
             !svc.app.is_active(),
@@ -1120,17 +1128,28 @@ mod actuator_middleware_tests {
         // EXEMPT: liveness/observability + the whole /console plane (reads AND the
         // supervisor-gated grant — the grant's gate is the key, not posture).
         for p in [
-            "/health", "/health/live", "/ready", "/metrics",
-            "/console", "/console/fleet", "/console/audit",
-            "/console/escalations", "/console/clearance-grants",
+            "/health",
+            "/health/live",
+            "/ready",
+            "/metrics",
+            "/console",
+            "/console/fleet",
+            "/console/audit",
+            "/console/escalations",
+            "/console/clearance-grants",
         ] {
             assert!(is_posture_exempt(p), "{p} MUST be posture-exempt");
         }
         // NOT EXEMPT: prefix-confusion guard — a near-miss must not ride in on a
         // loose prefix, and a normal gated path stays gated.
         for p in [
-            "/consoleX", "/console-x", "/consol", "/con",
-            "/fleet/posture", "/attestation/register", "/",
+            "/consoleX",
+            "/console-x",
+            "/consol",
+            "/con",
+            "/fleet/posture",
+            "/attestation/register",
+            "/",
         ] {
             assert!(!is_posture_exempt(p), "{p} must NOT be posture-exempt");
         }
@@ -1146,22 +1165,28 @@ mod actuator_middleware_tests {
     #[test]
     fn test_max_vehicle_command_bytes_cap_fits_worst_case_command() {
         let worst = ProposedVehicleCommand {
-            linear_velocity_mps:        f64::MAX,
-            current_velocity_mps:       f64::MAX,
-            delta_time_s:               f64::MAX,
-            steering_angle_deg:         f64::MAX,
+            linear_velocity_mps: f64::MAX,
+            current_velocity_mps: f64::MAX,
+            delta_time_s: f64::MAX,
+            steering_angle_deg: f64::MAX,
             current_steering_angle_deg: f64::MAX,
         };
         let json = serde_json::to_vec(&worst).expect("serialize");
-        assert!(json.len() < MAX_VEHICLE_COMMAND_BYTES,
+        assert!(
+            json.len() < MAX_VEHICLE_COMMAND_BYTES,
             "worst-case ProposedVehicleCommand serializes to {} bytes — must fit \
              under MAX_VEHICLE_COMMAND_BYTES ({} bytes)",
-            json.len(), MAX_VEHICLE_COMMAND_BYTES);
+            json.len(),
+            MAX_VEHICLE_COMMAND_BYTES
+        );
         // And the headroom must be substantial — a 2× factor over the
         // worst case is the minimum we expect.
-        assert!(json.len() * 2 < MAX_VEHICLE_COMMAND_BYTES,
+        assert!(
+            json.len() * 2 < MAX_VEHICLE_COMMAND_BYTES,
             "cap should be >= 2× worst-case ({} bytes) — got cap = {}",
-            json.len(), MAX_VEHICLE_COMMAND_BYTES);
+            json.len(),
+            MAX_VEHICLE_COMMAND_BYTES
+        );
     }
 
     #[test]
@@ -1212,7 +1237,10 @@ mod actuator_middleware_tests {
             steering_angle_deg: 0.0,
             current_steering_angle_deg: 0.0,
         };
-        assert_eq!(validate_vehicle_command(&cmd, &nominal), EnforceAction::Allow);
+        assert_eq!(
+            validate_vehicle_command(&cmd, &nominal),
+            EnforceAction::Allow
+        );
     }
 
     #[test]
@@ -1227,7 +1255,9 @@ mod actuator_middleware_tests {
         };
         assert_eq!(
             validate_vehicle_command(&cmd, &contract),
-            EnforceAction::DenyBreach(crate::gateway::kinematics_contract::DenyCode::InvalidTimeDelta)
+            EnforceAction::DenyBreach(
+                crate::gateway::kinematics_contract::DenyCode::InvalidTimeDelta
+            )
         );
     }
 

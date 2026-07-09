@@ -19,6 +19,7 @@
 //! unsafe outputs, not the doer per se), not blanket paranoia. That precision is what
 //! makes "swap in a learned planner, the safety case is unchanged" a real claim.
 
+use kirra_core::FleetPosture;
 use kirra_planner::{
     plan_for_intent, EgoState, GeometricPlanner, Goal, MickIntent, PlanInput, PlanOutput, Planner,
     Pose, ProposalKind, TrajectoryPoint,
@@ -26,7 +27,6 @@ use kirra_planner::{
 use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
 use kirra_trajectory::state::{PerceivedObject, TrajectoryVerdict};
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
-use kirra_core::FleetPosture;
 
 /// KIRRA refuses to certify a trajectory longer than this many poses — a WCET bound
 /// on the containment check (`kirra_core::containment::
@@ -73,19 +73,32 @@ impl Planner for RecklessDoer {
                 p
             })
             .collect();
-        PlanOutput { trajectory, kind: ProposalKind::Motion }
+        PlanOutput {
+            trajectory,
+            kind: ProposalKind::Motion,
+        }
     }
 }
 
 fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> PlanInput<'a> {
     PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 5.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -101,7 +114,8 @@ fn world<'a>(map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> Pla
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
 fn stopped_car(x: f64) -> PerceivedObject {
@@ -141,21 +155,41 @@ fn kirra_bounds_the_reckless_doer_exactly_as_it_bounds_occy() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
     let objs = [stopped_car(25.0)];
     let w = world(&corr, &objs);
-    let intent = MickIntent::GoTo { x_m: 40.0, y_m: 0.0 };
+    let intent = MickIntent::GoTo {
+        x_m: 40.0,
+        y_m: 0.0,
+    };
 
     // Doer 1 — the real Occy: it stops short of the car, and KIRRA admits the plan.
     let mut occy = GeometricPlanner::default();
     let occy_out = plan_for_intent(&mut occy, &intent, &w);
-    let occy_max_x = occy_out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-    assert!(occy_max_x < 25.0, "Occy stops short of the obstacle, got {occy_max_x}");
-    assert!(admitted(kirra_verdict(&occy_out, &corr, &objs)), "KIRRA admits Occy's safe plan");
+    let occy_max_x = occy_out
+        .trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(0.0, f64::max);
+    assert!(
+        occy_max_x < 25.0,
+        "Occy stops short of the obstacle, got {occy_max_x}"
+    );
+    assert!(
+        admitted(kirra_verdict(&occy_out, &corr, &objs)),
+        "KIRRA admits Occy's safe plan"
+    );
 
     // Doer 2 — the reckless/learned doer behind the SAME seam: it drives straight
     // THROUGH the car. KIRRA rejects it; the doer's choice does not reach the actuator.
     let mut reckless = RecklessDoer;
     let reckless_out = plan_for_intent(&mut reckless, &intent, &w);
-    let reckless_max_x = reckless_out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-    assert!(reckless_max_x > 25.0, "the reckless doer drives past the obstacle, got {reckless_max_x}");
+    let reckless_max_x = reckless_out
+        .trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(0.0, f64::max);
+    assert!(
+        reckless_max_x > 25.0,
+        "the reckless doer drives past the obstacle, got {reckless_max_x}"
+    );
     assert_eq!(
         kirra_verdict(&reckless_out, &corr, &objs),
         TrajectoryVerdict::MRCFallback,
@@ -165,7 +199,10 @@ fn kirra_bounds_the_reckless_doer_exactly_as_it_bounds_occy() {
     // On rejection the architecture's always-available fallback takes over: a safe
     // stop the checker accepts. The unsafe intent never actuates, whoever authored it.
     let fallback = PlanOutput::safe_stop(w.ego.pose);
-    assert!(admitted(kirra_verdict(&fallback, &corr, &objs)), "the safe-stop fallback is admissible");
+    assert!(
+        admitted(kirra_verdict(&fallback, &corr, &objs)),
+        "the safe-stop fallback is admissible"
+    );
 }
 
 /// The bound is PRECISE, not blanket: on a clear road the very same reckless doer is
@@ -175,12 +212,22 @@ fn kirra_bounds_the_reckless_doer_exactly_as_it_bounds_occy() {
 fn kirra_admits_the_reckless_doer_when_its_output_is_actually_safe() {
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
     let w = world(&corr, &[]); // clear road, no obstacles
-    let intent = MickIntent::GoTo { x_m: 40.0, y_m: 0.0 };
+    let intent = MickIntent::GoTo {
+        x_m: 40.0,
+        y_m: 0.0,
+    };
 
     let mut reckless = RecklessDoer;
     let out = plan_for_intent(&mut reckless, &intent, &w);
-    let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-    assert!(max_x > 25.0, "the reckless doer drives toward the goal, got {max_x}");
+    let max_x = out
+        .trajectory
+        .iter()
+        .map(|t| t.pose.x_m)
+        .fold(0.0, f64::max);
+    assert!(
+        max_x > 25.0,
+        "the reckless doer drives toward the goal, got {max_x}"
+    );
     assert!(
         admitted(kirra_verdict(&out, &corr, &[])),
         "with nothing to hit, KIRRA admits the reckless straight-line — the bound is precise"

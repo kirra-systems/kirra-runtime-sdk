@@ -5,8 +5,8 @@ use super::*;
 
 impl VerifierStore {
     pub fn save_node(&self, node: &RegisteredNode) -> Result<()> {
-        let status_json = serde_json::to_string(&node.status)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let status_json =
+            serde_json::to_string(&node.status).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
         self.conn.execute(
             "INSERT OR REPLACE INTO nodes
@@ -37,8 +37,8 @@ impl VerifierStore {
 
         let rows = stmt.query_map([], |row| {
             let status_json: String = row.get(1)?;
-            let status: NodeTrustState = serde_json::from_str(&status_json)
-                .unwrap_or(NodeTrustState::Unknown);
+            let status: NodeTrustState =
+                serde_json::from_str(&status_json).unwrap_or(NodeTrustState::Unknown);
 
             Ok(RegisteredNode {
                 node_id: row.get(0)?,
@@ -90,7 +90,11 @@ impl VerifierStore {
     /// `INSERT OR REPLACE` so re-registration reflects the operator's current
     /// intent (including flipping the requirement back off). Isolated from the
     /// `nodes` identity record by design — see the table comment.
-    pub fn set_node_attestation_policy(&self, node_id: &str, require_tpm_quote: bool) -> Result<()> {
+    pub fn set_node_attestation_policy(
+        &self,
+        node_id: &str,
+        require_tpm_quote: bool,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO node_attestation_policy (node_id, require_tpm_quote)
              VALUES (?1, ?2)",
@@ -126,9 +130,8 @@ impl VerifierStore {
             params![node_id],
         )?;
         {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO dependencies (node_id, dep_id) VALUES (?1, ?2)",
-            )?;
+            let mut stmt = tx
+                .prepare("INSERT OR REPLACE INTO dependencies (node_id, dep_id) VALUES (?1, ?2)")?;
             for dep in deps {
                 stmt.execute(params![node_id, dep])?;
             }
@@ -138,7 +141,9 @@ impl VerifierStore {
     }
 
     pub fn load_dependencies(&self) -> Result<HashMap<String, Vec<String>>> {
-        let mut stmt = self.conn.prepare("SELECT node_id, dep_id FROM dependencies")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, dep_id FROM dependencies")?;
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
         let rows = stmt.query_map([], |row| {
@@ -173,11 +178,8 @@ impl VerifierStore {
     /// `app.nodes` is empty while the durable registry still holds nodes) — both
     /// fail closed, but the reason code differs for operators.
     pub fn count_nodes(&self) -> Result<i64> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM nodes",
-            [],
-            |row| row.get(0),
-        )
+        self.conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
     }
 }
 
@@ -260,18 +262,42 @@ pub struct InMemoryNodeStore {
 impl NodeStore for InMemoryNodeStore {
     type Error = std::convert::Infallible;
 
-    fn save_node(&self, node: &RegisteredNode) -> std::result::Result<(), std::convert::Infallible> {
-        self.nodes.lock().unwrap_or_else(|e| e.into_inner()).insert(node.node_id.clone(), node.clone());
+    fn save_node(
+        &self,
+        node: &RegisteredNode,
+    ) -> std::result::Result<(), std::convert::Infallible> {
+        self.nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node.node_id.clone(), node.clone());
         Ok(())
     }
-    fn load_node(&self, node_id: &str) -> std::result::Result<Option<RegisteredNode>, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).get(node_id).cloned())
+    fn load_node(
+        &self,
+        node_id: &str,
+    ) -> std::result::Result<Option<RegisteredNode>, std::convert::Infallible> {
+        Ok(self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(node_id)
+            .cloned())
     }
     fn load_nodes(&self) -> std::result::Result<Vec<RegisteredNode>, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect())
+        Ok(self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect())
     }
     fn node_exists(&self, node_id: &str) -> std::result::Result<bool, std::convert::Infallible> {
-        Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).contains_key(node_id))
+        Ok(self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(node_id))
     }
     fn count_nodes(&self) -> std::result::Result<i64, std::convert::Infallible> {
         Ok(self.nodes.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)
@@ -313,7 +339,9 @@ where
     assert!(!store.node_exists("n1").unwrap());
 
     // Save + read back (id + status preserved).
-    store.save_node(&node("n1", NodeTrustState::Trusted)).unwrap();
+    store
+        .save_node(&node("n1", NodeTrustState::Trusted))
+        .unwrap();
     assert!(store.node_exists("n1").unwrap());
     assert_eq!(store.count_nodes().unwrap(), 1);
     let loaded = store.load_node("n1").unwrap().expect("n1 present");
@@ -321,13 +349,22 @@ where
     assert_eq!(loaded.status, NodeTrustState::Trusted);
 
     // A second node; bulk load sees both.
-    store.save_node(&node("n2", NodeTrustState::Unknown)).unwrap();
+    store
+        .save_node(&node("n2", NodeTrustState::Unknown))
+        .unwrap();
     assert_eq!(store.count_nodes().unwrap(), 2);
-    let ids: Vec<String> = store.load_nodes().unwrap().into_iter().map(|n| n.node_id).collect();
+    let ids: Vec<String> = store
+        .load_nodes()
+        .unwrap()
+        .into_iter()
+        .map(|n| n.node_id)
+        .collect();
     assert!(ids.contains(&"n1".to_string()) && ids.contains(&"n2".to_string()));
 
     // UPSERT: re-saving n1 with a new status overwrites, count stays 2.
-    store.save_node(&node("n1", NodeTrustState::Untrusted("fault".to_string()))).unwrap();
+    store
+        .save_node(&node("n1", NodeTrustState::Untrusted("fault".to_string())))
+        .unwrap();
     assert_eq!(store.count_nodes().unwrap(), 2, "upsert must not duplicate");
     assert_eq!(
         store.load_node("n1").unwrap().unwrap().status,

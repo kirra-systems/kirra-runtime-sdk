@@ -20,8 +20,8 @@
 //! lane), so a refused change holds the centerline rather than drifting.
 
 use kirra_planner::{
-    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType,
-    PlanInput, Planner, Pose, TrajectoryVerdict,
+    EgoState, FleetPosture, GeometricPlanner, Goal, Lane, LaneEdge, LaneGraph, LineType, PlanInput,
+    Planner, Pose, TrajectoryVerdict,
 };
 use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
 
@@ -57,17 +57,29 @@ fn lane_change_across_broken_divider_admits() {
     // lawful. Occy shifts the held trajectory into the target lane, and KIRRA
     // admits it (the corridor derived from the graph spans all three lanes).
     let g = three_lane_road();
-    let corridor = g.corridor_over(&SPAN, 0.95, 10).expect("corridor over the span");
+    let corridor = g
+        .corridor_over(&SPAN, 0.95, 10)
+        .expect("corridor over the span");
     let boundaries = g.boundaries_relative_to(1, &SPAN).expect("boundaries");
 
     let input = PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 8.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 8.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 40.0, y_m: -3.5, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 40.0,
+                y_m: -3.5,
+                heading_rad: 0.0,
+            },
+        },
         map: &corridor,
         objects: &[],
         controls: &[],
@@ -83,7 +95,8 @@ fn lane_change_across_broken_divider_admits() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    };
+        signal_states: &[],
+    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
     let verdict = validate_trajectory_slow(
@@ -95,10 +108,20 @@ fn lane_change_across_broken_divider_admits() {
         FleetPosture::Nominal,
     );
 
-    let min_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-    assert!(min_y <= -3.0, "shifts into the right lane, got min_y {min_y}");
+    let min_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(0.0, f64::min);
     assert!(
-        matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        min_y <= -3.0,
+        "shifts into the right lane, got min_y {min_y}"
+    );
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
         "KIRRA admits the lane-graph-derived lane change, got {verdict:?}"
     );
 }
@@ -114,12 +137,22 @@ fn lane_change_across_solid_divider_is_refused() {
 
     let input = PlanInput {
         ego: EgoState {
-            pose: Pose { x_m: 8.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 8.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 2.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         },
-        goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 40.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map: &corridor,
         objects: &[],
         controls: &[],
@@ -135,12 +168,27 @@ fn lane_change_across_solid_divider_is_refused() {
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    };
+        signal_states: &[],
+    };
     let mut planner = GeometricPlanner::default();
     let plan = planner.plan(&input);
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::max);
-    let min_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-    assert!(max_y < 0.5, "solid divider → no leftward lane change, got max_y {max_y}");
-    assert!(min_y > -0.5, "and holds the center lane (no drift), got min_y {min_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(0.0, f64::max);
+    let min_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(0.0, f64::min);
+    assert!(
+        max_y < 0.5,
+        "solid divider → no leftward lane change, got max_y {max_y}"
+    );
+    assert!(
+        min_y > -0.5,
+        "and holds the center lane (no drift), got min_y {min_y}"
+    );
 }

@@ -2,8 +2,8 @@
 
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
 use crate::gateway::policy::OperationalCommand;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dnp3Message {
@@ -39,29 +39,33 @@ pub const DNP3_BROADCAST_ADDRESS: u16 = 0xFFFF;
 impl Dnp3Adapter {
     pub fn evaluate(msg: &Dnp3Message) -> Dnp3Evaluation {
         let (command, function_name) = match msg.function_code {
-            0x01 => (OperationalCommand::ReadTelemetry,  "Read"),
-            0x02 => (OperationalCommand::WriteState,     "Write"),
-            0x03 => (OperationalCommand::WriteState,     "Select"),
+            0x01 => (OperationalCommand::ReadTelemetry, "Read"),
+            0x02 => (OperationalCommand::WriteState, "Write"),
+            0x03 => (OperationalCommand::WriteState, "Select"),
             0x04 => (OperationalCommand::SystemMutation, "Operate"),
             0x05 => (OperationalCommand::SystemMutation, "Direct_Operate"),
             0x06 => (OperationalCommand::SystemMutation, "Direct_Operate_NR"),
-            0x07 => (OperationalCommand::WriteState,     "Freeze"),
-            0x08 => (OperationalCommand::WriteState,     "Freeze_NR"),
-            0x81 => (OperationalCommand::ReadTelemetry,  "Response"),
-            0x82 => (OperationalCommand::ReadTelemetry,  "Unsolicited_Response"),
-            _    => (OperationalCommand::Unknown,         "Unknown"),
+            0x07 => (OperationalCommand::WriteState, "Freeze"),
+            0x08 => (OperationalCommand::WriteState, "Freeze_NR"),
+            0x81 => (OperationalCommand::ReadTelemetry, "Response"),
+            0x82 => (OperationalCommand::ReadTelemetry, "Unsolicited_Response"),
+            _ => (OperationalCommand::Unknown, "Unknown"),
         };
 
         let is_broadcast = msg.dest_address == DNP3_BROADCAST_ADDRESS;
 
         // CROB (Group 12), Analog Output (41-42), Octet String (110-113)
-        let critical_infrastructure_relevant = msg.objects.iter().any(|obj| {
-            matches!(obj.group, 12 | 41 | 42 | 110 | 111 | 112 | 113)
-        });
+        let critical_infrastructure_relevant = msg
+            .objects
+            .iter()
+            .any(|obj| matches!(obj.group, 12 | 41 | 42 | 110 | 111 | 112 | 113));
 
         // Control commands with CROB or Analog Output objects are actuator writes
         let is_control = matches!(msg.function_code, 0x03..=0x06)
-            && msg.objects.iter().any(|obj| matches!(obj.group, 12 | 41 | 42));
+            && msg
+                .objects
+                .iter()
+                .any(|obj| matches!(obj.group, 12 | 41 | 42));
 
         Dnp3Evaluation {
             command,
@@ -151,14 +155,16 @@ impl crate::adapters::IndustrialAdapter for Dnp3Adapter {
 /// ignored; only the leading value bytes are read (little-endian per IEEE 1815).
 pub fn decode_analog_setpoint(variation: u8, data: &[u8]) -> Option<f64> {
     match variation {
-        1 if data.len() >= 4 => Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64),
-        2 if data.len() >= 2 => Some(i16::from_le_bytes([data[0], data[1]]) as f64),
-        3 if data.len() >= 4 => Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64),
-        4 if data.len() >= 8 => {
-            Some(f64::from_le_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]))
+        1 if data.len() >= 4 => {
+            Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
         }
+        2 if data.len() >= 2 => Some(i16::from_le_bytes([data[0], data[1]]) as f64),
+        3 if data.len() >= 4 => {
+            Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+        }
+        4 if data.len() >= 8 => Some(f64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ])),
         _ => None,
     }
 }
@@ -238,7 +244,11 @@ mod tests {
     }
 
     fn obj(group: u8) -> Dnp3Object {
-        Dnp3Object { group, variation: 1, data: vec![] }
+        Dnp3Object {
+            group,
+            variation: 1,
+            data: vec![],
+        }
     }
 
     #[test]
@@ -337,7 +347,10 @@ mod tests {
     fn test_octet_string_groups_flag_critical() {
         for group in [110u8, 111, 112, 113] {
             let e = Dnp3Adapter::evaluate(&msg(0x01, 0x0001, vec![obj(group)]));
-            assert!(e.critical_infrastructure_relevant, "group {group} must be critical");
+            assert!(
+                e.critical_infrastructure_relevant,
+                "group {group} must be critical"
+            );
         }
     }
 
@@ -369,47 +382,100 @@ mod tests {
     // --- Analog Output (group 41) magnitude bounding -----------------------
 
     fn ao(variation: u8, data: Vec<u8>) -> Dnp3Object {
-        Dnp3Object { group: 41, variation, data }
+        Dnp3Object {
+            group: 41,
+            variation,
+            data,
+        }
     }
 
     #[test]
     fn decode_setpoint_per_variation() {
         // v1: 32-bit signed int (LE); v2: 16-bit; v3: f32; v4: f64.
         assert_eq!(decode_analog_setpoint(1, &50i32.to_le_bytes()), Some(50.0));
-        assert_eq!(decode_analog_setpoint(1, &(-7i32).to_le_bytes()), Some(-7.0));
-        assert_eq!(decode_analog_setpoint(2, &1234i16.to_le_bytes()), Some(1234.0));
+        assert_eq!(
+            decode_analog_setpoint(1, &(-7i32).to_le_bytes()),
+            Some(-7.0)
+        );
+        assert_eq!(
+            decode_analog_setpoint(2, &1234i16.to_le_bytes()),
+            Some(1234.0)
+        );
         assert_eq!(decode_analog_setpoint(3, &1.5f32.to_le_bytes()), Some(1.5));
-        assert_eq!(decode_analog_setpoint(4, &(-2.25f64).to_le_bytes()), Some(-2.25));
+        assert_eq!(
+            decode_analog_setpoint(4, &(-2.25f64).to_le_bytes()),
+            Some(-2.25)
+        );
     }
 
     #[test]
     fn decode_setpoint_fails_closed_on_short_or_unknown() {
-        assert_eq!(decode_analog_setpoint(1, &[0u8; 3]), None, "v1 needs 4 bytes");
-        assert_eq!(decode_analog_setpoint(2, &[0u8; 1]), None, "v2 needs 2 bytes");
-        assert_eq!(decode_analog_setpoint(4, &[0u8; 7]), None, "v4 needs 8 bytes");
-        assert_eq!(decode_analog_setpoint(9, &[0u8; 8]), None, "unknown variation undecodable");
+        assert_eq!(
+            decode_analog_setpoint(1, &[0u8; 3]),
+            None,
+            "v1 needs 4 bytes"
+        );
+        assert_eq!(
+            decode_analog_setpoint(2, &[0u8; 1]),
+            None,
+            "v2 needs 2 bytes"
+        );
+        assert_eq!(
+            decode_analog_setpoint(4, &[0u8; 7]),
+            None,
+            "v4 needs 8 bytes"
+        );
+        assert_eq!(
+            decode_analog_setpoint(9, &[0u8; 8]),
+            None,
+            "unknown variation undecodable"
+        );
     }
 
     #[test]
     fn envelope_parse_rejects_bad_specs() {
-        assert_eq!(AnalogOutputEnvelope::parse("-100:100"), Some(AnalogOutputEnvelope { min: -100.0, max: 100.0 }));
-        assert_eq!(AnalogOutputEnvelope::parse(" -5.5 : 5.5 "), Some(AnalogOutputEnvelope { min: -5.5, max: 5.5 }));
+        assert_eq!(
+            AnalogOutputEnvelope::parse("-100:100"),
+            Some(AnalogOutputEnvelope {
+                min: -100.0,
+                max: 100.0
+            })
+        );
+        assert_eq!(
+            AnalogOutputEnvelope::parse(" -5.5 : 5.5 "),
+            Some(AnalogOutputEnvelope {
+                min: -5.5,
+                max: 5.5
+            })
+        );
         assert!(AnalogOutputEnvelope::parse("nocolon").is_none());
         assert!(AnalogOutputEnvelope::parse("a:b").is_none());
-        assert!(AnalogOutputEnvelope::parse("10:5").is_none(), "min > max rejected");
-        assert!(AnalogOutputEnvelope::parse("inf:5").is_none(), "non-finite rejected");
+        assert!(
+            AnalogOutputEnvelope::parse("10:5").is_none(),
+            "min > max rejected"
+        );
+        assert!(
+            AnalogOutputEnvelope::parse("inf:5").is_none(),
+            "non-finite rejected"
+        );
     }
 
     #[test]
     fn control_analog_in_envelope_is_admitted() {
-        let env = AnalogOutputEnvelope { min: -100.0, max: 100.0 };
+        let env = AnalogOutputEnvelope {
+            min: -100.0,
+            max: 100.0,
+        };
         let m = msg(0x05, 0x0001, vec![ao(1, 50i32.to_le_bytes().to_vec())]); // Direct_Operate, value 50
         assert_eq!(Dnp3Adapter::bound_analog_control(&m, Some(&env)), Ok(()));
     }
 
     #[test]
     fn control_analog_out_of_envelope_is_refused() {
-        let env = AnalogOutputEnvelope { min: -100.0, max: 100.0 };
+        let env = AnalogOutputEnvelope {
+            min: -100.0,
+            max: 100.0,
+        };
         let m = msg(0x05, 0x0001, vec![ao(1, 999i32.to_le_bytes().to_vec())]);
         assert_eq!(
             Dnp3Adapter::bound_analog_control(&m, Some(&env)),
@@ -429,7 +495,10 @@ mod tests {
 
     #[test]
     fn control_analog_undecodable_is_refused() {
-        let env = AnalogOutputEnvelope { min: -100.0, max: 100.0 };
+        let env = AnalogOutputEnvelope {
+            min: -100.0,
+            max: 100.0,
+        };
         let m = msg(0x05, 0x0001, vec![ao(1, vec![0x01, 0x02])]); // v1 needs 4 bytes
         assert_eq!(
             Dnp3Adapter::bound_analog_control(&m, Some(&env)),
@@ -439,7 +508,10 @@ mod tests {
 
     #[test]
     fn control_analog_nonfinite_is_refused() {
-        let env = AnalogOutputEnvelope { min: -100.0, max: 100.0 };
+        let env = AnalogOutputEnvelope {
+            min: -100.0,
+            max: 100.0,
+        };
         let m = msg(0x05, 0x0001, vec![ao(3, f32::NAN.to_le_bytes().to_vec())]); // v3 NaN
         assert_eq!(
             Dnp3Adapter::bound_analog_control(&m, Some(&env)),
@@ -449,7 +521,10 @@ mod tests {
 
     #[test]
     fn non_control_and_crob_only_are_not_bounded() {
-        let env = AnalogOutputEnvelope { min: -1.0, max: 1.0 };
+        let env = AnalogOutputEnvelope {
+            min: -1.0,
+            max: 1.0,
+        };
         // A READ carrying a g41 object is not a command → not bounded.
         let read = msg(0x01, 0x0001, vec![ao(1, 999i32.to_le_bytes().to_vec())]);
         assert_eq!(Dnp3Adapter::bound_analog_control(&read, Some(&env)), Ok(()));

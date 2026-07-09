@@ -26,7 +26,10 @@
 // It makes temporal behavior deterministic, repeatable, and independent of
 // host CPU load, scheduler jitter, or CI machine speed.
 
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -145,7 +148,10 @@ mod clock_tests {
     #[test]
     fn test_system_clock_returns_nonzero() {
         let clock = SystemClock;
-        assert!(clock.now_ms() > 0, "system clock must return positive timestamp");
+        assert!(
+            clock.now_ms() > 0,
+            "system clock must return positive timestamp"
+        );
     }
 
     #[test]
@@ -195,7 +201,11 @@ mod clock_tests {
         assert_eq!(clock2.now_ms(), 42, "arc clone must see same time");
 
         clock2.advance_ms(8);
-        assert_eq!(clock.now_ms(), 50, "advance via clone must be visible to original");
+        assert_eq!(
+            clock.now_ms(),
+            50,
+            "advance via clone must be visible to original"
+        );
     }
 
     #[test]

@@ -96,7 +96,10 @@ impl core::fmt::Display for DetectError {
         match self {
             DetectError::Backend(e) => write!(f, "detector backend error: {e}"),
             DetectError::MissingOutputTensor(name) => {
-                write!(f, "detector output tensor '{name}' missing from backend result")
+                write!(
+                    f,
+                    "detector output tensor '{name}' missing from backend result"
+                )
             }
         }
     }
@@ -120,11 +123,23 @@ pub fn decode_detections(raw: &[f32], cfg: &DetectorConfig) -> Vec<Detection> {
             if !conf.is_finite() || conf < cfg.conf_threshold {
                 return None;
             }
-            let bbox = BBox { cx: row[0], cy: row[1], w: row[2], h: row[3] };
-            if ![bbox.cx, bbox.cy, bbox.w, bbox.h].iter().all(|v| v.is_finite()) {
+            let bbox = BBox {
+                cx: row[0],
+                cy: row[1],
+                w: row[2],
+                h: row[3],
+            };
+            if ![bbox.cx, bbox.cy, bbox.w, bbox.h]
+                .iter()
+                .all(|v| v.is_finite())
+            {
                 return None;
             }
-            Some(Detection { class_id: row[5].max(0.0) as u32, confidence: conf, bbox })
+            Some(Detection {
+                class_id: row[5].max(0.0) as u32,
+                confidence: conf,
+                bbox,
+            })
         })
         .collect();
     nms(&mut dets, cfg.iou_threshold)
@@ -176,8 +191,18 @@ mod tests {
 
     #[test]
     fn iou_is_one_for_identical_boxes_and_zero_for_disjoint() {
-        let a = BBox { cx: 0.0, cy: 0.0, w: 2.0, h: 2.0 };
-        let b = BBox { cx: 10.0, cy: 10.0, w: 2.0, h: 2.0 };
+        let a = BBox {
+            cx: 0.0,
+            cy: 0.0,
+            w: 2.0,
+            h: 2.0,
+        };
+        let b = BBox {
+            cx: 10.0,
+            cy: 10.0,
+            w: 2.0,
+            h: 2.0,
+        };
         assert!((a.iou(&a) - 1.0).abs() < 1e-6);
         assert_eq!(a.iou(&b), 0.0);
     }
@@ -205,15 +230,18 @@ mod tests {
         ];
         let dets = decode_detections(&raw, &cfg());
         assert_eq!(dets.len(), 2, "the overlapping duplicate is suppressed");
-        assert!((dets[0].confidence - 0.9).abs() < 1e-6, "NMS keeps the higher-confidence box");
+        assert!(
+            (dets[0].confidence - 0.9).abs() < 1e-6,
+            "NMS keeps the higher-confidence box"
+        );
     }
 
     #[test]
     fn nms_keeps_overlapping_boxes_of_different_classes() {
         // Same geometry as above, but the duplicate is a DIFFERENT class → not suppressed.
         let raw = vec![
-            0.0, 0.0, 2.0, 2.0, 0.9, 0.0,
-            0.1, 0.1, 2.0, 2.0, 0.8, 1.0, // class 1 → kept despite overlap
+            0.0, 0.0, 2.0, 2.0, 0.9, 0.0, 0.1, 0.1, 2.0, 2.0, 0.8,
+            1.0, // class 1 → kept despite overlap
         ];
         assert_eq!(decode_detections(&raw, &cfg()).len(), 2);
     }
@@ -221,10 +249,26 @@ mod tests {
     #[test]
     fn decode_ignores_non_finite_and_ragged_rows() {
         let raw = vec![
-            1.0, 1.0, 2.0, 2.0, f32::NAN, 0.0, // non-finite conf → dropped
-            3.0, 3.0, f32::INFINITY, 2.0, 0.9, 0.0, // non-finite box → dropped
-            7.0, 7.0, 2.0, 2.0, 0.95, 2.0, // valid → kept
-            9.0, 9.0, // ragged tail → ignored by chunks_exact
+            1.0,
+            1.0,
+            2.0,
+            2.0,
+            f32::NAN,
+            0.0, // non-finite conf → dropped
+            3.0,
+            3.0,
+            f32::INFINITY,
+            2.0,
+            0.9,
+            0.0, // non-finite box → dropped
+            7.0,
+            7.0,
+            2.0,
+            2.0,
+            0.95,
+            2.0, // valid → kept
+            9.0,
+            9.0, // ragged tail → ignored by chunks_exact
         ];
         let dets = decode_detections(&raw, &cfg());
         assert_eq!(dets.len(), 1);
@@ -240,7 +284,10 @@ mod tests {
         );
         let backend = MockBackend::new(out, BackendDescriptor::Cpu);
         let model = backend.load_model("yolo.onnx").unwrap();
-        let inputs = TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() };
+        let inputs = TensorBatch {
+            named_tensors: HashMap::new(),
+            metadata: HashMap::new(),
+        };
 
         let dets = run_detector(&backend, &model, &inputs, &cfg()).unwrap();
         assert_eq!(dets.len(), 1);
@@ -253,7 +300,10 @@ mod tests {
         out.insert("something_else".to_string(), vec![0.0_f32; 6]);
         let backend = MockBackend::new(out, BackendDescriptor::Cpu);
         let model = backend.load_model("m").unwrap();
-        let inputs = TensorBatch { named_tensors: HashMap::new(), metadata: HashMap::new() };
+        let inputs = TensorBatch {
+            named_tensors: HashMap::new(),
+            metadata: HashMap::new(),
+        };
 
         let err = run_detector(&backend, &model, &inputs, &cfg()).unwrap_err();
         assert!(matches!(err, DetectError::MissingOutputTensor(_)));

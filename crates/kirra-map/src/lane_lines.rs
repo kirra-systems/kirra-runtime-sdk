@@ -79,11 +79,20 @@ mod tests {
 
     #[test]
     fn broken_line_allows_crossing_solid_forbids() {
-        let broken = LaneBoundary { y_m: -0.5, line: LineType::Broken };
+        let broken = LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Broken,
+        };
         assert!(broken.may_cross(0.0, -1.5), "broken: crossing OK");
-        let solid = LaneBoundary { y_m: -0.5, line: LineType::Solid };
+        let solid = LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Solid,
+        };
         assert!(!solid.may_cross(0.0, -1.5), "solid: no crossing");
-        let double = LaneBoundary { y_m: 0.5, line: LineType::DoubleSolid };
+        let double = LaneBoundary {
+            y_m: 0.5,
+            line: LineType::DoubleSolid,
+        };
         assert!(!double.may_cross(0.0, 2.0), "double solid: no crossing");
     }
 
@@ -92,7 +101,10 @@ mod tests {
         // No paint (undivided / dirt road centerline) → crossing permitted either
         // way, same as a broken line. (Keep-right is a positional default handled
         // elsewhere, not a crossing prohibition.)
-        let unmarked = LaneBoundary { y_m: 0.0, line: LineType::Unmarked };
+        let unmarked = LaneBoundary {
+            y_m: 0.0,
+            line: LineType::Unmarked,
+        };
         assert!(unmarked.may_cross(-1.0, 1.0), "unmarked: cross left OK");
         assert!(unmarked.may_cross(1.0, -1.0), "unmarked: cross right OK");
     }
@@ -100,18 +112,27 @@ mod tests {
     #[test]
     fn not_crossing_a_line_is_unconstrained() {
         // Move stays on one side of the line → allowed even for a solid line.
-        let solid = LaneBoundary { y_m: -3.0, line: LineType::Solid };
+        let solid = LaneBoundary {
+            y_m: -3.0,
+            line: LineType::Solid,
+        };
         assert!(solid.may_cross(0.0, -1.5), "did not reach the line → OK");
     }
 
     #[test]
     fn combined_line_crosses_from_the_broken_side_only() {
         // Broken faces +y: a vehicle on the +y side may cross down; the -y side may not.
-        let bl = LaneBoundary { y_m: 0.0, line: LineType::BrokenOnLeft };
+        let bl = LaneBoundary {
+            y_m: 0.0,
+            line: LineType::BrokenOnLeft,
+        };
         assert!(bl.may_cross(1.0, -1.0), "+y (broken) side may cross");
         assert!(!bl.may_cross(-1.0, 1.0), "-y (solid) side may NOT cross");
         // Mirror image.
-        let br = LaneBoundary { y_m: 0.0, line: LineType::BrokenOnRight };
+        let br = LaneBoundary {
+            y_m: 0.0,
+            line: LineType::BrokenOnRight,
+        };
         assert!(br.may_cross(-1.0, 1.0), "-y (broken) side may cross");
         assert!(!br.may_cross(1.0, -1.0), "+y (solid) side may NOT cross");
     }
@@ -119,8 +140,14 @@ mod tests {
     #[test]
     fn lateral_move_permitted_requires_all_boundaries() {
         let bounds = [
-            LaneBoundary { y_m: -0.5, line: LineType::Broken },
-            LaneBoundary { y_m: -1.0, line: LineType::Solid },
+            LaneBoundary {
+                y_m: -0.5,
+                line: LineType::Broken,
+            },
+            LaneBoundary {
+                y_m: -1.0,
+                line: LineType::Solid,
+            },
         ];
         // Crossing to -1.5 crosses BOTH; the solid one forbids it.
         assert!(!lateral_move_permitted(&bounds, 0.0, -1.5));

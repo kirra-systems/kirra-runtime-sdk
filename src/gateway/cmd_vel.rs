@@ -57,19 +57,29 @@ mod tests {
 
     fn sample_cmd(lx: f64, az: f64) -> CmdVel {
         CmdVel {
-            linear_x: lx, linear_y: 0.0, linear_z: 0.0,
-            angular_x: 0.0, angular_y: 0.0, angular_z: az,
+            linear_x: lx,
+            linear_y: 0.0,
+            linear_z: 0.0,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: az,
         }
     }
 
     #[test]
     fn test_cmd_vel_within_bounds() {
-        assert!(validate_cmd_vel(&sample_cmd(0.25, 0.4), DEFAULT_CMD_VEL_LIMITS));
+        assert!(validate_cmd_vel(
+            &sample_cmd(0.25, 0.4),
+            DEFAULT_CMD_VEL_LIMITS
+        ));
     }
 
     #[test]
     fn test_cmd_vel_exceeds_linear_x() {
-        assert!(!validate_cmd_vel(&sample_cmd(0.6, 0.0), DEFAULT_CMD_VEL_LIMITS));
+        assert!(!validate_cmd_vel(
+            &sample_cmd(0.6, 0.0),
+            DEFAULT_CMD_VEL_LIMITS
+        ));
     }
 
     /// SG9 / GAP 1: NaN or Inf in ANY of the six axes must reject before any
@@ -158,8 +168,12 @@ mod tests {
             max_angular_z_abs: 1.0,
         };
         let cmd = CmdVel {
-            linear_x: 0.25, linear_y: 0.9, linear_z: 0.0,
-            angular_x: 0.0, angular_y: 0.0, angular_z: 0.2,
+            linear_x: 0.25,
+            linear_y: 0.9,
+            linear_z: 0.0,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: 0.2,
         };
         assert!(
             !validate_cmd_vel(&cmd, limits),
@@ -178,8 +192,12 @@ mod tests {
             max_angular_z_abs: 1.0,
         };
         let cmd = CmdVel {
-            linear_x: 0.25, linear_y: 0.0, linear_z: -0.9,
-            angular_x: 0.0, angular_y: 0.0, angular_z: 0.2,
+            linear_x: 0.25,
+            linear_y: 0.0,
+            linear_z: -0.9,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: 0.2,
         };
         assert!(
             !validate_cmd_vel(&cmd, limits),
@@ -198,8 +216,12 @@ mod tests {
             max_angular_z_abs: 1.0,
         };
         let cmd = CmdVel {
-            linear_x: 0.25, linear_y: 0.2, linear_z: -0.3,
-            angular_x: 0.0, angular_y: 0.0, angular_z: 0.2,
+            linear_x: 0.25,
+            linear_y: 0.2,
+            linear_z: -0.3,
+            angular_x: 0.0,
+            angular_y: 0.0,
+            angular_z: 0.2,
         };
         assert!(
             validate_cmd_vel(&cmd, limits),

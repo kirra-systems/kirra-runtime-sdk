@@ -1,6 +1,6 @@
 // src/action_filter.rs
 
-use crate::{SafetyGovernor, ActionResolution, AgentAction, SafetyContract};
+use crate::{ActionResolution, AgentAction, SafetyContract, SafetyGovernor};
 
 pub struct FilterOutput {
     pub resolution: ActionResolution,
@@ -28,7 +28,9 @@ impl<C: SafetyContract> ActionFilter<C> {
                 let intercept = governor.evaluate(velocity, dt);
                 let mutated = (intercept.sanitized_scalar - velocity).abs() > 0.001;
 
-                let resolution = if intercept.was_unsafe_attempt && governor.trust_mode() == crate::TrustMode::LockedOut {
+                let resolution = if intercept.was_unsafe_attempt
+                    && governor.trust_mode() == crate::TrustMode::LockedOut
+                {
                     ActionResolution::Failsafe
                 } else if mutated {
                     ActionResolution::Mutated
@@ -38,7 +40,9 @@ impl<C: SafetyContract> ActionFilter<C> {
 
                 FilterOutput {
                     resolution,
-                    sanitized_action: AgentAction::MoveLinear { velocity: intercept.sanitized_scalar },
+                    sanitized_action: AgentAction::MoveLinear {
+                        velocity: intercept.sanitized_scalar,
+                    },
                     narrative: intercept.mitigation.to_string(),
                 }
             }
@@ -67,8 +71,8 @@ impl<C: SafetyContract> ActionFilter<C> {
 
 // --- Posture-aware action claim evaluation (post-v1 extension) ---------------
 
-use crate::verifier::FleetPosture;
 use crate::gateway::cmd_vel::{validate_cmd_vel, CmdVel, DEFAULT_CMD_VEL_LIMITS};
+use crate::verifier::FleetPosture;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ActionClaim {
@@ -86,10 +90,16 @@ pub struct ActionDecision {
 
 pub fn evaluate_action_claim(claim: ActionClaim, posture: FleetPosture) -> ActionDecision {
     if claim.action_type.is_empty() {
-        return ActionDecision { allowed: false, reason: "MISSING_ACTION_TYPE".to_string() };
+        return ActionDecision {
+            allowed: false,
+            reason: "MISSING_ACTION_TYPE".to_string(),
+        };
     }
     if claim.target_node.is_empty() {
-        return ActionDecision { allowed: false, reason: "MISSING_TARGET_NODE".to_string() };
+        return ActionDecision {
+            allowed: false,
+            reason: "MISSING_TARGET_NODE".to_string(),
+        };
     }
 
     match posture {
@@ -97,22 +107,43 @@ pub fn evaluate_action_claim(claim: ActionClaim, posture: FleetPosture) -> Actio
             "cmd_vel" => match serde_json::from_value::<CmdVel>(claim.payload.clone()) {
                 Ok(cmd) => {
                     if validate_cmd_vel(&cmd, DEFAULT_CMD_VEL_LIMITS) {
-                        ActionDecision { allowed: true, reason: "NOMINAL_VALID_KINEMATICS".to_string() }
+                        ActionDecision {
+                            allowed: true,
+                            reason: "NOMINAL_VALID_KINEMATICS".to_string(),
+                        }
                     } else {
-                        ActionDecision { allowed: false, reason: "KINEMATIC_ENVELOPE_BREACH".to_string() }
+                        ActionDecision {
+                            allowed: false,
+                            reason: "KINEMATIC_ENVELOPE_BREACH".to_string(),
+                        }
                     }
                 }
-                Err(_) => ActionDecision { allowed: false, reason: "MALFORMED_CMD_VEL_PAYLOAD".to_string() },
+                Err(_) => ActionDecision {
+                    allowed: false,
+                    reason: "MALFORMED_CMD_VEL_PAYLOAD".to_string(),
+                },
             },
-            _ => ActionDecision { allowed: false, reason: "UNKNOWN_ACTION_TYPE".to_string() },
+            _ => ActionDecision {
+                allowed: false,
+                reason: "UNKNOWN_ACTION_TYPE".to_string(),
+            },
         },
         FleetPosture::Degraded => {
             if claim.risk_class == "kinetic_write" || claim.action_type == "cmd_vel" {
-                ActionDecision { allowed: false, reason: "DEGRADED_POSTURE_KINETIC_DENIED".to_string() }
+                ActionDecision {
+                    allowed: false,
+                    reason: "DEGRADED_POSTURE_KINETIC_DENIED".to_string(),
+                }
             } else if claim.action_type == "read_telemetry" {
-                ActionDecision { allowed: true, reason: "DEGRADED_READ_ONLY_PERMITTED".to_string() }
+                ActionDecision {
+                    allowed: true,
+                    reason: "DEGRADED_READ_ONLY_PERMITTED".to_string(),
+                }
             } else {
-                ActionDecision { allowed: false, reason: "DEGRADED_UNSUPPORTED_CLAIM_TYPE".to_string() }
+                ActionDecision {
+                    allowed: false,
+                    reason: "DEGRADED_UNSUPPORTED_CLAIM_TYPE".to_string(),
+                }
             }
         }
         FleetPosture::LockedOut => ActionDecision {
@@ -157,7 +188,11 @@ mod action_filter_tests {
     #[test]
     fn test_unknown_action_type_always_denied() {
         // Unknown action types must be denied in ALL posture states
-        for posture in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
+        for posture in [
+            FleetPosture::Nominal,
+            FleetPosture::Degraded,
+            FleetPosture::LockedOut,
+        ] {
             let d = evaluate_action_claim(unknown_claim(), posture);
             assert!(!d.allowed, "Unknown action must be denied in {posture:?}");
         }

@@ -29,11 +29,11 @@
 // 9. BICYCLE_MODEL_AFTER_CLAMP: after ClampSteering, lateral accel <= contract max
 // 10.DETERMINISTIC: same input always produces same output
 
-use proptest::prelude::*;
+use crate::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleClass};
 use crate::gateway::kinematics_contract::{
     validate_vehicle_command, EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
 };
-use crate::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleClass};
+use proptest::prelude::*;
 
 /// EVERY member of the contract family (Nominal + MRC for all three classes),
 /// as `(label, contract)`. The validation gate (#312): a profile that fails the
@@ -41,7 +41,11 @@ use crate::gateway::contract_profiles::{contract_for, mrc_fallback_for, VehicleC
 /// certification story, so the same battery runs against every member.
 fn family_contracts() -> Vec<(&'static str, VehicleKinematicsContract)> {
     let mut v = Vec::new();
-    for class in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+    for class in [
+        VehicleClass::Courier,
+        VehicleClass::DeliveryAv,
+        VehicleClass::Robotaxi,
+    ] {
         v.push((class.as_str(), contract_for(class)));
         v.push((class.as_str(), mrc_fallback_for(class)));
     }
@@ -59,18 +63,16 @@ fn finite_f64() -> impl Strategy<Value = f64> {
         -1e-10_f64..=1e-10_f64,
         prop_oneof![Just(f64::MAX / 2.0), Just(f64::MIN / 2.0)],
         Just(0.0_f64),
-        Just(35.0_f64), Just(-35.0_f64),
-        Just(5.0_f64), Just(-5.0_f64),
+        Just(35.0_f64),
+        Just(-35.0_f64),
+        Just(5.0_f64),
+        Just(-5.0_f64),
     ]
 }
 
 /// Strategy for non-finite f64 values (NaN and Inf variants).
 fn nonfinite_f64() -> impl Strategy<Value = f64> {
-    prop_oneof![
-        Just(f64::NAN),
-        Just(f64::INFINITY),
-        Just(f64::NEG_INFINITY),
-    ]
+    prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY),]
 }
 
 /// Strategy for delta_time_s — includes zero and negative to test Priority 1.
@@ -92,13 +94,14 @@ fn finite_command() -> impl Strategy<Value = ProposedVehicleCommand> {
         delta_time_strategy(),
         finite_f64(),
         finite_f64(),
-    ).prop_map(|(v, cv, dt, delta, cdelta)| ProposedVehicleCommand {
-        linear_velocity_mps: v,
-        current_velocity_mps: cv,
-        delta_time_s: dt,
-        steering_angle_deg: delta,
-        current_steering_angle_deg: cdelta,
-    })
+    )
+        .prop_map(|(v, cv, dt, delta, cdelta)| ProposedVehicleCommand {
+            linear_velocity_mps: v,
+            current_velocity_mps: cv,
+            delta_time_s: dt,
+            steering_angle_deg: delta,
+            current_steering_angle_deg: cdelta,
+        })
 }
 
 /// Strategy for a valid (non-zero positive) delta_time_s command.
@@ -109,20 +112,18 @@ fn valid_dt_command() -> impl Strategy<Value = ProposedVehicleCommand> {
         0.001_f64..=1.0_f64,
         finite_f64(),
         finite_f64(),
-    ).prop_map(|(v, cv, dt, delta, cdelta)| ProposedVehicleCommand {
-        linear_velocity_mps: v,
-        current_velocity_mps: cv,
-        delta_time_s: dt,
-        steering_angle_deg: delta,
-        current_steering_angle_deg: cdelta,
-    })
+    )
+        .prop_map(|(v, cv, dt, delta, cdelta)| ProposedVehicleCommand {
+            linear_velocity_mps: v,
+            current_velocity_mps: cv,
+            delta_time_s: dt,
+            steering_angle_deg: delta,
+            current_steering_angle_deg: cdelta,
+        })
 }
 
 /// Builds a command with one nonfinite field at the given slot index (0-4).
-fn command_with_one_nonfinite_field(
-    bad_value: f64,
-    field_idx: usize,
-) -> ProposedVehicleCommand {
+fn command_with_one_nonfinite_field(bad_value: f64, field_idx: usize) -> ProposedVehicleCommand {
     let fields = [10.0_f64, 10.0, 0.1, 5.0, 5.0];
     let mut f = fields;
     f[field_idx % 5] = bad_value;

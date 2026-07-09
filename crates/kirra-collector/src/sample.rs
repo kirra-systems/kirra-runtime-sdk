@@ -93,9 +93,16 @@ mod tests {
 
     #[test]
     fn interventions_are_never_sampled_out() {
-        for outcome in [CaptureOutcome::ClampLinear, CaptureOutcome::ClampSteering, CaptureOutcome::Deny] {
+        for outcome in [
+            CaptureOutcome::ClampLinear,
+            CaptureOutcome::ClampSteering,
+            CaptureOutcome::Deny,
+        ] {
             let r = rec(7, outcome);
-            assert!(keep(&r, 0.0), "intervention must survive even at pass_rate 0.0");
+            assert!(
+                keep(&r, 0.0),
+                "intervention must survive even at pass_rate 0.0"
+            );
         }
     }
 }

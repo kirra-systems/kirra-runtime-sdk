@@ -43,7 +43,10 @@ const IMPACT_ESCALATION_RAISED_EVENT_TYPE: &str = "ImpactEscalationRaised";
 const IMPACT_AUDIT_SOURCE: &str = "governor_impact_latch";
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn decode_signing_key(b64: &str) -> Result<SigningKey, String> {
@@ -77,20 +80,38 @@ struct SeedSummary {
 fn seed(store: &mut VerifierStore, now: u64) -> rusqlite::Result<SeedSummary> {
     // node_id, trust state (drives the console fleet tile), route/condition note.
     let nodes: [(&str, NodeTrustState, &str); 6] = [
-        ("KIRRA-DEMO-01", NodeTrustState::Trusted, "route: depot → dock A"),
-        ("KIRRA-DEMO-02", NodeTrustState::Trusted, "route: dock A → yard"),
+        (
+            "KIRRA-DEMO-01",
+            NodeTrustState::Trusted,
+            "route: depot → dock A",
+        ),
+        (
+            "KIRRA-DEMO-02",
+            NodeTrustState::Trusted,
+            "route: dock A → yard",
+        ),
         (
             "KIRRA-DEMO-03",
-            NodeTrustState::Untrusted("post-collision impact latch — operator clearance required".into()),
+            NodeTrustState::Untrusted(
+                "post-collision impact latch — operator clearance required".into(),
+            ),
             "SG6 immobilized — escalation raised",
         ),
-        ("KIRRA-DEMO-04", NodeTrustState::Trusted, "route: yard → depot"),
+        (
+            "KIRRA-DEMO-04",
+            NodeTrustState::Trusted,
+            "route: yard → depot",
+        ),
         (
             "KIRRA-DEMO-05",
             NodeTrustState::Untrusted("flood_condition_active".into()),
             "degraded: standing water on segment 7",
         ),
-        ("KIRRA-DEMO-06", NodeTrustState::Trusted, "route: charging bay"),
+        (
+            "KIRRA-DEMO-06",
+            NodeTrustState::Trusted,
+            "route: charging bay",
+        ),
     ];
 
     let mut events = 0usize;
@@ -131,7 +152,8 @@ fn seed(store: &mut VerifierStore, now: u64) -> rusqlite::Result<SeedSummary> {
     store.save_posture_event_chained(
         "KIRRA-DEMO-03",
         "RSS_VIOLATION",
-        &serde_json::json!({ "safe": false, "note": "RSS longitudinal safe-distance violated" }).to_string(),
+        &serde_json::json!({ "safe": false, "note": "RSS longitudinal safe-distance violated" })
+            .to_string(),
         Some("rss_violation"),
         now - 3_000,
     )?;
@@ -177,7 +199,10 @@ fn seed(store: &mut VerifierStore, now: u64) -> rusqlite::Result<SeedSummary> {
     )?;
     events += 1;
 
-    Ok(SeedSummary { nodes: nodes.len(), events })
+    Ok(SeedSummary {
+        nodes: nodes.len(),
+        events,
+    })
 }
 
 fn main() {
@@ -226,7 +251,10 @@ fn main() {
         }
     };
 
-    println!("Seeded '{db}': {} demo nodes, {} signed chain events.", summary.nodes, summary.events);
+    println!(
+        "Seeded '{db}': {} demo nodes, {} signed chain events.",
+        summary.nodes, summary.events
+    );
     println!("  fleet: KIRRA-DEMO-01..06 (DEMO DATA, not evidence).");
     println!("  KIRRA-DEMO-03: SG6 escalation (RSS_VIOLATION → TRAJECTORY_MRC_FALLBACK → ImpactDetected → ImpactEscalationRaised).");
     println!();
@@ -271,10 +299,22 @@ mod tests {
             .entries
             .iter()
             .filter_map(|e| serde_json::to_value(e).ok())
-            .filter_map(|v| v.get("event_type").and_then(|x| x.as_str()).map(String::from))
+            .filter_map(|v| {
+                v.get("event_type")
+                    .and_then(|x| x.as_str())
+                    .map(String::from)
+            })
             .collect();
-        for required in ["ImpactDetected", "ImpactEscalationRaised", "RSS_VIOLATION", "TRAJECTORY_MRC_FALLBACK"] {
-            assert!(types.iter().any(|t| t == required), "missing real event type {required}");
+        for required in [
+            "ImpactDetected",
+            "ImpactEscalationRaised",
+            "RSS_VIOLATION",
+            "TRAJECTORY_MRC_FALLBACK",
+        ] {
+            assert!(
+                types.iter().any(|t| t == required),
+                "missing real event type {required}"
+            );
         }
         // Every row carries a real signature that VERIFIES under the seeding key
         // (load_audit_chain_page renders this as "valid"; "unsigned"/"invalid"
@@ -282,17 +322,27 @@ mod tests {
         let all_valid = page.entries.iter().all(|e| {
             serde_json::to_value(e)
                 .ok()
-                .and_then(|v| v.get("signature_status").and_then(|x| x.as_str()).map(|s| s == "valid"))
+                .and_then(|v| {
+                    v.get("signature_status")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s == "valid")
+                })
                 .unwrap_or(false)
         });
-        assert!(all_valid, "every seeded row must be signed AND verify (status == \"valid\")");
+        assert!(
+            all_valid,
+            "every seeded row must be signed AND verify (status == \"valid\")"
+        );
     }
 
     #[test]
     fn impact_event_strings_match_real_taxonomy() {
         // The bin's literals are byte-identical to the production parko-kirra
         // constants (we can't import them in non-test code — dev-dep cycle).
-        assert_eq!(IMPACT_DETECTED_EVENT_TYPE, parko_kirra::audit_sink::IMPACT_DETECTED_EVENT_TYPE);
+        assert_eq!(
+            IMPACT_DETECTED_EVENT_TYPE,
+            parko_kirra::audit_sink::IMPACT_DETECTED_EVENT_TYPE
+        );
         assert_eq!(
             IMPACT_ESCALATION_RAISED_EVENT_TYPE,
             parko_kirra::audit_sink::IMPACT_ESCALATION_RAISED_EVENT_TYPE
@@ -305,7 +355,10 @@ mod tests {
         store.set_signing_key(demo_key());
         seed(&mut store, 1_700_000_000_000).expect("seed");
         // A second seed attempt is refused (RAIL 1).
-        assert!(ensure_fresh(&store).is_err(), "a populated store must be refused");
+        assert!(
+            ensure_fresh(&store).is_err(),
+            "a populated store must be refused"
+        );
     }
 
     #[test]
@@ -328,14 +381,21 @@ mod tests {
         let store = StoreHandle::new(store);
         // A loop driven into EscalationRaised through the REAL state machine.
         let mut clearance_loop = ClearanceLoop::new();
-        let ev = ImpactEvidence { imu_accel_spike_mps2: 0.0, contact_sensor: true, vanished_object: false };
+        let ev = ImpactEvidence {
+            imu_accel_spike_mps2: 0.0,
+            contact_sensor: true,
+            vanished_object: false,
+        };
         clearance_loop.observe(&ev, &ImpactCfg::default(), 0);
         clearance_loop.observe(&ev, &ImpactCfg::default(), 0);
         assert!(clearance_loop.is_immobilized());
 
         let delivery = ClearanceDelivery::new(store, "KIRRA-DEMO-03");
         let outcome = delivery.poll_and_deliver(&mut clearance_loop, 1_700_000_001_000);
-        assert!(matches!(outcome, DeliveryOutcome::Cleared { .. }), "got {outcome:?}");
+        assert!(
+            matches!(outcome, DeliveryOutcome::Cleared { .. }),
+            "got {outcome:?}"
+        );
         assert_eq!(clearance_loop.state(), parko_core::ClearanceState::Normal);
     }
 }

@@ -36,7 +36,8 @@ pub(crate) const REQUEST_ID_HEADER: &str = "x-kirra-request-id";
 fn client_id_acceptable(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= 64
-        && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// Mint a fresh request id: 128 random bits (OS CSPRNG via `getrandom`, the
@@ -74,7 +75,10 @@ pub(crate) async fn request_observability(
     let started = Instant::now();
     let mut res = next.run(req).instrument(span).await;
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    svc.app.fleet_metrics.http_request_latency.record_micros(micros);
+    svc.app
+        .fleet_metrics
+        .http_request_latency
+        .record_micros(micros);
 
     // The id was validated (or freshly minted as hex), so it is always a
     // legal header value; fall back to dropping the header rather than
@@ -122,7 +126,10 @@ mod observability_tests {
     fn app(svc: Arc<ServiceState>) -> Router {
         Router::new()
             .route("/ping", get(|| async { "pong" }))
-            .layer(axum::middleware::from_fn_with_state(svc.clone(), request_observability))
+            .layer(axum::middleware::from_fn_with_state(
+                svc.clone(),
+                request_observability,
+            ))
             .with_state(svc)
     }
 
@@ -144,7 +151,13 @@ mod observability_tests {
             .to_owned();
         assert_eq!(id.len(), 32, "minted ids are 128-bit hex: {id}");
         assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(svc.app.fleet_metrics.http_request_latency.observation_count(), 1);
+        assert_eq!(
+            svc.app
+                .fleet_metrics
+                .http_request_latency
+                .observation_count(),
+            1
+        );
     }
 
     /// A well-formed client-supplied id is honored (cross-service
@@ -175,7 +188,12 @@ mod observability_tests {
             )
             .await
             .unwrap();
-        let echoed = hostile.headers().get(REQUEST_ID_HEADER).unwrap().to_str().unwrap();
+        let echoed = hostile
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_ne!(echoed, "evil\"} injection {label=\"x");
         assert_eq!(echoed.len(), 32, "hostile id replaced with a minted one");
     }

@@ -17,7 +17,9 @@ impl VolatileZeroizer {
     #[inline]
     pub fn zeroize(slice: &mut [u8]) {
         for i in 0..slice.len() {
-            unsafe { std::ptr::write_volatile(&mut slice[i], 0u8); }
+            unsafe {
+                std::ptr::write_volatile(&mut slice[i], 0u8);
+            }
         }
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
     }
@@ -35,8 +37,16 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     // length bound). The length_mask still forces a reject on a length mismatch.
     let span = a.len().max(b.len()).max(64);
     for i in 0..span {
-        let byte_a = if i < a.len() { unsafe { std::ptr::read_volatile(&a[i]) } } else { 0u8 };
-        let byte_b = if i < b.len() { unsafe { std::ptr::read_volatile(&b[i]) } } else { 0u8 };
+        let byte_a = if i < a.len() {
+            unsafe { std::ptr::read_volatile(&a[i]) }
+        } else {
+            0u8
+        };
+        let byte_b = if i < b.len() {
+            unsafe { std::ptr::read_volatile(&b[i]) }
+        } else {
+            0u8
+        };
         bitwise_accumulator.fetch_or(byte_a ^ byte_b, Ordering::SeqCst);
     }
 
@@ -88,7 +98,9 @@ pub struct AdministrativeKeyContainer {
 
 impl AdministrativeKeyContainer {
     pub fn new(initial_key: Vec<u8>) -> Self {
-        Self { private_auth_key: initial_key }
+        Self {
+            private_auth_key: initial_key,
+        }
     }
 
     pub fn rotate_key(&mut self, new_key: Vec<u8>) {
@@ -127,41 +139,57 @@ mod sg_015_admin_token_tests {
     #[test]
     fn test_absent_configured_token_denies() {
         // Mirrors KIRRA_ADMIN_TOKEN unset → fail-closed (caller → 503).
-        assert!(!admin_token_ok(Some("anything"), None),
-            "no configured admin token must deny (fail-closed)");
+        assert!(
+            !admin_token_ok(Some("anything"), None),
+            "no configured admin token must deny (fail-closed)"
+        );
     }
 
     #[test]
     fn test_empty_configured_token_denies() {
         // Mirrors KIRRA_ADMIN_TOKEN="" → fail-closed (caller → 503).
-        assert!(!admin_token_ok(Some("anything"), Some("")),
-            "empty configured admin token must deny (fail-closed)");
+        assert!(
+            !admin_token_ok(Some("anything"), Some("")),
+            "empty configured admin token must deny (fail-closed)"
+        );
         // Empty configured denies even an empty provided token (no fail-open).
-        assert!(!admin_token_ok(Some(""), Some("")),
-            "empty==empty must NOT authorize");
-        assert!(!admin_token_ok(None, Some("")),
-            "empty configured denies regardless of provided");
+        assert!(
+            !admin_token_ok(Some(""), Some("")),
+            "empty==empty must NOT authorize"
+        );
+        assert!(
+            !admin_token_ok(None, Some("")),
+            "empty configured denies regardless of provided"
+        );
     }
 
     #[test]
     fn test_absent_provided_token_denies() {
-        assert!(!admin_token_ok(None, Some("s3cret-admin-token")),
-            "a request with no bearer token must deny");
+        assert!(
+            !admin_token_ok(None, Some("s3cret-admin-token")),
+            "a request with no bearer token must deny"
+        );
     }
 
     #[test]
     fn test_wrong_provided_token_denies() {
-        assert!(!admin_token_ok(Some("wrong"), Some("s3cret-admin-token")),
-            "a mismatched token must deny");
+        assert!(
+            !admin_token_ok(Some("wrong"), Some("s3cret-admin-token")),
+            "a mismatched token must deny"
+        );
         // Length-mismatch path of constant_time_compare also denies.
-        assert!(!admin_token_ok(Some("s3cret-admin-token-extra"), Some("s3cret-admin-token")),
-            "a longer-but-prefix-matching token must deny");
+        assert!(
+            !admin_token_ok(Some("s3cret-admin-token-extra"), Some("s3cret-admin-token")),
+            "a longer-but-prefix-matching token must deny"
+        );
     }
 
     #[test]
     fn test_correct_token_allows() {
-        assert!(admin_token_ok(Some("s3cret-admin-token"), Some("s3cret-admin-token")),
-            "the exact configured token must authorize");
+        assert!(
+            admin_token_ok(Some("s3cret-admin-token"), Some("s3cret-admin-token")),
+            "the exact configured token must authorize"
+        );
     }
 
     #[test]
@@ -173,9 +201,13 @@ mod sg_015_admin_token_tests {
         let a = format!("{prefix}aaaaaaaaaa");
         let b = format!("{prefix}bbbbbbbbbb");
         assert_eq!(a.len(), b.len(), "same length isolates the prefix-only bug");
-        assert!(!constant_time_compare(a.as_bytes(), b.as_bytes()),
-            "tokens differing only past byte 64 must NOT compare equal");
-        assert!(constant_time_compare(a.as_bytes(), a.as_bytes()),
-            "an identical >64-byte token must still compare equal");
+        assert!(
+            !constant_time_compare(a.as_bytes(), b.as_bytes()),
+            "tokens differing only past byte 64 must NOT compare equal"
+        );
+        assert!(
+            constant_time_compare(a.as_bytes(), a.as_bytes()),
+            "an identical >64-byte token must still compare equal"
+        );
     }
 }

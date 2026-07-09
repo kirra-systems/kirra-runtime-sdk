@@ -265,10 +265,14 @@ impl DiverseKirraGovernor {
         let cur_lin = previous.map(|p| p.linear_velocity).unwrap_or(0.0);
         let cur_ang = previous.map(|p| p.angular_velocity).unwrap_or(0.0);
         if let Some(reason) = degraded_channel_violation(cur_lin, v, STOP_EPSILON_MPS) {
-            return EnforcementAction::Deny { reason: reason.to_string() };
+            return EnforcementAction::Deny {
+                reason: reason.to_string(),
+            };
         }
         if let Some(reason) = degraded_channel_violation(cur_ang, w, STOP_EPSILON_RAD_S) {
-            return EnforcementAction::Deny { reason: reason.to_string() };
+            return EnforcementAction::Deny {
+                reason: reason.to_string(),
+            };
         }
 
         // DIFFERENCE #4 — over-ceiling guard instead of `v.min(MRC)`.
@@ -316,8 +320,7 @@ impl DiverseKirraGovernor {
             };
         }
 
-        let (safe_linear, linear_clamped) =
-            self.diverse_linear_envelope(v, current, delta_time_s);
+        let (safe_linear, linear_clamped) = self.diverse_linear_envelope(v, current, delta_time_s);
 
         // DIFFERENCE — angular bound evaluated at the ORIGINAL commanded
         // linear speed (matching the primary's `nominal_angular_clamp`,
@@ -407,11 +410,7 @@ fn clamp_angular(w: f64, omega_ceiling: f64) -> Option<f64> {
 /// most-restrictive-wins. Produces the same variant the primary does for a
 /// given `(linear_clamped, angular_clamped)` pair so the physical effect —
 /// and the action shape — match.
-fn build_action(
-    safe_linear: f64,
-    linear_clamped: bool,
-    angular: Option<f64>,
-) -> EnforcementAction {
+fn build_action(safe_linear: f64, linear_clamped: bool, angular: Option<f64>) -> EnforcementAction {
     match (linear_clamped, angular) {
         (false, None) => EnforcementAction::Allow,
         (true, None) => EnforcementAction::ClampLinearVelocity(safe_linear),
@@ -526,60 +525,186 @@ mod tests {
     fn agreement_nominal_spans_allow_and_each_clamp() {
         let prev = twist(3.0, 0.0);
         // Allow — steady state in envelope.
-        assert_agrees(safe_rss(), &twist(3.0, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(3.0, 0.0),
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // Linear ceiling clamp (|v| > 35).
-        assert_agrees(safe_rss(), &twist(40.0, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
-        assert_agrees(safe_rss(), &twist(-50.0, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(40.0, 0.0),
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert_agrees(
+            safe_rss(),
+            &twist(-50.0, 0.0),
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // Acceleration rate clamp.
-        assert_agrees(safe_rss(), &twist(20.0, 0.0), Some(&twist(0.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(20.0, 0.0),
+            Some(&twist(0.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // Brake rate clamp.
-        assert_agrees(safe_rss(), &twist(-20.0, 0.0), Some(&twist(10.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(-20.0, 0.0),
+            Some(&twist(10.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // Angular-only clamp (linear in envelope, big yaw).
-        assert_agrees(safe_rss(), &twist(2.0, 5.0), Some(&twist(2.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(2.0, 5.0),
+            Some(&twist(2.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // Both axes clamp (over ceiling + big yaw).
-        assert_agrees(safe_rss(), &twist(60.0, 5.0), Some(&twist(30.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(60.0, 5.0),
+            Some(&twist(30.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         // In-place rotation (v=0, big yaw).
-        assert_agrees(safe_rss(), &twist(0.0, 3.0), Some(&twist(0.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(0.0, 3.0),
+            Some(&twist(0.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
     }
 
     /// Nominal fail-closed Deny paths (non-finite / non-physical dt).
     #[test]
     fn agreement_nominal_deny_paths() {
         let prev = twist(3.0, 0.0);
-        assert_agrees(safe_rss(), &twist(f64::NAN, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
-        assert_agrees(safe_rss(), &twist(3.0, 0.0), Some(&prev), 0.0, SafetyPosture::Nominal);
-        assert_agrees(safe_rss(), &twist(3.0, 0.0), Some(&prev), -0.1, SafetyPosture::Nominal);
+        assert_agrees(
+            safe_rss(),
+            &twist(f64::NAN, 0.0),
+            Some(&prev),
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert_agrees(
+            safe_rss(),
+            &twist(3.0, 0.0),
+            Some(&prev),
+            0.0,
+            SafetyPosture::Nominal,
+        );
+        assert_agrees(
+            safe_rss(),
+            &twist(3.0, 0.0),
+            Some(&prev),
+            -0.1,
+            SafetyPosture::Nominal,
+        );
     }
 
     /// Degraded posture — MRC contraction on both axes.
     #[test]
     fn agreement_degraded_spans_mrc_envelope() {
         // Below MRC cap → pass.
-        assert_agrees(safe_rss(), &twist(3.0, 0.1), None, 0.05, SafetyPosture::Degraded);
+        assert_agrees(
+            safe_rss(),
+            &twist(3.0, 0.1),
+            None,
+            0.05,
+            SafetyPosture::Degraded,
+        );
         // Above MRC linear cap → clamp to 5.0.
-        assert_agrees(safe_rss(), &twist(10.0, 0.0), None, 0.05, SafetyPosture::Degraded);
+        assert_agrees(
+            safe_rss(),
+            &twist(10.0, 0.0),
+            None,
+            0.05,
+            SafetyPosture::Degraded,
+        );
         // Above MRC angular cap.
-        assert_agrees(safe_rss(), &twist(2.0, 4.0), None, 0.05, SafetyPosture::Degraded);
+        assert_agrees(
+            safe_rss(),
+            &twist(2.0, 4.0),
+            None,
+            0.05,
+            SafetyPosture::Degraded,
+        );
         // Both axes over MRC caps.
-        assert_agrees(safe_rss(), &twist(12.0, 4.0), None, 0.05, SafetyPosture::Degraded);
+        assert_agrees(
+            safe_rss(),
+            &twist(12.0, 4.0),
+            None,
+            0.05,
+            SafetyPosture::Degraded,
+        );
         // Reverse below cap (negative not clamped by min()).
-        assert_agrees(safe_rss(), &twist(-3.0, 0.0), None, 0.05, SafetyPosture::Degraded);
+        assert_agrees(
+            safe_rss(),
+            &twist(-3.0, 0.0),
+            None,
+            0.05,
+            SafetyPosture::Degraded,
+        );
     }
 
     /// RSS-unsafe in Nominal posture must take the same MRC path.
     #[test]
     fn agreement_rss_unsafe_takes_mrc_path() {
-        assert_agrees(unsafe_rss(), &twist(10.0, 0.0), None, 0.05, SafetyPosture::Nominal);
-        assert_agrees(unsafe_rss(), &twist(2.0, 4.0), None, 0.05, SafetyPosture::Nominal);
-        assert_agrees(unsafe_rss(), &twist(3.0, 0.1), None, 0.05, SafetyPosture::Nominal);
+        assert_agrees(
+            unsafe_rss(),
+            &twist(10.0, 0.0),
+            None,
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert_agrees(
+            unsafe_rss(),
+            &twist(2.0, 4.0),
+            None,
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert_agrees(
+            unsafe_rss(),
+            &twist(3.0, 0.1),
+            None,
+            0.05,
+            SafetyPosture::Nominal,
+        );
     }
 
     /// LockedOut dominates everything (incl. RSS-unsafe).
     #[test]
     fn agreement_locked_out_hard_stop() {
         for &v in &[0.0_f64, 3.0, 35.0, 100.0, -20.0] {
-            assert_agrees(safe_rss(), &twist(v, 2.0), None, 0.05, SafetyPosture::LockedOut);
-            assert_agrees(unsafe_rss(), &twist(v, 2.0), None, 0.05, SafetyPosture::LockedOut);
+            assert_agrees(
+                safe_rss(),
+                &twist(v, 2.0),
+                None,
+                0.05,
+                SafetyPosture::LockedOut,
+            );
+            assert_agrees(
+                unsafe_rss(),
+                &twist(v, 2.0),
+                None,
+                0.05,
+                SafetyPosture::LockedOut,
+            );
         }
     }
 
@@ -655,17 +780,37 @@ mod tests {
         // Non-finite linear (current + dt finite).
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let out = gov.evaluate(&twist(bad, 0.0), Some(&fin), 0.05, SafetyPosture::Nominal);
-            assert!(matches!(out, EnforcementAction::Deny { .. }),
-                "non-finite linear {bad} must fail-closed; got {out:?}");
+            assert!(
+                matches!(out, EnforcementAction::Deny { .. }),
+                "non-finite linear {bad} must fail-closed; got {out:?}"
+            );
         }
         // Non-finite current velocity (proposed + dt finite).
-        let out = gov.evaluate(&fin, Some(&twist(f64::NAN, 0.0)), 0.05, SafetyPosture::Nominal);
-        assert!(matches!(out, EnforcementAction::Deny { .. }), "non-finite current must Deny");
+        let out = gov.evaluate(
+            &fin,
+            Some(&twist(f64::NAN, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
+        assert!(
+            matches!(out, EnforcementAction::Deny { .. }),
+            "non-finite current must Deny"
+        );
         // Non-finite dt, and non-physical dt <= 0.
-        assert!(matches!(gov.evaluate(&fin, Some(&fin), f64::NAN, SafetyPosture::Nominal),
-            EnforcementAction::Deny { .. }), "non-finite dt must Deny");
-        assert!(matches!(gov.evaluate(&fin, Some(&fin), 0.0, SafetyPosture::Nominal),
-            EnforcementAction::Deny { .. }), "dt=0 must Deny");
+        assert!(
+            matches!(
+                gov.evaluate(&fin, Some(&fin), f64::NAN, SafetyPosture::Nominal),
+                EnforcementAction::Deny { .. }
+            ),
+            "non-finite dt must Deny"
+        );
+        assert!(
+            matches!(
+                gov.evaluate(&fin, Some(&fin), 0.0, SafetyPosture::Nominal),
+                EnforcementAction::Deny { .. }
+            ),
+            "dt=0 must Deny"
+        );
     }
 
     /// The Nominal accel-rate clamp produces the SPEC value
@@ -675,10 +820,17 @@ mod tests {
     #[test]
     fn diverse_accel_clamp_equals_spec_value() {
         let gov = DiverseKirraGovernor::new().with_external_rss_gate();
-        let out = gov.evaluate(&twist(20.0, 0.0), Some(&twist(0.0, 0.0)), 0.05, SafetyPosture::Nominal);
+        let out = gov.evaluate(
+            &twist(20.0, 0.0),
+            Some(&twist(0.0, 0.0)),
+            0.05,
+            SafetyPosture::Nominal,
+        );
         let v = effective_lin(&out, 20.0);
-        assert!((v - 0.125).abs() < 1e-6,
-            "accel clamp must be current + max_accel*dt = 0.125 m/s, got {v}");
+        assert!(
+            (v - 0.125).abs() < 1e-6,
+            "accel clamp must be current + max_accel*dt = 0.125 m/s, got {v}"
+        );
     }
 
     /// The `RssAwareGovernor::set_rss_state` TRAIT impl must actually update
@@ -698,8 +850,10 @@ mod tests {
         let prev = twist(20.0, 0.0);
         let out = gov.evaluate(&twist(20.0, 0.0), Some(&prev), 0.05, SafetyPosture::Nominal);
         let v = effective_lin(&out, 20.0);
-        assert!((v - MRC_VELOCITY_CEILING_MPS).abs() < 1e-9,
-            "set_rss_state(unsafe) must route to MRC ceiling {MRC_VELOCITY_CEILING_MPS}, got {v}");
+        assert!(
+            (v - MRC_VELOCITY_CEILING_MPS).abs() < 1e-9,
+            "set_rss_state(unsafe) must route to MRC ceiling {MRC_VELOCITY_CEILING_MPS}, got {v}"
+        );
     }
 
     /// `with_odd_speed_cap` makes the `effective_ceiling` ODD-cap arm reachable
@@ -715,15 +869,21 @@ mod tests {
         let mut uncapped = DiverseKirraGovernor::new();
         uncapped.update_rss_state(safe_rss());
         let v_uncapped = effective_lin(
-            &uncapped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal), 30.0);
+            &uncapped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal),
+            30.0,
+        );
 
         let mut capped = DiverseKirraGovernor::new().with_odd_speed_cap(8.0);
         capped.update_rss_state(safe_rss());
         let v_capped = effective_lin(
-            &capped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal), 30.0);
+            &capped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal),
+            30.0,
+        );
 
-        assert!(v_capped <= 8.0 + 1e-9,
-            "ODD cap 8.0 must bind the Nominal ceiling, got {v_capped}");
+        assert!(
+            v_capped <= 8.0 + 1e-9,
+            "ODD cap 8.0 must bind the Nominal ceiling, got {v_capped}"
+        );
         assert!(v_capped < v_uncapped,
             "ODD cap must lower the ceiling below the uncapped max: capped={v_capped} uncapped={v_uncapped}");
     }
@@ -749,18 +909,24 @@ mod tests {
         let mut uncapped = DiverseKirraGovernor::new();
         uncapped.update_rss_state(safe_rss());
         let v_uncapped = effective_lin(
-            &uncapped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal), 60.0);
+            &uncapped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal),
+            60.0,
+        );
 
         // Cap of 50.0 > physical max 35.0 → must not raise the ceiling.
         let mut over_capped = DiverseKirraGovernor::new().with_odd_speed_cap(50.0);
         over_capped.update_rss_state(safe_rss());
         let v_over = effective_lin(
-            &over_capped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal), 60.0);
+            &over_capped.evaluate(&cmd, Some(&prev), 100.0, SafetyPosture::Nominal),
+            60.0,
+        );
 
         assert!((v_over - v_uncapped).abs() < 1e-9,
             "an ODD cap above the physical max must be a no-op: over_capped={v_over} uncapped={v_uncapped}");
-        assert!(v_over <= 35.0 + 1e-9,
-            "ceiling must remain at the physical max 35.0, got {v_over}");
+        assert!(
+            v_over <= 35.0 + 1e-9,
+            "ceiling must remain at the physical max 35.0, got {v_over}"
+        );
     }
 
     // -- Property-based broad agreement ----------------------------------

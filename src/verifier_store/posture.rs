@@ -21,7 +21,13 @@ impl VerifierStore {
             "INSERT INTO posture_events
              (node_id, event_type, posture_json, reason, created_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+            params![
+                node_id,
+                event_type,
+                posture_json,
+                reason,
+                created_at_ms as i64
+            ],
         )?;
         Ok(())
     }
@@ -40,8 +46,8 @@ impl VerifierStore {
             let reason: Option<String> = row.get(2)?;
             let created_at_ms: i64 = row.get(3)?;
 
-            let posture: serde_json::Value = serde_json::from_str(&posture_json)
-                .unwrap_or(serde_json::Value::Null);
+            let posture: serde_json::Value =
+                serde_json::from_str(&posture_json).unwrap_or(serde_json::Value::Null);
 
             Ok(serde_json::json!({
                 "event_type": event_type,
@@ -67,10 +73,7 @@ impl VerifierStore {
     /// carrying its `posture_json` (the resulting `FleetPosture`) and the row
     /// timestamp. The handler buckets these client-side over the window. Pure
     /// read; no new data class. Returns `(created_at_ms, posture_json)` ASC.
-    pub fn load_posture_events_since(
-        &self,
-        since_ms: u64,
-    ) -> Result<Vec<(u64, String)>> {
+    pub fn load_posture_events_since(&self, since_ms: u64) -> Result<Vec<(u64, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT created_at_ms, posture_json FROM posture_events
              WHERE created_at_ms >= ?1
@@ -84,10 +87,7 @@ impl VerifierStore {
 
     /// #396 console analytics — per-node posture-event counts since `since_ms`,
     /// the "flapping" leaderboard input. `(node_id, count)` DESC by count.
-    pub fn count_posture_events_by_node_since(
-        &self,
-        since_ms: u64,
-    ) -> Result<Vec<(String, u64)>> {
+    pub fn count_posture_events_by_node_since(&self, since_ms: u64) -> Result<Vec<(String, u64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, COUNT(*) AS c FROM posture_events
              WHERE created_at_ms >= ?1
@@ -114,8 +114,8 @@ impl VerifierStore {
             let reason: Option<String> = row.get(3)?;
             let created_at_ms: i64 = row.get(4)?;
 
-            let posture: serde_json::Value = serde_json::from_str(&posture_json)
-                .unwrap_or(serde_json::Value::Null);
+            let posture: serde_json::Value =
+                serde_json::from_str(&posture_json).unwrap_or(serde_json::Value::Null);
 
             Ok(serde_json::json!({
                 "node_id": node_id,
@@ -156,10 +156,20 @@ impl VerifierStore {
             "INSERT INTO posture_events
              (node_id, event_type, posture_json, reason, created_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![node_id, event_type, posture_json, reason, created_at_ms as i64],
+            params![
+                node_id,
+                event_type,
+                posture_json,
+                reason,
+                created_at_ms as i64
+            ],
         )?;
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
-            &tx, event_type, posture_json, created_at_ms as i64, signing_key,
+            &tx,
+            event_type,
+            posture_json,
+            created_at_ms as i64,
+            signing_key,
         )?;
         let advanced = match generation {
             Some(g) => {
@@ -197,8 +207,14 @@ impl VerifierStore {
         // Disjoint field borrows: the tx borrows `self.conn`, the append reads
         // `self.signing_key` — different fields, so both live at once.
         Self::write_posture_event_chained_tx(
-            &mut self.conn, self.signing_key.as_ref(),
-            node_id, event_type, posture_json, reason, created_at_ms, None,
+            &mut self.conn,
+            self.signing_key.as_ref(),
+            node_id,
+            event_type,
+            posture_json,
+            reason,
+            created_at_ms,
+            None,
         )?;
         Ok(())
     }
@@ -235,8 +251,14 @@ impl VerifierStore {
             return Err(rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX));
         }
         Self::write_posture_event_chained_tx(
-            &mut self.conn, self.signing_key.as_ref(),
-            node_id, event_type, posture_json, reason, created_at_ms, Some(generation),
+            &mut self.conn,
+            self.signing_key.as_ref(),
+            node_id,
+            event_type,
+            posture_json,
+            reason,
+            created_at_ms,
+            Some(generation),
         )
     }
 
@@ -260,7 +282,10 @@ impl VerifierStore {
         {
             self.durable_posture_writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.fail_durable_posture_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            if self
+                .fail_durable_posture_writes
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Err(Self::injected_durable_fault());
             }
         }
@@ -268,8 +293,14 @@ impl VerifierStore {
         // for the append.
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
         Self::write_posture_event_chained_tx(
-            conn, self.signing_key.as_ref(),
-            node_id, event_type, posture_json, reason, created_at_ms, None,
+            conn,
+            self.signing_key.as_ref(),
+            node_id,
+            event_type,
+            posture_json,
+            reason,
+            created_at_ms,
+            None,
         )?;
         Ok(())
     }
@@ -299,14 +330,23 @@ impl VerifierStore {
         {
             self.durable_posture_writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.fail_durable_posture_writes.load(std::sync::atomic::Ordering::SeqCst) {
+            if self
+                .fail_durable_posture_writes
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Err(Self::injected_durable_fault());
             }
         }
         let conn = self.durable_conn.as_mut().unwrap_or(&mut self.conn);
         Self::write_posture_event_chained_tx(
-            conn, self.signing_key.as_ref(),
-            node_id, event_type, posture_json, reason, created_at_ms, Some(generation),
+            conn,
+            self.signing_key.as_ref(),
+            node_id,
+            event_type,
+            posture_json,
+            reason,
+            created_at_ms,
+            Some(generation),
         )
     }
 
@@ -406,7 +446,7 @@ impl VerifierStore {
             params![key],
             |row| row.get::<_, String>(0),
         ) {
-            Ok(v)  => Ok(Some(v)),
+            Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }

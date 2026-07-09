@@ -27,8 +27,8 @@
 use std::collections::HashMap;
 
 use crate::backend::{
-    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend,
-    ModelHandle, PrecisionMode, TensorBatch,
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, ModelHandle,
+    PrecisionMode, TensorBatch,
 };
 
 /// Backend descriptor for OpenVINO. Free function so callers can read the
@@ -100,12 +100,18 @@ mod tests {
 
     #[test]
     fn test_openvino_stub_descriptor() {
-        assert_eq!(OpenVinoStubBackend.descriptor(), BackendDescriptor::IntelOpenVino);
+        assert_eq!(
+            OpenVinoStubBackend.descriptor(),
+            BackendDescriptor::IntelOpenVino
+        );
     }
 
     #[test]
     fn test_openvino_stub_capabilities_are_default() {
-        assert_eq!(OpenVinoStubBackend.capabilities(), BackendCapabilities::default());
+        assert_eq!(
+            OpenVinoStubBackend.capabilities(),
+            BackendCapabilities::default()
+        );
     }
 
     /// Free-function descriptor() returns the right variant without needing
@@ -129,9 +135,9 @@ mod tests {
                     "InitializationError should mention OpenVINO; got {msg:?}"
                 );
             }
-            Err(other) => panic!(
-                "Expected InitializationError (runtime not installed), got: {other:?}"
-            ),
+            Err(other) => {
+                panic!("Expected InitializationError (runtime not installed), got: {other:?}")
+            }
             Ok(_) => panic!(
                 "Stub on a runtime-less host must not succeed. If OpenVINO is now \
                  installed on this host, replace the stub body with the real impl."

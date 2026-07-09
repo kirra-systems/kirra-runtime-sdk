@@ -71,7 +71,10 @@ pub enum ReplayResult {
     Identical,
     /// THE ALARM: the same inputs through the same checker produced a
     /// different verdict than the record claims.
-    Divergent { recorded: VerdictImage, recomputed: VerdictImage },
+    Divergent {
+        recorded: VerdictImage,
+        recomputed: VerdictImage,
+    },
     /// The record does not carry its complete checker inputs; classified,
     /// never guessed. The reason says exactly what is missing.
     NotReplayable { reason: String },
@@ -147,7 +150,10 @@ pub fn replay_record(rec: &CaptureRecord, class: VehicleClass) -> ReplayResult {
     if recorded == recomputed {
         ReplayResult::Identical
     } else {
-        ReplayResult::Divergent { recorded, recomputed }
+        ReplayResult::Divergent {
+            recorded,
+            recomputed,
+        }
     }
 }
 
@@ -193,7 +199,10 @@ pub fn replay_session_jsonl(jsonl: &str, class: VehicleClass) -> ReplaySummary {
         summary.total += 1;
         match replay_record(&rec, class) {
             ReplayResult::Identical => summary.identical += 1,
-            ReplayResult::Divergent { recorded, recomputed } => summary.divergences.push((
+            ReplayResult::Divergent {
+                recorded,
+                recomputed,
+            } => summary.divergences.push((
                 rec.decision_seq,
                 format!("recorded {recorded:?} != recomputed {recomputed:?}"),
             )),
@@ -265,7 +274,14 @@ mod tests {
                 }
                 FleetPosture::LockedOut => unreachable!(),
             };
-            let rec = record_from_verdict(seq as u64, 1_000 + seq as u64, &verdict, *posture, &cmd, false);
+            let rec = record_from_verdict(
+                seq as u64,
+                1_000 + seq as u64,
+                &verdict,
+                *posture,
+                &cmd,
+                false,
+            );
             out.push_str(&serde_json::to_string(&rec).expect("serialize record"));
             out.push('\n');
         }
@@ -276,11 +292,19 @@ mod tests {
     /// for every vehicle class.
     #[test]
     fn capture_replay_identical_verdicts_all_classes() {
-        for class in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+        for class in [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ] {
             let session = capture_session(class);
             let summary = replay_session_jsonl(&session, class);
             assert_eq!(summary.total, 7, "class {class:?}");
-            assert_eq!(summary.identical, 7, "class {class:?}: {:?}", summary.divergences);
+            assert_eq!(
+                summary.identical, 7,
+                "class {class:?}: {:?}",
+                summary.divergences
+            );
             assert!(summary.is_deterministic());
         }
     }

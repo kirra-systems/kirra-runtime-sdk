@@ -19,7 +19,7 @@ use parko_core::commands::ControlCommand;
 /// PostureTracker / parko-kirra govern these via the 2D subset).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutgoingTwist {
-    pub linear_x_mps:   f64,
+    pub linear_x_mps: f64,
     pub angular_z_rads: f64,
     /// Wall-clock-ms when this twist was produced. Threaded for
     /// the audit ledger + integration trace; not consumed by the
@@ -34,7 +34,11 @@ impl OutgoingTwist {
     ///   - the comparator escalates to LockedOut (Deny path).
     #[must_use]
     pub fn stopped(stamp_ms: u64) -> Self {
-        Self { linear_x_mps: 0.0, angular_z_rads: 0.0, stamp_ms }
+        Self {
+            linear_x_mps: 0.0,
+            angular_z_rads: 0.0,
+            stamp_ms,
+        }
     }
 }
 
@@ -54,9 +58,9 @@ pub fn enforce_outgoing_twist(cmd: &ControlCommand) -> OutgoingTwist {
         return OutgoingTwist::stopped(cmd.timestamp_ms);
     }
     OutgoingTwist {
-        linear_x_mps:   cmd.linear_velocity,
+        linear_x_mps: cmd.linear_velocity,
         angular_z_rads: cmd.angular_velocity,
-        stamp_ms:       cmd.timestamp_ms,
+        stamp_ms: cmd.timestamp_ms,
     }
 }
 
@@ -66,11 +70,20 @@ mod tests {
 
     #[test]
     fn maps_finite_command_per_axis() {
-        let cmd = ControlCommand { linear_velocity: 1.5, angular_velocity: 0.4, timestamp_ms: 100 };
+        let cmd = ControlCommand {
+            linear_velocity: 1.5,
+            angular_velocity: 0.4,
+            timestamp_ms: 100,
+        };
         let twist = enforce_outgoing_twist(&cmd);
-        assert_eq!(twist, OutgoingTwist {
-            linear_x_mps: 1.5, angular_z_rads: 0.4, stamp_ms: 100
-        });
+        assert_eq!(
+            twist,
+            OutgoingTwist {
+                linear_x_mps: 1.5,
+                angular_z_rads: 0.4,
+                stamp_ms: 100
+            }
+        );
     }
 
     #[test]
@@ -84,14 +97,22 @@ mod tests {
     fn defence_in_depth_nan_linear_velocity_maps_to_stop() {
         // A bug downstream of the governor leaked a NaN — the mapper
         // must catch it and emit a stop, never a NaN twist.
-        let cmd = ControlCommand { linear_velocity: f64::NAN, angular_velocity: 0.2, timestamp_ms: 300 };
+        let cmd = ControlCommand {
+            linear_velocity: f64::NAN,
+            angular_velocity: 0.2,
+            timestamp_ms: 300,
+        };
         let twist = enforce_outgoing_twist(&cmd);
         assert_eq!(twist, OutgoingTwist::stopped(300));
     }
 
     #[test]
     fn defence_in_depth_inf_angular_velocity_maps_to_stop() {
-        let cmd = ControlCommand { linear_velocity: 1.0, angular_velocity: f64::INFINITY, timestamp_ms: 400 };
+        let cmd = ControlCommand {
+            linear_velocity: 1.0,
+            angular_velocity: f64::INFINITY,
+            timestamp_ms: 400,
+        };
         let twist = enforce_outgoing_twist(&cmd);
         assert_eq!(twist, OutgoingTwist::stopped(400));
     }

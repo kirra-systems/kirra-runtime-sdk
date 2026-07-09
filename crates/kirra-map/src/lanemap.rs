@@ -81,7 +81,12 @@ impl Occluder {
     pub fn new(x0_m: f64, x1_m: f64, y0_m: f64, y1_m: f64) -> Self {
         let (x_min_m, x_max_m) = Self::order(x0_m, x1_m);
         let (y_min_m, y_max_m) = Self::order(y0_m, y1_m);
-        Self { x_min_m, x_max_m, y_min_m, y_max_m }
+        Self {
+            x_min_m,
+            x_max_m,
+            y_min_m,
+            y_max_m,
+        }
     }
 
     /// Order a pair low→high, but if either is non-finite return `(NaN, NaN)` so the
@@ -151,8 +156,10 @@ pub fn corner_sight_distance(
     // is an in-path object, not an occluder) yet WITHIN the corner reach of an edge.
     let lane_left = lane_y + hw;
     let lane_right = lane_y - hw;
-    let off_left = occ.y_min_m >= lane_left && occ.y_min_m <= lane_left + OCCLUSION_CORNER_LATERAL_REACH_M;
-    let off_right = occ.y_max_m <= lane_right && occ.y_max_m >= lane_right - OCCLUSION_CORNER_LATERAL_REACH_M;
+    let off_left =
+        occ.y_min_m >= lane_left && occ.y_min_m <= lane_left + OCCLUSION_CORNER_LATERAL_REACH_M;
+    let off_right =
+        occ.y_max_m <= lane_right && occ.y_max_m >= lane_right - OCCLUSION_CORNER_LATERAL_REACH_M;
     if !(off_left || off_right) {
         return None;
     }
@@ -253,8 +260,14 @@ impl Lane {
         Self {
             id,
             centerline: vec![
-                Point { x_m: x_start, y_m: y_center },
-                Point { x_m: x_end, y_m: y_center },
+                Point {
+                    x_m: x_start,
+                    y_m: y_center,
+                },
+                Point {
+                    x_m: x_end,
+                    y_m: y_center,
+                },
             ],
             half_width_m,
             left_line,
@@ -365,8 +378,14 @@ impl Lane {
     #[must_use]
     pub fn lane_boundaries(&self) -> Vec<LaneBoundary> {
         vec![
-            LaneBoundary { y_m: self.half_width_m, line: self.left_line },
-            LaneBoundary { y_m: -self.half_width_m, line: self.right_line },
+            LaneBoundary {
+                y_m: self.half_width_m,
+                line: self.left_line,
+            },
+            LaneBoundary {
+                y_m: -self.half_width_m,
+                line: self.right_line,
+            },
         ]
     }
 
@@ -450,7 +469,11 @@ impl LaneGraph {
     /// An empty graph.
     #[must_use]
     pub fn new() -> Self {
-        Self { lanes: BTreeMap::new(), priority_over: BTreeMap::new(), occlusion_sight: BTreeMap::new() }
+        Self {
+            lanes: BTreeMap::new(),
+            priority_over: BTreeMap::new(),
+            occlusion_sight: BTreeMap::new(),
+        }
     }
 
     /// Record that approach `lane` has limited cross-traffic visibility — `sight_distance_m` of
@@ -495,7 +518,8 @@ impl LaneGraph {
         // Collect first (immutable borrow of lanes) then write (mutable borrow of the map).
         let mut derived: Vec<(u64, f64)> = Vec::new();
         for lane in self.lanes.values() {
-            let (Some(first), Some(last)) = (lane.centerline.first(), lane.centerline.last()) else {
+            let (Some(first), Some(last)) = (lane.centerline.first(), lane.centerline.last())
+            else {
                 continue; // degenerate lane — no approach geometry
             };
             if last.x_m <= first.x_m {
@@ -513,7 +537,10 @@ impl LaneGraph {
         }
         for (id, sight) in derived {
             // Tighten-only: keep the stricter of an existing datum and the derived one.
-            let tightened = self.occlusion_sight.get(&id).map_or(sight, |&prev| prev.min(sight));
+            let tightened = self
+                .occlusion_sight
+                .get(&id)
+                .map_or(sight, |&prev| prev.min(sight));
             self.set_occluded_approach(id, tightened);
         }
     }
@@ -528,7 +555,10 @@ impl LaneGraph {
     /// Record that `priority_lane` has right-of-way over `yielding_lane` — traffic in
     /// the yielding lane must cede to traffic in the priority lane at their conflict.
     pub fn add_right_of_way(&mut self, priority_lane: u64, yielding_lane: u64) {
-        self.priority_over.entry(priority_lane).or_default().insert(yielding_lane);
+        self.priority_over
+            .entry(priority_lane)
+            .or_default()
+            .insert(yielding_lane);
     }
 
     /// Builder form of [`add_right_of_way`](Self::add_right_of_way).
@@ -593,12 +623,16 @@ impl LaneGraph {
                 }
                 // Crossing? (not parallel same / opposing)
                 let dh = wrap_pi(a.heading - b.heading).abs();
-                if !(ROW_CROSSING_MIN_RAD..=std::f64::consts::PI - ROW_CROSSING_MIN_RAD).contains(&dh) {
+                if !(ROW_CROSSING_MIN_RAD..=std::f64::consts::PI - ROW_CROSSING_MIN_RAD)
+                    .contains(&dh)
+                {
                     continue;
                 }
                 // Uncontrolled beats stop/yield-controlled. A traffic light (or matching control
                 // classes) asserts nothing.
-                let give = |c: Option<LaneControl>| matches!(c, Some(LaneControl::Stop | LaneControl::Yield));
+                let give = |c: Option<LaneControl>| {
+                    matches!(c, Some(LaneControl::Stop | LaneControl::Yield))
+                };
                 if a.control.is_none() && give(b.control) {
                     grants.push((a.id, b.id));
                 } else if b.control.is_none() && give(a.control) {
@@ -620,7 +654,11 @@ impl LaneGraph {
 
     /// The lanes that must yield to `priority_lane` (empty if it has no asserted priority).
     pub fn lanes_yielding_to(&self, priority_lane: u64) -> impl Iterator<Item = u64> + '_ {
-        self.priority_over.get(&priority_lane).into_iter().flatten().copied()
+        self.priority_over
+            .get(&priority_lane)
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     /// Derive the **`cedes_to_ego_ids`** list for an ego in `ego_lane`: every perceived
@@ -674,7 +712,10 @@ impl LaneGraph {
         }
         objects
             .iter()
-            .filter(|o| self.lane_at(o.pos).is_some_and(|l| priority_lanes.contains(&l)))
+            .filter(|o| {
+                self.lane_at(o.pos)
+                    .is_some_and(|l| priority_lanes.contains(&l))
+            })
             .map(|o| o.id)
             .collect()
     }
@@ -779,7 +820,9 @@ impl LaneGraph {
             if cost > *dist.get(&lane_id).unwrap_or(&u32::MAX) {
                 continue; // a stale heap entry superseded by a cheaper path
             }
-            let Some(lane) = self.lane(lane_id) else { continue };
+            let Some(lane) = self.lane(lane_id) else {
+                continue;
+            };
             let edges: Vec<(u64, u32)> = lane
                 .successors()
                 .map(|s| (s, SUCCESSOR_COST))
@@ -868,7 +911,9 @@ impl LaneGraph {
         let mut visited: BTreeSet<u64> = BTreeSet::new();
         let mut cur = lane_id;
         while visited.insert(cur) && visited.len() <= MAX_ROUTE_LANES {
-            let Some(lane) = self.lanes.get(&cur) else { break };
+            let Some(lane) = self.lanes.get(&cur) else {
+                break;
+            };
             concat_dedup(&mut chain, &lane.centerline);
             match lane.successors().min() {
                 Some(n) if !visited.contains(&n) => cur = n,
@@ -897,11 +942,22 @@ impl LaneGraph {
     /// the shifted trajectory stays contained. Returns `None` if any id is unknown
     /// or the slice is empty.
     #[must_use]
-    pub fn corridor_over(&self, lane_ids: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+    pub fn corridor_over(
+        &self,
+        lane_ids: &[u64],
+        confidence: f32,
+        age_ms: u64,
+    ) -> Option<LaneCorridor> {
         let lanes = self.resolve(lane_ids)?;
         // Leftmost = greatest mean-y; rightmost = least mean-y.
-        let leftmost = lanes.iter().copied().max_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
-        let rightmost = lanes.iter().copied().min_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
+        let leftmost = lanes
+            .iter()
+            .copied()
+            .max_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
+        let rightmost = lanes
+            .iter()
+            .copied()
+            .min_by(|a, b| a.mean_y().total_cmp(&b.mean_y()))?;
         Some(LaneCorridor {
             left: offset_polyline(&leftmost.centerline, leftmost.half_width_m),
             right: offset_polyline(&rightmost.centerline, -rightmost.half_width_m),
@@ -934,15 +990,31 @@ impl LaneGraph {
     /// corners. Typed lane boundaries along a route (for a mid-turn lane change) are a
     /// tracked follow-up; a turn follows the route centerline and needs only the corridor.
     #[must_use]
-    pub fn route_corridor(&self, route: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+    pub fn route_corridor(
+        &self,
+        route: &[u64],
+        confidence: f32,
+        age_ms: u64,
+    ) -> Option<LaneCorridor> {
         let lanes = self.resolve(route)?;
         let mut left: Vec<Point> = Vec::new();
         let mut right: Vec<Point> = Vec::new();
         for lane in lanes {
-            concat_dedup(&mut left, &offset_polyline(&lane.centerline, lane.half_width_m));
-            concat_dedup(&mut right, &offset_polyline(&lane.centerline, -lane.half_width_m));
+            concat_dedup(
+                &mut left,
+                &offset_polyline(&lane.centerline, lane.half_width_m),
+            );
+            concat_dedup(
+                &mut right,
+                &offset_polyline(&lane.centerline, -lane.half_width_m),
+            );
         }
-        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor { left, right, confidence, age_ms })
+        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor {
+            left,
+            right,
+            confidence,
+            age_ms,
+        })
     }
 
     /// Materialize a **wide** route corridor — the route's lanes PLUS their direct lateral
@@ -960,17 +1032,39 @@ impl LaneGraph {
     /// or the result degenerates. **Scope:** one level of lateral neighbor each side (covers
     /// a two-wide turn); the same smooth-arc geometry caveat as `route_corridor` applies.
     #[must_use]
-    pub fn route_drivable(&self, route: &[u64], confidence: f32, age_ms: u64) -> Option<LaneCorridor> {
+    pub fn route_drivable(
+        &self,
+        route: &[u64],
+        confidence: f32,
+        age_ms: u64,
+    ) -> Option<LaneCorridor> {
         let lanes = self.resolve(route)?;
         let mut left: Vec<Point> = Vec::new();
         let mut right: Vec<Point> = Vec::new();
         for lane in lanes {
-            let left_lane = lane.left_neighbor().and_then(|n| self.lanes.get(&n)).unwrap_or(lane);
-            let right_lane = lane.right_neighbor().and_then(|n| self.lanes.get(&n)).unwrap_or(lane);
-            concat_dedup(&mut left, &offset_polyline(&left_lane.centerline, left_lane.half_width_m));
-            concat_dedup(&mut right, &offset_polyline(&right_lane.centerline, -right_lane.half_width_m));
+            let left_lane = lane
+                .left_neighbor()
+                .and_then(|n| self.lanes.get(&n))
+                .unwrap_or(lane);
+            let right_lane = lane
+                .right_neighbor()
+                .and_then(|n| self.lanes.get(&n))
+                .unwrap_or(lane);
+            concat_dedup(
+                &mut left,
+                &offset_polyline(&left_lane.centerline, left_lane.half_width_m),
+            );
+            concat_dedup(
+                &mut right,
+                &offset_polyline(&right_lane.centerline, -right_lane.half_width_m),
+            );
         }
-        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor { left, right, confidence, age_ms })
+        (left.len() >= 2 && right.len() >= 2).then_some(LaneCorridor {
+            left,
+            right,
+            confidence,
+            age_ms,
+        })
     }
 
     /// Derive the typed lane boundaries across a span of lanes, expressed as
@@ -978,15 +1072,25 @@ impl LaneGraph {
     /// `lane_boundaries` input uses). Boundaries shared between adjacent lanes are
     /// deduplicated by lateral position. Returns `None` if any id is unknown.
     #[must_use]
-    pub fn boundaries_relative_to(&self, ego_lane: u64, lane_ids: &[u64]) -> Option<Vec<LaneBoundary>> {
+    pub fn boundaries_relative_to(
+        &self,
+        ego_lane: u64,
+        lane_ids: &[u64],
+    ) -> Option<Vec<LaneBoundary>> {
         let ego_y = self.lanes.get(&ego_lane)?.mean_y();
         let lanes = self.resolve(lane_ids)?;
         let mut out: Vec<LaneBoundary> = Vec::new();
         for lane in lanes {
             let c = lane.mean_y() - ego_y;
             for b in [
-                LaneBoundary { y_m: c + lane.half_width_m, line: lane.left_line },
-                LaneBoundary { y_m: c - lane.half_width_m, line: lane.right_line },
+                LaneBoundary {
+                    y_m: c + lane.half_width_m,
+                    line: lane.left_line,
+                },
+                LaneBoundary {
+                    y_m: c - lane.half_width_m,
+                    line: lane.right_line,
+                },
             ] {
                 // Dedup a boundary already present at this lateral position (shared
                 // divider between two adjacent lanes appears on both).
@@ -1011,7 +1115,12 @@ impl LaneGraph {
     /// gently-curved / roughly-parallel-lanes assumption as the rest of the lane geometry applies
     /// (the nearest-point projection approximates the Frenet lateral for parallel lanes).
     #[must_use]
-    pub fn boundaries_relative_to_at(&self, ego_lane: u64, lane_ids: &[u64], ego_pos: Point) -> Option<Vec<LaneBoundary>> {
+    pub fn boundaries_relative_to_at(
+        &self,
+        ego_lane: u64,
+        lane_ids: &[u64],
+        ego_pos: Point,
+    ) -> Option<Vec<LaneBoundary>> {
         let ego = self.lanes.get(&ego_lane)?;
         if ego.centerline.len() < 2 {
             return None;
@@ -1029,8 +1138,14 @@ impl LaneGraph {
         let mut out: Vec<LaneBoundary> = Vec::new();
         for lane in lanes {
             for (bd, line) in [
-                (offset_polyline(&lane.centerline, lane.half_width_m), lane.left_line),
-                (offset_polyline(&lane.centerline, -lane.half_width_m), lane.right_line),
+                (
+                    offset_polyline(&lane.centerline, lane.half_width_m),
+                    lane.left_line,
+                ),
+                (
+                    offset_polyline(&lane.centerline, -lane.half_width_m),
+                    lane.right_line,
+                ),
             ] {
                 if bd.len() < 2 {
                     continue;
@@ -1092,15 +1207,33 @@ impl LaneGraph {
         let mut g = LaneGraph::new();
         // Ego (right half): unmarked centerline on the LEFT, road edge on the right.
         g.add_lane(
-            Lane::straight(ego_lane_id, ego_c, x0, x1, lane_half, LineType::Unmarked, LineType::Solid)
-                .with_edge(LaneEdge::LeftNeighbor { to: oncoming_lane_id }),
+            Lane::straight(
+                ego_lane_id,
+                ego_c,
+                x0,
+                x1,
+                lane_half,
+                LineType::Unmarked,
+                LineType::Solid,
+            )
+            .with_edge(LaneEdge::LeftNeighbor {
+                to: oncoming_lane_id,
+            }),
         );
         // Oncoming (left half): road edge on the left, unmarked centerline on the
         // right, and travel OPPOSING the ego (heading π) — the head-on direction.
         g.add_lane(
-            Lane::straight(oncoming_lane_id, onc_c, x0, x1, lane_half, LineType::Solid, LineType::Unmarked)
-                .with_heading(std::f64::consts::PI)
-                .with_edge(LaneEdge::RightNeighbor { to: ego_lane_id }),
+            Lane::straight(
+                oncoming_lane_id,
+                onc_c,
+                x0,
+                x1,
+                lane_half,
+                LineType::Solid,
+                LineType::Unmarked,
+            )
+            .with_heading(std::f64::consts::PI)
+            .with_edge(LaneEdge::RightNeighbor { to: ego_lane_id }),
         );
         Some(g)
     }
@@ -1149,7 +1282,10 @@ fn project_point_segment(p: Point, a: Point, b: Point) -> (Point, f64) {
     } else {
         (((p.x_m - a.x_m) * abx + (p.y_m - a.y_m) * aby) / len_sq).clamp(0.0, 1.0)
     };
-    let proj = Point { x_m: a.x_m + t * abx, y_m: a.y_m + t * aby };
+    let proj = Point {
+        x_m: a.x_m + t * abx,
+        y_m: a.y_m + t * aby,
+    };
     let (dx, dy) = (p.x_m - proj.x_m, p.y_m - proj.y_m);
     (proj, dx * dx + dy * dy)
 }
@@ -1170,8 +1306,16 @@ fn project_onto_polyline(poly: &[Point], p: Point) -> (usize, Point) {
 /// Longitudinal `[x_min, x_max]` spanned by two boundary polylines, or `None` if
 /// degenerate (non-finite or zero length).
 fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
-    let x0 = a.iter().chain(b).map(|p| p.x_m).fold(f64::INFINITY, f64::min);
-    let x1 = a.iter().chain(b).map(|p| p.x_m).fold(f64::NEG_INFINITY, f64::max);
+    let x0 = a
+        .iter()
+        .chain(b)
+        .map(|p| p.x_m)
+        .fold(f64::INFINITY, f64::min);
+    let x1 = a
+        .iter()
+        .chain(b)
+        .map(|p| p.x_m)
+        .fold(f64::NEG_INFINITY, f64::max);
     (x0.is_finite() && x1.is_finite() && x1 > x0).then_some((x0, x1))
 }
 
@@ -1180,7 +1324,9 @@ fn x_extent(a: &[Point], b: &[Point]) -> Option<(f64, f64)> {
 /// polylines at a shared junction node leaves no zero-length segment.
 fn concat_dedup(acc: &mut Vec<Point>, pts: &[Point]) {
     let start = match (acc.last(), pts.first()) {
-        (Some(last), Some(first)) if (last.x_m - first.x_m).hypot(last.y_m - first.y_m) <= 1e-6 => 1,
+        (Some(last), Some(first)) if (last.x_m - first.x_m).hypot(last.y_m - first.y_m) <= 1e-6 => {
+            1
+        }
         _ => 0,
     };
     acc.extend_from_slice(&pts[start..]);
@@ -1196,17 +1342,29 @@ fn offset_polyline(centerline: &[Point], signed_offset: f64) -> Vec<Point> {
     }
     if n == 1 {
         // Degenerate: no tangent — offset straight along +y.
-        return vec![Point { x_m: centerline[0].x_m, y_m: centerline[0].y_m + signed_offset }];
+        return vec![Point {
+            x_m: centerline[0].x_m,
+            y_m: centerline[0].y_m + signed_offset,
+        }];
     }
     (0..n)
         .map(|i| {
             // Tangent from the adjacent segment(s).
             let (ax, ay) = if i == 0 {
-                (centerline[1].x_m - centerline[0].x_m, centerline[1].y_m - centerline[0].y_m)
+                (
+                    centerline[1].x_m - centerline[0].x_m,
+                    centerline[1].y_m - centerline[0].y_m,
+                )
             } else if i == n - 1 {
-                (centerline[n - 1].x_m - centerline[n - 2].x_m, centerline[n - 1].y_m - centerline[n - 2].y_m)
+                (
+                    centerline[n - 1].x_m - centerline[n - 2].x_m,
+                    centerline[n - 1].y_m - centerline[n - 2].y_m,
+                )
             } else {
-                (centerline[i + 1].x_m - centerline[i - 1].x_m, centerline[i + 1].y_m - centerline[i - 1].y_m)
+                (
+                    centerline[i + 1].x_m - centerline[i - 1].x_m,
+                    centerline[i + 1].y_m - centerline[i - 1].y_m,
+                )
             };
             let len = ax.hypot(ay).max(1e-9);
             // Left-normal of the tangent (rotate +90°): (-ty, tx).
@@ -1243,8 +1401,14 @@ mod tests {
         let c = lane.corridor(0.95, 10);
         assert_eq!(c.left_boundary().len(), 2);
         assert_eq!(c.right_boundary().len(), 2);
-        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "left at +half_width");
-        assert!((c.right_boundary()[0].y_m + 1.75).abs() < 1e-9, "right at -half_width");
+        assert!(
+            (c.left_boundary()[0].y_m - 1.75).abs() < 1e-9,
+            "left at +half_width"
+        );
+        assert!(
+            (c.right_boundary()[0].y_m + 1.75).abs() < 1e-9,
+            "right at -half_width"
+        );
         assert_eq!(c.confidence(), 0.95);
         assert_eq!(c.age_ms(), 10);
     }
@@ -1254,17 +1418,29 @@ mod tests {
         let lane = Lane::straight(1, 0.0, 0.0, 50.0, 1.75, LineType::Solid, LineType::Broken);
         let b = lane.lane_boundaries();
         assert_eq!(b.len(), 2);
-        assert!(b.iter().any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
-        assert!(b.iter().any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
+        assert!(b
+            .iter()
+            .any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
+        assert!(b
+            .iter()
+            .any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
     }
 
     #[test]
     fn corridor_over_spans_both_lanes() {
         let g = two_lane_road();
-        let c = g.corridor_over(&[1, 2], 0.95, 10).expect("both lanes resolve");
+        let c = g
+            .corridor_over(&[1, 2], 0.95, 10)
+            .expect("both lanes resolve");
         // Outer envelope: left edge of lane 1 (+1.75), right edge of lane 2 (-5.25).
-        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "left envelope +1.75");
-        assert!((c.right_boundary()[0].y_m + 5.25).abs() < 1e-9, "right envelope -5.25");
+        assert!(
+            (c.left_boundary()[0].y_m - 1.75).abs() < 1e-9,
+            "left envelope +1.75"
+        );
+        assert!(
+            (c.right_boundary()[0].y_m + 5.25).abs() < 1e-9,
+            "right envelope -5.25"
+        );
     }
 
     #[test]
@@ -1273,9 +1449,15 @@ mod tests {
         let b = g.boundaries_relative_to(1, &[1, 2]).expect("resolve");
         // Three distinct boundaries: +1.75 solid, -1.75 broken (shared), -5.25 solid.
         assert_eq!(b.len(), 3, "shared divider deduped, got {b:?}");
-        assert!(b.iter().any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
-        assert!(b.iter().any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
-        assert!(b.iter().any(|x| (x.y_m + 5.25).abs() < 1e-9 && x.line == LineType::Solid));
+        assert!(b
+            .iter()
+            .any(|x| (x.y_m - 1.75).abs() < 1e-9 && x.line == LineType::Solid));
+        assert!(b
+            .iter()
+            .any(|x| (x.y_m + 1.75).abs() < 1e-9 && x.line == LineType::Broken));
+        assert!(b
+            .iter()
+            .any(|x| (x.y_m + 5.25).abs() < 1e-9 && x.line == LineType::Solid));
     }
 
     #[test]
@@ -1284,13 +1466,25 @@ mod tests {
         // global mean_y version — same boundary set, so existing behavior is unchanged.
         let g = two_lane_road();
         let mut global = g.boundaries_relative_to(1, &[1, 2]).unwrap();
-        let mut local = g.boundaries_relative_to_at(1, &[1, 2], Point { x_m: 50.0, y_m: 0.0 }).unwrap();
+        let mut local = g
+            .boundaries_relative_to_at(
+                1,
+                &[1, 2],
+                Point {
+                    x_m: 50.0,
+                    y_m: 0.0,
+                },
+            )
+            .unwrap();
         let key = |b: &LaneBoundary| (b.y_m * 1e6).round() as i64;
         global.sort_by_key(key);
         local.sort_by_key(key);
         assert_eq!(global.len(), local.len());
         for (a, b) in global.iter().zip(local.iter()) {
-            assert!((a.y_m - b.y_m).abs() < 1e-6 && a.line == b.line, "straight parity: {a:?} vs {b:?}");
+            assert!(
+                (a.y_m - b.y_m).abs() < 1e-6 && a.line == b.line,
+                "straight parity: {a:?} vs {b:?}"
+            );
         }
     }
 
@@ -1301,16 +1495,39 @@ mod tests {
         // global mean_y (averaging the whole arc) would not place them locally.
         let arc = quarter_arc(0.0, 12.0, 12.0, -std::f64::consts::FRAC_PI_2, 12);
         let g = LaneGraph::new().with_lane(Lane {
-            id: 1, centerline: arc, half_width_m: 2.0, left_line: LineType::Solid,
-            right_line: LineType::Broken, heading_rad: std::f64::consts::FRAC_PI_4, edges: Vec::new(), control: None,
+            id: 1,
+            centerline: arc,
+            half_width_m: 2.0,
+            left_line: LineType::Solid,
+            right_line: LineType::Broken,
+            heading_rad: std::f64::consts::FRAC_PI_4,
+            edges: Vec::new(),
+            control: None,
         });
         // A point on the arc around 45° in: (12 cos(-π/4), 12 + 12 sin(-π/4)) ≈ (8.49, 3.51).
-        let bs = g.boundaries_relative_to_at(1, &[1], Point { x_m: 8.49, y_m: 3.51 }).unwrap();
+        let bs = g
+            .boundaries_relative_to_at(
+                1,
+                &[1],
+                Point {
+                    x_m: 8.49,
+                    y_m: 3.51,
+                },
+            )
+            .unwrap();
         assert_eq!(bs.len(), 2, "the lane's own two boundaries");
         let left = bs.iter().find(|b| b.line == LineType::Solid).unwrap();
         let right = bs.iter().find(|b| b.line == LineType::Broken).unwrap();
-        assert!((left.y_m - 2.0).abs() < 0.2, "left boundary ≈ +half_width perpendicular, got {}", left.y_m);
-        assert!((right.y_m + 2.0).abs() < 0.2, "right boundary ≈ -half_width perpendicular, got {}", right.y_m);
+        assert!(
+            (left.y_m - 2.0).abs() < 0.2,
+            "left boundary ≈ +half_width perpendicular, got {}",
+            left.y_m
+        );
+        assert!(
+            (right.y_m + 2.0).abs() < 0.2,
+            "right boundary ≈ -half_width perpendicular, got {}",
+            right.y_m
+        );
     }
 
     #[test]
@@ -1321,18 +1538,48 @@ mod tests {
         let arc = quarter_arc(0.0, 12.0, 12.0, -std::f64::consts::FRAC_PI_2, 12);
         let neighbor_cl = offset_polyline(&arc, 4.0);
         let g = LaneGraph::new()
-            .with_lane(Lane { id: 1, centerline: arc, half_width_m: 1.75, left_line: LineType::Broken, right_line: LineType::Solid, heading_rad: 0.0, edges: Vec::new(), control: None })
-            .with_lane(Lane { id: 2, centerline: neighbor_cl, half_width_m: 1.75, left_line: LineType::Solid, right_line: LineType::Broken, heading_rad: 0.0, edges: Vec::new(), control: None });
-        let ego = Point { x_m: 8.49, y_m: 3.51 };
+            .with_lane(Lane {
+                id: 1,
+                centerline: arc,
+                half_width_m: 1.75,
+                left_line: LineType::Broken,
+                right_line: LineType::Solid,
+                heading_rad: 0.0,
+                edges: Vec::new(),
+                control: None,
+            })
+            .with_lane(Lane {
+                id: 2,
+                centerline: neighbor_cl,
+                half_width_m: 1.75,
+                left_line: LineType::Solid,
+                right_line: LineType::Broken,
+                heading_rad: 0.0,
+                edges: Vec::new(),
+                control: None,
+            });
+        let ego = Point {
+            x_m: 8.49,
+            y_m: 3.51,
+        };
         let global = g.boundaries_relative_to(1, &[2]).unwrap();
         let local = g.boundaries_relative_to_at(1, &[2], ego).unwrap();
         // The neighbor's near boundary, measured perpendicular at the ego station, sits ~+2.25
         // (4 − 1.75); the global mean_y average mis-places it. They must differ on the curve.
-        let differs = global.iter().zip(local.iter()).any(|(a, b)| (a.y_m - b.y_m).abs() > 0.5);
-        assert!(differs, "curve-correct ≠ global mean_y for a neighbor: global={global:?} local={local:?}");
+        let differs = global
+            .iter()
+            .zip(local.iter())
+            .any(|(a, b)| (a.y_m - b.y_m).abs() > 0.5);
+        assert!(
+            differs,
+            "curve-correct ≠ global mean_y for a neighbor: global={global:?} local={local:?}"
+        );
         // And the Frenet near-edge is the locally-correct ~2.25 m.
         let near = local.iter().map(|b| b.y_m).fold(f64::INFINITY, f64::min);
-        assert!((near - 2.25).abs() < 0.4, "near neighbor edge ≈ 4 − half_width perpendicular, got {near}");
+        assert!(
+            (near - 2.25).abs() < 0.4,
+            "near neighbor edge ≈ 4 − half_width perpendicular, got {near}"
+        );
     }
 
     #[test]
@@ -1362,11 +1609,21 @@ mod tests {
         let onc = g.lane(2).unwrap();
         // Each synthesized lane is a quarter-width half-lane (2.5 m), centered in
         // its half: ego at -2.5 (right), oncoming at +2.5 (left).
-        assert!((ego.centerline[0].y_m + 2.5).abs() < 1e-9, "ego keeps right (-2.5)");
-        assert!((onc.centerline[0].y_m - 2.5).abs() < 1e-9, "oncoming is the left half (+2.5)");
+        assert!(
+            (ego.centerline[0].y_m + 2.5).abs() < 1e-9,
+            "ego keeps right (-2.5)"
+        );
+        assert!(
+            (onc.centerline[0].y_m - 2.5).abs() < 1e-9,
+            "oncoming is the left half (+2.5)"
+        );
         assert!((ego.half_width_m - 2.5).abs() < 1e-9);
         // The shared centerline is UNMARKED (crossable to pass), road edges SOLID.
-        assert_eq!(ego.left_line, LineType::Unmarked, "ego↔oncoming divider unmarked");
+        assert_eq!(
+            ego.left_line,
+            LineType::Unmarked,
+            "ego↔oncoming divider unmarked"
+        );
         assert_eq!(ego.right_line, LineType::Solid, "right road edge");
         assert_eq!(onc.right_line, LineType::Unmarked);
         assert_eq!(ego.left_neighbor(), Some(2));
@@ -1381,10 +1638,20 @@ mod tests {
         // The ego-lane corridor spans the RIGHT half: [-5, 0], never crossing the
         // road center into the +y (oncoming) half.
         for p in ego.left_boundary().iter().chain(ego.right_boundary()) {
-            assert!(p.y_m <= 1e-9, "ego lane stays right of center, got y={}", p.y_m);
+            assert!(
+                p.y_m <= 1e-9,
+                "ego lane stays right of center, got y={}",
+                p.y_m
+            );
         }
-        assert!((ego.left_boundary()[0].y_m).abs() < 1e-9, "left edge at the road center (0)");
-        assert!((ego.right_boundary()[0].y_m + 5.0).abs() < 1e-9, "right edge at the road edge (-5)");
+        assert!(
+            (ego.left_boundary()[0].y_m).abs() < 1e-9,
+            "left edge at the road center (0)"
+        );
+        assert!(
+            (ego.right_boundary()[0].y_m + 5.0).abs() < 1e-9,
+            "right edge at the road edge (-5)"
+        );
     }
 
     #[test]
@@ -1410,8 +1677,23 @@ mod tests {
             }
         }
         let flipped = FlippedSource {
-            left: vec![Point { x_m: 0.0, y_m: -5.0 }, Point { x_m: 50.0, y_m: -5.0 }],
-            right: vec![Point { x_m: 0.0, y_m: 5.0 }, Point { x_m: 50.0, y_m: 5.0 }],
+            left: vec![
+                Point {
+                    x_m: 0.0,
+                    y_m: -5.0,
+                },
+                Point {
+                    x_m: 50.0,
+                    y_m: -5.0,
+                },
+            ],
+            right: vec![
+                Point { x_m: 0.0, y_m: 5.0 },
+                Point {
+                    x_m: 50.0,
+                    y_m: 5.0,
+                },
+            ],
         };
         assert!(LaneGraph::from_undivided_corridor(&flipped, 1, 2).is_none());
     }
@@ -1424,7 +1706,10 @@ mod tests {
         let ego = g.lane(1).unwrap();
         let onc = g.lane(2).unwrap();
         assert_eq!(ego.heading_rad, 0.0, "ego travels forward (+X)");
-        assert!((onc.heading_rad - std::f64::consts::PI).abs() < 1e-9, "oncoming travels -X");
+        assert!(
+            (onc.heading_rad - std::f64::consts::PI).abs() < 1e-9,
+            "oncoming travels -X"
+        );
         assert!(onc.opposes(ego), "oncoming lane opposes the ego");
         assert!(ego.opposes(onc), "opposition is symmetric");
         assert!(!ego.opposes(ego), "a lane never opposes itself");
@@ -1436,11 +1721,35 @@ mod tests {
         let road = MockCorridorSource::straight_5m_half_width(100.0);
         let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
         // Right half (y<0) → ego lane 1; left half (y>0) → oncoming lane 2.
-        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: -2.5 }), Some(1));
-        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: 2.5 }), Some(2));
+        assert_eq!(
+            g.lane_at(Point {
+                x_m: 20.0,
+                y_m: -2.5
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            g.lane_at(Point {
+                x_m: 20.0,
+                y_m: 2.5
+            }),
+            Some(2)
+        );
         // Off the road (beyond the edge) or past the longitudinal extent → None.
-        assert_eq!(g.lane_at(Point { x_m: 20.0, y_m: 9.0 }), None);
-        assert_eq!(g.lane_at(Point { x_m: 200.0, y_m: -2.5 }), None);
+        assert_eq!(
+            g.lane_at(Point {
+                x_m: 20.0,
+                y_m: 9.0
+            }),
+            None
+        );
+        assert_eq!(
+            g.lane_at(Point {
+                x_m: 200.0,
+                y_m: -2.5
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1450,10 +1759,46 @@ mod tests {
         let g = LaneGraph::from_undivided_corridor(&road, 1, 2).unwrap();
         // An object in the oncoming half is a head-on candidate; one in the ego
         // half is same-direction (a lead). Off-road / unknown ego → None (fail-closed).
-        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: 2.5 }), Some(true));
-        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: -2.5 }), Some(false));
-        assert_eq!(g.is_oncoming_at(1, Point { x_m: 30.0, y_m: 20.0 }), None);
-        assert_eq!(g.is_oncoming_at(99, Point { x_m: 30.0, y_m: 2.5 }), None);
+        assert_eq!(
+            g.is_oncoming_at(
+                1,
+                Point {
+                    x_m: 30.0,
+                    y_m: 2.5
+                }
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            g.is_oncoming_at(
+                1,
+                Point {
+                    x_m: 30.0,
+                    y_m: -2.5
+                }
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            g.is_oncoming_at(
+                1,
+                Point {
+                    x_m: 30.0,
+                    y_m: 20.0
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            g.is_oncoming_at(
+                99,
+                Point {
+                    x_m: 30.0,
+                    y_m: 2.5
+                }
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1470,8 +1815,14 @@ mod tests {
         // A centerline turning toward +y: the left offset is longer-arc/outside.
         let cl = vec![
             Point { x_m: 0.0, y_m: 0.0 },
-            Point { x_m: 10.0, y_m: 0.0 },
-            Point { x_m: 20.0, y_m: 5.0 },
+            Point {
+                x_m: 10.0,
+                y_m: 0.0,
+            },
+            Point {
+                x_m: 20.0,
+                y_m: 5.0,
+            },
         ];
         let left = offset_polyline(&cl, 1.0);
         let right = offset_polyline(&cl, -1.0);
@@ -1498,12 +1849,54 @@ mod tests {
             lane.with_edge(neigh)
         };
         LaneGraph::new()
-            .with_lane(seg(1, 0.0, 0.0, 30.0, Some(2), LaneEdge::RightNeighbor { to: 11 }))
-            .with_lane(seg(2, 0.0, 30.0, 60.0, Some(3), LaneEdge::RightNeighbor { to: 12 }))
-            .with_lane(seg(3, 0.0, 60.0, 90.0, None, LaneEdge::RightNeighbor { to: 13 }))
-            .with_lane(seg(11, -3.5, 0.0, 30.0, Some(12), LaneEdge::LeftNeighbor { to: 1 }))
-            .with_lane(seg(12, -3.5, 30.0, 60.0, Some(13), LaneEdge::LeftNeighbor { to: 2 }))
-            .with_lane(seg(13, -3.5, 60.0, 90.0, None, LaneEdge::LeftNeighbor { to: 3 }))
+            .with_lane(seg(
+                1,
+                0.0,
+                0.0,
+                30.0,
+                Some(2),
+                LaneEdge::RightNeighbor { to: 11 },
+            ))
+            .with_lane(seg(
+                2,
+                0.0,
+                30.0,
+                60.0,
+                Some(3),
+                LaneEdge::RightNeighbor { to: 12 },
+            ))
+            .with_lane(seg(
+                3,
+                0.0,
+                60.0,
+                90.0,
+                None,
+                LaneEdge::RightNeighbor { to: 13 },
+            ))
+            .with_lane(seg(
+                11,
+                -3.5,
+                0.0,
+                30.0,
+                Some(12),
+                LaneEdge::LeftNeighbor { to: 1 },
+            ))
+            .with_lane(seg(
+                12,
+                -3.5,
+                30.0,
+                60.0,
+                Some(13),
+                LaneEdge::LeftNeighbor { to: 2 },
+            ))
+            .with_lane(seg(
+                13,
+                -3.5,
+                60.0,
+                90.0,
+                None,
+                LaneEdge::LeftNeighbor { to: 3 },
+            ))
     }
 
     #[test]
@@ -1535,13 +1928,39 @@ mod tests {
     fn lane_follow_path_traces_a_straight_lane_forward_from_the_object() {
         // A straight east lane; an object at (10, 0.3) (slightly off-center, in-lane). The
         // follow-path starts at its projection (~(10,0)) and extends east, staying on y≈0.
-        let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 60.0, 2.0, LineType::Solid, LineType::Solid));
-        let path = g.lane_follow_path(Point { x_m: 10.0, y_m: 0.3 }, 20.0).expect("on the lane");
+        let g = LaneGraph::new().with_lane(Lane::straight(
+            1,
+            0.0,
+            0.0,
+            60.0,
+            2.0,
+            LineType::Solid,
+            LineType::Solid,
+        ));
+        let path = g
+            .lane_follow_path(
+                Point {
+                    x_m: 10.0,
+                    y_m: 0.3,
+                },
+                20.0,
+            )
+            .expect("on the lane");
         assert!(path.len() >= 2);
-        assert!((path[0].x_m - 10.0).abs() < 1e-6 && path[0].y_m.abs() < 1e-6, "starts at the projection ~ (10,0), got {:?}", path[0]);
-        assert!(path.last().unwrap().x_m >= 30.0 - 1e-6, "extends ~20 m forward, got {:?}", path.last());
-        assert!(path.iter().all(|p| p.y_m.abs() < 1e-6), "stays on the straight centerline");
+        assert!(
+            (path[0].x_m - 10.0).abs() < 1e-6 && path[0].y_m.abs() < 1e-6,
+            "starts at the projection ~ (10,0), got {:?}",
+            path[0]
+        );
+        assert!(
+            path.last().unwrap().x_m >= 30.0 - 1e-6,
+            "extends ~20 m forward, got {:?}",
+            path.last()
+        );
+        assert!(
+            path.iter().all(|p| p.y_m.abs() < 1e-6),
+            "stays on the straight centerline"
+        );
     }
 
     #[test]
@@ -1550,31 +1969,88 @@ mod tests {
         // A lane that runs east then curves LEFT (north) via a quarter arc: straight (0,0)→(20,0)
         // [lane 1] → arc (20,0)→(32,12) [lane 2]. An object on lane 1 following its lane traces
         // the bend — its path gains +y (a kinematic CV predictor would stay on y=0).
-        let arc: Vec<Point> = (0..=8).map(|i| {
-            let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 8.0);
-            Point { x_m: 20.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
-        }).collect();
+        let arc: Vec<Point> = (0..=8)
+            .map(|i| {
+                let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 8.0);
+                Point {
+                    x_m: 20.0 + 12.0 * t.cos(),
+                    y_m: 12.0 + 12.0 * t.sin(),
+                }
+            })
+            .collect();
         let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 2 }))
-            .with_lane(Lane { id: 2, centerline: arc, half_width_m: 2.0, left_line: LineType::Solid, right_line: LineType::Solid, heading_rad: FRAC_PI_4, edges: Vec::new(), control: None });
-        let path = g.lane_follow_path(Point { x_m: 8.0, y_m: 0.0 }, 40.0).expect("on lane 1");
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid)
+                    .with_edge(LaneEdge::Successor { to: 2 }),
+            )
+            .with_lane(Lane {
+                id: 2,
+                centerline: arc,
+                half_width_m: 2.0,
+                left_line: LineType::Solid,
+                right_line: LineType::Solid,
+                heading_rad: FRAC_PI_4,
+                edges: Vec::new(),
+                control: None,
+            });
+        let path = g
+            .lane_follow_path(Point { x_m: 8.0, y_m: 0.0 }, 40.0)
+            .expect("on lane 1");
         let max_y = path.iter().map(|p| p.y_m).fold(f64::MIN, f64::max);
-        assert!(max_y > 5.0, "the follow-path traces the bend into +y (a CV predictor would not), max_y {max_y}");
+        assert!(
+            max_y > 5.0,
+            "the follow-path traces the bend into +y (a CV predictor would not), max_y {max_y}"
+        );
     }
 
     #[test]
     fn lane_follow_path_is_none_off_the_mapped_road() {
-        let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 60.0, 2.0, LineType::Solid, LineType::Solid));
-        assert!(g.lane_follow_path(Point { x_m: 10.0, y_m: 50.0 }, 20.0).is_none(), "off-road → None");
+        let g = LaneGraph::new().with_lane(Lane::straight(
+            1,
+            0.0,
+            0.0,
+            60.0,
+            2.0,
+            LineType::Solid,
+            LineType::Solid,
+        ));
+        assert!(
+            g.lane_follow_path(
+                Point {
+                    x_m: 10.0,
+                    y_m: 50.0
+                },
+                20.0
+            )
+            .is_none(),
+            "off-road → None"
+        );
     }
 
     #[test]
     fn route_to_a_point_resolves_the_goal_lane() {
         let g = routing_grid();
-        assert_eq!(g.route_to_point(1, Point { x_m: 75.0, y_m: 0.0 }), Some(vec![1, 2, 3]));
+        assert_eq!(
+            g.route_to_point(
+                1,
+                Point {
+                    x_m: 75.0,
+                    y_m: 0.0
+                }
+            ),
+            Some(vec![1, 2, 3])
+        );
         // Off the mapped road → None.
-        assert_eq!(g.route_to_point(1, Point { x_m: 75.0, y_m: 50.0 }), None);
+        assert_eq!(
+            g.route_to_point(
+                1,
+                Point {
+                    x_m: 75.0,
+                    y_m: 50.0
+                }
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1583,7 +2059,15 @@ mod tests {
         assert_eq!(g.route(1, 9999), None, "unknown destination");
         assert_eq!(g.route(9999, 3), None, "unknown source");
         // A disconnected lane is unreachable.
-        let g2 = g.with_lane(Lane::straight(77, 100.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid));
+        let g2 = g.with_lane(Lane::straight(
+            77,
+            100.0,
+            0.0,
+            30.0,
+            1.75,
+            LineType::Solid,
+            LineType::Solid,
+        ));
         assert_eq!(g2.route(1, 77), None, "no path to an isolated lane");
     }
 
@@ -1591,9 +2075,23 @@ mod tests {
     fn route_terminates_on_a_cycle() {
         // A → B → A. Routing to an unreachable node must not loop forever.
         let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 2 }))
-            .with_lane(Lane::straight(2, 0.0, 30.0, 60.0, 1.75, LineType::Solid, LineType::Solid).with_edge(LaneEdge::Successor { to: 1 }))
-            .with_lane(Lane::straight(3, 0.0, 60.0, 90.0, 1.75, LineType::Solid, LineType::Solid));
+            .with_lane(
+                Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid)
+                    .with_edge(LaneEdge::Successor { to: 2 }),
+            )
+            .with_lane(
+                Lane::straight(2, 0.0, 30.0, 60.0, 1.75, LineType::Solid, LineType::Solid)
+                    .with_edge(LaneEdge::Successor { to: 1 }),
+            )
+            .with_lane(Lane::straight(
+                3,
+                0.0,
+                60.0,
+                90.0,
+                1.75,
+                LineType::Solid,
+                LineType::Solid,
+            ));
         assert_eq!(g.route(1, 3), None);
         assert_eq!(g.route(1, 2), Some(vec![1, 2]));
     }
@@ -1606,7 +2104,10 @@ mod tests {
         (0..=n)
             .map(|i| {
                 let t = start_angle + std::f64::consts::FRAC_PI_2 * (i as f64 / n as f64);
-                Point { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+                Point {
+                    x_m: cx + r * t.cos(),
+                    y_m: cy + r * t.sin(),
+                }
             })
             .collect()
     }
@@ -1619,16 +2120,35 @@ mod tests {
                 Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid)
                     .with_edge(LaneEdge::Successor { to: 2 }),
             )
-            .with_lane(Lane::straight(2, 0.0, 20.0, 40.0, 2.0, LineType::Solid, LineType::Solid));
+            .with_lane(Lane::straight(
+                2,
+                0.0,
+                20.0,
+                40.0,
+                2.0,
+                LineType::Solid,
+                LineType::Solid,
+            ));
         assert_eq!(g.route(1, 2), Some(vec![1, 2]));
 
         let c = g.route_corridor(&[1, 2], 0.95, 10).expect("stitch");
         // Seam at x=20 deduped → 3 vertices a side, spanning x 0..40 at ±2.
-        assert_eq!(c.left_boundary().len(), 3, "shared seam vertex deduped: {:?}", c.left_boundary());
+        assert_eq!(
+            c.left_boundary().len(),
+            3,
+            "shared seam vertex deduped: {:?}",
+            c.left_boundary()
+        );
         assert_eq!(c.right_boundary().len(), 3);
         assert!(c.left_boundary().iter().all(|p| (p.y_m - 2.0).abs() < 1e-9));
-        assert!(c.right_boundary().iter().all(|p| (p.y_m + 2.0).abs() < 1e-9));
-        assert!((c.left_boundary().last().unwrap().x_m - 40.0).abs() < 1e-9, "spans to x=40");
+        assert!(c
+            .right_boundary()
+            .iter()
+            .all(|p| (p.y_m + 2.0).abs() < 1e-9));
+        assert!(
+            (c.left_boundary().last().unwrap().x_m - 40.0).abs() < 1e-9,
+            "spans to x=40"
+        );
     }
 
     #[test]
@@ -1646,10 +2166,20 @@ mod tests {
             right_line: LineType::Solid,
             heading_rad: std::f64::consts::FRAC_PI_4, // mean of the turn; not load-bearing here
             edges: vec![LaneEdge::Successor { to: 3 }],
-            control: None,        };
+            control: None,
+        };
         let exit = Lane {
             id: 3,
-            centerline: vec![Point { x_m: 30.0, y_m: 10.0 }, Point { x_m: 30.0, y_m: 30.0 }],
+            centerline: vec![
+                Point {
+                    x_m: 30.0,
+                    y_m: 10.0,
+                },
+                Point {
+                    x_m: 30.0,
+                    y_m: 30.0,
+                },
+            ],
             half_width_m: 2.0,
             left_line: LineType::Solid,
             right_line: LineType::Solid,
@@ -1672,18 +2202,42 @@ mod tests {
         // The corridor starts flat (east, y≈0) and ends pointed north (x≈30, y≈30) —
         // i.e. it genuinely turned, not stayed on the entry heading.
         let last_l = *c.left_boundary().last().unwrap();
-        assert!(last_l.y_m > 25.0, "corridor reaches up the exit lane, got y={}", last_l.y_m);
-        assert!((last_l.x_m - 30.0).abs() < 3.0, "and is laterally at the exit (x≈30±half), got x={}", last_l.x_m);
+        assert!(
+            last_l.y_m > 25.0,
+            "corridor reaches up the exit lane, got y={}",
+            last_l.y_m
+        );
+        assert!(
+            (last_l.x_m - 30.0).abs() < 3.0,
+            "and is laterally at the exit (x≈30±half), got x={}",
+            last_l.x_m
+        );
         // Sanity: the entry is still near the origin heading east.
-        assert!(c.right_boundary()[0].x_m.abs() < 1e-6, "entry starts at x≈0");
+        assert!(
+            c.right_boundary()[0].x_m.abs() < 1e-6,
+            "entry starts at x≈0"
+        );
     }
 
     #[test]
     fn route_corridor_fails_closed_on_unknown_or_empty() {
-        let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 20.0, 2.0, LineType::Solid, LineType::Solid));
-        assert!(g.route_corridor(&[], 0.95, 10).is_none(), "empty route → None");
-        assert!(g.route_corridor(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
+        let g = LaneGraph::new().with_lane(Lane::straight(
+            1,
+            0.0,
+            0.0,
+            20.0,
+            2.0,
+            LineType::Solid,
+            LineType::Solid,
+        ));
+        assert!(
+            g.route_corridor(&[], 0.95, 10).is_none(),
+            "empty route → None"
+        );
+        assert!(
+            g.route_corridor(&[1, 99], 0.95, 10).is_none(),
+            "unknown id → None"
+        );
     }
 
     #[test]
@@ -1702,14 +2256,27 @@ mod tests {
             );
 
         let d = g.route_drivable(&[1], 0.95, 10).expect("widen");
-        assert!((d.left_boundary()[0].y_m - 5.25).abs() < 1e-9, "left widened to the neighbor edge (3.5+1.75), got {}", d.left_boundary()[0].y_m);
-        assert!((d.right_boundary()[0].y_m + 1.75).abs() < 1e-9, "right stays at lane 1's edge");
+        assert!(
+            (d.left_boundary()[0].y_m - 5.25).abs() < 1e-9,
+            "left widened to the neighbor edge (3.5+1.75), got {}",
+            d.left_boundary()[0].y_m
+        );
+        assert!(
+            (d.right_boundary()[0].y_m + 1.75).abs() < 1e-9,
+            "right stays at lane 1's edge"
+        );
 
         let c = g.route_corridor(&[1], 0.95, 10).expect("narrow");
-        assert!((c.left_boundary()[0].y_m - 1.75).abs() < 1e-9, "route_corridor stays single-lane (+1.75)");
+        assert!(
+            (c.left_boundary()[0].y_m - 1.75).abs() < 1e-9,
+            "route_corridor stays single-lane (+1.75)"
+        );
 
         assert!(g.route_drivable(&[], 0.95, 10).is_none(), "empty → None");
-        assert!(g.route_drivable(&[1, 99], 0.95, 10).is_none(), "unknown id → None");
+        assert!(
+            g.route_drivable(&[1, 99], 0.95, 10).is_none(),
+            "unknown id → None"
+        );
     }
 
     #[test]
@@ -1720,7 +2287,10 @@ mod tests {
         let arc: Vec<Point> = (0..=12)
             .map(|i| {
                 let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 12.0);
-                Point { x_m: 30.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
+                Point {
+                    x_m: 30.0 + 12.0 * t.cos(),
+                    y_m: 12.0 + 12.0 * t.sin(),
+                }
             })
             .collect();
         let lane = Lane {
@@ -1736,13 +2306,43 @@ mod tests {
 
         // Points ON the arc near its low end (y≈0) and high end (y≈12) — the box [3,9] excluded
         // these, which is exactly what stranded `lane_at` at the approach→arc seam.
-        assert!(lane.contains(Point { x_m: 30.1, y_m: 0.0 }), "the arc's low (junction-seam) end is inside");
-        assert!(lane.contains(Point { x_m: 41.9, y_m: 12.0 }), "the arc's high (exit) end is inside");
+        assert!(
+            lane.contains(Point {
+                x_m: 30.1,
+                y_m: 0.0
+            }),
+            "the arc's low (junction-seam) end is inside"
+        );
+        assert!(
+            lane.contains(Point {
+                x_m: 41.9,
+                y_m: 12.0
+            }),
+            "the arc's high (exit) end is inside"
+        );
         // A point at a mid-arc station, just inside the half-width perpendicular to the curve.
-        assert!(lane.contains(Point { x_m: 35.0, y_m: 1.6 }), "a mid-arc point within half-width is inside");
+        assert!(
+            lane.contains(Point {
+                x_m: 35.0,
+                y_m: 1.6
+            }),
+            "a mid-arc point within half-width is inside"
+        );
         // The box [3,9] would have FALSELY included a point at the chord interior far off the arc.
-        assert!(!lane.contains(Point { x_m: 33.0, y_m: 6.0 }), "a point off the actual curve is outside");
-        assert!(!lane.contains(Point { x_m: 35.0, y_m: 6.0 }), "well off the curve laterally → outside");
+        assert!(
+            !lane.contains(Point {
+                x_m: 33.0,
+                y_m: 6.0
+            }),
+            "a point off the actual curve is outside"
+        );
+        assert!(
+            !lane.contains(Point {
+                x_m: 35.0,
+                y_m: 6.0
+            }),
+            "well off the curve laterally → outside"
+        );
     }
 
     // ----- Right-of-way: cede vs non-yield, consistent from one source -----
@@ -1752,8 +2352,24 @@ mod tests {
         use kirra_core::trajectory::PerceivedObject;
         // Lane 1 (along y=0) has priority over lane 2 (along y=10).
         let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid))
-            .with_lane(Lane::straight(2, 10.0, 0.0, 30.0, 1.75, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(
+                1,
+                0.0,
+                0.0,
+                30.0,
+                1.75,
+                LineType::Solid,
+                LineType::Solid,
+            ))
+            .with_lane(Lane::straight(
+                2,
+                10.0,
+                0.0,
+                30.0,
+                1.75,
+                LineType::Solid,
+                LineType::Solid,
+            ))
             .with_right_of_way(1, 2);
         let obj = |id, x, y| PerceivedObject {
             id,
@@ -1783,15 +2399,37 @@ mod tests {
     #[test]
     fn occluded_approach_sight_distance_round_trips_and_fails_safe() {
         let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 2.0, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(
+                1,
+                0.0,
+                0.0,
+                30.0,
+                2.0,
+                LineType::Solid,
+                LineType::Solid,
+            ))
             .with_occluded_approach(1, 6.0);
-        assert_eq!(g.sight_distance(1), Some(6.0), "the sight distance round-trips");
-        assert_eq!(g.sight_distance(2), None, "a lane with no datum has an open view");
+        assert_eq!(
+            g.sight_distance(1),
+            Some(6.0),
+            "the sight distance round-trips"
+        );
+        assert_eq!(
+            g.sight_distance(2),
+            None,
+            "a lane with no datum has an open view"
+        );
 
         // Non-finite / negative distances are ignored (no spurious occlusion datum).
-        let g2 = LaneGraph::new().with_occluded_approach(5, f64::NAN).with_occluded_approach(6, -3.0);
+        let g2 = LaneGraph::new()
+            .with_occluded_approach(5, f64::NAN)
+            .with_occluded_approach(6, -3.0);
         assert_eq!(g2.sight_distance(5), None, "NaN sight ignored (fail-safe)");
-        assert_eq!(g2.sight_distance(6), None, "negative sight ignored (fail-safe)");
+        assert_eq!(
+            g2.sight_distance(6),
+            None,
+            "negative sight ignored (fail-safe)"
+        );
     }
 
     // A +x approach lane: centred at y=0, half-width 2 m, running x∈[0,30] so the conflict
@@ -1806,73 +2444,132 @@ mod tests {
         let near_edge = LaneGraph::new()
             .with_lane(approach_lane())
             .with_derived_occlusion(&[Occluder::new(10.0, 24.0, 2.5, 8.0)]);
-        assert_eq!(near_edge.sight_distance(1), Some(6.0), "sight = conflict_x − building's junction edge");
+        assert_eq!(
+            near_edge.sight_distance(1),
+            Some(6.0),
+            "sight = conflict_x − building's junction edge"
+        );
     }
 
     #[test]
     fn a_building_closer_to_the_junction_yields_less_sight() {
-        let far = LaneGraph::new().with_lane(approach_lane())
+        let far = LaneGraph::new()
+            .with_lane(approach_lane())
             .with_derived_occlusion(&[Occluder::new(10.0, 21.0, 2.5, 8.0)]); // ends 9 m out
-        let near = LaneGraph::new().with_lane(approach_lane())
+        let near = LaneGraph::new()
+            .with_lane(approach_lane())
             .with_derived_occlusion(&[Occluder::new(10.0, 27.0, 2.5, 8.0)]); // ends 3 m out
         assert_eq!(far.sight_distance(1), Some(9.0));
         assert_eq!(near.sight_distance(1), Some(3.0));
-        assert!(near.sight_distance(1) < far.sight_distance(1), "closer building ⇒ blinder ⇒ less sight");
+        assert!(
+            near.sight_distance(1) < far.sight_distance(1),
+            "closer building ⇒ blinder ⇒ less sight"
+        );
     }
 
     #[test]
     fn a_building_reaching_the_conflict_line_is_fully_blind() {
-        let to_line = LaneGraph::new().with_lane(approach_lane())
+        let to_line = LaneGraph::new()
+            .with_lane(approach_lane())
             .with_derived_occlusion(&[Occluder::new(10.0, 30.0, 2.5, 8.0)]); // edge AT the line
-        let past = LaneGraph::new().with_lane(approach_lane())
+        let past = LaneGraph::new()
+            .with_lane(approach_lane())
             .with_derived_occlusion(&[Occluder::new(10.0, 40.0, 2.5, 8.0)]); // straddles the line
-        assert_eq!(to_line.sight_distance(1), Some(0.0), "edge at the conflict line ⇒ 0 ⇒ creep");
-        assert_eq!(past.sight_distance(1), Some(0.0), "straddling the corner ⇒ fully blind");
+        assert_eq!(
+            to_line.sight_distance(1),
+            Some(0.0),
+            "edge at the conflict line ⇒ 0 ⇒ creep"
+        );
+        assert_eq!(
+            past.sight_distance(1),
+            Some(0.0),
+            "straddling the corner ⇒ fully blind"
+        );
     }
 
     #[test]
     fn no_occluder_leaves_an_open_view() {
-        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[]);
-        assert_eq!(g.sight_distance(1), None, "nothing shadows the approach ⇒ no cap");
+        let g = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_derived_occlusion(&[]);
+        assert_eq!(
+            g.sight_distance(1),
+            None,
+            "nothing shadows the approach ⇒ no cap"
+        );
     }
 
     #[test]
     fn an_in_lane_or_far_lateral_box_does_not_bound_sight() {
         let in_lane = Occluder::new(10.0, 24.0, -1.0, 1.0); // inside the ±2 m lane footprint
         let far = Occluder::new(10.0, 24.0, 9.0, 12.0); // beyond the corner reach (edge 2 → 9 > 2+4)
-        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[in_lane, far]);
-        assert_eq!(g.sight_distance(1), None, "an in-path object / a set-back building is not a corner occluder");
+        let g = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_derived_occlusion(&[in_lane, far]);
+        assert_eq!(
+            g.sight_distance(1),
+            None,
+            "an in-path object / a set-back building is not a corner occluder"
+        );
     }
 
     #[test]
     fn the_worst_of_two_corners_wins() {
         let left = Occluder::new(10.0, 24.0, 2.5, 8.0); // +y side, sight 6
         let right = Occluder::new(10.0, 27.0, -8.0, -2.5); // −y side, sight 3 (closer)
-        let g = LaneGraph::new().with_lane(approach_lane()).with_derived_occlusion(&[left, right]);
-        assert_eq!(g.sight_distance(1), Some(3.0), "the blinder corner bounds the approach");
+        let g = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_derived_occlusion(&[left, right]);
+        assert_eq!(
+            g.sight_distance(1),
+            Some(3.0),
+            "the blinder corner bounds the approach"
+        );
     }
 
     #[test]
     fn derivation_only_tightens_an_existing_datum_and_fails_safe() {
         // A stricter hand-set datum is NOT relaxed by a looser derived one.
-        let tight = LaneGraph::new().with_lane(approach_lane()).with_occluded_approach(1, 2.0)
+        let tight = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_occluded_approach(1, 2.0)
             .with_derived_occlusion(&[Occluder::new(10.0, 24.0, 2.5, 8.0)]); // derived 6 > 2
-        assert_eq!(tight.sight_distance(1), Some(2.0), "tighten-only: keep the stricter integrator value");
+        assert_eq!(
+            tight.sight_distance(1),
+            Some(2.0),
+            "tighten-only: keep the stricter integrator value"
+        );
 
         // A non-finite footprint is dropped; a −x (oncoming) approach is outside the model.
         let nan_box = Occluder::new(10.0, f64::NAN, 2.5, 8.0);
         let oncoming = Lane::straight(2, 0.0, 30.0, 0.0, 2.0, LineType::Solid, LineType::Solid); // advances −x
-        let g = LaneGraph::new().with_lane(approach_lane()).with_lane(oncoming)
+        let g = LaneGraph::new()
+            .with_lane(approach_lane())
+            .with_lane(oncoming)
             .with_derived_occlusion(&[nan_box]);
-        assert_eq!(g.sight_distance(1), None, "a NaN footprint is dropped (fail-safe)");
-        assert_eq!(g.sight_distance(2), None, "a −x approach is skipped (outside the straight +x model)");
+        assert_eq!(
+            g.sight_distance(1),
+            None,
+            "a NaN footprint is dropped (fail-safe)"
+        );
+        assert_eq!(
+            g.sight_distance(2),
+            None,
+            "a −x approach is skipped (outside the straight +x model)"
+        );
     }
 
     // ---- Right-of-way derivation from controls --------------------------------------------
 
     /// An approach lane from `from`→`to` (its terminus is `to`, where the conflict sits), with the
     /// given world heading and optional control. Used to build crossing-junction scenes below.
-    fn approach_to(id: u64, from: Point, to: Point, heading_rad: f64, control: Option<LaneControl>) -> Lane {
+    fn approach_to(
+        id: u64,
+        from: Point,
+        to: Point,
+        heading_rad: f64,
+        control: Option<LaneControl>,
+    ) -> Lane {
         let mut l = Lane::straight(id, 0.0, 0.0, 1.0, 2.0, LineType::Solid, LineType::Solid);
         l.centerline = vec![from, to];
         l.heading_rad = heading_rad;
@@ -1882,53 +2579,110 @@ mod tests {
 
     /// A stationary perceived object at `(x, y)` — only id + position matter for the RoW sets.
     fn obj_at(id: u64, x: f64, y: f64) -> PerceivedObject {
-        PerceivedObject { id, pos: Point { x_m: x, y_m: y }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+        PerceivedObject {
+            id,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }
     }
 
     /// East-bound through approach (heading 0) and a north-bound side approach (heading π/2) that
     /// terminate at the same junction point (0,0). `side_control` flags the side road's sign.
-    fn crossing_junction(side_control: Option<LaneControl>, through_control: Option<LaneControl>) -> LaneGraph {
+    fn crossing_junction(
+        side_control: Option<LaneControl>,
+        through_control: Option<LaneControl>,
+    ) -> LaneGraph {
         use std::f64::consts::FRAC_PI_2;
         LaneGraph::new()
-            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, through_control))
-            .with_lane(approach_to(2, Point { x_m: 0.0, y_m: -30.0 }, Point { x_m: 0.0, y_m: 0.0 }, FRAC_PI_2, side_control))
+            .with_lane(approach_to(
+                1,
+                Point {
+                    x_m: -30.0,
+                    y_m: 0.0,
+                },
+                Point { x_m: 0.0, y_m: 0.0 },
+                0.0,
+                through_control,
+            ))
+            .with_lane(approach_to(
+                2,
+                Point {
+                    x_m: 0.0,
+                    y_m: -30.0,
+                },
+                Point { x_m: 0.0, y_m: 0.0 },
+                FRAC_PI_2,
+                side_control,
+            ))
     }
 
     #[test]
     fn through_road_has_priority_over_a_stop_controlled_side_road() {
         let g = crossing_junction(Some(LaneControl::Stop), None).with_derived_right_of_way();
         // The uncontrolled through lane (1) gains priority over the stop-controlled side lane (2).
-        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2], "side road yields to the through road");
-        assert_eq!(g.lanes_yielding_to(2).count(), 0, "the stop-controlled road asserts no priority");
+        assert_eq!(
+            g.lanes_yielding_to(1).collect::<Vec<_>>(),
+            vec![2],
+            "side road yields to the through road"
+        );
+        assert_eq!(
+            g.lanes_yielding_to(2).count(),
+            0,
+            "the stop-controlled road asserts no priority"
+        );
 
         // And it falls through to the consumer sets: a car on the side road cedes to the ego on
         // the through road; a car on the through road does NOT cede to the side-road ego.
         let on_side = [obj_at(7, 0.0, -10.0)];
         let on_through = [obj_at(8, -10.0, 0.0)];
-        assert_eq!(g.cedes_to_ego(1, &on_side), vec![7], "through ego: the side-road car cedes");
-        assert_eq!(g.cedes_to_ego(2, &on_through), Vec::<u64>::new(), "side-road ego asserts no priority");
+        assert_eq!(
+            g.cedes_to_ego(1, &on_side),
+            vec![7],
+            "through ego: the side-road car cedes"
+        );
+        assert_eq!(
+            g.cedes_to_ego(2, &on_through),
+            Vec::<u64>::new(),
+            "side-road ego asserts no priority"
+        );
     }
 
     #[test]
     fn two_uncontrolled_approaches_assert_no_priority() {
         let g = crossing_junction(None, None).with_derived_right_of_way();
         assert_eq!(g.lanes_yielding_to(1).count(), 0);
-        assert_eq!(g.lanes_yielding_to(2).count(), 0, "no signs ⇒ no static RoW ⇒ ego yields to all (fail-safe)");
+        assert_eq!(
+            g.lanes_yielding_to(2).count(),
+            0,
+            "no signs ⇒ no static RoW ⇒ ego yields to all (fail-safe)"
+        );
     }
 
     #[test]
     fn an_all_way_stop_asserts_no_priority() {
-        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::Stop)).with_derived_right_of_way();
+        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::Stop))
+            .with_derived_right_of_way();
         assert_eq!(g.lanes_yielding_to(1).count(), 0);
-        assert_eq!(g.lanes_yielding_to(2).count(), 0, "all-way stop is first-come, not a static relation");
+        assert_eq!(
+            g.lanes_yielding_to(2).count(),
+            0,
+            "all-way stop is first-come, not a static relation"
+        );
     }
 
     #[test]
     fn a_traffic_light_defers_to_the_signal_state_not_static_priority() {
         // A light on the through road vs a stop on the side road: NO static priority is asserted —
         // the light's priority is the live signal each tick, owned by the signal path.
-        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::TrafficLight)).with_derived_right_of_way();
-        assert_eq!(g.lanes_yielding_to(1).count(), 0, "a traffic light asserts no static RoW");
+        let g = crossing_junction(Some(LaneControl::Stop), Some(LaneControl::TrafficLight))
+            .with_derived_right_of_way();
+        assert_eq!(
+            g.lanes_yielding_to(1).count(),
+            0,
+            "a traffic light asserts no static RoW"
+        );
         assert_eq!(g.lanes_yielding_to(2).count(), 0);
     }
 
@@ -1937,10 +2691,32 @@ mod tests {
         // Two SAME-direction approaches (both heading 0) sharing a junction, one stop-controlled:
         // they are a following relation (RSS), not a crossing — no RoW asserted.
         let g = LaneGraph::new()
-            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, None))
-            .with_lane(approach_to(2, Point { x_m: -30.0, y_m: 3.5 }, Point { x_m: 0.0, y_m: 3.5 }, 0.0, Some(LaneControl::Stop)))
+            .with_lane(approach_to(
+                1,
+                Point {
+                    x_m: -30.0,
+                    y_m: 0.0,
+                },
+                Point { x_m: 0.0, y_m: 0.0 },
+                0.0,
+                None,
+            ))
+            .with_lane(approach_to(
+                2,
+                Point {
+                    x_m: -30.0,
+                    y_m: 3.5,
+                },
+                Point { x_m: 0.0, y_m: 3.5 },
+                0.0,
+                Some(LaneControl::Stop),
+            ))
             .with_derived_right_of_way();
-        assert_eq!(g.lanes_yielding_to(1).count(), 0, "parallel lanes are not a right-of-way relation");
+        assert_eq!(
+            g.lanes_yielding_to(1).count(),
+            0,
+            "parallel lanes are not a right-of-way relation"
+        );
     }
 
     #[test]
@@ -1949,10 +2725,35 @@ mod tests {
         // crossing test would match on heading, but the junction-radius gate keeps them separate.
         use std::f64::consts::FRAC_PI_2;
         let g = LaneGraph::new()
-            .with_lane(approach_to(1, Point { x_m: -30.0, y_m: 0.0 }, Point { x_m: 0.0, y_m: 0.0 }, 0.0, None))
-            .with_lane(approach_to(2, Point { x_m: 100.0, y_m: -30.0 }, Point { x_m: 100.0, y_m: 0.0 }, FRAC_PI_2, Some(LaneControl::Stop)))
+            .with_lane(approach_to(
+                1,
+                Point {
+                    x_m: -30.0,
+                    y_m: 0.0,
+                },
+                Point { x_m: 0.0, y_m: 0.0 },
+                0.0,
+                None,
+            ))
+            .with_lane(approach_to(
+                2,
+                Point {
+                    x_m: 100.0,
+                    y_m: -30.0,
+                },
+                Point {
+                    x_m: 100.0,
+                    y_m: 0.0,
+                },
+                FRAC_PI_2,
+                Some(LaneControl::Stop),
+            ))
             .with_derived_right_of_way();
-        assert_eq!(g.lanes_yielding_to(1).count(), 0, "lanes at different junctions do not interact");
+        assert_eq!(
+            g.lanes_yielding_to(1).count(),
+            0,
+            "lanes at different junctions do not interact"
+        );
     }
 
     #[test]
@@ -1963,7 +2764,11 @@ mod tests {
             .with_derived_right_of_way();
         let yields_to_2: Vec<u64> = g.lanes_yielding_to(2).collect();
         assert!(yields_to_2.contains(&99), "the hand-set relation is kept");
-        assert_eq!(g.lanes_yielding_to(1).collect::<Vec<_>>(), vec![2], "and the derived one is added");
+        assert_eq!(
+            g.lanes_yielding_to(1).collect::<Vec<_>>(),
+            vec![2],
+            "and the derived one is added"
+        );
     }
 
     #[test]
@@ -1972,18 +2777,47 @@ mod tests {
         // purely from the derived relation. Ego on the through road (pose at (-5,0)).
         let g = crossing_junction(Some(LaneControl::Stop), None).with_derived_right_of_way();
         let objs = [obj_at(7, 0.0, -10.0)];
-        let ctx = g.junction_context(Point { x_m: -5.0, y_m: 0.0 }, &objs);
+        let ctx = g.junction_context(
+            Point {
+                x_m: -5.0,
+                y_m: 0.0,
+            },
+            &objs,
+        );
         assert_eq!(ctx.ego_lane, Some(1));
-        assert_eq!(ctx.cedes_to_ego, vec![7], "the side-road car cedes to the through ego — derived, not hand-fed");
-        assert!(ctx.must_yield_to.is_empty(), "the through ego waits for no one here");
+        assert_eq!(
+            ctx.cedes_to_ego,
+            vec![7],
+            "the side-road car cedes to the through ego — derived, not hand-fed"
+        );
+        assert!(
+            ctx.must_yield_to.is_empty(),
+            "the through ego waits for no one here"
+        );
     }
 
     #[test]
     fn junction_context_resolves_the_ego_lane_and_both_sets() {
         use kirra_core::trajectory::PerceivedObject;
         let g = LaneGraph::new()
-            .with_lane(Lane::straight(1, 0.0, 0.0, 30.0, 2.5, LineType::Solid, LineType::Solid))
-            .with_lane(Lane::straight(2, 10.0, 0.0, 30.0, 2.5, LineType::Solid, LineType::Solid))
+            .with_lane(Lane::straight(
+                1,
+                0.0,
+                0.0,
+                30.0,
+                2.5,
+                LineType::Solid,
+                LineType::Solid,
+            ))
+            .with_lane(Lane::straight(
+                2,
+                10.0,
+                0.0,
+                30.0,
+                2.5,
+                LineType::Solid,
+                LineType::Solid,
+            ))
             .with_right_of_way(1, 2);
         let obj = |id, x, y| PerceivedObject {
             id,
@@ -1995,14 +2829,26 @@ mod tests {
         let objs = [obj(7, 15.0, 10.0)];
 
         // Ego in lane 1 (priority): one call resolves the lane + both sets.
-        let ctx = g.junction_context(Point { x_m: 15.0, y_m: 0.0 }, &objs);
+        let ctx = g.junction_context(
+            Point {
+                x_m: 15.0,
+                y_m: 0.0,
+            },
+            &objs,
+        );
         assert_eq!(ctx.ego_lane, Some(1));
         assert_eq!(ctx.cedes_to_ego, vec![7]);
         assert!(ctx.must_yield_to.is_empty());
 
         // Off the mapped road → empty context (fail-safe).
         assert_eq!(
-            g.junction_context(Point { x_m: 15.0, y_m: 99.0 }, &objs),
+            g.junction_context(
+                Point {
+                    x_m: 15.0,
+                    y_m: 99.0
+                },
+                &objs
+            ),
             JunctionContext::default()
         );
     }

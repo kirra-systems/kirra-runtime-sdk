@@ -128,7 +128,8 @@ fn measure(
     for _ in 0..warmup {
         f();
     }
-    let mut ch: kirra_timing::WcetChannel<BUCKETS> = kirra_timing::WcetChannel::new(BUCKET_WIDTH_NS);
+    let mut ch: kirra_timing::WcetChannel<BUCKETS> =
+        kirra_timing::WcetChannel::new(BUCKET_WIDTH_NS);
     let mut samples_us = Vec::with_capacity(iters as usize);
     for _ in 0..iters {
         let t0 = clock.now_nanos();
@@ -223,7 +224,11 @@ fn main() {
     let mrc_contract = VehicleKinematicsContract::mrc_fallback_profile();
     let nominal_command = nominal_allow_cmd();
     let mrc_command = mrc_allow_cmd();
-    assert_allow("governor_exec (nominal)", &nominal_command, &nominal_contract);
+    assert_allow(
+        "governor_exec (nominal)",
+        &nominal_command,
+        &nominal_contract,
+    );
     assert_allow("governor_exec_mrc", &mrc_command, &mrc_contract);
 
     let (governor, governor_samples) = measure(&clock, warmup, iters, || {
@@ -261,7 +266,9 @@ fn main() {
     let pwcet_mrc = pwcet_line(stage::GOVERNOR_EXEC_MRC, &governor_mrc_samples);
 
     let mut csv = String::new();
-    report.write_csv(&mut csv).expect("writing to a String cannot fail");
+    report
+        .write_csv(&mut csv)
+        .expect("writing to a String cannot fail");
     csv.push_str(&pwcet_gov);
     csv.push_str(&pwcet_mrc);
     print!("{csv}");

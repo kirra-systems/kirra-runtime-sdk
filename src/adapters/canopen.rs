@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
 use crate::gateway::policy::OperationalCommand;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CanOpenMessage {
@@ -47,15 +47,36 @@ impl CanOpenAdapter {
     pub fn evaluate(msg: &CanOpenMessage) -> CanOpenEvaluation {
         let (command, message_type) = match msg.function_code {
             0x0 => (OperationalCommand::SystemMutation, CanOpenMessageType::NMT),
-            0x1 => (OperationalCommand::ReadTelemetry,  CanOpenMessageType::SYNC),
-            0x2 => (OperationalCommand::ReadTelemetry,  CanOpenMessageType::Timestamp),
-            0x3 => (OperationalCommand::ReadTelemetry,  CanOpenMessageType::Emergency),
-            0x4 | 0x5 => (OperationalCommand::ReadTelemetry, CanOpenMessageType::PDOTransmit),
-            0x6 | 0x7 => (OperationalCommand::WriteState,    CanOpenMessageType::PDOReceive),
-            0x8 | 0x9 => (OperationalCommand::ReadTelemetry, CanOpenMessageType::SDOTransmit),
-            0xA | 0xB => (OperationalCommand::WriteState,    CanOpenMessageType::SDOReceive),
-            0xE => (OperationalCommand::ReadTelemetry, CanOpenMessageType::Heartbeat),
-            _   => (OperationalCommand::Unknown,        CanOpenMessageType::Unknown),
+            0x1 => (OperationalCommand::ReadTelemetry, CanOpenMessageType::SYNC),
+            0x2 => (
+                OperationalCommand::ReadTelemetry,
+                CanOpenMessageType::Timestamp,
+            ),
+            0x3 => (
+                OperationalCommand::ReadTelemetry,
+                CanOpenMessageType::Emergency,
+            ),
+            0x4 | 0x5 => (
+                OperationalCommand::ReadTelemetry,
+                CanOpenMessageType::PDOTransmit,
+            ),
+            0x6 | 0x7 => (
+                OperationalCommand::WriteState,
+                CanOpenMessageType::PDOReceive,
+            ),
+            0x8 | 0x9 => (
+                OperationalCommand::ReadTelemetry,
+                CanOpenMessageType::SDOTransmit,
+            ),
+            0xA | 0xB => (
+                OperationalCommand::WriteState,
+                CanOpenMessageType::SDOReceive,
+            ),
+            0xE => (
+                OperationalCommand::ReadTelemetry,
+                CanOpenMessageType::Heartbeat,
+            ),
+            _ => (OperationalCommand::Unknown, CanOpenMessageType::Unknown),
         };
 
         let is_emergency = msg.function_code == 0x3;
@@ -72,7 +93,11 @@ impl CanOpenAdapter {
         //   0x81 = Reset Node
         //   0x82 = Reset Communication
         let triggers_recalculation = msg.function_code == 0x0
-            && msg.data.first().map(|&b| matches!(b, 0x02 | 0x80 | 0x81 | 0x82)).unwrap_or(false);
+            && msg
+                .data
+                .first()
+                .map(|&b| matches!(b, 0x02 | 0x80 | 0x81 | 0x82))
+                .unwrap_or(false);
 
         CanOpenEvaluation {
             command,
@@ -446,7 +471,7 @@ mod sdo_bounds_tests {
     #[test]
     fn upload_request_and_non_sdo_carry_no_setpoint() {
         let b = bounds("5:0x6042:0=i16:-500:500", true); // strict, to prove reads pass
-        // SDO upload request (ccs=2 → command byte 0x40) on the SDO channel.
+                                                         // SDO upload request (ccs=2 → command byte 0x40) on the SDO channel.
         let idx = 0x6042u16.to_le_bytes();
         let upload = CanOpenMessage {
             node_id: 5,
@@ -555,7 +580,10 @@ impl CanOpenNodeMap {
                 continue;
             }
             let Some((id_str, node)) = entry.split_once(':') else {
-                tracing::warn!(entry, "CANopen node-map: skipping malformed entry (expected `canid:fleet_node`)");
+                tracing::warn!(
+                    entry,
+                    "CANopen node-map: skipping malformed entry (expected `canid:fleet_node`)"
+                );
                 continue;
             };
             let node = node.trim();
@@ -626,7 +654,10 @@ pub enum NmtOfflineOutcome {
     /// Resolved to a registered fleet node — mark it offline (effectful recalc).
     Attributed { fleet_node_id: String },
     /// Could not be attributed — handle fail-closed (surface, never drop).
-    Unattributed { canopen_node_id: u8, reason: UnattributedReason },
+    Unattributed {
+        canopen_node_id: u8,
+        reason: UnattributedReason,
+    },
 }
 
 /// Classify an NMT-offline event given the resolved fleet node (if any) and
@@ -680,7 +711,10 @@ mod tests {
 
     #[test]
     fn test_emergency_sets_is_emergency_flag() {
-        let e = CanOpenAdapter::evaluate(&msg(0x3, vec![0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+        let e = CanOpenAdapter::evaluate(&msg(
+            0x3,
+            vec![0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ));
         assert!(e.is_emergency);
         assert_eq!(e.emergency_code, Some(0x2010));
     }
@@ -744,7 +778,10 @@ mod tests {
     fn test_canopen_nmt_stop_triggers_posture_recalculation() {
         // Stop Remote Node (0x02) must signal that posture recalculation is needed
         let e = CanOpenAdapter::evaluate(&msg(0x0, vec![0x02, 0x00]));
-        assert!(e.triggers_recalculation, "NMT Stop must trigger recalculation");
+        assert!(
+            e.triggers_recalculation,
+            "NMT Stop must trigger recalculation"
+        );
     }
 
     #[test]
@@ -762,7 +799,12 @@ mod tests {
 
     #[test]
     fn test_max_node_id() {
-        let m = CanOpenMessage { node_id: 127, function_code: 0xE, data: vec![], source_node: "n".to_string() };
+        let m = CanOpenMessage {
+            node_id: 127,
+            function_code: 0xE,
+            data: vec![],
+            source_node: "n".to_string(),
+        };
         let e = CanOpenAdapter::evaluate(&m);
         assert_eq!(e.node_id, 127);
     }
@@ -796,7 +838,12 @@ mod tests {
     #[test]
     fn test_classify_mapped_registered_is_attributed() {
         let out = classify_nmt_offline(5, Some("robot-01".to_string()), true);
-        assert_eq!(out, NmtOfflineOutcome::Attributed { fleet_node_id: "robot-01".to_string() });
+        assert_eq!(
+            out,
+            NmtOfflineOutcome::Attributed {
+                fleet_node_id: "robot-01".to_string()
+            }
+        );
     }
 
     #[test]
@@ -806,7 +853,10 @@ mod tests {
         let out = classify_nmt_offline(99, None, false);
         assert_eq!(
             out,
-            NmtOfflineOutcome::Unattributed { canopen_node_id: 99, reason: UnattributedReason::NoMapping }
+            NmtOfflineOutcome::Unattributed {
+                canopen_node_id: 99,
+                reason: UnattributedReason::NoMapping
+            }
         );
     }
 
@@ -817,7 +867,10 @@ mod tests {
         let out = classify_nmt_offline(5, Some("ghost".to_string()), false);
         assert_eq!(
             out,
-            NmtOfflineOutcome::Unattributed { canopen_node_id: 5, reason: UnattributedReason::NodeNotRegistered }
+            NmtOfflineOutcome::Unattributed {
+                canopen_node_id: 5,
+                reason: UnattributedReason::NodeNotRegistered
+            }
         );
     }
 }

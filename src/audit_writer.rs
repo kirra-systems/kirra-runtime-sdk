@@ -126,10 +126,7 @@ pub struct AuditWriteJob {
 pub fn spawn_audit_writer(app: Arc<AppState>) -> mpsc::Sender<AuditWriteJob> {
     let (tx, mut rx) = mpsc::channel::<AuditWriteJob>(AUDIT_QUEUE_BOUND);
     tokio::task::spawn_blocking(move || {
-        tracing::info!(
-            queue_bound = AUDIT_QUEUE_BOUND,
-            "audit writer task started"
-        );
+        tracing::info!(queue_bound = AUDIT_QUEUE_BOUND, "audit writer task started");
         // blocking_recv drains the queue serially; per Pass B discovery,
         // single-writer-only is what preserves chain-hash read-then-write
         // atomicity across concurrent verdict tasks.

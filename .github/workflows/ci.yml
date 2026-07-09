@@ -179,6 +179,39 @@ jobs:
   # explicit so it holds regardless of `rust-toolchain.toml` (which pins the far
   # newer BUILD toolchain). Raising the MSRV is a deliberate MINOR bump (policy
   # §3): update both `rust-version` fields, the CHANGELOG, and this lane together.
+  fmt:
+    name: rustfmt gate (all cargo trees)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt
+      # Every cargo tree in the repo, including the workspace-detached
+      # harnesses. The frozen kinematics talisman is excluded via
+      # `#[rustfmt::skip]` on its `mod` declarations (kirra-core lib.rs +
+      # the kani #[path] include) — its git blob pin (`ed00f4da…`) must
+      # survive any formatting pass; the step below asserts exactly that.
+      - name: cargo fmt --check — root workspace
+        run: cargo fmt --check
+      - name: cargo fmt --check — parko workspace
+        # parko/Cargo.toml is a virtual manifest — cargo fmt needs --all there.
+        run: cargo fmt --check --all --manifest-path parko/Cargo.toml
+      - name: cargo fmt --check — detached harnesses
+        run: |
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+          cargo fmt --check --manifest-path verification/kani/Cargo.toml
+          cargo fmt --check --manifest-path crates/kirra-loom-models/Cargo.toml
+          cargo fmt --check --manifest-path crates/kirra-verifier-pg/Cargo.toml
+          cargo fmt --check --manifest-path tools/iceoryx2-spike/Cargo.toml
+      - name: frozen-talisman blob pin survives formatting
+        run: |
+          pin=$(grep -oE '\bed00f4da[0-9a-f]{32}\b' docs/CAPTURE_PIPELINE_SPEC.md | head -1)
+          actual=$(git hash-object crates/kirra-core/src/kinematics_contract.rs)
+          test -n "$pin" && test "$actual" = "$pin" \
+            || { echo "talisman blob $actual != pinned $pin"; exit 1; }
+
   msrv:
     name: MSRV check (rustc 1.88)
     runs-on: ubuntu-latest
@@ -519,12 +552,15 @@ jobs:
   # (like loom/fuzz) and `#[path]`-includes the shipped sources VERBATIM, so
   # the file under proof IS the file that ships.
   #
-  # NON-BLOCKING for now (`continue-on-error`), per the EP-15 plan: the lane
-  # flips to blocking once it has a stable run history. The mirror tests of
-  # every property already run BLOCKING in this lane's first step (they need
-  # no Kani), so a property regression still fails CI today.
+  # BLOCKING as of the L5 flip (proof runs on main were green and the proofs
+  # are deterministic CBMC over blob-pinned sources): a genuine proof failure
+  # now fails CI. The one tolerated failure mode is the Kani INSTALL step
+  # (network/toolchain-fetch flake, `continue-on-error`) — when install fails
+  # the proofs are SKIPPED, not failed, and the mirror tests of every property
+  # (which need no Kani) have already run BLOCKING as this lane's first step,
+  # so a property regression still fails CI even on an install-flake day.
   kani-proofs:
-    name: Kani proofs (EP-15, non-blocking)
+    name: Kani proofs (EP-15, blocking; install-flake tolerated)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -532,13 +568,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Proof-property mirror tests (BLOCKING; includes compile + concrete mirrors)
         run: cd verification/kani && cargo test --locked
-      - name: Install Kani
+      - name: Install Kani (tolerated flake — proofs skip, mirrors already gated)
         id: kani-install
         continue-on-error: true
         run: cargo install kani-verifier --locked && cargo kani setup
-      - name: Run Kani proofs (non-blocking until the lane stabilizes)
+      - name: Run Kani proofs (BLOCKING)
         if: steps.kani-install.outcome == 'success'
-        continue-on-error: true
         run: cd verification/kani && cargo kani
 
   # M5 — fuzz-target build + bounded run guard. Compiles every cargo-fuzz
@@ -980,6 +1015,12 @@ jobs:
         run: |
           set -o pipefail
           python3 ci/check_quality_guardrails.py | tee quality-guardrails-report.txt
+      - name: Orphan-core gate (wire-or-delete ratchet, DD §8.2)
+        # A crate-root `pub mod` with no non-test consumer must be wired,
+        # deleted, or baselined with a justification — the forcing function
+        # the DD review asked for after finding six unwired "DONE" cores.
+        # See ci/check_orphan_cores.py + ci/orphan_cores_baseline.json.
+        run: python3 ci/check_orphan_cores.py
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Clippy

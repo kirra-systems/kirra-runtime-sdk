@@ -32,7 +32,10 @@ mod tests {
         // Canonical CRC-32/IEEE check values.
         assert_eq!(crc32_ieee(b""), 0x0000_0000);
         assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32_ieee(b"The quick brown fox jumps over the lazy dog"), 0x414F_A339);
+        assert_eq!(
+            crc32_ieee(b"The quick brown fox jumps over the lazy dog"),
+            0x414F_A339
+        );
     }
 
     #[test]

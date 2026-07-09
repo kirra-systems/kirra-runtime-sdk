@@ -1,9 +1,9 @@
 // src/tpm.rs
 
 #[cfg(feature = "tpm")]
-use tss_esapi::{Context, TctiNameConf};
-#[cfg(feature = "tpm")]
 use std::str::FromStr;
+#[cfg(feature = "tpm")]
+use tss_esapi::{Context, TctiNameConf};
 
 #[cfg(feature = "tpm")]
 pub struct TpmBootstrap {
@@ -24,7 +24,9 @@ impl TpmBootstrap {
     }
 
     pub fn verify_readiness(&mut self) -> Result<(), &'static str> {
-        self.context.get_random(1).map_err(|_| "TPM_NOT_RESPONDING")?;
+        self.context
+            .get_random(1)
+            .map_err(|_| "TPM_NOT_RESPONDING")?;
         Ok(())
     }
 }

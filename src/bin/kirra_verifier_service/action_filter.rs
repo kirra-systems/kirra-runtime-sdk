@@ -18,18 +18,28 @@ pub(crate) async fn evaluate_action_filter(
             // first (rejection is reused for the response detail below).
             let now = now_ms();
             let payload = json!({ "error": rejection.body_text() }).to_string();
-            let _ = svc.app.store.call(move |store| {
-                let _ = store.save_posture_event_chained(
-                    "action_filter", "ACTION_FILTER_MALFORMED_REQUEST",
-                    &payload,
-                    Some("malformed request body"), now,
-                );
-            }).await;
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": "MALFORMED_REQUEST",
-                "detail": rejection.body_text(),
-                "allowed": false,
-            }))).into_response();
+            let _ = svc
+                .app
+                .store
+                .call(move |store| {
+                    let _ = store.save_posture_event_chained(
+                        "action_filter",
+                        "ACTION_FILTER_MALFORMED_REQUEST",
+                        &payload,
+                        Some("malformed request body"),
+                        now,
+                    );
+                })
+                .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "MALFORMED_REQUEST",
+                    "detail": rejection.body_text(),
+                    "allowed": false,
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -64,12 +74,19 @@ pub(crate) async fn evaluate_action_filter(
     // `&'static str` and the event string is owned, so both move into the closure.
     let now = now_ms();
     let event_str = event.to_string();
-    let _ = svc.app.store.call(move |store| {
-        let _ = store.save_posture_event_chained(
-            "action_filter", audit_event_type,
-            &event_str, None, now,
-        );
-    }).await;
+    let _ = svc
+        .app
+        .store
+        .call(move |store| {
+            let _ = store.save_posture_event_chained(
+                "action_filter",
+                audit_event_type,
+                &event_str,
+                None,
+                now,
+            );
+        })
+        .await;
 
     tracing::info!(
         action_type = %claim.action_type,
@@ -86,5 +103,6 @@ pub(crate) async fn evaluate_action_filter(
         "reason": decision.reason,
         "posture_at_evaluation": posture_str,
         "request_id": request_id,
-    })).into_response()
+    }))
+    .into_response()
 }

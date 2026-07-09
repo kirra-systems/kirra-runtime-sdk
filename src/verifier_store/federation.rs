@@ -17,9 +17,9 @@ impl VerifierStore {
         // partially bounds replay). Federation reports are rare, so the per-commit
         // fsync is off the hot path and inconsequential to throughput.
         let signing_key = self.signing_key.clone(); // durable_mut() borrows self
-        // #79: IMMEDIATE so the durable write lock is held before the epoch
-        // re-check below — no concurrent `try_claim_epoch` can interleave
-        // between the fence read and this commit.
+                                                    // #79: IMMEDIATE so the durable write lock is held before the epoch
+                                                    // re-check below — no concurrent `try_claim_epoch` can interleave
+                                                    // between the fence read and this commit.
         let tx = self
             .durable_mut()
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -55,7 +55,10 @@ impl VerifierStore {
             if let Some(hw) = high_water {
                 if gen <= hw {
                     // tx drops here → atomic rollback. Fail-closed.
-                    return Err(DurableWriteError::GenerationRegress { found: gen, high_water: hw });
+                    return Err(DurableWriteError::GenerationRegress {
+                        found: gen,
+                        high_water: hw,
+                    });
                 }
                 if gen > hw + 1 {
                     gap_from = Some(hw);
@@ -71,14 +74,16 @@ impl VerifierStore {
                  ON CONFLICT(source_controller_id, asset_id)
                  DO UPDATE SET last_generation = ?3, last_seen_ms = ?4",
                 params![
-                    report.source_controller_id, report.asset_id,
-                    gen as i64, received_at_ms as i64,
+                    report.source_controller_id,
+                    report.asset_id,
+                    gen as i64,
+                    received_at_ms as i64,
                 ],
             )?;
         }
 
-        let posture_json = serde_json::to_string(&report.posture)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let posture_json =
+            serde_json::to_string(&report.posture).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
         tx.execute(
             "INSERT INTO federated_trust_reports
@@ -101,7 +106,11 @@ impl VerifierStore {
         if let Err(e) = tx.execute(
             "INSERT INTO federation_report_nonces (nonce_hex, source_controller_id, seen_at_ms)
              VALUES (?1, ?2, ?3)",
-            params![report.nonce_hex, report.source_controller_id, received_at_ms as i64],
+            params![
+                report.nonce_hex,
+                report.source_controller_id,
+                received_at_ms as i64
+            ],
         ) {
             if is_unique_violation(&e) {
                 // tx drops here → the report INSERT above is rolled back atomically.
@@ -320,14 +329,22 @@ impl VerifierStore {
             let issued: i64 = row.get(3)?;
             let expires: i64 = row.get(4)?;
             let generation: Option<i64> = row.get(5)?;
-            Ok((source, aid, posture_json, issued as u64, expires as u64, generation.map(|g| g as u64)))
+            Ok((
+                source,
+                aid,
+                posture_json,
+                issued as u64,
+                expires as u64,
+                generation.map(|g| g as u64),
+            ))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
             let (source, aid, posture_json, issued, expires, generation) = row?;
             // Fail-closed: a corrupt posture is skipped, never coerced to Nominal.
-            let Ok(posture) = serde_json::from_str::<crate::verifier::FleetPosture>(&posture_json) else {
+            let Ok(posture) = serde_json::from_str::<crate::verifier::FleetPosture>(&posture_json)
+            else {
                 continue;
             };
             out.push(crate::federation_reconciliation::FederatedTrustReportV2 {

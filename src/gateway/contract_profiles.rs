@@ -48,9 +48,7 @@
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use crate::gateway::kinematics_contract::{
-    VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS,
-};
+use crate::gateway::kinematics_contract::{VehicleKinematicsContract, URBAN_ODD_SPEED_CAP_MPS};
 
 /// Env var selecting the deployment's vehicle class (#312). Parsed FAIL-CLOSED via
 /// [`VehicleClass::from_str`]: `courier` | `delivery-av` | `robotaxi`. There is NO
@@ -233,7 +231,10 @@ pub fn init_vehicle_class(class: VehicleClass) {
 /// byte-identical. The fail-closed guarantee lives at the startup boundary.
 #[must_use]
 pub fn global_vehicle_class() -> VehicleClass {
-    GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(VehicleClass::Robotaxi)
+    GLOBAL_VEHICLE_CLASS
+        .get()
+        .copied()
+        .unwrap_or(VehicleClass::Robotaxi)
 }
 
 // --- Courier (sidewalk, VRU-dense) — the #313 profile ----------------------
@@ -283,12 +284,12 @@ fn courier_mrc() -> VehicleKinematicsContract {
     VehicleKinematicsContract {
         // VALIDATION-PENDING: degraded crawl. (courier.mrc.max_speed)
         max_speed_mps: 1.0,
-        max_accel_mps2: 0.5,    // VALIDATION-PENDING (≥ ? brake below) (courier.mrc.accel)
-        max_brake_mps2: 2.0,    // VALIDATION-PENDING: brake ≥ accel. (courier.mrc.brake)
+        max_accel_mps2: 0.5, // VALIDATION-PENDING (≥ ? brake below) (courier.mrc.accel)
+        max_brake_mps2: 2.0, // VALIDATION-PENDING: brake ≥ accel. (courier.mrc.brake)
         max_steering_deg: 15.0, // VALIDATION-PENDING (courier.mrc.steering)
         max_steering_rate_deg_s: 15.0, // VALIDATION-PENDING (courier.mrc.steering_rate)
-        min_follow_distance_m: 3.0,    // VALIDATION-PENDING: ≥ nominal follow (courier.mrc.follow)
-        max_lateral_accel_mps2: 0.75,  // VALIDATION-PENDING (courier.mrc.lat_accel)
+        min_follow_distance_m: 3.0, // VALIDATION-PENDING: ≥ nominal follow (courier.mrc.follow)
+        max_lateral_accel_mps2: 0.75, // VALIDATION-PENDING (courier.mrc.lat_accel)
         // Footprint is platform geometry — IDENTICAL to courier nominal (the vehicle
         // does not shrink in degraded posture).
         wheelbase_m: 0.5,
@@ -311,14 +312,14 @@ fn delivery_av_nominal() -> VehicleKinematicsContract {
         // VALIDATION-PENDING: mechanical max above the ~25 mph (11 m/s) road-pod ODD
         // cap. (delivery-av.max_speed)
         max_speed_mps: 12.0,
-        max_accel_mps2: 1.8,    // VALIDATION-PENDING: between courier 1.0 and robotaxi 2.5 (delivery-av.accel)
-        max_brake_mps2: 4.0,    // VALIDATION-PENDING: firm service brake; ≥ accel (delivery-av.brake)
+        max_accel_mps2: 1.8, // VALIDATION-PENDING: between courier 1.0 and robotaxi 2.5 (delivery-av.accel)
+        max_brake_mps2: 4.0, // VALIDATION-PENDING: firm service brake; ≥ accel (delivery-av.brake)
         max_steering_deg: 33.0, // VALIDATION-PENDING (delivery-av.steering)
         max_steering_rate_deg_s: 40.0, // VALIDATION-PENDING (delivery-av.steering_rate)
-        min_follow_distance_m: 3.5,    // VALIDATION-PENDING: ~0.3 s @ 11 m/s + reaction (delivery-av.follow)
-        max_lateral_accel_mps2: 2.5,   // VALIDATION-PENDING: between courier 1.5 and robotaxi 3.5 (delivery-av.lat_accel)
-        wheelbase_m: 1.9,       // VALIDATION-PENDING: small road pod (delivery-av.wheelbase)
-        width_m: 1.1,           // VALIDATION-PENDING: narrow pod footprint (delivery-av.footprint)
+        min_follow_distance_m: 3.5, // VALIDATION-PENDING: ~0.3 s @ 11 m/s + reaction (delivery-av.follow)
+        max_lateral_accel_mps2: 2.5, // VALIDATION-PENDING: between courier 1.5 and robotaxi 3.5 (delivery-av.lat_accel)
+        wheelbase_m: 1.9,            // VALIDATION-PENDING: small road pod (delivery-av.wheelbase)
+        width_m: 1.1, // VALIDATION-PENDING: narrow pod footprint (delivery-av.footprint)
         length_m: 2.9,
         overhang_front_m: 0.5,
         overhang_rear_m: 0.5,
@@ -328,13 +329,13 @@ fn delivery_av_nominal() -> VehicleKinematicsContract {
 
 fn delivery_av_mrc() -> VehicleKinematicsContract {
     VehicleKinematicsContract {
-        max_speed_mps: 4.0,     // VALIDATION-PENDING (delivery-av.mrc.max_speed)
-        max_accel_mps2: 1.0,    // VALIDATION-PENDING (delivery-av.mrc.accel)
-        max_brake_mps2: 3.0,    // VALIDATION-PENDING: brake ≥ accel (delivery-av.mrc.brake)
-        max_steering_deg: 15.0, // VALIDATION-PENDING (delivery-av.mrc.steering)
+        max_speed_mps: 4.0,            // VALIDATION-PENDING (delivery-av.mrc.max_speed)
+        max_accel_mps2: 1.0,           // VALIDATION-PENDING (delivery-av.mrc.accel)
+        max_brake_mps2: 3.0,           // VALIDATION-PENDING: brake ≥ accel (delivery-av.mrc.brake)
+        max_steering_deg: 15.0,        // VALIDATION-PENDING (delivery-av.mrc.steering)
         max_steering_rate_deg_s: 20.0, // VALIDATION-PENDING (delivery-av.mrc.steering_rate)
-        min_follow_distance_m: 5.0,    // VALIDATION-PENDING: ≥ nominal follow (delivery-av.mrc.follow)
-        max_lateral_accel_mps2: 1.5,   // VALIDATION-PENDING (delivery-av.mrc.lat_accel)
+        min_follow_distance_m: 5.0, // VALIDATION-PENDING: ≥ nominal follow (delivery-av.mrc.follow)
+        max_lateral_accel_mps2: 1.5, // VALIDATION-PENDING (delivery-av.mrc.lat_accel)
         // Footprint IDENTICAL to delivery-av nominal.
         wheelbase_m: 1.9,
         width_m: 1.1,
@@ -354,22 +355,44 @@ mod tests {
     use super::*;
 
     /// Every family member, Nominal + MRC, as (name, nominal, mrc).
-    fn family() -> Vec<(VehicleClass, VehicleKinematicsContract, VehicleKinematicsContract)> {
-        [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi]
-            .into_iter()
-            .map(|c| (c, contract_for(c), mrc_fallback_for(c)))
-            .collect()
+    fn family() -> Vec<(
+        VehicleClass,
+        VehicleKinematicsContract,
+        VehicleKinematicsContract,
+    )> {
+        [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ]
+        .into_iter()
+        .map(|c| (c, contract_for(c), mrc_fallback_for(c)))
+        .collect()
     }
 
     #[test]
     fn courier_str_roundtrips_case_insensitive() {
         for s in ["courier", "Courier", "COURIER", "  courier  "] {
-            assert_eq!(VehicleClass::from_str(s).unwrap(), VehicleClass::Courier, "{s:?}");
+            assert_eq!(
+                VehicleClass::from_str(s).unwrap(),
+                VehicleClass::Courier,
+                "{s:?}"
+            );
         }
-        assert_eq!(VehicleClass::from_str("delivery-av").unwrap(), VehicleClass::DeliveryAv);
-        assert_eq!(VehicleClass::from_str("ROBOTAXI").unwrap(), VehicleClass::Robotaxi);
+        assert_eq!(
+            VehicleClass::from_str("delivery-av").unwrap(),
+            VehicleClass::DeliveryAv
+        );
+        assert_eq!(
+            VehicleClass::from_str("ROBOTAXI").unwrap(),
+            VehicleClass::Robotaxi
+        );
         // round-trip through as_str
-        for c in [VehicleClass::Courier, VehicleClass::DeliveryAv, VehicleClass::Robotaxi] {
+        for c in [
+            VehicleClass::Courier,
+            VehicleClass::DeliveryAv,
+            VehicleClass::Robotaxi,
+        ] {
             assert_eq!(VehicleClass::from_str(c.as_str()).unwrap(), c);
         }
     }
@@ -378,7 +401,10 @@ mod tests {
     fn unknown_class_is_fail_closed_err() {
         // A typo / garbage / empty must be Err — NEVER a silent fallback class.
         for s in ["", "robotaxii", "delivery_av", "car", "truck", "couri er"] {
-            assert!(VehicleClass::from_str(s).is_err(), "expected fail-closed Err for {s:?}");
+            assert!(
+                VehicleClass::from_str(s).is_err(),
+                "expected fail-closed Err for {s:?}"
+            );
         }
     }
 
@@ -424,8 +450,14 @@ mod tests {
         let courier = contract_for(VehicleClass::Courier).effective_max_speed_mps();
         let delivery = contract_for(VehicleClass::DeliveryAv).effective_max_speed_mps();
         let robotaxi = contract_for(VehicleClass::Robotaxi).effective_max_speed_mps();
-        assert!(courier < delivery, "courier {courier} !< delivery-av {delivery}");
-        assert!(delivery < robotaxi, "delivery-av {delivery} !< robotaxi {robotaxi}");
+        assert!(
+            courier < delivery,
+            "courier {courier} !< delivery-av {delivery}"
+        );
+        assert!(
+            delivery < robotaxi,
+            "delivery-av {delivery} !< robotaxi {robotaxi}"
+        );
         // (The documented ODD-cap consts agree with this ordering — pinned at
         // compile time via the `const _: () = assert!(...)` checks beside the consts.)
     }
@@ -433,10 +465,18 @@ mod tests {
     #[test]
     fn every_profile_brake_geq_accel() {
         for (c, nom, mrc) in family() {
-            assert!(nom.max_brake_mps2 >= nom.max_accel_mps2,
-                "{c:?} nominal brake {} < accel {}", nom.max_brake_mps2, nom.max_accel_mps2);
-            assert!(mrc.max_brake_mps2 >= mrc.max_accel_mps2,
-                "{c:?} mrc brake {} < accel {}", mrc.max_brake_mps2, mrc.max_accel_mps2);
+            assert!(
+                nom.max_brake_mps2 >= nom.max_accel_mps2,
+                "{c:?} nominal brake {} < accel {}",
+                nom.max_brake_mps2,
+                nom.max_accel_mps2
+            );
+            assert!(
+                mrc.max_brake_mps2 >= mrc.max_accel_mps2,
+                "{c:?} mrc brake {} < accel {}",
+                mrc.max_brake_mps2,
+                mrc.max_accel_mps2
+            );
         }
     }
 
@@ -458,11 +498,17 @@ mod tests {
         for (c, nom, mrc) in family() {
             for (label, k) in [("nominal", nom), ("mrc", mrc)] {
                 if let Some(cap) = k.odd_speed_cap_mps {
-                    assert!(cap <= k.max_speed_mps,
-                        "{c:?} {label} odd cap {cap} > max_speed {}", k.max_speed_mps);
+                    assert!(
+                        cap <= k.max_speed_mps,
+                        "{c:?} {label} odd cap {cap} > max_speed {}",
+                        k.max_speed_mps
+                    );
                 }
                 // effective ceiling never exceeds the mechanical max.
-                assert!(k.effective_max_speed_mps() <= k.max_speed_mps + 1e-9, "{c:?} {label}");
+                assert!(
+                    k.effective_max_speed_mps() <= k.max_speed_mps + 1e-9,
+                    "{c:?} {label}"
+                );
             }
         }
     }
@@ -474,11 +520,23 @@ mod tests {
             assert!(mrc.max_speed_mps <= nom.max_speed_mps, "{c:?} speed");
             assert!(mrc.max_accel_mps2 <= nom.max_accel_mps2, "{c:?} accel");
             assert!(mrc.max_brake_mps2 <= nom.max_brake_mps2, "{c:?} brake");
-            assert!(mrc.max_steering_deg <= nom.max_steering_deg, "{c:?} steering");
-            assert!(mrc.max_steering_rate_deg_s <= nom.max_steering_rate_deg_s, "{c:?} steering_rate");
-            assert!(mrc.max_lateral_accel_mps2 <= nom.max_lateral_accel_mps2, "{c:?} lat_accel");
+            assert!(
+                mrc.max_steering_deg <= nom.max_steering_deg,
+                "{c:?} steering"
+            );
+            assert!(
+                mrc.max_steering_rate_deg_s <= nom.max_steering_rate_deg_s,
+                "{c:?} steering_rate"
+            );
+            assert!(
+                mrc.max_lateral_accel_mps2 <= nom.max_lateral_accel_mps2,
+                "{c:?} lat_accel"
+            );
             // Following distance is the conservative direction: MRC ≥ Nominal.
-            assert!(mrc.min_follow_distance_m >= nom.min_follow_distance_m, "{c:?} follow");
+            assert!(
+                mrc.min_follow_distance_m >= nom.min_follow_distance_m,
+                "{c:?} follow"
+            );
             // Footprint is platform geometry — identical (the vehicle doesn't shrink).
             assert_eq!(mrc.wheelbase_m, nom.wheelbase_m, "{c:?} wheelbase");
             assert_eq!(mrc.width_m, nom.width_m, "{c:?} width");

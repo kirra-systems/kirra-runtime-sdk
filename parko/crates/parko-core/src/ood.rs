@@ -112,7 +112,11 @@ impl CalibrationBaseline {
         if samples.iter().any(|x| !x.is_finite()) {
             return Err(OodError::NonFiniteCalibration);
         }
-        Ok(Self { lo, hi, proportions: binned_proportions(samples, bins, lo, hi) })
+        Ok(Self {
+            lo,
+            hi,
+            proportions: binned_proportions(samples, bins, lo, hi),
+        })
     }
 
     /// The number of bins.
@@ -165,8 +169,16 @@ impl OodMonitor {
     ///   again, fail open to `Stable`).
     #[must_use]
     pub fn with_thresholds(mut self, warn_psi: f64, fault_psi: f64, min_window: usize) -> Self {
-        let warn = if warn_psi.is_finite() { warn_psi.max(0.0) } else { DEFAULT_WARN_PSI };
-        let fault = if fault_psi.is_finite() { fault_psi.max(0.0) } else { DEFAULT_FAULT_PSI };
+        let warn = if warn_psi.is_finite() {
+            warn_psi.max(0.0)
+        } else {
+            DEFAULT_WARN_PSI
+        };
+        let fault = if fault_psi.is_finite() {
+            fault_psi.max(0.0)
+        } else {
+            DEFAULT_FAULT_PSI
+        };
         self.warn_psi = warn.min(fault);
         self.fault_psi = warn.max(fault);
         self.min_window = min_window.max(1);
@@ -192,7 +204,12 @@ impl OodMonitor {
                 reason: OodReason::InsufficientWindow,
             };
         }
-        let live = binned_proportions(window, self.baseline.bins(), self.baseline.lo, self.baseline.hi);
+        let live = binned_proportions(
+            window,
+            self.baseline.bins(),
+            self.baseline.lo,
+            self.baseline.hi,
+        );
         let psi = population_stability_index(&self.baseline.proportions, &live);
         let (recommended, reason) = if psi >= self.fault_psi {
             (SafetyPosture::LockedOut, OodReason::SevereShift)
@@ -201,7 +218,11 @@ impl OodMonitor {
         } else {
             (SafetyPosture::Nominal, OodReason::Stable)
         };
-        OodAssessment { psi, recommended, reason }
+        OodAssessment {
+            psi,
+            recommended,
+            reason,
+        }
     }
 }
 
@@ -218,7 +239,10 @@ fn binned_proportions(samples: &[f64], bins: usize, lo: f64, hi: f64) -> Vec<f64
         counts[idx] += 1;
     }
     let n = samples.len() as f64;
-    counts.iter().map(|&c| (c as f64 / n).max(PSI_EPS)).collect()
+    counts
+        .iter()
+        .map(|&c| (c as f64 / n).max(PSI_EPS))
+        .collect()
 }
 
 /// Population Stability Index between two same-length proportion vectors:
@@ -253,7 +277,9 @@ mod tests {
     // detector on in-distribution frames), 400 samples over [0,1].
     fn nominal_baseline() -> CalibrationBaseline {
         let mut rng = Rng(1);
-        let samples: Vec<f64> = (0..400).map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0)).collect();
+        let samples: Vec<f64> = (0..400)
+            .map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0))
+            .collect();
         CalibrationBaseline::from_samples(&samples, 10, 0.0, 1.0).unwrap()
     }
 
@@ -284,7 +310,9 @@ mod tests {
         let m = OodMonitor::new(nominal_baseline());
         let mut rng = Rng(7);
         // A live window from the SAME distribution as calibration.
-        let window: Vec<f64> = (0..100).map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0)).collect();
+        let window: Vec<f64> = (0..100)
+            .map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0))
+            .collect();
         let a = m.assess(&window);
         assert_eq!(a.recommended, SafetyPosture::Nominal, "psi={}", a.psi);
         assert_eq!(a.reason, OodReason::Stable);
@@ -297,7 +325,9 @@ mod tests {
         let mut rng = Rng(11);
         // Confidence collapses toward the low-mid range (a detector losing its
         // grip on a shifted scene) — a moderate but not extreme move.
-        let window: Vec<f64> = (0..100).map(|_| (0.35 + 0.3 * rng.f64()).clamp(0.0, 1.0)).collect();
+        let window: Vec<f64> = (0..100)
+            .map(|_| (0.35 + 0.3 * rng.f64()).clamp(0.0, 1.0))
+            .collect();
         let a = m.assess(&window);
         assert!(
             a.recommended.severity() >= SafetyPosture::Degraded.severity(),
@@ -360,7 +390,9 @@ mod tests {
         let trials = 500;
         let mut false_escalations = 0;
         for _ in 0..trials {
-            let window: Vec<f64> = (0..100).map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0)).collect();
+            let window: Vec<f64> = (0..100)
+                .map(|_| (0.6 + 0.3 * rng.f64()).clamp(0.0, 1.0))
+                .collect();
             if m.assess(&window).recommended != SafetyPosture::Nominal {
                 false_escalations += 1;
             }
@@ -383,8 +415,11 @@ mod tests {
         // A NaN band would make `psi >= band` always false → never escalate.
         // Sanitization must fall back to finite defaults so severe drift still
         // locks out.
-        let m = OodMonitor::new(nominal_baseline())
-            .with_thresholds(f64::NAN, f64::INFINITY, DEFAULT_MIN_WINDOW);
+        let m = OodMonitor::new(nominal_baseline()).with_thresholds(
+            f64::NAN,
+            f64::INFINITY,
+            DEFAULT_MIN_WINDOW,
+        );
         let a = m.assess(&vec![0.02_f64; 100]); // severe shift
         assert_eq!(a.recommended, SafetyPosture::LockedOut, "psi={}", a.psi);
     }
@@ -400,7 +435,10 @@ mod tests {
         assert_eq!(a.recommended, SafetyPosture::Nominal);
         assert!(a.psi.is_finite(), "no NaN leaks from an empty window");
         // A genuine severe window still escalates through the forced-min path.
-        assert_eq!(m.assess(&vec![0.02_f64; 100]).recommended, SafetyPosture::LockedOut);
+        assert_eq!(
+            m.assess(&vec![0.02_f64; 100]).recommended,
+            SafetyPosture::LockedOut
+        );
     }
 
     #[test]

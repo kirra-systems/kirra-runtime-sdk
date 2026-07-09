@@ -101,12 +101,17 @@ pub(crate) async fn metrics_endpoint(State(svc): State<Arc<ServiceState>>) -> im
         .app
         .store
         .call_read(|store| {
-            Ok::<_, rusqlite::Error>((store.load_campaigns()?, store.load_node_artifact_statuses()?))
+            Ok::<_, rusqlite::Error>((
+                store.load_campaigns()?,
+                store.load_node_artifact_statuses()?,
+            ))
         })
         .await
     {
         let summary = kirra_verifier::ota_campaign::summarize_campaigns(&campaigns, &statuses);
-        body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(&summary));
+        body.push_str(&kirra_verifier::ota_campaign::campaign_metrics_prometheus(
+            &summary,
+        ));
     }
 
     // WP-15 (MGA G-19): append the mTLS cert-principal lifecycle census
@@ -328,7 +333,11 @@ pub(crate) async fn report_node_artifact(
             )
                 .into_response();
         }
-        let ak = svc.app.nodes.get(&node_id).and_then(|n| n.ak_public_pem.clone());
+        let ak = svc
+            .app
+            .nodes
+            .get(&node_id)
+            .and_then(|n| n.ak_public_pem.clone());
         let Some(ak) = ak else {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -364,7 +373,10 @@ pub(crate) async fn report_node_artifact(
     let status = kirra_verifier::ota_campaign::NodeArtifactStatus {
         node_id,
         applied_digest,
-        campaign_id: req.campaign_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        campaign_id: req
+            .campaign_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         artifact_version: req
             .artifact_version
             .map(|s| s.trim().to_string())

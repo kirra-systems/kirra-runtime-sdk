@@ -63,12 +63,14 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     for el in root.children().filter(roxmltree::Node::is_element) {
         match el.tag_name().name() {
             "node" => {
-                let id = attr_u64(&el, "id").ok_or_else(|| Lanelet2ParseError::BadNode("id".into()))?;
+                let id =
+                    attr_u64(&el, "id").ok_or_else(|| Lanelet2ParseError::BadNode("id".into()))?;
                 // Prefer Autoware's pre-projected metric coords; fall back to geographic
                 // `lat`/`lon` attributes (projected after the scan). Neither present → fail closed.
                 if let (Some(x), Some(y)) = (tag_f64(&el, "local_x"), tag_f64(&el, "local_y")) {
                     nodes.insert(id, Point { x_m: x, y_m: y });
-                } else if let (Some(lat), Some(lon)) = (attr_f64(&el, "lat"), attr_f64(&el, "lon")) {
+                } else if let (Some(lat), Some(lon)) = (attr_f64(&el, "lat"), attr_f64(&el, "lon"))
+                {
                     geo_nodes.insert(id, (lat, lon));
                 } else {
                     return Err(Lanelet2ParseError::BadNode(format!(
@@ -77,7 +79,9 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                 }
             }
             "way" => {
-                let Some(id) = attr_u64(&el, "id") else { continue };
+                let Some(id) = attr_u64(&el, "id") else {
+                    continue;
+                };
                 let node_ids: Vec<u64> = el
                     .children()
                     .filter(|c| c.has_tag_name("nd"))
@@ -85,7 +89,14 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                     .collect();
                 let subtype = tag_value(&el, "subtype");
                 let line = line_type_of(tag_value(&el, "type"), subtype);
-                ways.insert(id, Way { node_ids, line, subtype: subtype.map(str::to_string) });
+                ways.insert(
+                    id,
+                    Way {
+                        node_ids,
+                        line,
+                        subtype: subtype.map(str::to_string),
+                    },
+                );
             }
             "relation" => match tag_value(&el, "type") {
                 Some("lanelet") => {
@@ -96,7 +107,9 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                     if !is_driveable_subtype(tag_value(&el, "subtype")) {
                         continue;
                     }
-                    let Some(id) = attr_u64(&el, "id") else { continue };
+                    let Some(id) = attr_u64(&el, "id") else {
+                        continue;
+                    };
                     let first_ref = |r: &str| {
                         el.children()
                             .filter(|c| c.has_tag_name("member"))
@@ -113,10 +126,17 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                         .filter(|c| c.attribute("role") == Some("regulatory_element"))
                         .filter_map(|c| attr_u64(&c, "ref"))
                         .collect();
-                    raw_lanelets.push(RawLanelet { id, left, right, reg_elems });
+                    raw_lanelets.push(RawLanelet {
+                        id,
+                        left,
+                        right,
+                        reg_elems,
+                    });
                 }
                 Some("regulatory_element") => {
-                    let Some(reg_id) = attr_u64(&el, "id") else { continue };
+                    let Some(reg_id) = attr_u64(&el, "id") else {
+                        continue;
+                    };
                     if tag_value(&el, "subtype") == Some("right_of_way") {
                         // Members reference lanelets by id: role `right_of_way` = the lanes
                         // with priority, role `yield` = the lanes that must cede.
@@ -127,7 +147,8 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
                                 .filter_map(|c| attr_u64(&c, "ref"))
                                 .collect()
                         };
-                        right_of_way.push((refs_with_role("right_of_way"), refs_with_role("yield")));
+                        right_of_way
+                            .push((refs_with_role("right_of_way"), refs_with_role("yield")));
                     } else {
                         // A traffic-sign / traffic-light element: collect it raw and resolve to a
                         // control after the scan (the `refers` way may appear later in the file).
@@ -155,7 +176,9 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     // depends on). A pre-projected `local_x`/`local_y` node of the same id is never overwritten.
     if let Some((&_origin_id, &(lat0, lon0))) = geo_nodes.iter().next() {
         for (id, (lat, lon)) in &geo_nodes {
-            nodes.entry(*id).or_insert_with(|| project_geographic(*lat, *lon, lat0, lon0));
+            nodes
+                .entry(*id)
+                .or_insert_with(|| project_geographic(*lat, *lon, lat0, lon0));
         }
     }
 
@@ -164,7 +187,15 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
         let w = &ways[&way_id];
         w.node_ids
             .iter()
-            .map(|n| nodes.get(n).copied().ok_or(Lanelet2ParseError::DanglingNodeRef { way: way_id, node: *n }))
+            .map(|n| {
+                nodes
+                    .get(n)
+                    .copied()
+                    .ok_or(Lanelet2ParseError::DanglingNodeRef {
+                        way: way_id,
+                        node: *n,
+                    })
+            })
             .collect()
     };
 
@@ -176,11 +207,12 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     for r in &raw_regs {
         let control = match r.subtype.as_deref() {
             Some("traffic_light") => Some(LaneControl::TrafficLight),
-            Some("traffic_sign") => r
-                .sign_type
-                .as_deref()
-                .and_then(sign_control)
-                .or_else(|| r.refers.and_then(|w| ways.get(&w)).and_then(|w| w.subtype.as_deref()).and_then(sign_control)),
+            Some("traffic_sign") => r.sign_type.as_deref().and_then(sign_control).or_else(|| {
+                r.refers
+                    .and_then(|w| ways.get(&w))
+                    .and_then(|w| w.subtype.as_deref())
+                    .and_then(sign_control)
+            }),
             other => other.and_then(sign_control), // direct-subtype convention (e.g. subtype=stop_sign)
         };
         if let Some(c) = control {
@@ -192,7 +224,10 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
     for ll in &raw_lanelets {
         for (role, w) in [("left", ll.left), ("right", ll.right)] {
             if !ways.contains_key(&w) {
-                return Err(Lanelet2ParseError::MissingBoundary { lanelet: ll.id, role });
+                return Err(Lanelet2ParseError::MissingBoundary {
+                    lanelet: ll.id,
+                    role,
+                });
             }
         }
         let left = way_points(ll.left)?;
@@ -209,7 +244,10 @@ pub fn parse_lanelet2_osm(xml: &str) -> Result<LaneGraph, Lanelet2ParseError> {
             edges: connectivity(ll, &raw_lanelets, &ways),
             // The regulatory control (STOP / YIELD sign or TRAFFIC LIGHT) from the first of this
             // lanelet's `regulatory_element` members that resolves to one; `None` if it has none.
-            control: ll.reg_elems.iter().find_map(|e| reg_controls.get(e).copied()),
+            control: ll
+                .reg_elems
+                .iter()
+                .find_map(|e| reg_controls.get(e).copied()),
         });
     }
 
@@ -288,7 +326,9 @@ fn connectivity(me: &RawLanelet, all: &[RawLanelet], ways: &BTreeMap<u64, Way>) 
             edges.push(LaneEdge::LeftNeighbor { to: other.id });
         }
         // Successor: `other`'s boundaries START where mine END.
-        if let (Some((o_left_start, _)), Some((o_right_start, _))) = (ends(other.left), ends(other.right)) {
+        if let (Some((o_left_start, _)), Some((o_right_start, _))) =
+            (ends(other.left), ends(other.right))
+        {
             if o_left_start == my_left_end && o_right_start == my_right_end {
                 edges.push(LaneEdge::Successor { to: other.id });
             }
@@ -310,7 +350,10 @@ fn centerline_and_half_width(left: &[Point], right: &[Point]) -> (Vec<Point>, f6
     let mut gap_sum = 0.0;
     for i in 0..n {
         let (l, r) = (left[i], right[i]);
-        centerline.push(Point { x_m: (l.x_m + r.x_m) / 2.0, y_m: (l.y_m + r.y_m) / 2.0 });
+        centerline.push(Point {
+            x_m: (l.x_m + r.x_m) / 2.0,
+            y_m: (l.y_m + r.y_m) / 2.0,
+        });
         gap_sum += (l.x_m - r.x_m).hypot(l.y_m - r.y_m);
     }
     (centerline, gap_sum / n as f64 / 2.0)
@@ -468,7 +511,10 @@ mod tests {
   <way id="11"><nd ref="3"/><nd ref="4"/><tag k="subtype" v="solid"/></way>
   <relation id="1"><tag k="type" v="lanelet"/><member type="way" role="left" ref="10"/><member type="way" role="right" ref="11"/></relation>
 </osm>"#;
-        assert_eq!(parse_lanelet2_osm(xml).unwrap().lane(1).unwrap().left_line, LineType::Unmarked);
+        assert_eq!(
+            parse_lanelet2_osm(xml).unwrap().lane(1).unwrap().left_line,
+            LineType::Unmarked
+        );
     }
 
     #[test]
@@ -476,8 +522,14 @@ mod tests {
         let missing = r#"<osm>
   <relation id="1"><tag k="type" v="lanelet"/><member type="way" role="left" ref="99"/></relation>
 </osm>"#;
-        assert!(matches!(parse_lanelet2_osm(missing), Err(Lanelet2ParseError::IncompleteLanelet(1))));
-        assert!(matches!(parse_lanelet2_osm("<osm><relation"), Err(Lanelet2ParseError::Xml(_))));
+        assert!(matches!(
+            parse_lanelet2_osm(missing),
+            Err(Lanelet2ParseError::IncompleteLanelet(1))
+        ));
+        assert!(matches!(
+            parse_lanelet2_osm("<osm><relation"),
+            Err(Lanelet2ParseError::Xml(_))
+        ));
     }
 
     #[test]
@@ -561,10 +613,26 @@ mod tests {
   <relation id="80"><tag k="type" v="regulatory_element"/><tag k="subtype" v="traffic_sign"/><tag k="sign_type" v="speed_limit_50"/></relation>
 </osm>"#;
         let g = parse_lanelet2_osm(xml).unwrap();
-        assert_eq!(g.lane(1).unwrap().control, Some(LaneControl::Stop), "STOP via refers-way subtype stop_sign");
-        assert_eq!(g.lane(2).unwrap().control, Some(LaneControl::TrafficLight), "TRAFFIC LIGHT");
-        assert_eq!(g.lane(3).unwrap().control, Some(LaneControl::Yield), "YIELD via sign_type de205");
-        assert_eq!(g.lane(4).unwrap().control, None, "an unrecognized sign fabricates no control");
+        assert_eq!(
+            g.lane(1).unwrap().control,
+            Some(LaneControl::Stop),
+            "STOP via refers-way subtype stop_sign"
+        );
+        assert_eq!(
+            g.lane(2).unwrap().control,
+            Some(LaneControl::TrafficLight),
+            "TRAFFIC LIGHT"
+        );
+        assert_eq!(
+            g.lane(3).unwrap().control,
+            Some(LaneControl::Yield),
+            "YIELD via sign_type de205"
+        );
+        assert_eq!(
+            g.lane(4).unwrap().control,
+            None,
+            "an unrecognized sign fabricates no control"
+        );
     }
 
     #[test]
@@ -607,11 +675,21 @@ mod tests {
     /// A two-lanelet successor chain (same shape as `CHAIN`) authored as a GEOGRAPHIC map about
     /// `(lat0, lon0)` — `lat`/`lon` node attributes, no `local_x`/`local_y`.
     fn geo_chain(lat0: f64, lon0: f64) -> String {
-        let pts = [(0.0, 1.75), (30.0, 1.75), (60.0, 1.75), (0.0, -1.75), (30.0, -1.75), (60.0, -1.75)];
+        let pts = [
+            (0.0, 1.75),
+            (30.0, 1.75),
+            (60.0, 1.75),
+            (0.0, -1.75),
+            (30.0, -1.75),
+            (60.0, -1.75),
+        ];
         let mut s = String::from("<?xml version=\"1.0\"?>\n<osm>\n");
         for (i, (x, y)) in pts.iter().enumerate() {
             let (lat, lon) = inv_project(*x, *y, lat0, lon0);
-            s.push_str(&format!("  <node id=\"{}\" lat=\"{lat:.15}\" lon=\"{lon:.15}\"/>\n", i + 1));
+            s.push_str(&format!(
+                "  <node id=\"{}\" lat=\"{lat:.15}\" lon=\"{lon:.15}\"/>\n",
+                i + 1
+            ));
         }
         s.push_str(
             r#"  <way id="10"><nd ref="1"/><nd ref="2"/><tag k="subtype" v="solid"/></way>
@@ -632,11 +710,23 @@ mod tests {
         let g = parse_lanelet2_osm(&geo_chain(35.0, 139.0)).unwrap();
         assert_eq!(g.len(), 2, "both lanelets parse from geographic coords");
         let l = g.lane(100).unwrap();
-        assert!((l.half_width_m - 1.75).abs() < 0.02, "projected half-width ≈ 1.75 m, got {}", l.half_width_m);
-        assert!(l.heading_rad.abs() < 1e-3, "runs eastbound (+x), got heading {}", l.heading_rad);
+        assert!(
+            (l.half_width_m - 1.75).abs() < 0.02,
+            "projected half-width ≈ 1.75 m, got {}",
+            l.half_width_m
+        );
+        assert!(
+            l.heading_rad.abs() < 1e-3,
+            "runs eastbound (+x), got heading {}",
+            l.heading_rad
+        );
         assert_eq!(l.left_line, LineType::Solid);
         assert_eq!(l.right_line, LineType::Broken);
-        assert_eq!(g.route(100, 200), Some(vec![100, 200]), "connectivity derives the same as the metric map");
+        assert_eq!(
+            g.route(100, 200),
+            Some(vec![100, 200]),
+            "connectivity derives the same as the metric map"
+        );
     }
 
     #[test]
@@ -650,7 +740,10 @@ mod tests {
         for (pa, pb) in la.centerline.iter().zip(&lb.centerline) {
             // Agree to 0.1 mm despite being on opposite sides of Earth (residual = lat/lon string
             // round-trip precision, not a projection difference).
-            assert!((pa.x_m - pb.x_m).abs() < 1e-4 && (pa.y_m - pb.y_m).abs() < 1e-4, "projection is origin-invariant");
+            assert!(
+                (pa.x_m - pb.x_m).abs() < 1e-4 && (pa.y_m - pb.y_m).abs() < 1e-4,
+                "projection is origin-invariant"
+            );
         }
         assert!((la.half_width_m - lb.half_width_m).abs() < 1e-9);
     }
@@ -662,6 +755,9 @@ mod tests {
   <node id="1"><tag k="name" v="nowhere"/></node>
   <way id="10"><nd ref="1"/></way>
 </osm>"#;
-        assert!(matches!(parse_lanelet2_osm(xml), Err(Lanelet2ParseError::BadNode(_))));
+        assert!(matches!(
+            parse_lanelet2_osm(xml),
+            Err(Lanelet2ParseError::BadNode(_))
+        ));
     }
 }

@@ -226,7 +226,10 @@ mod adapter_trait_tests {
         assert_eq!(ScalarType::U8.decode_le(&[0xFF]), Some(255.0));
         assert_eq!(ScalarType::I16.decode_le(&[0x00, 0x80]), Some(-32768.0));
         assert_eq!(ScalarType::U16.decode_le(&[0x00, 0x80]), Some(32768.0));
-        assert_eq!(ScalarType::I32.decode_le(&[0xFF, 0xFF, 0xFF, 0xFF]), Some(-1.0));
+        assert_eq!(
+            ScalarType::I32.decode_le(&[0xFF, 0xFF, 0xFF, 0xFF]),
+            Some(-1.0)
+        );
         assert_eq!(ScalarType::F32.decode_le(&1.5f32.to_le_bytes()), Some(1.5));
         assert_eq!(ScalarType::F64.decode_le(&2.5f64.to_le_bytes()), Some(2.5));
         // Too short for the declared width → None (never a fabricated value).

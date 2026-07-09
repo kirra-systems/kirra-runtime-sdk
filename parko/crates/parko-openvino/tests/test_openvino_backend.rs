@@ -30,14 +30,14 @@
 use std::collections::HashMap;
 
 use parko_core::backend::{
-    BackendCapabilities, BackendDescriptor, BackendError,
-    InferenceBackend, InferenceThreads, TensorBatch, TensorStorage,
+    BackendCapabilities, BackendDescriptor, BackendError, InferenceBackend, InferenceThreads,
+    TensorBatch, TensorStorage,
 };
 use parko_onnx::OrtBackend;
 use parko_openvino::OvBackend;
 
 const MNIST_PATH: &str = "tests/data/mnist-12.onnx";
-const MNIST_INPUT_NAME:  &str = "Input3";
+const MNIST_INPUT_NAME: &str = "Input3";
 const MNIST_OUTPUT_NAME: &str = "Plus214_Output_0";
 
 /// Absolute-value tolerance for the cross-backend equivalence check.
@@ -110,28 +110,41 @@ fn make_mnist_input() -> [f32; 28 * 28] {
 fn batch_with<'a>(name: &str, data: &'a [f32]) -> TensorBatch<'a> {
     let mut named = HashMap::new();
     named.insert(name.to_string(), TensorStorage::Borrowed(data));
-    TensorBatch { named_tensors: named, metadata: HashMap::new() }
+    TensorBatch {
+        named_tensors: named,
+        metadata: HashMap::new(),
+    }
 }
 
 #[test]
 fn openvino_smoke_mnist_inference_runs_and_outputs_finite() {
-    let backend = OvBackend::new(MNIST_PATH).unwrap_or_else(|e|
-        panic!("OvBackend::new failed: {e:?}. Is libopenvino_c.so installed? \
-                Set OPENVINO_LIB_PATH or apt-install openvino-2024."));
+    let backend = OvBackend::new(MNIST_PATH).unwrap_or_else(|e| {
+        panic!(
+            "OvBackend::new failed: {e:?}. Is libopenvino_c.so installed? \
+                Set OPENVINO_LIB_PATH or apt-install openvino-2024."
+        )
+    });
 
     let model = backend.load_model(MNIST_PATH).expect("load_model");
-    let input_shape  = model.input_shapes.get(MNIST_INPUT_NAME)
+    let input_shape = model
+        .input_shapes
+        .get(MNIST_INPUT_NAME)
         .expect("MNIST input node 'Input3' not found in introspection");
-    let output_shape = model.output_shapes.get(MNIST_OUTPUT_NAME)
+    let output_shape = model
+        .output_shapes
+        .get(MNIST_OUTPUT_NAME)
         .expect("MNIST output node 'Plus214_Output_0' not found");
-    assert_eq!(input_shape,  &vec![1, 1, 28, 28], "input shape");
-    assert_eq!(output_shape, &vec![1, 10],         "output shape");
+    assert_eq!(input_shape, &vec![1, 1, 28, 28], "input shape");
+    assert_eq!(output_shape, &vec![1, 10], "output shape");
 
     let input = make_mnist_input();
     let batch = batch_with(MNIST_INPUT_NAME, &input);
     let out = backend.run(&model, &batch).expect("run");
-    let scores = out.named_tensors.get(MNIST_OUTPUT_NAME)
-        .expect("missing output tensor").as_slice();
+    let scores = out
+        .named_tensors
+        .get(MNIST_OUTPUT_NAME)
+        .expect("missing output tensor")
+        .as_slice();
     assert_eq!(scores.len(), 10, "10-class MNIST output");
     for (i, s) in scores.iter().enumerate() {
         assert!(s.is_finite(), "non-finite score at index {i}: {s}");
@@ -149,14 +162,18 @@ fn ort_ov_output_equivalence_on_mnist() {
     // counts can never diverge — the structural guard for the #152 asymmetry
     // (the equivalence claim is only valid when both run the same posture).
     let threads = InferenceThreads::default(); // single-threaded, reproducible
-    let ort = OrtBackend::with_threads(MNIST_PATH, threads).unwrap_or_else(|e|
-        panic!("OrtBackend::with_threads failed: {e:?}. Is libonnxruntime.so installed? \
-                Set ORT_DYLIB_PATH or run via the parko-onnx README."));
-    let ov  = OvBackend::with_threads(MNIST_PATH, threads).unwrap_or_else(|e|
-        panic!("OvBackend::with_threads failed: {e:?}. Is libopenvino_c.so installed?"));
+    let ort = OrtBackend::with_threads(MNIST_PATH, threads).unwrap_or_else(|e| {
+        panic!(
+            "OrtBackend::with_threads failed: {e:?}. Is libonnxruntime.so installed? \
+                Set ORT_DYLIB_PATH or run via the parko-onnx README."
+        )
+    });
+    let ov = OvBackend::with_threads(MNIST_PATH, threads).unwrap_or_else(|e| {
+        panic!("OvBackend::with_threads failed: {e:?}. Is libopenvino_c.so installed?")
+    });
 
     let ort_model = ort.load_model(MNIST_PATH).expect("ort load_model");
-    let ov_model  = ov.load_model(MNIST_PATH).expect("ov load_model");
+    let ov_model = ov.load_model(MNIST_PATH).expect("ov load_model");
 
     // CRITICAL: generate the input ONCE and feed the SAME buffer to
     // BOTH backends. The equivalence claim is only valid when the
@@ -166,25 +183,36 @@ fn ort_ov_output_equivalence_on_mnist() {
     // fixed seed, but the principle is the same buffer or none).
     let input = make_mnist_input();
     let ort_batch = batch_with(MNIST_INPUT_NAME, &input);
-    let ov_batch  = batch_with(MNIST_INPUT_NAME, &input);
+    let ov_batch = batch_with(MNIST_INPUT_NAME, &input);
 
     let ort_out = ort.run(&ort_model, &ort_batch).expect("ort run");
-    let ov_out  = ov.run(&ov_model,  &ov_batch).expect("ov run");
+    let ov_out = ov.run(&ov_model, &ov_batch).expect("ov run");
 
-    let ort_scores = ort_out.named_tensors.get(MNIST_OUTPUT_NAME)
-        .expect("ort output tensor").as_slice();
-    let ov_scores  = ov_out.named_tensors.get(MNIST_OUTPUT_NAME)
-        .expect("ov output tensor").as_slice();
-    assert_eq!(ort_scores.len(), ov_scores.len(),
-        "output lengths must match across backends");
+    let ort_scores = ort_out
+        .named_tensors
+        .get(MNIST_OUTPUT_NAME)
+        .expect("ort output tensor")
+        .as_slice();
+    let ov_scores = ov_out
+        .named_tensors
+        .get(MNIST_OUTPUT_NAME)
+        .expect("ov output tensor")
+        .as_slice();
+    assert_eq!(
+        ort_scores.len(),
+        ov_scores.len(),
+        "output lengths must match across backends"
+    );
 
     for (i, (a, b)) in ort_scores.iter().zip(ov_scores.iter()).enumerate() {
         let diff = (a - b).abs();
-        assert!(diff <= EQUIV_TOL,
+        assert!(
+            diff <= EQUIV_TOL,
             "OrtBackend vs OvBackend disagree on MNIST output[{i}]: \
              ort={a} ov={b} |diff|={diff} > tol {EQUIV_TOL}. \
              A failure here is genuine numerical drift between the two \
-             runtimes — don't loosen the bound without investigating.");
+             runtimes — don't loosen the bound without investigating."
+        );
     }
 }
 
@@ -217,8 +245,8 @@ fn openvino_capabilities_match_cpu_baseline() {
     assert_eq!(
         caps,
         BackendCapabilities {
-            supports_int8:  false,
-            supports_fp16:  false,
+            supports_int8: false,
+            supports_fp16: false,
             max_batch_size: None,
         },
         "OvBackend capabilities must match the documented CPU baseline (parity with parko-onnx)"
@@ -233,21 +261,32 @@ fn openvino_capabilities_match_cpu_baseline() {
 fn equivalence_input_is_deterministic_and_in_unit_range() {
     let a = make_mnist_input();
     let b = make_mnist_input();
-    assert_eq!(a, b,
-        "make_mnist_input must be deterministic — repeated calls must produce identical buffers");
-    assert_eq!(a.len(), 28 * 28,
-        "MNIST input must be exactly 1*1*28*28 = 784 elements");
+    assert_eq!(
+        a, b,
+        "make_mnist_input must be deterministic — repeated calls must produce identical buffers"
+    );
+    assert_eq!(
+        a.len(),
+        28 * 28,
+        "MNIST input must be exactly 1*1*28*28 = 784 elements"
+    );
 
     let mut any_nonzero = false;
     for &v in &a {
         assert!(v.is_finite(), "input must be finite");
-        assert!((0.0..1.0).contains(&v),
-            "input must be in [0.0, 1.0) (MNIST normalised range); got {v}");
-        if v > 0.0 { any_nonzero = true; }
+        assert!(
+            (0.0..1.0).contains(&v),
+            "input must be in [0.0, 1.0) (MNIST normalised range); got {v}"
+        );
+        if v > 0.0 {
+            any_nonzero = true;
+        }
     }
-    assert!(any_nonzero,
+    assert!(
+        any_nonzero,
         "input must contain non-zero values — the whole point of the amendment \
-         is to exercise the full weight-dependent path");
+         is to exercise the full weight-dependent path"
+    );
 
     // Pin the first three values produced by `EQUIV_INPUT_SEED` so a
     // future bump to the seed or the mix constants is detected.

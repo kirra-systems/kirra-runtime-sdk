@@ -201,7 +201,10 @@ impl SemanticEvalSummary {
             if caught {
                 self.true_hazards_caught += 1;
             }
-            let e = self.by_class.entry(class_label(truth_hz.class)).or_default();
+            let e = self
+                .by_class
+                .entry(class_label(truth_hz.class))
+                .or_default();
             e.seen += 1;
             if caught {
                 e.caught += 1;
@@ -273,7 +276,12 @@ impl std::fmt::Display for SemanticEvalSummary {
                 r.seen
             )?;
         }
-        write!(f, "  mean clip error {:.2} m (over {} co-clipped frames)", self.mean_clip_err_m(), self.co_clipped)
+        write!(
+            f,
+            "  mean clip error {:.2} m (over {} co-clipped frames)",
+            self.mean_clip_err_m(),
+            self.co_clipped
+        )
     }
 }
 
@@ -295,7 +303,10 @@ mod tests {
     // substrate the fusion tests use), so the binding hazard is the semantic one, not geometry.
     fn open_corridor() -> TajCorridor {
         // Two far side walls → a clear forward corridor; reuse the lib test's scan shape.
-        let taj = TajPhaseA::new(TajConfig { forward_extent_m: 20.0, ..Default::default() });
+        let taj = TajPhaseA::new(TajConfig {
+            forward_extent_m: 20.0,
+            ..Default::default()
+        });
         // A scan with returns only far out to the sides leaves the forward corridor open.
         let n = 180usize;
         let mut ranges = vec![f32::INFINITY; n];
@@ -314,7 +325,12 @@ mod tests {
     }
 
     fn hazard(class: SemanticClass, near_x: f64) -> SemanticDetection {
-        SemanticDetection { class, near_x_m: near_x, lateral_min_m: -5.0, lateral_max_m: 5.0 }
+        SemanticDetection {
+            class,
+            near_x_m: near_x,
+            lateral_min_m: -5.0,
+            lateral_max_m: 5.0,
+        }
     }
 
     fn frame<'a>(
@@ -322,7 +338,11 @@ mod tests {
         truth: &'a [SemanticDetection],
         detected: &'a [SemanticDetection],
     ) -> SemanticEvalFrame<'a> {
-        SemanticEvalFrame { corridor, truth, detected }
+        SemanticEvalFrame {
+            corridor,
+            truth,
+            detected,
+        }
     }
 
     #[test]
@@ -330,7 +350,10 @@ mod tests {
         let c = open_corridor();
         let truth = [hazard(SemanticClass::Water, 8.0)];
         let det = [hazard(SemanticClass::Water, 8.0)];
-        assert_eq!(score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M), FrameOutcome::Correct);
+        assert_eq!(
+            score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M),
+            FrameOutcome::Correct
+        );
     }
 
     #[test]
@@ -339,7 +362,10 @@ mod tests {
         let c = open_corridor();
         let truth = [hazard(SemanticClass::Water, 8.0)];
         let det: [SemanticDetection; 0] = [];
-        assert_eq!(score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M), FrameOutcome::UnsafeMiss);
+        assert_eq!(
+            score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M),
+            FrameOutcome::UnsafeMiss
+        );
     }
 
     #[test]
@@ -348,7 +374,10 @@ mod tests {
         let c = open_corridor();
         let truth = [hazard(SemanticClass::Water, 8.0)];
         let det = [hazard(SemanticClass::Water, 14.0)];
-        assert_eq!(score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M), FrameOutcome::UnsafeMiss);
+        assert_eq!(
+            score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M),
+            FrameOutcome::UnsafeMiss
+        );
     }
 
     #[test]
@@ -380,7 +409,10 @@ mod tests {
         let c = open_corridor();
         let truth: [SemanticDetection; 0] = [];
         let det: [SemanticDetection; 0] = [];
-        assert_eq!(score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M), FrameOutcome::Correct);
+        assert_eq!(
+            score_frame(&frame(&c, &truth, &det), DEFAULT_CLIP_TOL_M),
+            FrameOutcome::Correct
+        );
     }
 
     #[test]
@@ -409,7 +441,10 @@ mod tests {
         assert!((s.hazard_recall() - 2.0 / 3.0).abs() < 1e-9);
         // Per-class: water 1/2 caught, static_obstacle 1/1.
         assert_eq!(s.by_class["water"], ClassRecall { seen: 2, caught: 1 });
-        assert_eq!(s.by_class["static_obstacle"], ClassRecall { seen: 1, caught: 1 });
+        assert_eq!(
+            s.by_class["static_obstacle"],
+            ClassRecall { seen: 1, caught: 1 }
+        );
         assert!((s.by_class["water"].recall() - 0.5).abs() < 1e-9);
     }
 
@@ -420,7 +455,11 @@ mod tests {
         let det: [SemanticDetection; 0] = [];
         let s = SemanticEvalSummary::from_frames([frame(&c, &truth, &det)]);
         assert_eq!(s.frames_with_true_hazard, 0);
-        assert_eq!(s.hazard_recall(), 1.0, "no hazards to miss → vacuously perfect recall");
+        assert_eq!(
+            s.hazard_recall(),
+            1.0,
+            "no hazards to miss → vacuously perfect recall"
+        );
         assert_eq!(s.unsafe_miss_rate(), 0.0);
         assert_eq!(s.mean_clip_err_m(), 0.0);
     }
@@ -436,7 +475,10 @@ mod tests {
         let d2: [SemanticDetection; 0] = [];
         let s = SemanticEvalSummary::from_frames([frame(&c, &t1, &d1), frame(&c, &t2, &d2)]);
         assert_eq!(s.co_clipped, 1);
-        assert!((s.mean_clip_err_m() - 2.0).abs() < 1e-9, "2 m error over 1 co-clipped frame");
+        assert!(
+            (s.mean_clip_err_m() - 2.0).abs() < 1e-9,
+            "2 m error over 1 co-clipped frame"
+        );
     }
 
     #[test]
@@ -445,7 +487,13 @@ mod tests {
         let t = [hazard(SemanticClass::Water, 8.0)];
         let d: [SemanticDetection; 0] = [];
         let report = SemanticEvalSummary::from_frames([frame(&c, &t, &d)]).to_string();
-        assert!(report.contains("UNSAFE MISS"), "report surfaces the safety bar: {report}");
-        assert!(report.contains("water"), "report breaks down by class: {report}");
+        assert!(
+            report.contains("UNSAFE MISS"),
+            "report surfaces the safety bar: {report}"
+        );
+        assert!(
+            report.contains("water"),
+            "report breaks down by class: {report}"
+        );
     }
 }

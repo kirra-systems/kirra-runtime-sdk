@@ -135,7 +135,10 @@ mod sg_008_cert_tests {
     fn test_startup_aborts_when_hardware_root_untrusted() {
         // SS-001 entry invariant: an unavailable/unresponsive hardware root of
         // trust must abort startup before the listener binds (fail-closed).
-        let ctx = StartupContext { hardware_root_trusted: false, ..all_ok_active() };
+        let ctx = StartupContext {
+            hardware_root_trusted: false,
+            ..all_ok_active()
+        };
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::HardwareRootUntrusted),
@@ -145,7 +148,10 @@ mod sg_008_cert_tests {
 
     #[test]
     fn test_startup_aborts_without_admin_token() {
-        let ctx = StartupContext { admin_token_present: false, ..all_ok_active() };
+        let ctx = StartupContext {
+            admin_token_present: false,
+            ..all_ok_active()
+        };
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::AdminTokenMissing),
@@ -155,7 +161,10 @@ mod sg_008_cert_tests {
 
     #[test]
     fn test_startup_aborts_when_sqlite_not_wal() {
-        let ctx = StartupContext { sqlite_wal: false, ..all_ok_active() };
+        let ctx = StartupContext {
+            sqlite_wal: false,
+            ..all_ok_active()
+        };
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::SqliteNotWal),
@@ -165,7 +174,10 @@ mod sg_008_cert_tests {
 
     #[test]
     fn test_startup_aborts_when_watchdog_not_spawned_on_active() {
-        let ctx = StartupContext { watchdog_spawned: false, ..all_ok_active() };
+        let ctx = StartupContext {
+            watchdog_spawned: false,
+            ..all_ok_active()
+        };
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::WatchdogNotSpawned),
@@ -175,7 +187,10 @@ mod sg_008_cert_tests {
 
     #[test]
     fn test_startup_aborts_when_posture_engine_down_on_active() {
-        let ctx = StartupContext { posture_engine_running: false, ..all_ok_active() };
+        let ctx = StartupContext {
+            posture_engine_running: false,
+            ..all_ok_active()
+        };
         assert_eq!(
             check_startup_invariants(&ctx),
             Err(StartupInvariant::PostureEngineDown),
@@ -218,7 +233,11 @@ mod sg_008_cert_tests {
             Err(StartupInvariant::AdminTokenMissing),
             "SG-008: admin token is required in every mode"
         );
-        let no_wal = StartupContext { admin_token_present: true, sqlite_wal: false, ..no_token };
+        let no_wal = StartupContext {
+            admin_token_present: true,
+            sqlite_wal: false,
+            ..no_token
+        };
         assert_eq!(
             check_startup_invariants(&no_wal),
             Err(StartupInvariant::SqliteNotWal),

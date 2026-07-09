@@ -38,9 +38,7 @@ use kirra_core::kinematics_sim::apply_enforcement;
 // (see node.rs): nominal cap = URBAN_ODD_SPEED_CAP_MPS (22.35), MRC floor = 0.0,
 // ceiling V_OBJECT_MAX_MPS = 60. The publisher ttl reuses the subscription
 // staleness budget (500 ms).
-use kirra_core::perception_monitor::{
-    KinematicPlausibilityContract, PerceptionCapPublisher,
-};
+use kirra_core::perception_monitor::{KinematicPlausibilityContract, PerceptionCapPublisher};
 
 /// Staleness/ttl budget the publisher uses (mirrors SUBSCRIPTION_STALENESS_TIMEOUT_MS).
 pub const TTL_MS: u64 = 500;
@@ -71,10 +69,16 @@ impl FixtureObj {
     pub fn perceived(&self) -> PerceivedObject {
         PerceivedObject {
             id: self.id,
-            pos: Point { x_m: self.x_m, y_m: self.y_m },
+            pos: Point {
+                x_m: self.x_m,
+                y_m: self.y_m,
+            },
             velocity_mps: (self.vx * self.vx + self.vy * self.vy).sqrt(),
             heading_rad: self.vy.atan2(self.vx),
-            vel: Point { x_m: self.vx, y_m: self.vy },
+            vel: Point {
+                x_m: self.vx,
+                y_m: self.vy,
+            },
         }
     }
 }
@@ -88,22 +92,52 @@ pub fn perceived_vec(fixtures: &[FixtureObj]) -> Vec<PerceivedObject> {
 /// (b) PLAUSIBLE: 2 objects, both speed < 60 → no derate (nominal cap).
 pub fn scenario_b() -> Vec<FixtureObj> {
     vec![
-        FixtureObj { id: 1, x_m: 12.0, y_m: 1.0, vx: 5.0, vy: 0.0 },  // 5 m/s
-        FixtureObj { id: 2, x_m: 20.0, y_m: -1.0, vx: 3.0, vy: 4.0 }, // 5 m/s
+        FixtureObj {
+            id: 1,
+            x_m: 12.0,
+            y_m: 1.0,
+            vx: 5.0,
+            vy: 0.0,
+        }, // 5 m/s
+        FixtureObj {
+            id: 2,
+            x_m: 20.0,
+            y_m: -1.0,
+            vx: 3.0,
+            vy: 4.0,
+        }, // 5 m/s
     ]
 }
 
 /// (c1) SINGLE IMPLAUSIBLE: 1 object > 60 → fraction 1.0 > 0.50 → MRC floor.
 pub fn scenario_c1() -> Vec<FixtureObj> {
-    vec![FixtureObj { id: 1, x_m: 30.0, y_m: 0.0, vx: 70.0, vy: 0.0 }] // 70 m/s
+    vec![FixtureObj {
+        id: 1,
+        x_m: 30.0,
+        y_m: 0.0,
+        vx: 70.0,
+        vy: 0.0,
+    }] // 70 m/s
 }
 
 /// (c2) MIXED: 10 objects, exactly 1 over 60 → fraction 0.10 → 0.75 × nominal.
 pub fn scenario_c2() -> Vec<FixtureObj> {
     let mut v: Vec<FixtureObj> = (0..9)
-        .map(|i| FixtureObj { id: i as u64, x_m: 10.0 + i as f64, y_m: 0.0, vx: 5.0, vy: 0.0 })
+        .map(|i| FixtureObj {
+            id: i as u64,
+            x_m: 10.0 + i as f64,
+            y_m: 0.0,
+            vx: 5.0,
+            vy: 0.0,
+        })
         .collect();
-    v.push(FixtureObj { id: 99, x_m: 40.0, y_m: 0.0, vx: 65.0, vy: 0.0 }); // 1 implausible
+    v.push(FixtureObj {
+        id: 99,
+        x_m: 40.0,
+        y_m: 0.0,
+        vx: 65.0,
+        vy: 0.0,
+    }); // 1 implausible
     v
 }
 
@@ -122,8 +156,11 @@ pub fn published_cap(
     now_ms: u64,
 ) -> Option<f64> {
     let cache = empty_perception_cap();
-    let publisher =
-        PerceptionCapPublisher::new(cache.clone(), KinematicPlausibilityContract::urban_reference(), TTL_MS);
+    let publisher = PerceptionCapPublisher::new(
+        cache.clone(),
+        KinematicPlausibilityContract::urban_reference(),
+        TTL_MS,
+    );
     publish_perception_tick(&publisher, objects, tick_ms);
     resolve_perception_cap(enabled, &cache, now_ms)
 }

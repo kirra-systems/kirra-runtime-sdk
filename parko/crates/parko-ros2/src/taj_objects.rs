@@ -112,7 +112,10 @@ impl ObjectSnapshot {
     /// Copy a perception frame's objects + stamp into an owned snapshot.
     #[must_use]
     pub fn from_objects(objects: &[PerceivedObject], stamp_ms: u64) -> Self {
-        Self { objects: objects.to_vec(), stamp_ms }
+        Self {
+            objects: objects.to_vec(),
+            stamp_ms,
+        }
     }
 
     /// Age (ms) of this snapshot at `now_ms` (saturating; a clock that went
@@ -287,7 +290,11 @@ mod tests {
 
     fn outcome(linear: f64) -> TickOutcome {
         TickOutcome {
-            twist: OutgoingTwist { linear_x_mps: linear, angular_z_rads: 0.0, stamp_ms: 7 },
+            twist: OutgoingTwist {
+                linear_x_mps: linear,
+                angular_z_rads: 0.0,
+                stamp_ms: 7,
+            },
             error: None,
             degraded: false,
         }
@@ -302,9 +309,14 @@ mod tests {
     #[test]
     fn fresh_empty_perception_is_known_empty_not_absent() {
         // The safety-critical distinction: perception ran, nothing ahead → clear.
-        assert!(matches!(objects_to_agent_scene(&[], 1.0), AgentScene::KnownEmpty));
-        assert!(matches!(parko_kirra::compute_scene_rss(
-            &objects_to_agent_scene(&[], 1.0), &params()).safe, true));
+        assert!(matches!(
+            objects_to_agent_scene(&[], 1.0),
+            AgentScene::KnownEmpty
+        ));
+        assert!(matches!(
+            parko_kirra::compute_scene_rss(&objects_to_agent_scene(&[], 1.0), &params()).safe,
+            true
+        ));
     }
 
     #[test]
@@ -312,7 +324,10 @@ mod tests {
         // An object 2 m BEHIND the ego (x = -2) is out of the forward half-plane;
         // a forward-driving courier cannot forward-collide with it → KnownEmpty.
         let objs = [object(1, -2.0, 0.0, 0.0, 0.0)];
-        assert!(matches!(objects_to_agent_scene(&objs, 1.0), AgentScene::KnownEmpty));
+        assert!(matches!(
+            objects_to_agent_scene(&objs, 1.0),
+            AgentScene::KnownEmpty
+        ));
     }
 
     // ---- SG6 vanished-scene source (#309) ----------------------------------
@@ -360,8 +375,12 @@ mod tests {
     #[test]
     fn clear_scene_passes_the_command() {
         // Nothing ahead → the governed command passes through untouched.
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&[], 100)), &params(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 1.0, "a clear scene must pass the command");
+        let out =
+            apply_object_rss_gate(outcome(1.0), Some(&snapshot(&[], 100)), &params(), 500, 100);
+        assert_eq!(
+            out.twist.linear_x_mps, 1.0,
+            "a clear scene must pass the command"
+        );
         assert!(out.error.is_none());
     }
 
@@ -370,8 +389,18 @@ mod tests {
         // A static object 0.5 m dead ahead, ego at 1 m/s — far inside the RSS
         // longitudinal gap → unsafe → MRC.
         let objs = [object(1, 0.5, 0.0, 0.0, 0.0)];
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&objs, 100)), &params(), 500, 100);
-        assert_eq!(out.twist, OutgoingTwist::stopped(7), "an object in the path must MRC");
+        let out = apply_object_rss_gate(
+            outcome(1.0),
+            Some(&snapshot(&objs, 100)),
+            &params(),
+            500,
+            100,
+        );
+        assert_eq!(
+            out.twist,
+            OutgoingTwist::stopped(7),
+            "an object in the path must MRC"
+        );
         assert_eq!(out.error, Some(TickError::ObjectRssBreach));
     }
 
@@ -380,8 +409,17 @@ mod tests {
         // A static object 3 m to the side (y = 3), abreast (x = 0): laterally far
         // beyond the footprint+overlap band → the §4 conjunction is not met → safe.
         let objs = [object(1, 0.0, 3.0, 0.0, 0.0)];
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&objs, 100)), &params(), 500, 100);
-        assert_eq!(out.twist.linear_x_mps, 1.0, "a laterally-clear object must not MRC");
+        let out = apply_object_rss_gate(
+            outcome(1.0),
+            Some(&snapshot(&objs, 100)),
+            &params(),
+            500,
+            100,
+        );
+        assert_eq!(
+            out.twist.linear_x_mps, 1.0,
+            "a laterally-clear object must not MRC"
+        );
         assert!(out.error.is_none());
     }
 
@@ -389,7 +427,11 @@ mod tests {
     fn absent_perception_fails_closed() {
         // No snapshot at all → AgentScene::Absent → UNSAFE → MRC.
         let out = apply_object_rss_gate(outcome(1.0), None, &params(), 500, 100);
-        assert_eq!(out.twist, OutgoingTwist::stopped(7), "no perception must fail closed");
+        assert_eq!(
+            out.twist,
+            OutgoingTwist::stopped(7),
+            "no perception must fail closed"
+        );
         assert_eq!(out.error, Some(TickError::ObjectRssBreach));
     }
 
@@ -397,8 +439,18 @@ mod tests {
     fn stale_snapshot_fails_closed() {
         // A snapshot stamped at 100, checked at 2000 with a 500 ms budget → stale
         // → Absent → MRC, even though it holds a clear (empty) scene.
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&[], 100)), &params(), 500, 2000);
-        assert_eq!(out.twist, OutgoingTwist::stopped(7), "a stale snapshot must fail closed");
+        let out = apply_object_rss_gate(
+            outcome(1.0),
+            Some(&snapshot(&[], 100)),
+            &params(),
+            500,
+            2000,
+        );
+        assert_eq!(
+            out.twist,
+            OutgoingTwist::stopped(7),
+            "a stale snapshot must fail closed"
+        );
         assert_eq!(out.error, Some(TickError::ObjectRssBreach));
     }
 
@@ -413,7 +465,10 @@ mod tests {
         };
         // Even with an object dead ahead AND no perception, a stop passes through.
         let out = apply_object_rss_gate(prior.clone(), None, &params(), 500, 100);
-        assert_eq!(out, prior, "an already-stopped outcome must pass through unchanged");
+        assert_eq!(
+            out, prior,
+            "an already-stopped outcome must pass through unchanged"
+        );
     }
 
     #[test]
@@ -424,21 +479,43 @@ mod tests {
         // same-direction lead (the bug the oncoming flag prevents) would have a
         // far smaller required gap and could read as safe.
         let agent = object_to_agent(&object(1, 5.0, 0.0, -3.0, 0.0), 1.0);
-        assert!(agent.oncoming, "a back-closing object must be flagged oncoming");
+        assert!(
+            agent.oncoming,
+            "a back-closing object must be flagged oncoming"
+        );
         let objs = [object(1, 5.0, 0.0, -3.0, 0.0)];
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&objs, 100)), &params(), 500, 100);
-        assert_eq!(out.error, Some(TickError::ObjectRssBreach),
-            "a close oncoming object must MRC under the head-on bound");
+        let out = apply_object_rss_gate(
+            outcome(1.0),
+            Some(&snapshot(&objs, 100)),
+            &params(),
+            500,
+            100,
+        );
+        assert_eq!(
+            out.error,
+            Some(TickError::ObjectRssBreach),
+            "a close oncoming object must MRC under the head-on bound"
+        );
     }
 
     #[test]
     fn over_cap_scene_fails_closed() {
         // A scene larger than compute_scene_rss's WCET cap is fail-closed (MRC),
         // not truncated — many forward objects (e.g. a noisy scan) → stop.
-        let objs: Vec<PerceivedObject> =
-            (0..256).map(|i| object(i, 1.0 + i as f64 * 0.01, 5.0, 0.0, 0.0)).collect();
-        let out = apply_object_rss_gate(outcome(1.0), Some(&snapshot(&objs, 100)), &params(), 500, 100);
-        assert_eq!(out.error, Some(TickError::ObjectRssBreach),
-            "an over-cap scene must fail closed");
+        let objs: Vec<PerceivedObject> = (0..256)
+            .map(|i| object(i, 1.0 + i as f64 * 0.01, 5.0, 0.0, 0.0))
+            .collect();
+        let out = apply_object_rss_gate(
+            outcome(1.0),
+            Some(&snapshot(&objs, 100)),
+            &params(),
+            500,
+            100,
+        );
+        assert_eq!(
+            out.error,
+            Some(TickError::ObjectRssBreach),
+            "an over-cap scene must fail closed"
+        );
     }
 }

@@ -1,8 +1,8 @@
 // src/protocol_adapter.rs
 
-use serde::{Deserialize, Serialize};
 use crate::action_filter::{evaluate_action_claim, ActionClaim, ActionDecision};
 use crate::verifier::FleetPosture;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,8 +50,7 @@ pub fn map_industrial_event_to_claim(event: &IndustrialEvent) -> Result<ActionCl
         (IndustrialProtocol::OpcUa, "write_node") => Mapped::CmdVelSetpoint,
         (IndustrialProtocol::OpcUa, "read_node") => Mapped::ReadTelemetry,
         // Motion-implying, but no faithfully-decodable velocity magnitude.
-        (IndustrialProtocol::Modbus, "coil_write")
-        | (IndustrialProtocol::OpcUa, "call_method") => {
+        (IndustrialProtocol::Modbus, "coil_write") | (IndustrialProtocol::OpcUa, "call_method") => {
             return Err("UNMAPPABLE_TO_KINEMATIC_CLAIM");
         }
         _ => return Err("UNSUPPORTED_INDUSTRIAL_OPERATION"),
@@ -128,9 +127,9 @@ pub fn evaluate_industrial_event(event: IndustrialEvent, posture: FleetPosture) 
 // Unified industrial request / evaluation
 // ---------------------------------------------------------------------------
 
-use crate::adapters::ethernet_ip::EtherNetIpAdapter;
 use crate::adapters::canopen::CanOpenAdapter;
 use crate::adapters::dnp3::Dnp3Adapter;
+use crate::adapters::ethernet_ip::EtherNetIpAdapter;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UnifiedIndustrialRequest {
@@ -167,15 +166,21 @@ pub fn evaluate_unified_industrial_request(
     match req.protocol {
         IndustrialProtocol::Modbus | IndustrialProtocol::OpcUa => {
             // Legacy path: deserialize as IndustrialEvent fields from the message value
-            let asset_id = req.message.get("asset_id")
+            let asset_id = req
+                .message
+                .get("asset_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let operation = req.message.get("operation")
+            let operation = req
+                .message
+                .get("operation")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let address = req.message.get("address")
+            let address = req
+                .message
+                .get("address")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -193,7 +198,9 @@ pub fn evaluate_unified_industrial_request(
                     });
                 }
             };
-            let risk_class = req.message.get("risk_class")
+            let risk_class = req
+                .message
+                .get("risk_class")
                 .and_then(|v| v.as_str())
                 .unwrap_or("kinetic_write")
                 .to_string();
@@ -218,7 +225,11 @@ pub fn evaluate_unified_industrial_request(
                 protocol: format!("{:?}", req.protocol),
                 command,
                 allowed: decision.allowed,
-                denial_reason: if decision.allowed { None } else { Some(decision.reason) },
+                denial_reason: if decision.allowed {
+                    None
+                } else {
+                    Some(decision.reason)
+                },
                 posture_at_evaluation: posture_str,
                 adapter_details: serde_json::json!({}),
                 triggers_recalculation: false,
@@ -229,7 +240,9 @@ pub fn evaluate_unified_industrial_request(
         // posture-gate, then magnitude-bound (DNP3 enforces its g41 envelope; the
         // others are posture-only pending per-target type config — see their
         // `bound_magnitude`). `dispatch_adapter` formats its own posture string.
-        IndustrialProtocol::EthernetIp => dispatch_adapter::<EtherNetIpAdapter>(req.message, posture),
+        IndustrialProtocol::EthernetIp => {
+            dispatch_adapter::<EtherNetIpAdapter>(req.message, posture)
+        }
         IndustrialProtocol::CanOpen => dispatch_adapter::<CanOpenAdapter>(req.message, posture),
         IndustrialProtocol::Dnp3 => dispatch_adapter::<Dnp3Adapter>(req.message, posture),
     }
@@ -337,14 +350,28 @@ mod industrial_freshness_tests {
     #[test]
     fn fresh_message_passes() {
         assert_eq!(classify_industrial_freshness(1_000, 1_000, W), None);
-        assert_eq!(classify_industrial_freshness(1_000, 1_000 + W, W), None, "exactly at the window edge is fresh");
-        assert_eq!(classify_industrial_freshness(1_000 + W, 1_000, W), None, "edge future is fresh");
+        assert_eq!(
+            classify_industrial_freshness(1_000, 1_000 + W, W),
+            None,
+            "exactly at the window edge is fresh"
+        );
+        assert_eq!(
+            classify_industrial_freshness(1_000 + W, 1_000, W),
+            None,
+            "edge future is fresh"
+        );
     }
 
     #[test]
     fn stale_and_future_are_rejected() {
-        assert_eq!(classify_industrial_freshness(1_000, 1_000 + W + 1, W), Some("INDUSTRIAL_MESSAGE_STALE"));
-        assert_eq!(classify_industrial_freshness(1_000 + W + 1, 1_000, W), Some("INDUSTRIAL_MESSAGE_FUTURE_DATED"));
+        assert_eq!(
+            classify_industrial_freshness(1_000, 1_000 + W + 1, W),
+            Some("INDUSTRIAL_MESSAGE_STALE")
+        );
+        assert_eq!(
+            classify_industrial_freshness(1_000 + W + 1, 1_000, W),
+            Some("INDUSTRIAL_MESSAGE_FUTURE_DATED")
+        );
     }
 }
 
@@ -392,8 +419,12 @@ mod no_fabricated_velocity_tests {
     // Previously this was masked to a fabricated 0.25 and wrongly ALLOWED.
     #[test]
     fn real_magnitude_is_governed_not_masked() {
-        let decision = evaluate_industrial_event(modbus_event("write_register", 5), FleetPosture::Nominal);
-        assert!(!decision.allowed, "a real 5 m/s setpoint breaches the envelope");
+        let decision =
+            evaluate_industrial_event(modbus_event("write_register", 5), FleetPosture::Nominal);
+        assert!(
+            !decision.allowed,
+            "a real 5 m/s setpoint breaches the envelope"
+        );
         assert_eq!(decision.reason, "KINEMATIC_ENVELOPE_BREACH");
     }
 
@@ -405,8 +436,12 @@ mod no_fabricated_velocity_tests {
             map_industrial_event_to_claim(&modbus_event("coil_write", 1)).unwrap_err(),
             "UNMAPPABLE_TO_KINEMATIC_CLAIM",
         );
-        let decision = evaluate_industrial_event(modbus_event("coil_write", 1), FleetPosture::Nominal);
-        assert!(!decision.allowed, "an unmappable motion command must NOT be admitted");
+        let decision =
+            evaluate_industrial_event(modbus_event("coil_write", 1), FleetPosture::Nominal);
+        assert!(
+            !decision.allowed,
+            "an unmappable motion command must NOT be admitted"
+        );
         assert!(decision.reason.starts_with("ADAPTER_TRANSLATION_FAILURE"));
         assert!(decision.reason.contains("UNMAPPABLE_TO_KINEMATIC_CLAIM"));
     }
@@ -423,8 +458,13 @@ mod no_fabricated_velocity_tests {
             );
             let decision =
                 evaluate_industrial_event(modbus_event("write_register", v), FleetPosture::Nominal);
-            assert!(!decision.allowed, "an unfaithful-width register write must fail closed");
-            assert!(decision.reason.contains("MODBUS_REGISTER_VALUE_UNFAITHFUL_WIDTH"));
+            assert!(
+                !decision.allowed,
+                "an unfaithful-width register write must fail closed"
+            );
+            assert!(decision
+                .reason
+                .contains("MODBUS_REGISTER_VALUE_UNFAITHFUL_WIDTH"));
         }
     }
 
@@ -494,7 +534,9 @@ mod unified_tests {
                 "data": [],
                 "source_node": "plc_01"
             }),
-            source_id: "plc_01".to_string(), sequence: 1, timestamp_ms: 0,
+            source_id: "plc_01".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
         }
     }
 
@@ -507,7 +549,9 @@ mod unified_tests {
                 "data": data,
                 "source_node": "can_01"
             }),
-            source_id: "can_01".to_string(), sequence: 1, timestamp_ms: 0,
+            source_id: "can_01".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
         }
     }
 
@@ -522,11 +566,16 @@ mod unified_tests {
                 "objects": [],
                 "source_node": "sub_01"
             }),
-            source_id: "sub_01".to_string(), sequence: 1, timestamp_ms: 0,
+            source_id: "sub_01".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
         }
     }
 
-    fn legacy_modbus_request(operation: &str, message: serde_json::Value) -> UnifiedIndustrialRequest {
+    fn legacy_modbus_request(
+        operation: &str,
+        message: serde_json::Value,
+    ) -> UnifiedIndustrialRequest {
         let mut message = message;
         message["asset_id"] = serde_json::json!("asset-1");
         message["operation"] = serde_json::json!(operation);
@@ -567,10 +616,8 @@ mod unified_tests {
 
     #[test]
     fn test_unified_endpoint_routes_to_dnp3() {
-        let result = evaluate_unified_industrial_request(
-            dnp3_request(0x01, 0x0001),
-            FleetPosture::Nominal,
-        );
+        let result =
+            evaluate_unified_industrial_request(dnp3_request(0x01, 0x0001), FleetPosture::Nominal);
         assert!(result.is_ok());
         let r = result.unwrap();
         assert_eq!(r.protocol, "dnp3");
@@ -579,9 +626,16 @@ mod unified_tests {
 
     #[test]
     fn test_response_always_includes_posture_at_evaluation() {
-        for posture in [FleetPosture::Nominal, FleetPosture::Degraded, FleetPosture::LockedOut] {
+        for posture in [
+            FleetPosture::Nominal,
+            FleetPosture::Degraded,
+            FleetPosture::LockedOut,
+        ] {
             let r = evaluate_unified_industrial_request(eip_request(), posture).unwrap();
-            assert!(!r.posture_at_evaluation.is_empty(), "posture_at_evaluation must always be set");
+            assert!(
+                !r.posture_at_evaluation.is_empty(),
+                "posture_at_evaluation must always be set"
+            );
         }
     }
 
@@ -590,11 +644,15 @@ mod unified_tests {
         let req = UnifiedIndustrialRequest {
             protocol: IndustrialProtocol::EthernetIp,
             message: serde_json::json!({"bad": "data"}),
-            source_id: "x".to_string(), sequence: 1, timestamp_ms: 0,
+            source_id: "x".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
         };
         let result = evaluate_unified_industrial_request(req, FleetPosture::Nominal);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("MALFORMED_ETHERNET_IP_MESSAGE"));
+        assert!(result
+            .unwrap_err()
+            .contains("MALFORMED_ETHERNET_IP_MESSAGE"));
     }
 
     #[test]
@@ -603,8 +661,14 @@ mod unified_tests {
 
         let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
 
-        assert!(!r.allowed, "missing write value must not be fabricated as stop");
-        assert_eq!(r.command, crate::gateway::policy::OperationalCommand::Unknown);
+        assert!(
+            !r.allowed,
+            "missing write value must not be fabricated as stop"
+        );
+        assert_eq!(
+            r.command,
+            crate::gateway::policy::OperationalCommand::Unknown
+        );
         assert_eq!(
             r.denial_reason.as_deref(),
             Some("ADAPTER_TRANSLATION_FAILURE: MISSING_OR_NON_INTEGER_VALUE")
@@ -617,14 +681,14 @@ mod unified_tests {
 
     #[test]
     fn legacy_modbus_write_non_integer_value_fails_closed_b7() {
-        let req = legacy_modbus_request(
-            "write_register",
-            serde_json::json!({ "value": "0" }),
-        );
+        let req = legacy_modbus_request("write_register", serde_json::json!({ "value": "0" }));
 
         let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
 
-        assert!(!r.allowed, "string/non-integer write value must fail closed");
+        assert!(
+            !r.allowed,
+            "string/non-integer write value must fail closed"
+        );
         assert_eq!(
             r.denial_reason.as_deref(),
             Some("ADAPTER_TRANSLATION_FAILURE: MISSING_OR_NON_INTEGER_VALUE")
@@ -652,9 +716,13 @@ mod unified_tests {
 
     #[test]
     fn test_lockedout_posture_denies_all() {
-        let r = evaluate_unified_industrial_request(eip_request(), FleetPosture::LockedOut).unwrap();
+        let r =
+            evaluate_unified_industrial_request(eip_request(), FleetPosture::LockedOut).unwrap();
         assert!(!r.allowed);
-        assert_eq!(r.denial_reason.as_deref(), Some("FLEET_LOCKEDOUT_ABSOLUTE_DENIAL"));
+        assert_eq!(
+            r.denial_reason.as_deref(),
+            Some("FLEET_LOCKEDOUT_ABSOLUTE_DENIAL")
+        );
     }
 
     #[test]
@@ -679,10 +747,15 @@ mod unified_tests {
                 "objects": [{ "group": 41, "variation": 1, "data": 50i32.to_le_bytes().to_vec() }],
                 "source_node": "sub_01"
             }),
-            source_id: "sub_01".to_string(), sequence: 1, timestamp_ms: 0,
+            source_id: "sub_01".to_string(),
+            sequence: 1,
+            timestamp_ms: 0,
         };
         let r = evaluate_unified_industrial_request(req, FleetPosture::Nominal).unwrap();
-        assert!(!r.allowed, "an unbounded analog control must be denied (fail-closed)");
+        assert!(
+            !r.allowed,
+            "an unbounded analog control must be denied (fail-closed)"
+        );
         assert_eq!(
             r.denial_reason.as_deref(),
             Some("DNP3_ANALOG_OUTPUT_ENVELOPE_UNCONFIGURED")

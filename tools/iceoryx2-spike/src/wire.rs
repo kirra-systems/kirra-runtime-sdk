@@ -55,7 +55,12 @@ impl CommandFrame {
     /// Build a well-formed frame carrying `(linear_mps, angular_radps)`, with a
     /// correct CRC and `declared_len = 16`. Callers mutate fields afterward to
     /// inject faults.
-    pub fn well_formed(sequence: u64, deadline_nanos: u64, linear_mps: f64, angular_radps: f64) -> Self {
+    pub fn well_formed(
+        sequence: u64,
+        deadline_nanos: u64,
+        linear_mps: f64,
+        angular_radps: f64,
+    ) -> Self {
         let mut payload = [0u8; PAYLOAD_CAPACITY];
         payload[0..8].copy_from_slice(&linear_mps.to_le_bytes());
         payload[8..16].copy_from_slice(&angular_radps.to_le_bytes());

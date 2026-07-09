@@ -31,7 +31,12 @@ static UNIQ: AtomicU64 = AtomicU64::new(0);
 fn temp_db(tag: &str) -> std::path::PathBuf {
     // Wall-clock-free unique name: pid + a process-local counter.
     let n = UNIQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("kirra_powerloss_{}_{}_{}.sqlite", std::process::id(), tag, n))
+    std::env::temp_dir().join(format!(
+        "kirra_powerloss_{}_{}_{}.sqlite",
+        std::process::id(),
+        tag,
+        n
+    ))
 }
 
 fn cleanup(db: &std::path::Path) {
@@ -56,8 +61,15 @@ fn powerloss_writer_child() {
     let mut i: u64 = 0;
     loop {
         // Each insert appends exactly one chained audit entry in one atomic tx.
-        let c = Campaign::new(format!("crash-{i}"), DIGEST, "v1", vec!["c".into()], vec![100], i)
-            .expect("build campaign");
+        let c = Campaign::new(
+            format!("crash-{i}"),
+            DIGEST,
+            "v1",
+            vec!["c".into()],
+            vec![100],
+            i,
+        )
+        .expect("build campaign");
         let _ = store.insert_campaign(&c); // a mid-commit SIGKILL just drops this one
         i += 1;
     }
@@ -131,19 +143,30 @@ fn committed_audit_chain_reverifies_after_reopen() {
     let before = {
         let mut store = VerifierStore::new(db.to_str().unwrap()).expect("open");
         for i in 0..N {
-            let c =
-                Campaign::new(format!("c-{i}"), DIGEST, "v1", vec!["c".into()], vec![100], i)
-                    .expect("build campaign");
+            let c = Campaign::new(
+                format!("c-{i}"),
+                DIGEST,
+                "v1",
+                vec!["c".into()],
+                vec![100],
+                i,
+            )
+            .expect("build campaign");
             store.insert_campaign(&c).expect("insert");
         }
-        store.verify_audit_chain_full(None).expect("verify").total_entries
+        store
+            .verify_audit_chain_full(None)
+            .expect("verify")
+            .total_entries
         // store dropped here → connection closed
     };
     assert!(before >= N, "expected at least {N} entries, got {before}");
 
     // Reopen from disk and re-verify — nothing was held in memory.
     let store = VerifierStore::new(db.to_str().unwrap()).expect("reopen");
-    let full = store.verify_audit_chain_full(None).expect("verify after reopen");
+    let full = store
+        .verify_audit_chain_full(None)
+        .expect("verify after reopen");
     assert!(full.chain_intact, "chain must verify after a clean reopen");
     assert_eq!(
         full.total_entries, before,

@@ -10,14 +10,22 @@
 
 use kirra_trajectory::{
     config::VehicleConfig,
-    state::{AcceptedTrajectory, EgoOdom, Pose, TrajectoryPoint, TrajectoryVerdict, DEFAULT_MAX_AGE_MS},
-    validation::{check_command_conforms, ConformanceVerdict, IncomingControl, VELOCITY_TOLERANCE_MPS},
+    state::{
+        AcceptedTrajectory, EgoOdom, Pose, TrajectoryPoint, TrajectoryVerdict, DEFAULT_MAX_AGE_MS,
+    },
+    validation::{
+        check_command_conforms, ConformanceVerdict, IncomingControl, VELOCITY_TOLERANCE_MPS,
+    },
 };
 
 fn straight_pts(n: usize, v: f64, dt: f64) -> Vec<TrajectoryPoint> {
     (0..n)
         .map(|i| TrajectoryPoint {
-            pose: Pose { x_m: (i as f64) * v * dt, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: (i as f64) * v * dt,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             velocity_mps: v,
             time_from_start_s: (i as f64) * dt,
         })
@@ -34,7 +42,11 @@ fn conforming_command_accepts() {
     let promoted = 100_000;
     let now = promoted + 50;
     let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1));
-    let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
     let ego = EgoOdom::default();
     assert_eq!(
@@ -49,7 +61,11 @@ fn stale_trajectory_mrcs() {
     let promoted = 100_000;
     let now = promoted + DEFAULT_MAX_AGE_MS + 50;
     let traj = fresh_accepted(promoted, straight_pts(10, 5.0, 0.1));
-    let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
     assert_eq!(
         check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),
@@ -69,7 +85,11 @@ fn horizon_exhausted_mrcs() {
     let promoted = 100_000;
     let now = promoted + 150; // 0.15 s: < DEFAULT_MAX_AGE_MS (fresh), past the 0.04 s horizon
     let traj = fresh_accepted(promoted, straight_pts(3, 5.0, 0.02)); // poses at 0, 0.02, 0.04 s
-    let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
+    let cmd = IncomingControl {
+        velocity_mps: 5.0,
+        steering_rad: 0.0,
+        stamp_ms: now,
+    };
     let cfg = VehicleConfig::default_urban();
     assert_eq!(
         check_command_conforms(&cmd, &traj, &EgoOdom::default(), &cfg, now),

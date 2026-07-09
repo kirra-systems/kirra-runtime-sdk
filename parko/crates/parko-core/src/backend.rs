@@ -210,8 +210,14 @@ mod tests {
     #[test]
     fn inference_threads_default_is_single_threaded_reproducible() {
         let t = InferenceThreads::default();
-        assert_eq!(t.num_threads, 1, "default must be 1 (preserves the #152 experiment)");
-        assert!(t.bitwise_reproducible(), "single thread → bitwise reproducible");
+        assert_eq!(
+            t.num_threads, 1,
+            "default must be 1 (preserves the #152 experiment)"
+        );
+        assert!(
+            t.bitwise_reproducible(),
+            "single thread → bitwise reproducible"
+        );
     }
 
     #[test]
@@ -247,7 +253,11 @@ mod tests {
         ];
         for variant in &variants {
             let s = format!("{:?}", variant);
-            assert!(!s.is_empty(), "Debug output must be non-empty for {:?}", variant);
+            assert!(
+                !s.is_empty(),
+                "Debug output must be non-empty for {:?}",
+                variant
+            );
         }
     }
 
@@ -261,10 +271,21 @@ mod tests {
 
     #[test]
     fn test_backend_error_display() {
-        let shape_err = BackendError::ShapeMismatch { expected: 4, got: 2 };
+        let shape_err = BackendError::ShapeMismatch {
+            expected: 4,
+            got: 2,
+        };
         let msg = shape_err.to_string();
-        assert!(msg.contains('4'), "Display must mention expected=4, got: {}", msg);
-        assert!(msg.contains('2'), "Display must mention got=2, got: {}", msg);
+        assert!(
+            msg.contains('4'),
+            "Display must mention expected=4, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains('2'),
+            "Display must mention got=2, got: {}",
+            msg
+        );
 
         let io_err = BackendError::Io("disk full".into());
         assert!(

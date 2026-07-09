@@ -1,13 +1,13 @@
 // src/verifier.rs
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use crate::security::constant_time_compare;
 use crate::verifier_store::VerifierStore;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 
 /// Maximum recursion depth for dependency graph traversal.
 /// Prevents stack overflow on pathologically deep (but acyclic) graphs.
@@ -463,14 +463,26 @@ impl AppState {
             rss_active_violation: Arc::new(AtomicBool::new(false)),
             flood_condition_active: Arc::new(AtomicBool::new(false)),
             supervisor_tripped: Arc::new(AtomicBool::new(false)),
-            rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            rss_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
+                count: 0,
+                start_ms: 0,
+            })),
             frame_degraded_active: Arc::new(AtomicBool::new(false)),
             frame_lockout_active: Arc::new(AtomicBool::new(false)),
-            frame_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
-            frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            frame_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
+                count: 0,
+                start_ms: 0,
+            })),
+            frame_untrusted_streak: Arc::new(Mutex::new(RssRecoveryStreak {
+                count: 0,
+                start_ms: 0,
+            })),
             divergence_degraded_active: Arc::new(AtomicBool::new(false)),
             divergence_lockout_active: Arc::new(AtomicBool::new(false)),
-            divergence_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak { count: 0, start_ms: 0 })),
+            divergence_recovery_streak: Arc::new(Mutex::new(RssRecoveryStreak {
+                count: 0,
+                start_ms: 0,
+            })),
             current_incident: Arc::new(Mutex::new(None)),
             post_incident_write_failures: Arc::new(AtomicU64::new(0)),
             incident_durability_failures: Arc::new(AtomicU64::new(0)),
@@ -500,9 +512,7 @@ impl AppState {
         tx: tokio::sync::mpsc::Sender<crate::audit_writer::AuditWriteJob>,
     ) {
         if self.audit_writer_tx.set(tx).is_err() {
-            tracing::warn!(
-                "audit writer Sender already installed — ignoring duplicate install"
-            );
+            tracing::warn!("audit writer Sender already installed — ignoring duplicate install");
         }
     }
 
@@ -514,9 +524,7 @@ impl AppState {
         tx: tokio::sync::mpsc::Sender<crate::capture::CaptureRecord>,
     ) {
         if self.capture_writer_tx.set(tx).is_err() {
-            tracing::warn!(
-                "capture writer Sender already installed — ignoring duplicate install"
-            );
+            tracing::warn!("capture writer Sender already installed — ignoring duplicate install");
         }
     }
 
@@ -621,8 +629,7 @@ impl AppState {
         // registered or not — keeping it a pure stack-safety guard rather than a
         // (traversal-order-dependent) semantic verdict. Floored at
         // MAX_DEPENDENCY_DEPTH so a tiny fleet still carries the documented guard.
-        let max_depth =
-            (self.nodes.len() + self.dependency_graph.len()).max(MAX_DEPENDENCY_DEPTH);
+        let max_depth = (self.nodes.len() + self.dependency_graph.len()).max(MAX_DEPENDENCY_DEPTH);
         let posture = self.recursive_calculate(node_id, &mut gray, black, 0, max_depth);
         (*posture).clone()
     }
@@ -709,12 +716,14 @@ impl AppState {
         let id: Arc<str> = Arc::from(node_id);
         gray.insert(Arc::clone(&id));
 
-        let local_status = self.nodes
+        let local_status = self
+            .nodes
             .get(node_id)
             .map(|n| n.status.clone())
             .unwrap_or(NodeTrustState::Unknown);
 
-        let deps = self.dependency_graph
+        let deps = self
+            .dependency_graph
             .get(node_id)
             .map(|d| d.value().clone())
             .unwrap_or_default();
@@ -764,7 +773,9 @@ impl AppState {
             Some((_, e)) => e,
             None => return false,
         };
-        if now_ms > entry.expires_at_ms { return false; }
+        if now_ms > entry.expires_at_ms {
+            return false;
+        }
         entry.nonce == nonce
     }
 
@@ -774,11 +785,15 @@ impl AppState {
         // entries for nodes that never re-attested do not linger. The map is
         // already bounded (keyed by node_id, per-node overwrite); this only
         // drops timed-out entries — it never introduces unbounded growth.
-        self.pending_challenges.retain(|_, e| now_ms <= e.expires_at_ms);
-        self.pending_challenges.insert(node_id.to_string(), ChallengeEntry {
-            nonce,
-            expires_at_ms: now_ms + CHALLENGE_TTL_MS,
-        });
+        self.pending_challenges
+            .retain(|_, e| now_ms <= e.expires_at_ms);
+        self.pending_challenges.insert(
+            node_id.to_string(),
+            ChallengeEntry {
+                nonce,
+                expires_at_ms: now_ms + CHALLENGE_TTL_MS,
+            },
+        );
     }
 
     /// Issue an operator clearance-challenge nonce, keyed by `(operator_id,
@@ -789,7 +804,10 @@ impl AppState {
             .retain(|_, e| now_ms <= e.expires_at_ms);
         self.pending_clearance_challenges.insert(
             key.to_string(),
-            ClearanceChallengeEntry { nonce_hex, expires_at_ms: now_ms + CHALLENGE_TTL_MS },
+            ClearanceChallengeEntry {
+                nonce_hex,
+                expires_at_ms: now_ms + CHALLENGE_TTL_MS,
+            },
         );
     }
 
@@ -836,36 +854,69 @@ mod transport_identity_tests {
     #[test]
     fn test_disabled_ingress_rejects_even_with_valid_header() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-kirra-client-id", HeaderValue::from_static("edge-gateway-01"));
-        assert!(!validate_client_identity_headers(false, "x-kirra-client-id", &headers));
+        headers.insert(
+            "x-kirra-client-id",
+            HeaderValue::from_static("edge-gateway-01"),
+        );
+        assert!(!validate_client_identity_headers(
+            false,
+            "x-kirra-client-id",
+            &headers
+        ));
     }
 
     #[test]
     fn test_enabled_ingress_missing_header_rejects() {
         let headers = HeaderMap::new();
-        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
+        assert!(!validate_client_identity_headers(
+            true,
+            "x-kirra-client-id",
+            &headers
+        ));
     }
 
     #[test]
     fn test_enabled_ingress_blank_header_rejects() {
         let mut headers = HeaderMap::new();
         headers.insert("x-kirra-client-id", HeaderValue::from_static("     "));
-        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
+        assert!(!validate_client_identity_headers(
+            true,
+            "x-kirra-client-id",
+            &headers
+        ));
     }
 
     #[test]
     fn test_enabled_ingress_valid_header_accepts() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-kirra-client-id", HeaderValue::from_static("trusted-mesh-sidecar"));
-        assert!(validate_client_identity_headers(true, "x-kirra-client-id", &headers));
+        headers.insert(
+            "x-kirra-client-id",
+            HeaderValue::from_static("trusted-mesh-sidecar"),
+        );
+        assert!(validate_client_identity_headers(
+            true,
+            "x-kirra-client-id",
+            &headers
+        ));
     }
 
     #[test]
     fn test_custom_header_name_is_respected() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-custom-identity", HeaderValue::from_static("fleet-controller"));
-        assert!(validate_client_identity_headers(true, "x-custom-identity", &headers));
-        assert!(!validate_client_identity_headers(true, "x-kirra-client-id", &headers));
+        headers.insert(
+            "x-custom-identity",
+            HeaderValue::from_static("fleet-controller"),
+        );
+        assert!(validate_client_identity_headers(
+            true,
+            "x-custom-identity",
+            &headers
+        ));
+        assert!(!validate_client_identity_headers(
+            true,
+            "x-kirra-client-id",
+            &headers
+        ));
     }
 }
 
@@ -883,30 +934,63 @@ mod transport_security_tests {
     #[test]
     fn disabled_admits_everything_backward_compatible() {
         // require off → admit regardless of header (byte-identical to before).
-        assert!(request_transport_is_secure(false, "x-forwarded-proto", &HeaderMap::new()));
-        assert!(request_transport_is_secure(false, "x-forwarded-proto", &with_proto("http")));
+        assert!(request_transport_is_secure(
+            false,
+            "x-forwarded-proto",
+            &HeaderMap::new()
+        ));
+        assert!(request_transport_is_secure(
+            false,
+            "x-forwarded-proto",
+            &with_proto("http")
+        ));
     }
 
     #[test]
     fn enabled_requires_https_assertion() {
-        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("https")));
-        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("HTTPS")), "case-insensitive");
-        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto(" https ")), "trimmed");
+        assert!(request_transport_is_secure(
+            true,
+            "x-forwarded-proto",
+            &with_proto("https")
+        ));
+        assert!(
+            request_transport_is_secure(true, "x-forwarded-proto", &with_proto("HTTPS")),
+            "case-insensitive"
+        );
+        assert!(
+            request_transport_is_secure(true, "x-forwarded-proto", &with_proto(" https ")),
+            "trimmed"
+        );
     }
 
     #[test]
     fn enabled_rejects_insecure_or_absent_fail_closed() {
-        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &HeaderMap::new()), "absent header → deny");
-        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http")), "plaintext → deny");
-        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("")), "empty → deny");
+        assert!(
+            !request_transport_is_secure(true, "x-forwarded-proto", &HeaderMap::new()),
+            "absent header → deny"
+        );
+        assert!(
+            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http")),
+            "plaintext → deny"
+        );
+        assert!(
+            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("")),
+            "empty → deny"
+        );
     }
 
     #[test]
     fn enabled_uses_original_client_protocol_from_a_proxy_chain() {
         // X-Forwarded-Proto lists client,proxy,...: the FIRST (client) leg governs.
-        assert!(request_transport_is_secure(true, "x-forwarded-proto", &with_proto("https, http")));
-        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http, https")),
-            "a plaintext ORIGINAL client leg must deny even if a later hop is https");
+        assert!(request_transport_is_secure(
+            true,
+            "x-forwarded-proto",
+            &with_proto("https, http")
+        ));
+        assert!(
+            !request_transport_is_secure(true, "x-forwarded-proto", &with_proto("http, https")),
+            "a plaintext ORIGINAL client leg must deny even if a later hop is https"
+        );
     }
 
     #[test]
@@ -914,7 +998,10 @@ mod transport_security_tests {
         let mut h = HeaderMap::new();
         h.insert("x-mesh-proto", HeaderValue::from_static("https"));
         assert!(request_transport_is_secure(true, "x-mesh-proto", &h));
-        assert!(!request_transport_is_secure(true, "x-forwarded-proto", &h), "wrong header name → deny");
+        assert!(
+            !request_transport_is_secure(true, "x-forwarded-proto", &h),
+            "wrong header name → deny"
+        );
     }
 }
 
@@ -946,14 +1033,17 @@ mod mark_node_untrusted_tests {
     #[test]
     fn marking_registered_node_untrusted_is_effectful() {
         let app = app();
-        app.persist_and_insert_node(trusted_node("robot-01")).unwrap();
+        app.persist_and_insert_node(trusted_node("robot-01"))
+            .unwrap();
         assert_eq!(
             app.calculate_posture("robot-01").propagated_status,
             FleetPosture::Nominal,
             "a Trusted node is Nominal before the offline"
         );
 
-        let updated = app.mark_node_untrusted("robot-01", "CANOPEN_NMT_OFFLINE", 1_000).unwrap();
+        let updated = app
+            .mark_node_untrusted("robot-01", "CANOPEN_NMT_OFFLINE", 1_000)
+            .unwrap();
         assert!(updated, "an existing node is updated");
 
         assert!(matches!(
@@ -972,7 +1062,9 @@ mod mark_node_untrusted_tests {
     #[test]
     fn marking_unknown_node_returns_false() {
         let app = app();
-        assert!(!app.mark_node_untrusted("ghost", "CANOPEN_NMT_OFFLINE", 1).unwrap());
+        assert!(!app
+            .mark_node_untrusted("ghost", "CANOPEN_NMT_OFFLINE", 1)
+            .unwrap());
     }
 }
 
@@ -982,7 +1074,10 @@ mod nonce_lifecycle_tests {
     use crate::verifier_store::VerifierStore;
 
     fn app() -> AppState {
-        AppState::new(VerifierStore::new(":memory:").expect("in-memory store"), VerifierOperationMode::Active)
+        AppState::new(
+            VerifierStore::new(":memory:").expect("in-memory store"),
+            VerifierOperationMode::Active,
+        )
     }
 
     // #147 HEADLINE: nonces are CSPRNG-sourced, not wall-clock-derived.
@@ -991,15 +1086,22 @@ mod nonce_lifecycle_tests {
         let a = generate_challenge_nonce();
         let b = generate_challenge_nonce();
         let c = generate_challenge_nonce();
-        assert!(!(a == b && b == c), "successive CSPRNG nonces must not all be identical");
+        assert!(
+            !(a == b && b == c),
+            "successive CSPRNG nonces must not all be identical"
+        );
 
         // A wall-clock-nanos nonce would land within ~1s of `now`; a CSPRNG u64
         // landing that close to a ~1.8e18 timestamp has probability ~5e-11/value.
         let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
         for n in [a, b, c] {
-            assert!(n.abs_diff(now_nanos) > 1_000_000_000,
-                "nonce {n} is suspiciously close to the wall clock — not CSPRNG-sourced?");
+            assert!(
+                n.abs_diff(now_nanos) > 1_000_000_000,
+                "nonce {n} is suspiciously close to the wall clock — not CSPRNG-sourced?"
+            );
         }
     }
 
@@ -1008,8 +1110,14 @@ mod nonce_lifecycle_tests {
     fn replay_of_consumed_nonce_is_rejected() {
         let app = app();
         app.issue_challenge("n1", 42, 1_000);
-        assert!(app.consume_challenge("n1", 42, 1_100), "first consume succeeds");
-        assert!(!app.consume_challenge("n1", 42, 1_100), "replay of a consumed nonce is rejected");
+        assert!(
+            app.consume_challenge("n1", 42, 1_100),
+            "first consume succeeds"
+        );
+        assert!(
+            !app.consume_challenge("n1", 42, 1_100),
+            "replay of a consumed nonce is rejected"
+        );
     }
 
     // TTL-BOUNDED: an expired nonce is rejected.
@@ -1018,7 +1126,10 @@ mod nonce_lifecycle_tests {
         let app = app();
         app.issue_challenge("n1", 7, 1_000); // expires at 1_000 + CHALLENGE_TTL_MS
         let after_expiry = 1_000 + CHALLENGE_TTL_MS + 1;
-        assert!(!app.consume_challenge("n1", 7, after_expiry), "expired nonce is rejected");
+        assert!(
+            !app.consume_challenge("n1", 7, after_expiry),
+            "expired nonce is rejected"
+        );
     }
 
     // NODE-BOUND: a nonce issued for node A cannot be consumed for node B.
@@ -1026,8 +1137,14 @@ mod nonce_lifecycle_tests {
     fn nonce_is_bound_to_its_node() {
         let app = app();
         app.issue_challenge("node-a", 99, 1_000);
-        assert!(!app.consume_challenge("node-b", 99, 1_100), "another node cannot consume A's nonce");
-        assert!(app.consume_challenge("node-a", 99, 1_100), "A's own nonce remains consumable");
+        assert!(
+            !app.consume_challenge("node-b", 99, 1_100),
+            "another node cannot consume A's nonce"
+        );
+        assert!(
+            app.consume_challenge("node-a", 99, 1_100),
+            "A's own nonce remains consumable"
+        );
     }
 
     // STORE HYGIENE: issuing prunes expired entries (bounded, no lingering stale nonces).
@@ -1037,8 +1154,14 @@ mod nonce_lifecycle_tests {
         app.issue_challenge("stale", 1, 1_000);
         let later = 1_000 + CHALLENGE_TTL_MS + 1;
         app.issue_challenge("fresh", 2, later);
-        assert!(!app.pending_challenges.contains_key("stale"), "expired entry pruned on issue");
-        assert!(app.pending_challenges.contains_key("fresh"), "fresh entry retained");
+        assert!(
+            !app.pending_challenges.contains_key("stale"),
+            "expired entry pruned on issue"
+        );
+        assert!(
+            app.pending_challenges.contains_key("fresh"),
+            "fresh entry retained"
+        );
     }
 
     #[test]
@@ -1114,7 +1237,10 @@ mod shared_memo_equivalence_tests {
     use std::sync::Arc;
 
     fn app() -> AppState {
-        AppState::new(VerifierStore::new(":memory:").expect("in-memory store"), VerifierOperationMode::Active)
+        AppState::new(
+            VerifierStore::new(":memory:").expect("in-memory store"),
+            VerifierOperationMode::Active,
+        )
     }
 
     fn node(id: &str, status: NodeTrustState) -> RegisteredNode {
@@ -1156,22 +1282,41 @@ mod shared_memo_equivalence_tests {
         // the shared memo evaluates once and reuses; `x`'s LockedOut propagates up
         // through c and d. Both resolution strategies must agree on every node.
         let app = app();
-        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("c", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("d", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into()))).unwrap();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("c", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("d", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into())))
+            .unwrap();
         app.persist_and_insert_deps("b", vec!["a".into()]).unwrap();
-        app.persist_and_insert_deps("c", vec!["a".into(), "x".into()]).unwrap();
-        app.persist_and_insert_deps("d", vec!["b".into(), "c".into()]).unwrap();
+        app.persist_and_insert_deps("c", vec!["a".into(), "x".into()])
+            .unwrap();
+        app.persist_and_insert_deps("d", vec!["b".into(), "c".into()])
+            .unwrap();
 
         // Spot-check the expected verdicts, then prove equivalence.
-        assert_eq!(app.calculate_posture("a").propagated_status, FleetPosture::Nominal);
-        assert_eq!(app.calculate_posture("x").propagated_status, FleetPosture::LockedOut);
-        assert_eq!(app.calculate_posture("c").propagated_status, FleetPosture::LockedOut,
-            "c depends on the faulted x → LockedOut");
-        assert_eq!(app.calculate_posture("d").propagated_status, FleetPosture::LockedOut,
-            "d inherits c's LockedOut");
+        assert_eq!(
+            app.calculate_posture("a").propagated_status,
+            FleetPosture::Nominal
+        );
+        assert_eq!(
+            app.calculate_posture("x").propagated_status,
+            FleetPosture::LockedOut
+        );
+        assert_eq!(
+            app.calculate_posture("c").propagated_status,
+            FleetPosture::LockedOut,
+            "c depends on the faulted x → LockedOut"
+        );
+        assert_eq!(
+            app.calculate_posture("d").propagated_status,
+            FleetPosture::LockedOut,
+            "d inherits c's LockedOut"
+        );
         assert_shared_equals_per_call(&app);
     }
 
@@ -1182,10 +1327,14 @@ mod shared_memo_equivalence_tests {
     #[test]
     fn calculate_fleet_posture_matches_per_node_m2() {
         let app = app();
-        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into()))).unwrap();
-        app.persist_and_insert_deps("b", vec!["a".into(), "x".into()]).unwrap();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("x", NodeTrustState::Untrusted("fault".into())))
+            .unwrap();
+        app.persist_and_insert_deps("b", vec!["a".into(), "x".into()])
+            .unwrap();
 
         let fleet = app.calculate_fleet_posture();
         assert_eq!(fleet.len(), 3, "one posture per registered node");
@@ -1211,16 +1360,25 @@ mod shared_memo_equivalence_tests {
         // sentinel (CYCLE_DETECTED) is NEVER memoized, so sharing the memo across
         // roots must not leak it onto t — both strategies must agree.
         let app = app();
-        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("b", NodeTrustState::Trusted)).unwrap();
-        app.persist_and_insert_node(node("t", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("b", NodeTrustState::Trusted))
+            .unwrap();
+        app.persist_and_insert_node(node("t", NodeTrustState::Trusted))
+            .unwrap();
         app.persist_and_insert_deps("a", vec!["b".into()]).unwrap();
         app.persist_and_insert_deps("b", vec!["a".into()]).unwrap();
 
-        assert_eq!(app.calculate_posture("a").propagated_status, FleetPosture::LockedOut,
-            "a is on a cycle → LockedOut");
-        assert_eq!(app.calculate_posture("t").propagated_status, FleetPosture::Nominal,
-            "the independent node is unaffected by the cycle");
+        assert_eq!(
+            app.calculate_posture("a").propagated_status,
+            FleetPosture::LockedOut,
+            "a is on a cycle → LockedOut"
+        );
+        assert_eq!(
+            app.calculate_posture("t").propagated_status,
+            FleetPosture::Nominal,
+            "the independent node is unaffected by the cycle"
+        );
         assert_shared_equals_per_call(&app);
     }
 
@@ -1234,7 +1392,8 @@ mod shared_memo_equivalence_tests {
     #[test]
     fn deep_chain_of_unregistered_deps_is_not_depth_locked() {
         let app = app();
-        app.persist_and_insert_node(node("a", NodeTrustState::Trusted)).unwrap();
+        app.persist_and_insert_node(node("a", NodeTrustState::Trusted))
+            .unwrap();
 
         // a -> u1 -> u2 -> ... -> u20, none of the u* registered as nodes. With
         // only one registered node, the old `nodes.len().max(10)` bound (=10)
@@ -1242,7 +1401,8 @@ mod shared_memo_equivalence_tests {
         // straight into the in-memory graph (the edges intentionally reference
         // unregistered ids, which a persisted FK path would not allow).
         const N: usize = 20;
-        app.dependency_graph.insert("a".to_string(), vec!["u1".to_string()]);
+        app.dependency_graph
+            .insert("a".to_string(), vec!["u1".to_string()]);
         for i in 1..N {
             app.dependency_graph
                 .insert(format!("u{i}"), vec![format!("u{}", i + 1)]);
@@ -1255,7 +1415,10 @@ mod shared_memo_equivalence_tests {
             "an acyclic chain through unregistered (Unknown) deps is Degraded, not depth-locked",
         );
         assert!(
-            !posture.blocked_by.iter().any(|b| b.as_ref() == "MAX_DEPTH_EXCEEDED"),
+            !posture
+                .blocked_by
+                .iter()
+                .any(|b| b.as_ref() == "MAX_DEPTH_EXCEEDED"),
             "the depth backstop must not fire on a valid acyclic chain of unregistered ids",
         );
     }

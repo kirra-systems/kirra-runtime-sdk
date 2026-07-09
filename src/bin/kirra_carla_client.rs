@@ -54,8 +54,8 @@
 //   KIRRA_ADMIN_TOKEN=test-token \
 //   cargo run --bin kirra_carla_client -- --mode headless --scenario all
 
-use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Kirra HTTP client types
@@ -129,8 +129,14 @@ struct SimVehicleState {
 
 impl SimVehicleState {
     fn at_rest() -> Self {
-        Self { x_m: 0.0, y_m: 0.0, heading_rad: 0.0,
-               velocity_mps: 0.0, steering_angle_deg: 0.0, elapsed_ms: 0 }
+        Self {
+            x_m: 0.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+            velocity_mps: 0.0,
+            steering_angle_deg: 0.0,
+            elapsed_ms: 0,
+        }
     }
 
     fn step(&self, v: f64, delta_deg: f64, dt_s: f64, wheelbase_m: f64) -> Self {
@@ -139,7 +145,9 @@ impl SimVehicleState {
         let new_y = self.y_m + self.velocity_mps * self.heading_rad.sin() * dt_s;
         let heading_rate = if wheelbase_m > 1e-6 {
             (self.velocity_mps / wheelbase_m) * delta_rad.tan()
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         Self {
             x_m: new_x,
             y_m: new_y,
@@ -152,7 +160,9 @@ impl SimVehicleState {
 
     fn lateral_accel(&self, wheelbase_m: f64) -> f64 {
         let v2 = self.velocity_mps.powi(2);
-        if v2 <= 1e-6 { return 0.0; }
+        if v2 <= 1e-6 {
+            return 0.0;
+        }
         (v2 * self.steering_angle_deg.to_radians().tan().abs()) / wheelbase_m
     }
 }
@@ -163,10 +173,22 @@ impl SimVehicleState {
 
 #[derive(Debug, Clone)]
 enum ScenarioEvent {
-    Cruise { target_v: f64, target_delta: f64 },
-    InjectFault { node_id: String, confidence: f64, hw_fault: bool },
-    RestoreSensor { node_id: String },
-    DangerousCommand { v: f64, delta: f64 },
+    Cruise {
+        target_v: f64,
+        target_delta: f64,
+    },
+    InjectFault {
+        node_id: String,
+        confidence: f64,
+        hw_fault: bool,
+    },
+    RestoreSensor {
+        node_id: String,
+    },
+    DangerousCommand {
+        v: f64,
+        delta: f64,
+    },
 }
 
 #[derive(Debug)]
@@ -182,13 +204,34 @@ impl Scenario {
             name: "sensor_fault".to_string(),
             duration_ms: 15_000,
             events: vec![
-                (0,     ScenarioEvent::Cruise { target_v: 12.0, target_delta: 0.0 }),
-                (3_000, ScenarioEvent::InjectFault {
-                    node_id: "lidar_front".to_string(),
-                    confidence: 0.0, hw_fault: true,
-                }),
-                (8_000, ScenarioEvent::RestoreSensor { node_id: "lidar_front".to_string() }),
-                (5_500, ScenarioEvent::DangerousCommand { v: 25.0, delta: 15.0 }),
+                (
+                    0,
+                    ScenarioEvent::Cruise {
+                        target_v: 12.0,
+                        target_delta: 0.0,
+                    },
+                ),
+                (
+                    3_000,
+                    ScenarioEvent::InjectFault {
+                        node_id: "lidar_front".to_string(),
+                        confidence: 0.0,
+                        hw_fault: true,
+                    },
+                ),
+                (
+                    8_000,
+                    ScenarioEvent::RestoreSensor {
+                        node_id: "lidar_front".to_string(),
+                    },
+                ),
+                (
+                    5_500,
+                    ScenarioEvent::DangerousCommand {
+                        v: 25.0,
+                        delta: 15.0,
+                    },
+                ),
             ],
         }
     }
@@ -198,9 +241,27 @@ impl Scenario {
             name: "highway_speed_steering".to_string(),
             duration_ms: 10_000,
             events: vec![
-                (0,     ScenarioEvent::Cruise { target_v: 30.0, target_delta: 0.0 }),
-                (3_000, ScenarioEvent::DangerousCommand { v: 30.0, delta: 20.0 }),
-                (7_000, ScenarioEvent::Cruise { target_v: 30.0, target_delta: 3.0 }),
+                (
+                    0,
+                    ScenarioEvent::Cruise {
+                        target_v: 30.0,
+                        target_delta: 0.0,
+                    },
+                ),
+                (
+                    3_000,
+                    ScenarioEvent::DangerousCommand {
+                        v: 30.0,
+                        delta: 20.0,
+                    },
+                ),
+                (
+                    7_000,
+                    ScenarioEvent::Cruise {
+                        target_v: 30.0,
+                        target_delta: 3.0,
+                    },
+                ),
             ],
         }
     }
@@ -210,12 +271,27 @@ impl Scenario {
             name: "watchdog_timeout".to_string(),
             duration_ms: 20_000,
             events: vec![
-                (0,     ScenarioEvent::Cruise { target_v: 10.0, target_delta: 0.0 }),
-                (2_000, ScenarioEvent::InjectFault {
-                    node_id: "gps_primary".to_string(),
-                    confidence: 0.0, hw_fault: true,
-                }),
-                (15_000, ScenarioEvent::RestoreSensor { node_id: "gps_primary".to_string() }),
+                (
+                    0,
+                    ScenarioEvent::Cruise {
+                        target_v: 10.0,
+                        target_delta: 0.0,
+                    },
+                ),
+                (
+                    2_000,
+                    ScenarioEvent::InjectFault {
+                        node_id: "gps_primary".to_string(),
+                        confidence: 0.0,
+                        hw_fault: true,
+                    },
+                ),
+                (
+                    15_000,
+                    ScenarioEvent::RestoreSensor {
+                        node_id: "gps_primary".to_string(),
+                    },
+                ),
             ],
         }
     }
@@ -225,16 +301,35 @@ impl Scenario {
             name: "multi_sensor_degradation".to_string(),
             duration_ms: 20_000,
             events: vec![
-                (0,      ScenarioEvent::Cruise { target_v: 15.0, target_delta: 2.0 }),
-                (2_000,  ScenarioEvent::InjectFault {
-                    node_id: "lidar_front".to_string(),
-                    confidence: 0.1, hw_fault: false,
-                }),
-                (5_000,  ScenarioEvent::InjectFault {
-                    node_id: "gps_primary".to_string(),
-                    confidence: 0.4, hw_fault: false,
-                }),
-                (10_000, ScenarioEvent::RestoreSensor { node_id: "lidar_front".to_string() }),
+                (
+                    0,
+                    ScenarioEvent::Cruise {
+                        target_v: 15.0,
+                        target_delta: 2.0,
+                    },
+                ),
+                (
+                    2_000,
+                    ScenarioEvent::InjectFault {
+                        node_id: "lidar_front".to_string(),
+                        confidence: 0.1,
+                        hw_fault: false,
+                    },
+                ),
+                (
+                    5_000,
+                    ScenarioEvent::InjectFault {
+                        node_id: "gps_primary".to_string(),
+                        confidence: 0.4,
+                        hw_fault: false,
+                    },
+                ),
+                (
+                    10_000,
+                    ScenarioEvent::RestoreSensor {
+                        node_id: "lidar_front".to_string(),
+                    },
+                ),
             ],
         }
     }
@@ -271,8 +366,11 @@ impl KirraClient {
     }
 
     fn register_node(&self, node_id: &str) -> Result<(), String> {
-        let body = RegisterNodeRequest { node_id: node_id.to_string() };
-        let resp = self.client
+        let body = RegisterNodeRequest {
+            node_id: node_id.to_string(),
+        };
+        let resp = self
+            .client
             .post(self.url("/attestation/register"))
             .header("Authorization", self.auth_header())
             .json(&body)
@@ -289,14 +387,18 @@ impl KirraClient {
             node_id: node_id.to_string(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
         };
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/fleet/dependencies"))
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
             .map_err(|e| e.to_string())?;
-        if resp.status().is_success() { Ok(()) }
-        else { Err(format!("register_deps {node_id}: status {}", resp.status())) }
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("register_deps {node_id}: status {}", resp.status()))
+        }
     }
 
     fn register_av_meta(
@@ -311,7 +413,8 @@ impl KirraClient {
             "hardware_id": hardware_id,
             "confidence_floor": 0.70,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/fleet/assets/register"))
             .header("Authorization", self.auth_header())
             .json(&body)
@@ -320,7 +423,10 @@ impl KirraClient {
         if resp.status().is_success() || resp.status().as_u16() == 404 {
             Ok(())
         } else {
-            Err(format!("register_av_meta {node_id}: status {}", resp.status()))
+            Err(format!(
+                "register_av_meta {node_id}: status {}",
+                resp.status()
+            ))
         }
     }
 
@@ -328,7 +434,8 @@ impl KirraClient {
         &self,
         cmd: &MotionCommandRequest,
     ) -> Result<MotionCommandResponse, String> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/actuator/motion/command"))
             .header("Authorization", self.auth_header())
             .json(cmd)
@@ -336,7 +443,9 @@ impl KirraClient {
             .map_err(|e| e.to_string())?;
 
         match resp.status().as_u16() {
-            200 => resp.json::<MotionCommandResponse>().map_err(|e| e.to_string()),
+            200 => resp
+                .json::<MotionCommandResponse>()
+                .map_err(|e| e.to_string()),
             400 => Ok(MotionCommandResponse {
                 action: "DenyBreach".to_string(),
                 enforced_linear_velocity_mps: 0.0,
@@ -376,22 +485,31 @@ impl KirraClient {
             confidence_score: confidence,
             hardware_fault_detected: hw_fault,
         };
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/fleet/diagnostics/report"))
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
             .map_err(|e| e.to_string())?;
-        if resp.status().is_success() { Ok(()) }
-        else { Err(format!("report_sensor_health {node_id}: status {}", resp.status())) }
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "report_sensor_health {node_id}: status {}",
+                resp.status()
+            ))
+        }
     }
 
     fn get_fleet_posture(&self) -> Result<FleetPostureResponse, String> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(self.url("/fleet/posture"))
             .send()
             .map_err(|e| e.to_string())?;
-        resp.json::<FleetPostureResponse>().map_err(|e| e.to_string())
+        resp.json::<FleetPostureResponse>()
+            .map_err(|e| e.to_string())
     }
 
     fn health_check(&self) -> bool {
@@ -436,9 +554,9 @@ impl RunStats {
     fn record_enforcement(&mut self, action: &str) {
         self.total_steps += 1;
         match action {
-            "Allow"         => self.allow_count += 1,
+            "Allow" => self.allow_count += 1,
             "ClampLinear" | "ClampSteering" => self.clamp_count += 1,
-            _               => self.deny_count += 1,
+            _ => self.deny_count += 1,
         }
     }
 
@@ -473,16 +591,25 @@ impl RunStats {
         println!("SCENARIO: {scenario_name}");
         println!("{}", "=".repeat(60));
         println!("Steps:            {}", self.total_steps);
-        println!("Allow:            {} ({:.1}%)",
+        println!(
+            "Allow:            {} ({:.1}%)",
             self.allow_count,
-            100.0 * self.allow_count as f64 / self.total_steps.max(1) as f64);
-        println!("Clamp:            {} ({:.1}%)",
+            100.0 * self.allow_count as f64 / self.total_steps.max(1) as f64
+        );
+        println!(
+            "Clamp:            {} ({:.1}%)",
             self.clamp_count,
-            100.0 * self.clamp_count as f64 / self.total_steps.max(1) as f64);
-        println!("Deny:             {} ({:.1}%)",
+            100.0 * self.clamp_count as f64 / self.total_steps.max(1) as f64
+        );
+        println!(
+            "Deny:             {} ({:.1}%)",
             self.deny_count,
-            100.0 * self.deny_count as f64 / self.total_steps.max(1) as f64);
-        println!("Peak lateral:     {:.4} m/s\u{00b2}", self.peak_lateral_accel);
+            100.0 * self.deny_count as f64 / self.total_steps.max(1) as f64
+        );
+        println!(
+            "Peak lateral:     {:.4} m/s\u{00b2}",
+            self.peak_lateral_accel
+        );
         println!("Peak speed:       {:.4} m/s", self.peak_speed);
         if !self.posture_transitions.is_empty() {
             println!("Posture changes:");
@@ -493,7 +620,10 @@ impl RunStats {
         if self.invariant_violations.is_empty() {
             println!("Invariants:       \u{2713} ALL PASSED");
         } else {
-            println!("INVARIANT VIOLATIONS ({}):", self.invariant_violations.len());
+            println!(
+                "INVARIANT VIOLATIONS ({}):",
+                self.invariant_violations.len()
+            );
             for v in &self.invariant_violations {
                 println!("  \u{2717} {v}");
             }
@@ -512,12 +642,18 @@ struct SimplePlanner {
 
 impl SimplePlanner {
     fn new() -> Self {
-        Self { target_v: 0.0, target_delta: 0.0 }
+        Self {
+            target_v: 0.0,
+            target_delta: 0.0,
+        }
     }
 
     fn update(&mut self, event: &ScenarioEvent) {
         match event {
-            ScenarioEvent::Cruise { target_v, target_delta } => {
+            ScenarioEvent::Cruise {
+                target_v,
+                target_delta,
+            } => {
                 self.target_v = *target_v;
                 self.target_delta = *target_delta;
             }
@@ -562,12 +698,13 @@ fn run_scenario_headless(
     let mut last_sensor_report_ms: u64 = 0;
     let mut recovery_restore_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    let mut faulted_nodes: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut restoring_nodes: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut faulted_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut restoring_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    println!("\nRunning scenario: {} ({} ms)", scenario.name, scenario.duration_ms);
+    println!(
+        "\nRunning scenario: {} ({} ms)",
+        scenario.name, scenario.duration_ms
+    );
     println!("{}", "-".repeat(50));
 
     while state.elapsed_ms < scenario.duration_ms {
@@ -576,9 +713,15 @@ fn run_scenario_headless(
         for (event_t, event) in &scenario.events {
             if *event_t == t {
                 match event {
-                    ScenarioEvent::InjectFault { node_id, confidence, hw_fault } => {
-                        println!("  t={t}ms: FAULT injected on {node_id} \
-                                 (confidence={confidence:.2}, hw={hw_fault})");
+                    ScenarioEvent::InjectFault {
+                        node_id,
+                        confidence,
+                        hw_fault,
+                    } => {
+                        println!(
+                            "  t={t}ms: FAULT injected on {node_id} \
+                                 (confidence={confidence:.2}, hw={hw_fault})"
+                        );
                         let _ = client.report_sensor_health(node_id, *confidence, *hw_fault);
                         faulted_nodes.insert(node_id.clone());
                         restoring_nodes.remove(node_id);
@@ -589,7 +732,10 @@ fn run_scenario_headless(
                         restoring_nodes.insert(node_id.clone());
                         faulted_nodes.remove(node_id);
                     }
-                    ScenarioEvent::Cruise { target_v, target_delta } => {
+                    ScenarioEvent::Cruise {
+                        target_v,
+                        target_delta,
+                    } => {
                         println!("  t={t}ms: CRUISE v={target_v:.1} m/s \u{03b4}={target_delta:.1}\u{00b0}");
                     }
                     ScenarioEvent::DangerousCommand { v, delta } => {
@@ -623,16 +769,22 @@ fn run_scenario_headless(
                 let enforced_delta = resp.enforced_steering_angle_deg;
                 match resp.action.as_str() {
                     "ClampLinear" => {
-                        println!("  t={t}ms: CLAMP linear {:.2}\u{2192}{:.2} m/s",
-                            cmd.linear_velocity_mps, enforced_v);
+                        println!(
+                            "  t={t}ms: CLAMP linear {:.2}\u{2192}{:.2} m/s",
+                            cmd.linear_velocity_mps, enforced_v
+                        );
                     }
                     "ClampSteering" => {
-                        println!("  t={t}ms: CLAMP steering {:.2}\u{2192}{:.2}\u{00b0}",
-                            cmd.steering_angle_deg, enforced_delta);
+                        println!(
+                            "  t={t}ms: CLAMP steering {:.2}\u{2192}{:.2}\u{00b0}",
+                            cmd.steering_angle_deg, enforced_delta
+                        );
                     }
                     "DenyBreach" => {
-                        println!("  t={t}ms: DENY \u{2014} {}",
-                            resp.denial_reason.as_deref().unwrap_or("unknown"));
+                        println!(
+                            "  t={t}ms: DENY \u{2014} {}",
+                            resp.denial_reason.as_deref().unwrap_or("unknown")
+                        );
                     }
                     _ => {}
                 }
@@ -650,12 +802,14 @@ fn run_scenario_headless(
 
         if t.is_multiple_of(500) {
             if let Ok(posture_resp) = client.get_fleet_posture() {
-                let agg = posture_resp.fleet.iter()
+                let agg = posture_resp
+                    .fleet
+                    .iter()
                     .map(|n| n.propagated_status.as_str())
                     .max_by_key(|s| match *s {
                         "LockedOut" => 2,
-                        "Degraded"  => 1,
-                        _           => 0,
+                        "Degraded" => 1,
+                        _ => 0,
                     })
                     .unwrap_or("Nominal")
                     .to_string();
@@ -681,14 +835,14 @@ fn setup_av_fleet(client: &KirraClient) -> Result<(), String> {
     println!("Setting up AV fleet node graph...");
 
     let nodes = [
-        ("lidar_front",        "Perception",  "LIDAR-001"),
-        ("lidar_rear",         "Perception",  "LIDAR-002"),
-        ("camera_front",       "Perception",  "CAM-001"),
-        ("gps_primary",        "Positioning", "GPS-001"),
-        ("imu_primary",        "Positioning", "IMU-001"),
-        ("perception_fusion",  "Planning",    "FUSION-001"),
-        ("trajectory_planner", "Planning",    "PLAN-001"),
-        ("vehicle_controller", "Actuation",   "CTRL-001"),
+        ("lidar_front", "Perception", "LIDAR-001"),
+        ("lidar_rear", "Perception", "LIDAR-002"),
+        ("camera_front", "Perception", "CAM-001"),
+        ("gps_primary", "Positioning", "GPS-001"),
+        ("imu_primary", "Positioning", "IMU-001"),
+        ("perception_fusion", "Planning", "FUSION-001"),
+        ("trajectory_planner", "Planning", "PLAN-001"),
+        ("vehicle_controller", "Actuation", "CTRL-001"),
     ];
 
     for (node_id, subsystem_type, hardware_id) in &nodes {
@@ -697,13 +851,18 @@ fn setup_av_fleet(client: &KirraClient) -> Result<(), String> {
         let _ = client.register_av_meta(node_id, subsystem_type, hardware_id);
     }
 
-    client.register_deps("perception_fusion", &["lidar_front", "lidar_rear", "camera_front"])?;
+    client.register_deps(
+        "perception_fusion",
+        &["lidar_front", "lidar_rear", "camera_front"],
+    )?;
     client.register_deps("trajectory_planner", &["perception_fusion", "gps_primary"])?;
     client.register_deps("vehicle_controller", &["trajectory_planner"])?;
 
     println!("Fleet setup complete.");
     println!("  Nodes: {}", nodes.len());
-    println!("  Dependency chain: lidar/camera \u{2192} fusion \u{2192} planner \u{2192} controller");
+    println!(
+        "  Dependency chain: lidar/camera \u{2192} fusion \u{2192} planner \u{2192} controller"
+    );
     Ok(())
 }
 
@@ -712,16 +871,20 @@ fn setup_av_fleet(client: &KirraClient) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let base_url = std::env::var("KIRRA_VERIFIER_URL")
-        .unwrap_or_else(|_| "http://localhost:8090".to_string());
-    let admin_token = std::env::var("KIRRA_ADMIN_TOKEN")
-        .unwrap_or_else(|_| "dev-token".to_string());
+    let base_url =
+        std::env::var("KIRRA_VERIFIER_URL").unwrap_or_else(|_| "http://localhost:8090".to_string());
+    let admin_token =
+        std::env::var("KIRRA_ADMIN_TOKEN").unwrap_or_else(|_| "dev-token".to_string());
 
     let args: Vec<String> = std::env::args().collect();
-    let mode = args.iter().find(|a| a.starts_with("--mode="))
+    let mode = args
+        .iter()
+        .find(|a| a.starts_with("--mode="))
         .and_then(|a| a.strip_prefix("--mode="))
         .unwrap_or("headless");
-    let scenario_name = args.iter().find(|a| a.starts_with("--scenario="))
+    let scenario_name = args
+        .iter()
+        .find(|a| a.starts_with("--scenario="))
         .and_then(|a| a.strip_prefix("--scenario="))
         .unwrap_or("all");
 
@@ -735,7 +898,10 @@ fn main() {
     print!("Waiting for Kirra verifier...");
     let start = Instant::now();
     loop {
-        if client.health_check() { println!(" ready."); break; }
+        if client.health_check() {
+            println!(" ready.");
+            break;
+        }
         if start.elapsed() > Duration::from_secs(30) {
             eprintln!("\nVerifier not reachable after 30s \u{2014} is it running?");
             std::process::exit(1);
@@ -754,9 +920,9 @@ fn main() {
     let max_speed = 35.0_f64;
 
     let scenarios: Vec<Scenario> = match scenario_name {
-        "sensor_fault"             => vec![Scenario::sensor_fault()],
-        "highway_speed_steering"   => vec![Scenario::highway_speed_steering()],
-        "watchdog_timeout"         => vec![Scenario::watchdog_timeout()],
+        "sensor_fault" => vec![Scenario::sensor_fault()],
+        "highway_speed_steering" => vec![Scenario::highway_speed_steering()],
+        "watchdog_timeout" => vec![Scenario::watchdog_timeout()],
         "multi_sensor_degradation" => vec![Scenario::multi_sensor_degradation()],
         "all" => vec![
             Scenario::sensor_fault(),
@@ -773,9 +939,8 @@ fn main() {
 
     let mut all_passed = true;
     for scenario in &scenarios {
-        let stats = run_scenario_headless(
-            &client, scenario, wheelbase_m, max_lateral_accel, max_speed,
-        );
+        let stats =
+            run_scenario_headless(&client, scenario, wheelbase_m, max_lateral_accel, max_speed);
         stats.print_summary(&scenario.name);
         if !stats.invariant_violations.is_empty() {
             all_passed = false;

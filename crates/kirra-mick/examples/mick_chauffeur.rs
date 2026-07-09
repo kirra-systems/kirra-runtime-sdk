@@ -29,10 +29,20 @@ const FAST_DT_MS: u64 = 100;
 const TICKS: usize = 24; // 2.4 s
 const MRC_DECEL: f64 = 3.0;
 
-fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [PerceivedObject]) -> PlanInput<'a> {
+fn world<'a>(
+    ego: EgoState,
+    map: &'a dyn CorridorSource,
+    objects: &'a [PerceivedObject],
+) -> PlanInput<'a> {
     PlanInput {
         ego,
-        goal: Goal { target: Pose { x_m: 60.0, y_m: 0.0, heading_rad: 0.0 } },
+        goal: Goal {
+            target: Pose {
+                x_m: 60.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+        },
         map,
         objects,
         controls: &[],
@@ -48,11 +58,23 @@ fn world<'a>(ego: EgoState, map: &'a dyn CorridorSource, objects: &'a [Perceived
         request_overtake: false,
         request_pull_over: false,
         lane_graph: None,
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
-fn verdict(plan: &PlanOutput, corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> TrajectoryVerdict {
-    validate_trajectory_slow(&plan.trajectory, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal)
+fn verdict(
+    plan: &PlanOutput,
+    corr: &dyn CorridorSource,
+    objs: &[PerceivedObject],
+) -> TrajectoryVerdict {
+    validate_trajectory_slow(
+        &plan.trajectory,
+        corr,
+        objs,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    )
 }
 
 /// The (pose, velocity) at time `t` along a plan — the fast-loop conformance target.
@@ -67,7 +89,10 @@ fn target_at(plan: &PlanOutput, t: f64) -> Option<(Pose, f64)> {
 fn main() {
     let client = OllamaClient::new();
     let url = std::env::var("KIRRA_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into());
-    println!("Mick chauffeur — model = {} @ {url}  (fast loop 10 Hz, Gemma ~2 Hz)", client.model());
+    println!(
+        "Mick chauffeur — model = {} @ {url}  (fast loop 10 Hz, Gemma ~2 Hz)",
+        client.model()
+    );
 
     // Dual-rate driver: defaults = decide every 500 ms (System-2), hold if stale > 2 s.
     let mut driver = MickDriver::new(LlmBrain::new(client));
@@ -75,9 +100,27 @@ fn main() {
 
     // Straight road, stopped car at x=30 — Gemma should drive up; KIRRA holds it ~4 m short.
     let corr = MockCorridorSource::straight_5m_half_width(100.0);
-    let objs = [PerceivedObject { id: 1, pos: Point { x_m: 30.0, y_m: 0.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }];
+    let objs = [PerceivedObject {
+        id: 1,
+        pos: Point {
+            x_m: 30.0,
+            y_m: 0.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
 
-    let mut ego = EgoState { pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 2.0, yaw_rate_rads: 0.0, stamp_ms: 0 };
+    let mut ego = EgoState {
+        pose: Pose {
+            x_m: 5.0,
+            y_m: 0.0,
+            heading_rad: 0.0,
+        },
+        linear_x_mps: 2.0,
+        yaw_rate_rads: 0.0,
+        stamp_ms: 0,
+    };
     let mut accepted: Option<PlanOutput> = None;
     let mut slot_t = 0.0_f64;
 
@@ -101,7 +144,13 @@ fn main() {
         // Eval capture (before `plan` is moved into the accepted slot): log the brain's
         // intent → Occy's grounding → KIRRA's verdict when there is a current intent.
         if let (Some(log), Some(intent)) = (eval.as_mut(), driver.current_intent()) {
-            let _ = log.append(&MickDecisionRecord::new(tick as u64, now_ms, &intent, &plan, v));
+            let _ = log.append(&MickDecisionRecord::new(
+                tick as u64,
+                now_ms,
+                &intent,
+                &plan,
+                v,
+            ));
         }
 
         // Fast/slow conformance: promote on admit, otherwise keep tracking the last slot.
@@ -111,15 +160,28 @@ fn main() {
         }
         slot_t += FAST_DT_S;
         ego = match accepted.as_ref().and_then(|p| target_at(p, slot_t)) {
-            Some((pose, vel)) => EgoState { pose, linear_x_mps: vel, yaw_rate_rads: 0.0, stamp_ms: now_ms },
+            Some((pose, vel)) => EgoState {
+                pose,
+                linear_x_mps: vel,
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
+            },
             None => EgoState {
-                pose: ego.pose, linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
-                yaw_rate_rads: 0.0, stamp_ms: now_ms,
+                pose: ego.pose,
+                linear_x_mps: (ego.linear_x_mps - MRC_DECEL * FAST_DT_S).max(0.0),
+                yaw_rate_rads: 0.0,
+                stamp_ms: now_ms,
             },
         };
 
         let intent = driver.current_intent();
-        println!("{:>6.1}  {:>6.2}  {:>5.2}   {:<22?}  {v:?}", now_ms as f64 / 1000.0, ego.pose.x_m, ego.linear_x_mps, intent);
+        println!(
+            "{:>6.1}  {:>6.2}  {:>5.2}   {:<22?}  {v:?}",
+            now_ms as f64 / 1000.0,
+            ego.pose.x_m,
+            ego.linear_x_mps,
+            intent
+        );
     }
     println!("final ego.x = {:.2} (obstacle at x=30 — the chauffeur holds ~4 m short, never reaching it)", ego.pose.x_m);
 }

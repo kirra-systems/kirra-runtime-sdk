@@ -31,7 +31,9 @@ fn trt_backend_fails_closed_when_tensorrt_ep_unavailable() {
     }
 
     // Any path: construction must fail at EP registration, before model load.
-    let cfg = TrtConfig { engine_cache_path: "/tmp/parko_trt_cache".to_string() };
+    let cfg = TrtConfig {
+        engine_cache_path: "/tmp/parko_trt_cache".to_string(),
+    };
     let result = TrtBackend::with_config("tests/data/any_model.onnx", &cfg);
 
     let err = result.err().expect(
@@ -43,7 +45,9 @@ fn trt_backend_fails_closed_when_tensorrt_ep_unavailable() {
     match err {
         BackendError::InitializationError(msg) => {
             assert!(
-                msg.contains("TensorRT") || msg.contains("fail-closed") || msg.contains("registration"),
+                msg.contains("TensorRT")
+                    || msg.contains("fail-closed")
+                    || msg.contains("registration"),
                 "error must identify the TensorRT EP fail-closed cause, got: {msg}"
             );
         }

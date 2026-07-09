@@ -35,7 +35,10 @@ fn multilane_turn(r: f64) -> LaneGraph {
     let arc: Vec<Point> = (0..=12)
         .map(|i| {
             let t = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * (i as f64 / 12.0);
-            Point { x_m: APR + r * t.cos(), y_m: r + r * t.sin() }
+            Point {
+                x_m: APR + r * t.cos(),
+                y_m: r + r * t.sin(),
+            }
         })
         .collect();
     let turn = Lane {
@@ -50,7 +53,16 @@ fn multilane_turn(r: f64) -> LaneGraph {
     };
     let exit = Lane {
         id: 5,
-        centerline: vec![Point { x_m: APR + r, y_m: r }, Point { x_m: APR + r, y_m: r + 20.0 }],
+        centerline: vec![
+            Point {
+                x_m: APR + r,
+                y_m: r,
+            },
+            Point {
+                x_m: APR + r,
+                y_m: r + 20.0,
+            },
+        ],
         half_width_m: 1.75,
         left_line: LineType::Solid,
         right_line: LineType::Solid,
@@ -76,9 +88,23 @@ fn multilane_turn(r: f64) -> LaneGraph {
         .with_lane(exit)
 }
 
-fn ego_world<'a>(g: &'a LaneGraph, map: &'a dyn CorridorSource, objects: &'a [PerceivedObject], goal: Pose) -> PlanInput<'a> {
+fn ego_world<'a>(
+    g: &'a LaneGraph,
+    map: &'a dyn CorridorSource,
+    objects: &'a [PerceivedObject],
+    goal: Pose,
+) -> PlanInput<'a> {
     PlanInput {
-        ego: EgoState { pose: Pose { x_m: 4.0, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: 3.0, yaw_rate_rads: 0.0, stamp_ms: 0 },
+        ego: EgoState {
+            pose: Pose {
+                x_m: 4.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            linear_x_mps: 3.0,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        },
         goal: Goal { target: goal },
         map,
         objects,
@@ -95,7 +121,8 @@ fn ego_world<'a>(g: &'a LaneGraph, map: &'a dyn CorridorSource, objects: &'a [Pe
         request_overtake: false,
         request_pull_over: false,
         lane_graph: Some(g),
-        signal_states: &[],    }
+        signal_states: &[],
+    }
 }
 
 /// Records the drivable presence + boundary lines a grounding handed the planner.
@@ -117,15 +144,33 @@ fn turn_at_grounding_widens_the_drivable_and_supplies_the_divider_line() {
     // and the typed divider line — the inputs a within-turn route-around needs.
     let g = multilane_turn(12.0);
     let map = g.lane(1).unwrap().corridor(0.95, 0);
-    let goal = Pose { x_m: 52.0, y_m: 24.0, heading_rad: std::f64::consts::FRAC_PI_2 };
+    let goal = Pose {
+        x_m: 52.0,
+        y_m: 24.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+    };
     let w = ego_world(&g, &map, &[], goal);
 
-    let mut rec = WidthRecorder { drivable_present: false, boundaries: Vec::new() };
-    let _ = plan_for_intent(&mut rec, &MickIntent::TurnAt { direction: TurnDirection::Left }, &w);
+    let mut rec = WidthRecorder {
+        drivable_present: false,
+        boundaries: Vec::new(),
+    };
+    let _ = plan_for_intent(
+        &mut rec,
+        &MickIntent::TurnAt {
+            direction: TurnDirection::Left,
+        },
+        &w,
+    );
 
-    assert!(rec.drivable_present, "TurnAt grounds with a widened drivable area");
     assert!(
-        rec.boundaries.iter().any(|b| b.line == LineType::Broken && (b.y_m - 1.75).abs() < 1e-6),
+        rec.drivable_present,
+        "TurnAt grounds with a widened drivable area"
+    );
+    assert!(
+        rec.boundaries
+            .iter()
+            .any(|b| b.line == LineType::Broken && (b.y_m - 1.75).abs() < 1e-6),
         "the crossable divider to the neighbor lane is supplied, got {:?}",
         rec.boundaries
     );
@@ -139,15 +184,54 @@ fn the_ego_routes_around_an_obstacle_by_borrowing_the_neighbor_lane_and_kirra_ad
     let g = multilane_turn(12.0);
     let map = g.lane(1).unwrap().corridor(0.95, 0);
     let drivable = g.route_drivable(&g.route(1, 5).unwrap(), 0.95, 0).unwrap();
-    let stopped = [PerceivedObject { id: 1, pos: Point { x_m: 25.0, y_m: 0.0 }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }];
-    let goal = Pose { x_m: 52.0, y_m: 24.0, heading_rad: std::f64::consts::FRAC_PI_2 };
+    let stopped = [PerceivedObject {
+        id: 1,
+        pos: Point {
+            x_m: 25.0,
+            y_m: 0.0,
+        },
+        velocity_mps: 0.0,
+        heading_rad: 0.0,
+        vel: Point { x_m: 0.0, y_m: 0.0 },
+    }];
+    let goal = Pose {
+        x_m: 52.0,
+        y_m: 24.0,
+        heading_rad: std::f64::consts::FRAC_PI_2,
+    };
     let w = ego_world(&g, &map, &stopped, goal);
 
-    let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: TurnDirection::Left }, &w);
+    let plan = plan_for_intent(
+        &mut GeometricPlanner::default(),
+        &MickIntent::TurnAt {
+            direction: TurnDirection::Left,
+        },
+        &w,
+    );
 
-    let max_y = plan.trajectory.iter().map(|t| t.pose.y_m).fold(f64::MIN, f64::max);
-    assert!(max_y > 1.75, "the ego borrows the neighbor lane (crosses the +1.75 divider), got max_y {max_y}");
+    let max_y = plan
+        .trajectory
+        .iter()
+        .map(|t| t.pose.y_m)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        max_y > 1.75,
+        "the ego borrows the neighbor lane (crosses the +1.75 divider), got max_y {max_y}"
+    );
 
-    let verdict = validate_trajectory_slow(&plan.trajectory, &drivable, &stopped, &VehicleConfig::default_urban(), None, FleetPosture::Nominal);
-    assert!(matches!(verdict, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp), "KIRRA admits the borrow-the-neighbor route-around, got {verdict:?}");
+    let verdict = validate_trajectory_slow(
+        &plan.trajectory,
+        &drivable,
+        &stopped,
+        &VehicleConfig::default_urban(),
+        None,
+        FleetPosture::Nominal,
+    );
+    assert!(
+        matches!(
+            verdict,
+            TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
+        ),
+        "KIRRA admits the borrow-the-neighbor route-around, got {verdict:?}"
+    );
 }

@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::behavior::{
     creep_through_crowd_speed_cap, cross_when_clear, interactive_proceed, yield_to_vru_speed_cap,
     InteractiveConflict, SignalState, TrafficControl, VruApproach, DEFAULT_AGENT_REACCEL_MPS2,
-    DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, DEFAULT_CROWD_CONTACT_FLOOR_M, DEFAULT_CROWD_NUDGE_SPEED_MPS,
-    DEFAULT_TURN_CRITICAL_GAP_S, DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
+    DEFAULT_CROSSWALK_CLEARANCE_MARGIN_S, DEFAULT_CROWD_CONTACT_FLOOR_M,
+    DEFAULT_CROWD_NUDGE_SPEED_MPS, DEFAULT_TURN_CRITICAL_GAP_S,
+    DEFAULT_VRU_YIELD_BAND_HALF_WIDTH_M, DEFAULT_VRU_YIELD_STANDOFF_M,
 };
 
 /// Comfortable courier brake (m/s²) used to derive the yield speed cap — gentle so the cap is
@@ -190,11 +191,12 @@ impl MickIntent {
     /// are unchanged, so a genuinely malformed payload still fails closed.
     pub fn from_llm_json(raw: &str) -> Result<Self, &'static str> {
         let json = extract_first_json_object(raw).ok_or("MICK_JSON_PARSE_ERROR")?;
-        let parsed: IntentJson =
-            serde_json::from_str(json).map_err(|_| "MICK_JSON_PARSE_ERROR")?;
+        let parsed: IntentJson = serde_json::from_str(json).map_err(|_| "MICK_JSON_PARSE_ERROR")?;
         let intent = match parsed {
             IntentJson::GoTo { x_m, y_m } => MickIntent::GoTo { x_m, y_m },
-            IntentJson::LaneChange { target_offset_m } => MickIntent::LaneChange { target_offset_m },
+            IntentJson::LaneChange { target_offset_m } => {
+                MickIntent::LaneChange { target_offset_m }
+            }
             IntentJson::Hold => MickIntent::Hold,
             IntentJson::Cruise { target_speed_mps } => MickIntent::Cruise { target_speed_mps },
             IntentJson::Overtake => MickIntent::Overtake,
@@ -298,16 +300,18 @@ pub fn plan_for_intent(
     // all, no extra stop); an integrator-supplied list is never overridden; KIRRA still
     // backstops every agent and bounds the motion. (`must_yield_to` needs no wiring: the
     // planner already yields to every non-cede agent; that set is the parko-boundary input.)
-    let derived_cedes: Vec<u64> = if world.lane_graph.is_some() && world.cedes_to_ego_ids.is_empty() {
+    let derived_cedes: Vec<u64> = if world.lane_graph.is_some() && world.cedes_to_ego_ids.is_empty()
+    {
         derive_cedes_to_ego(world)
     } else {
         Vec::new()
     };
-    let derived_controls: Vec<TrafficControl> = if world.lane_graph.is_some() && world.controls.is_empty() {
-        derive_controls(world)
-    } else {
-        Vec::new()
-    };
+    let derived_controls: Vec<TrafficControl> =
+        if world.lane_graph.is_some() && world.controls.is_empty() {
+            derive_controls(world)
+        } else {
+            Vec::new()
+        };
     // Map-intention predicted paths: when a lane graph is supplied and the integrator did NOT hand
     // per-object predicted paths, derive the lane-follow hypothesis for each moving object from the
     // map (`LaneGraph::lane_follow_path`). The planner's predictive yield worst-cases over modes, so
@@ -315,25 +319,44 @@ pub fn plan_for_intent(
     // CV/CTRV rollout cannot know the road bends) and SUPPRESSES a spurious yield to one keeping its
     // own diverging lane. `derived_paths_pts` owns the point vectors; `derived_paths` borrows them —
     // both live to the end of the function so the enriched world can reference them.
-    let derived_paths_pts: Vec<(u64, Vec<MapPoint>)> = if world.lane_graph.is_some() && world.predicted_paths.is_empty() {
-        derive_predicted_paths(world)
-    } else {
-        Vec::new()
-    };
-    let derived_paths: Vec<PredictedPath> =
-        derived_paths_pts.iter().map(|(id, pts)| PredictedPath { id: *id, points: pts }).collect();
-    let enriched: PlanInput;
-    let world: &PlanInput = if !derived_cedes.is_empty() || !derived_controls.is_empty() || !derived_paths.is_empty() {
-        enriched = PlanInput {
-            cedes_to_ego_ids: if derived_cedes.is_empty() { world.cedes_to_ego_ids } else { &derived_cedes },
-            controls: if derived_controls.is_empty() { world.controls } else { &derived_controls },
-            predicted_paths: if derived_paths.is_empty() { world.predicted_paths } else { &derived_paths },
-            ..world.clone()
+    let derived_paths_pts: Vec<(u64, Vec<MapPoint>)> =
+        if world.lane_graph.is_some() && world.predicted_paths.is_empty() {
+            derive_predicted_paths(world)
+        } else {
+            Vec::new()
         };
-        &enriched
-    } else {
-        world
-    };
+    let derived_paths: Vec<PredictedPath> = derived_paths_pts
+        .iter()
+        .map(|(id, pts)| PredictedPath {
+            id: *id,
+            points: pts,
+        })
+        .collect();
+    let enriched: PlanInput;
+    let world: &PlanInput =
+        if !derived_cedes.is_empty() || !derived_controls.is_empty() || !derived_paths.is_empty() {
+            enriched = PlanInput {
+                cedes_to_ego_ids: if derived_cedes.is_empty() {
+                    world.cedes_to_ego_ids
+                } else {
+                    &derived_cedes
+                },
+                controls: if derived_controls.is_empty() {
+                    world.controls
+                } else {
+                    &derived_controls
+                },
+                predicted_paths: if derived_paths.is_empty() {
+                    world.predicted_paths
+                } else {
+                    &derived_paths
+                },
+                ..world.clone()
+            };
+            &enriched
+        } else {
+            world
+        };
     match *intent {
         MickIntent::Hold => PlanOutput::safe_stop(world.ego.pose),
         MickIntent::GoTo { x_m, y_m } => {
@@ -342,15 +365,25 @@ pub fn plan_for_intent(
             }
             // Override ONLY the goal; keep the world's heading reference.
             let goal = Goal {
-                target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad },
+                target: Pose {
+                    x_m,
+                    y_m,
+                    heading_rad: world.goal.target.heading_rad,
+                },
             };
-            planner.plan(&PlanInput { goal, ..world.clone() })
+            planner.plan(&PlanInput {
+                goal,
+                ..world.clone()
+            })
         }
         MickIntent::LaneChange { target_offset_m } => {
             if !target_offset_m.is_finite() {
                 return PlanOutput::safe_stop(world.ego.pose);
             }
-            planner.plan(&PlanInput { lane_change_to_m: Some(target_offset_m), ..world.clone() })
+            planner.plan(&PlanInput {
+                lane_change_to_m: Some(target_offset_m),
+                ..world.clone()
+            })
         }
         MickIntent::Cruise { target_speed_mps } => {
             if !target_speed_mps.is_finite() {
@@ -367,13 +400,19 @@ pub fn plan_for_intent(
             // Request the discretionary pass; Occy honors it only if a drivable area is
             // present and the pass fits + the lane line is crossable (else it stays in lane),
             // and KIRRA bounds it (head-on RSS). Nothing unsafe flows from the request itself.
-            planner.plan(&PlanInput { request_overtake: true, ..world.clone() })
+            planner.plan(&PlanInput {
+                request_overtake: true,
+                ..world.clone()
+            })
         }
         MickIntent::PullOver => {
             // Request the edge-park-and-stop; Occy honors it only if the rightward move is
             // lawful and fits the corridor (else it stays in lane), a nearer hazard still
             // stops the ego first, and KIRRA bounds the parked pose. Safe by construction.
-            planner.plan(&PlanInput { request_pull_over: true, ..world.clone() })
+            planner.plan(&PlanInput {
+                request_pull_over: true,
+                ..world.clone()
+            })
         }
         MickIntent::TurnAt { direction } => {
             // Resolve the turn against the lane graph, FAIL-CLOSED at every step (no graph
@@ -383,7 +422,10 @@ pub fn plan_for_intent(
             let Some(graph) = world.lane_graph else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            let ego_pt = MapPoint {
+                x_m: world.ego.pose.x_m,
+                y_m: world.ego.pose.y_m,
+            };
             let Some(ego_lane) = graph.lane_at(ego_pt) else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
@@ -399,7 +441,9 @@ pub fn plan_for_intent(
             // map's cede set and must find an adequate gap: any closing vehicle it has no priority
             // over within the critical gap → HOLD and wait. KIRRA's head-on / crossing RSS
             // independently backstops whatever is committed.
-            let term = graph.lane(ego_lane).and_then(|l| l.centerline.last().copied());
+            let term = graph
+                .lane(ego_lane)
+                .and_then(|l| l.centerline.last().copied());
             let protected_cedes: Vec<u64>;
             let cedes: &[u64] = match term {
                 Some(t) if turn_is_protected(graph, ego_lane, world.signal_states) => {
@@ -414,13 +458,20 @@ pub fn plan_for_intent(
                 // to stay slow, so the ego asserts only a genuinely-yielded gap. Subsumes plain
                 // gap-acceptance (a committed fast agent is its constant-speed `d/v`).
                 let conflicts = turn_interactive_conflicts(world, t, cedes);
-                if !interactive_proceed(&conflicts, DEFAULT_TURN_CRITICAL_GAP_S, DEFAULT_AGENT_REACCEL_MPS2) {
+                if !interactive_proceed(
+                    &conflicts,
+                    DEFAULT_TURN_CRITICAL_GAP_S,
+                    DEFAULT_AGENT_REACCEL_MPS2,
+                ) {
                     return PlanOutput::safe_stop(world.ego.pose);
                 }
             }
             // Follow the turn's route corridor with the effective cede set (so predictive yield
             // matches the gap decision); the goal is unchanged. KIRRA bounds it like any corridor.
-            let turn_world = PlanInput { cedes_to_ego_ids: cedes, ..world.clone() };
+            let turn_world = PlanInput {
+                cedes_to_ego_ids: cedes,
+                ..world.clone()
+            };
             plan_along_route(planner, &turn_world, graph, ego_lane, &route, world.goal)
         }
         MickIntent::RouteTo { x_m, y_m } => {
@@ -436,7 +487,10 @@ pub fn plan_for_intent(
             let Some(graph) = world.lane_graph else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
-            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            let ego_pt = MapPoint {
+                x_m: world.ego.pose.x_m,
+                y_m: world.ego.pose.y_m,
+            };
             let Some(ego_lane) = graph.lane_at(ego_pt) else {
                 return PlanOutput::safe_stop(world.ego.pose);
             };
@@ -446,7 +500,11 @@ pub fn plan_for_intent(
             // Drive toward the destination point (world frame), keeping the world's heading
             // reference — the same goal override `GoTo` uses, but along the routed corridor.
             let goal = Goal {
-                target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad },
+                target: Pose {
+                    x_m,
+                    y_m,
+                    heading_rad: world.goal.target.heading_rad,
+                },
             };
             plan_along_route(planner, world, graph, ego_lane, &route, goal)
         }
@@ -464,14 +522,27 @@ pub fn plan_for_intent(
                 DEFAULT_VRU_YIELD_STANDOFF_M,
                 COURIER_YIELD_BRAKE_MPS2,
             );
-            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
+            let goal = Goal {
+                target: Pose {
+                    x_m,
+                    y_m,
+                    heading_rad: world.goal.target.heading_rad,
+                },
+            };
             match cap {
                 // A pedestrian within the standoff → give way: stop and hold.
                 Some(c) if c <= f64::EPSILON => PlanOutput::safe_stop(world.ego.pose),
                 // A pedestrian ahead → creep toward the goal at the yield cap.
-                Some(c) => planner.plan(&PlanInput { goal, target_speed_mps: Some(c), ..world.clone() }),
+                Some(c) => planner.plan(&PlanInput {
+                    goal,
+                    target_speed_mps: Some(c),
+                    ..world.clone()
+                }),
                 // No pedestrian in the band → follow the goal (KIRRA + the courier cap still bound it).
-                None => planner.plan(&PlanInput { goal, ..world.clone() }),
+                None => planner.plan(&PlanInput {
+                    goal,
+                    ..world.clone()
+                }),
             }
         }
         MickIntent::CrossWhenClear { x_m, y_m } => {
@@ -494,8 +565,18 @@ pub fn plan_for_intent(
             ) {
                 return PlanOutput::safe_stop(world.ego.pose); // not clear → wait at the curb
             }
-            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
-            planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() })
+            let goal = Goal {
+                target: Pose {
+                    x_m,
+                    y_m,
+                    heading_rad: world.goal.target.heading_rad,
+                },
+            };
+            planner.plan(&PlanInput {
+                goal,
+                target_speed_mps: Some(COURIER_CREEP_MPS),
+                ..world.clone()
+            })
         }
         MickIntent::CreepThrough { x_m, y_m } => {
             // Sidewalk crowd creep (ADR-0028): like Yield, but inch forward at a gentle nudge through
@@ -512,14 +593,28 @@ pub fn plan_for_intent(
                 DEFAULT_CROWD_NUDGE_SPEED_MPS,
                 COURIER_YIELD_BRAKE_MPS2,
             );
-            let goal = Goal { target: Pose { x_m, y_m, heading_rad: world.goal.target.heading_rad } };
+            let goal = Goal {
+                target: Pose {
+                    x_m,
+                    y_m,
+                    heading_rad: world.goal.target.heading_rad,
+                },
+            };
             match cap {
                 // A pedestrian within the contact floor → stop (never nudge into someone).
                 Some(c) if c <= f64::EPSILON => PlanOutput::safe_stop(world.ego.pose),
                 // A pedestrian ahead but beyond the floor → inch forward at the nudge.
-                Some(c) => planner.plan(&PlanInput { goal, target_speed_mps: Some(c), ..world.clone() }),
+                Some(c) => planner.plan(&PlanInput {
+                    goal,
+                    target_speed_mps: Some(c),
+                    ..world.clone()
+                }),
                 // No pedestrian in the band → follow the goal at creep.
-                None => planner.plan(&PlanInput { goal, target_speed_mps: Some(COURIER_CREEP_MPS), ..world.clone() }),
+                None => planner.plan(&PlanInput {
+                    goal,
+                    target_speed_mps: Some(COURIER_CREEP_MPS),
+                    ..world.clone()
+                }),
             }
         }
     }
@@ -535,8 +630,14 @@ fn vru_approaches(world: &PlanInput<'_>) -> Vec<VruApproach> {
         .objects
         .iter()
         .map(|o| {
-            let (dx, dy) = (o.pos.x_m - world.ego.pose.x_m, o.pos.y_m - world.ego.pose.y_m);
-            VruApproach { ahead_m: dx * cos_h + dy * sin_h, lateral_offset_m: -dx * sin_h + dy * cos_h }
+            let (dx, dy) = (
+                o.pos.x_m - world.ego.pose.x_m,
+                o.pos.y_m - world.ego.pose.y_m,
+            );
+            VruApproach {
+                ahead_m: dx * cos_h + dy * sin_h,
+                lateral_offset_m: -dx * sin_h + dy * cos_h,
+            }
         })
         .collect()
 }
@@ -563,7 +664,8 @@ fn plan_along_route(
     route: &[u64],
     goal: Goal,
 ) -> PlanOutput {
-    let Some(corridor) = graph.route_corridor(route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
+    let Some(corridor) =
+        graph.route_corridor(route, ROUTE_CORRIDOR_CONFIDENCE, ROUTE_CORRIDOR_AGE_MS)
     else {
         return PlanOutput::safe_stop(world.ego.pose);
     };
@@ -586,7 +688,14 @@ fn plan_along_route(
         // current station (not each lane's global mean_y), so the crossing rules see a neighbor
         // boundary where it actually is through a turn — admitting/blocking a lateral move
         // correctly on the arc, not just on straights.
-        graph.boundaries_relative_to_at(ego_lane, &neighbors, MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m })
+        graph.boundaries_relative_to_at(
+            ego_lane,
+            &neighbors,
+            MapPoint {
+                x_m: world.ego.pose.x_m,
+                y_m: world.ego.pose.y_m,
+            },
+        )
     } else {
         None
     };
@@ -616,7 +725,10 @@ const ROUTE_CORRIDOR_AGE_MS: u64 = 0;
 fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
     match world.lane_graph {
         Some(graph) => {
-            let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+            let ego_pt = MapPoint {
+                x_m: world.ego.pose.x_m,
+                y_m: world.ego.pose.y_m,
+            };
             graph.junction_context(ego_pt, world.objects).cedes_to_ego
         }
         None => Vec::new(),
@@ -630,9 +742,17 @@ fn derive_cedes_to_ego(world: &PlanInput<'_>) -> Vec<u64> {
 /// absent signal — is permissive and must gap-accept. Fail-safe: an unknown / missing signal is
 /// NOT protected, so the ego yields.
 // SAFETY: SG5 | REQ: protected-vs-permitted-turn | TEST: a_permitted_green_yields_to_oncoming_on_a_tight_gap,a_protected_arrow_proceeds_through_the_same_tight_gap,a_permitted_green_takes_an_ample_gap,a_red_light_holds_regardless_of_the_gap,red_light_requires_stop_green_does_not
-fn turn_is_protected(graph: &LaneGraph, ego_lane: u64, signal_states: &[(u64, SignalState)]) -> bool {
-    graph.lane(ego_lane).is_some_and(|l| l.control == Some(LaneControl::TrafficLight))
-        && signal_states.iter().any(|(id, s)| *id == ego_lane && *s == SignalState::ProtectedGreen)
+fn turn_is_protected(
+    graph: &LaneGraph,
+    ego_lane: u64,
+    signal_states: &[(u64, SignalState)],
+) -> bool {
+    graph
+        .lane(ego_lane)
+        .is_some_and(|l| l.control == Some(LaneControl::TrafficLight))
+        && signal_states
+            .iter()
+            .any(|(id, s)| *id == ego_lane && *s == SignalState::ProtectedGreen)
 }
 
 /// Below this closing speed a vehicle is not meaningfully approaching the turn conflict point —
@@ -645,7 +765,11 @@ const TURN_CONFLICT_MIN_CLOSING_MPS: f64 = 0.5;
 /// closing (stopped / receding / tangential) is excluded (it is not a conflict; KIRRA still
 /// backstops a sudden re-acceleration); one already AT the conflict yields `(0, …)` (an immediate
 /// hold). The interaction model then reasons about each agent's worst-case response separately.
-fn turn_interactive_conflicts(world: &PlanInput<'_>, conflict: MapPoint, cedes: &[u64]) -> Vec<InteractiveConflict> {
+fn turn_interactive_conflicts(
+    world: &PlanInput<'_>,
+    conflict: MapPoint,
+    cedes: &[u64],
+) -> Vec<InteractiveConflict> {
     world
         .objects
         .iter()
@@ -654,12 +778,17 @@ fn turn_interactive_conflicts(world: &PlanInput<'_>, conflict: MapPoint, cedes: 
             let (dx, dy) = (conflict.x_m - o.pos.x_m, conflict.y_m - o.pos.y_m);
             let dist = dx.hypot(dy);
             if dist <= f64::EPSILON {
-                return Some(InteractiveConflict { distance_m: 0.0, closing_speed_mps: o.velocity_mps });
+                return Some(InteractiveConflict {
+                    distance_m: 0.0,
+                    closing_speed_mps: o.velocity_mps,
+                });
             }
             // Closing speed = the object's velocity component along the bearing to the conflict.
             let closing = (o.vel.x_m * dx + o.vel.y_m * dy) / dist;
-            (closing > TURN_CONFLICT_MIN_CLOSING_MPS)
-                .then_some(InteractiveConflict { distance_m: dist, closing_speed_mps: closing })
+            (closing > TURN_CONFLICT_MIN_CLOSING_MPS).then_some(InteractiveConflict {
+                distance_m: dist,
+                closing_speed_mps: closing,
+            })
         })
         .collect()
 }
@@ -673,7 +802,11 @@ fn protected_turn_cedes(world: &PlanInput<'_>, conflict: MapPoint) -> Vec<u64> {
     for o in world.objects {
         let (dx, dy) = (conflict.x_m - o.pos.x_m, conflict.y_m - o.pos.y_m);
         let dist = dx.hypot(dy);
-        let closing = if dist <= f64::EPSILON { f64::INFINITY } else { (o.vel.x_m * dx + o.vel.y_m * dy) / dist };
+        let closing = if dist <= f64::EPSILON {
+            f64::INFINITY
+        } else {
+            (o.vel.x_m * dx + o.vel.y_m * dy) / dist
+        };
         if closing > TURN_CONFLICT_MIN_CLOSING_MPS {
             ids.push(o.id);
         }
@@ -742,7 +875,10 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
         return Vec::new();
     };
     let ego = world.ego.pose;
-    let Some(lane_id) = graph.lane_at(MapPoint { x_m: ego.x_m, y_m: ego.y_m }) else {
+    let Some(lane_id) = graph.lane_at(MapPoint {
+        x_m: ego.x_m,
+        y_m: ego.y_m,
+    }) else {
         return Vec::new();
     };
     let lane = graph.lane(lane_id);
@@ -757,7 +893,10 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
                 let satisfied = world.ego.linear_x_mps.abs() < STOP_SATISFIED_SPEED_MPS
                     && dist > 0.0
                     && dist < STOP_SATISFIED_DIST_M;
-                TrafficControl::StopSign { stop_line_x_m: line_x, satisfied }
+                TrafficControl::StopSign {
+                    stop_line_x_m: line_x,
+                    satisfied,
+                }
             }
             LaneControl::TrafficLight => {
                 // Live signal state for the governed (ego) lane — fail-closed to RED when the
@@ -767,7 +906,10 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
                     .iter()
                     .find(|(id, _)| *id == lane_id)
                     .map_or(SignalState::Red, |(_, s)| *s);
-                TrafficControl::TrafficLight { stop_line_x_m: line_x, state }
+                TrafficControl::TrafficLight {
+                    stop_line_x_m: line_x,
+                    state,
+                }
             }
         });
     }
@@ -777,8 +919,13 @@ fn derive_controls(world: &PlanInput<'_>) -> Vec<TrafficControl> {
     // creeps into the blind junction (RSS Rule 4). Composes with any sign control above (a blind
     // STOP/YIELD approach gets both the stop/yield line AND the creep cap). A lane with an open
     // view contributes nothing.
-    if let (Some(sight), Some(conflict_x)) = (graph.sight_distance(lane_id), lane.map(Lane::stop_line_x)) {
-        out.push(TrafficControl::OccludedApproach { conflict_line_x_m: conflict_x, sight_distance_m: sight });
+    if let (Some(sight), Some(conflict_x)) =
+        (graph.sight_distance(lane_id), lane.map(Lane::stop_line_x))
+    {
+        out.push(TrafficControl::OccludedApproach {
+            conflict_line_x_m: conflict_x,
+            sight_distance_m: sight,
+        });
     }
 
     out
@@ -838,14 +985,18 @@ fn turn_route(graph: &LaneGraph, ego_lane: u64, direction: TurnDirection) -> Opt
             // otherwise spuriously match it, so a `Straight` with no straight branch still HOLDs
             // (fail-closed), as does any direction on a straight (non-arc) lane.
             let lane = graph.lane(ego_lane)?;
-            if direction != TurnDirection::Straight && direction.matches(lane_net_heading_change(lane)) {
+            if direction != TurnDirection::Straight
+                && direction.matches(lane_net_heading_change(lane))
+            {
                 vec![ego_lane] // mid-turn continuation; extended forward below
             } else {
                 return None;
             }
         }
     };
-    let mut cur = *route.last().expect("route seeded with at least the ego lane");
+    let mut cur = *route
+        .last()
+        .expect("route seeded with at least the ego lane");
     while route.len() < MAX_ROUTE_LANES {
         match graph.lane(cur).and_then(|l| l.successors().min()) {
             Some(next) if !route.contains(&next) => {
@@ -961,12 +1112,19 @@ impl WorldContext {
             .iter()
             .map(|o| {
                 let (ahead_m, left_m) = to_ego(o.pos.x_m, o.pos.y_m);
-                ObjectView { id: o.id, ahead_m, left_m, speed_mps: o.velocity_mps }
+                ObjectView {
+                    id: o.id,
+                    ahead_m,
+                    left_m,
+                    speed_mps: o.velocity_mps,
+                }
             })
             .collect();
         // Nearest-first so the truncation keeps the most relevant objects.
         objects.sort_by(|a, b| {
-            a.ahead_m.hypot(a.left_m).total_cmp(&b.ahead_m.hypot(b.left_m))
+            a.ahead_m
+                .hypot(a.left_m)
+                .total_cmp(&b.ahead_m.hypot(b.left_m))
         });
         objects.truncate(MICK_MAX_OBJECTS);
 
@@ -976,10 +1134,14 @@ impl WorldContext {
             goal_ahead_m,
             goal_left_m,
             may_change_left: crate::behavior::lateral_move_permitted(
-                world.lane_boundaries, 0.0, MICK_LANE_PROBE_M,
+                world.lane_boundaries,
+                0.0,
+                MICK_LANE_PROBE_M,
             ),
             may_change_right: crate::behavior::lateral_move_permitted(
-                world.lane_boundaries, 0.0, -MICK_LANE_PROBE_M,
+                world.lane_boundaries,
+                0.0,
+                -MICK_LANE_PROBE_M,
             ),
             objects,
             available_turns: available_turns(world),
@@ -995,15 +1157,22 @@ fn available_turns(world: &PlanInput<'_>) -> Vec<&'static str> {
     let Some(graph) = world.lane_graph else {
         return Vec::new();
     };
-    let ego_pt = MapPoint { x_m: world.ego.pose.x_m, y_m: world.ego.pose.y_m };
+    let ego_pt = MapPoint {
+        x_m: world.ego.pose.x_m,
+        y_m: world.ego.pose.y_m,
+    };
     let Some(ego_lane) = graph.lane_at(ego_pt) else {
         return Vec::new();
     };
-    [TurnDirection::Left, TurnDirection::Right, TurnDirection::Straight]
-        .into_iter()
-        .filter(|d| turn_target(graph, ego_lane, *d).is_some())
-        .map(TurnDirection::as_str)
-        .collect()
+    [
+        TurnDirection::Left,
+        TurnDirection::Right,
+        TurnDirection::Straight,
+    ]
+    .into_iter()
+    .filter(|d| turn_target(graph, ego_lane, *d).is_some())
+    .map(TurnDirection::as_str)
+    .collect()
 }
 
 /// The pluggable System-2 brain behind Mick. Given the bounded [`WorldContext`], it
@@ -1027,7 +1196,9 @@ pub struct ScriptedBrain {
 impl ScriptedBrain {
     #[must_use]
     pub fn new(intents: Vec<MickIntent>) -> Self {
-        Self { script: intents.into_iter() }
+        Self {
+            script: intents.into_iter(),
+        }
     }
 }
 
@@ -1096,14 +1267,23 @@ impl<B: MickBrain> MickDriver<B> {
     /// Construct with the default System-2 cadence + staleness bound.
     #[must_use]
     pub fn new(brain: B) -> Self {
-        Self::with_rates(brain, DEFAULT_DECIDE_INTERVAL_MS, DEFAULT_INTENT_STALENESS_MS)
+        Self::with_rates(
+            brain,
+            DEFAULT_DECIDE_INTERVAL_MS,
+            DEFAULT_INTENT_STALENESS_MS,
+        )
     }
 
     /// Construct with explicit `decide_interval_ms` (re-decide cadence) and
     /// `intent_staleness_ms` (beyond which a non-refreshed intent → `Hold`).
     #[must_use]
     pub fn with_rates(brain: B, decide_interval_ms: u64, intent_staleness_ms: u64) -> Self {
-        Self { brain, decide_interval_ms, intent_staleness_ms, cached: None }
+        Self {
+            brain,
+            decide_interval_ms,
+            intent_staleness_ms,
+            cached: None,
+        }
     }
 
     /// The current cached intent (for observability / tests), if any.
@@ -1139,7 +1319,9 @@ impl<B: MickBrain> MickDriver<B> {
 
         // Choose the intent to ground: the cached one iff still fresh, else fail closed.
         let intent = match self.cached {
-            Some((intent, decided_at)) if now_ms.saturating_sub(decided_at) <= self.intent_staleness_ms => {
+            Some((intent, decided_at))
+                if now_ms.saturating_sub(decided_at) <= self.intent_staleness_ms =>
+            {
                 intent
             }
             _ => MickIntent::Hold,
@@ -1166,9 +1348,9 @@ mod tests {
         EgoState, GeometricPlanner, LaneBoundary, LineType, PerceivedObject, ProposalKind,
         TrajectoryVerdict,
     };
+    use kirra_core::FleetPosture;
     use kirra_trajectory::corridor::{CorridorSource, MockCorridorSource, Point};
     use kirra_trajectory::{validate_trajectory_slow, VehicleConfig};
-    use kirra_core::FleetPosture;
 
     /// A perception-derived world: ego at x=5, a placeholder goal (the intent
     /// overrides it), and whatever objects / lane lines the test supplies.
@@ -1179,12 +1361,22 @@ mod tests {
     ) -> PlanInput<'a> {
         PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 },
+                pose: Pose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
                 linear_x_mps: 2.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 5.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             map,
             objects,
             controls: &[],
@@ -1200,7 +1392,8 @@ mod tests {
             request_overtake: false,
             request_pull_over: false,
             lane_graph: None,
-            signal_states: &[],        }
+            signal_states: &[],
+        }
     }
 
     fn stopped_car(x: f64) -> PerceivedObject {
@@ -1213,9 +1406,20 @@ mod tests {
         }
     }
 
-    fn admits(traj: &[crate::TrajectoryPoint], corr: &dyn CorridorSource, objs: &[PerceivedObject]) -> bool {
+    fn admits(
+        traj: &[crate::TrajectoryPoint],
+        corr: &dyn CorridorSource,
+        objs: &[PerceivedObject],
+    ) -> bool {
         matches!(
-            validate_trajectory_slow(traj, corr, objs, &VehicleConfig::default_urban(), None, FleetPosture::Nominal),
+            validate_trajectory_slow(
+                traj,
+                corr,
+                objs,
+                &VehicleConfig::default_urban(),
+                None,
+                FleetPosture::Nominal
+            ),
             TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp
         )
     }
@@ -1225,20 +1429,49 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = world(&corr, &[], &[]);
         let mut p = GeometricPlanner::default();
-        let out = plan_for_intent(&mut p, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
+        let out = plan_for_intent(
+            &mut p,
+            &MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 10.0, "Mick's GoTo drives the ego toward the goal, got {max_x}");
-        assert!(admits(&out.trajectory, &corr, &[]), "KIRRA admits the grounded plan");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 10.0,
+            "Mick's GoTo drives the ego toward the goal, got {max_x}"
+        );
+        assert!(
+            admits(&out.trajectory, &corr, &[]),
+            "KIRRA admits the grounded plan"
+        );
     }
 
     // --- sidewalk-courier intents (ADR-0028) --------------------------------
 
     fn pedestrian(x: f64, y: f64) -> PerceivedObject {
-        PerceivedObject { id: 7, pos: Point { x_m: x, y_m: y }, velocity_mps: 0.0, heading_rad: 0.0, vel: Point { x_m: 0.0, y_m: 0.0 } }
+        PerceivedObject {
+            id: 7,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: 0.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 0.0, y_m: 0.0 },
+        }
     }
     fn crossing_car(x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
-        PerceivedObject { id: 8, pos: Point { x_m: x, y_m: y }, velocity_mps: vx.hypot(vy), heading_rad: vy.atan2(vx), vel: Point { x_m: vx, y_m: vy } }
+        PerceivedObject {
+            id: 8,
+            pos: Point { x_m: x, y_m: y },
+            velocity_mps: vx.hypot(vy),
+            heading_rad: vy.atan2(vx),
+            vel: Point { x_m: vx, y_m: vy },
+        }
     }
 
     #[test]
@@ -1247,8 +1480,19 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [pedestrian(5.5, 0.0)];
         let w = world(&corr, &objs, &[]);
-        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
-        assert_eq!(out.kind, ProposalKind::SafeStop, "courier yields (stops) for a pedestrian in the way");
+        let out = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::Yield {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            out.kind,
+            ProposalKind::SafeStop,
+            "courier yields (stops) for a pedestrian in the way"
+        );
     }
 
     #[test]
@@ -1256,9 +1500,23 @@ mod tests {
         // No pedestrian in the band → Yield follows the goal (KIRRA + the courier cap still bound it).
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = world(&corr, &[], &[]);
-        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
+        let out = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::Yield {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
         assert_eq!(out.kind, ProposalKind::Motion);
-        assert!(out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max) > 8.0, "advances toward the goal");
+        assert!(
+            out.trajectory
+                .iter()
+                .map(|t| t.pose.x_m)
+                .fold(0.0, f64::max)
+                > 8.0,
+            "advances toward the goal"
+        );
     }
 
     #[test]
@@ -1269,17 +1527,45 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [pedestrian(8.0, 2.0)];
         let w = world(&corr, &objs, &[]);
-        let yld = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::Yield { x_m: 40.0, y_m: 0.0 }, &w);
-        let goto = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
-        assert_eq!(yld.kind, goto.kind, "an off-band pedestrian: Yield defers to plain GoTo");
+        let yld = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::Yield {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        let goto = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            yld.kind, goto.kind,
+            "an off-band pedestrian: Yield defers to plain GoTo"
+        );
     }
 
     #[test]
     fn cross_when_clear_crosses_an_empty_road() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = world(&corr, &[], &[]);
-        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::CrossWhenClear { x_m: 12.0, y_m: 0.0 }, &w);
-        assert_eq!(out.kind, ProposalKind::Motion, "an empty crosswalk → step off");
+        let out = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::CrossWhenClear {
+                x_m: 12.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            out.kind,
+            ProposalKind::Motion,
+            "an empty crosswalk → step off"
+        );
     }
 
     #[test]
@@ -1289,19 +1575,50 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [crossing_car(12.0, -20.0, 0.0, 10.0)];
         let w = world(&corr, &objs, &[]);
-        let out = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::CrossWhenClear { x_m: 12.0, y_m: 0.0 }, &w);
-        assert_eq!(out.kind, ProposalKind::SafeStop, "a closing car holds the courier at the curb");
+        let out = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::CrossWhenClear {
+                x_m: 12.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            out.kind,
+            ProposalKind::SafeStop,
+            "a closing car holds the courier at the curb"
+        );
     }
 
     #[test]
     fn from_llm_json_round_trips_the_sidewalk_intents() {
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"yield","x_m":12.0,"y_m":0.0}"#).unwrap(),
-                   MickIntent::Yield { x_m: 12.0, y_m: 0.0 });
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":3.0}"#).unwrap(),
-                   MickIntent::CrossWhenClear { x_m: 12.0, y_m: 3.0 });
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#).unwrap(),
-                   MickIntent::CreepThrough { x_m: 12.0, y_m: 0.0 });
-        assert!(MickIntent::from_llm_json(r#"{"intent":"yield","x_m":null,"y_m":0.0}"#).is_err(), "malformed → fail-closed");
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"yield","x_m":12.0,"y_m":0.0}"#).unwrap(),
+            MickIntent::Yield {
+                x_m: 12.0,
+                y_m: 0.0
+            }
+        );
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"cross_when_clear","x_m":12.0,"y_m":3.0}"#)
+                .unwrap(),
+            MickIntent::CrossWhenClear {
+                x_m: 12.0,
+                y_m: 3.0
+            }
+        );
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"creep_through","x_m":12.0,"y_m":0.0}"#)
+                .unwrap(),
+            MickIntent::CreepThrough {
+                x_m: 12.0,
+                y_m: 0.0
+            }
+        );
+        assert!(
+            MickIntent::from_llm_json(r#"{"intent":"yield","x_m":null,"y_m":0.0}"#).is_err(),
+            "malformed → fail-closed"
+        );
     }
 
     fn courier_planner() -> GeometricPlanner {
@@ -1317,10 +1634,28 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [pedestrian(8.0, 0.0)];
         let w = world(&corr, &objs, &[]);
-        let creep = plan_for_intent(&mut courier_planner(), &MickIntent::CreepThrough { x_m: 16.0, y_m: 0.0 }, &w);
-        assert_eq!(creep.kind, ProposalKind::Motion, "CreepThrough inches forward through the crowd");
-        let max_x = creep.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 5.5, "the courier advances past the ego start, got {max_x:.1}");
+        let creep = plan_for_intent(
+            &mut courier_planner(),
+            &MickIntent::CreepThrough {
+                x_m: 16.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            creep.kind,
+            ProposalKind::Motion,
+            "CreepThrough inches forward through the crowd"
+        );
+        let max_x = creep
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 5.5,
+            "the courier advances past the ego start, got {max_x:.1}"
+        );
     }
 
     #[test]
@@ -1330,8 +1665,19 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [pedestrian(5.3, 0.0)]; // ego at x=5 → 0.3 m ahead, inside the 0.4 m floor
         let w = world(&corr, &objs, &[]);
-        let creep = plan_for_intent(&mut courier_planner(), &MickIntent::CreepThrough { x_m: 16.0, y_m: 0.0 }, &w);
-        assert_eq!(creep.kind, ProposalKind::SafeStop, "stops at the contact floor — never pushes into a person");
+        let creep = plan_for_intent(
+            &mut courier_planner(),
+            &MickIntent::CreepThrough {
+                x_m: 16.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            creep.kind,
+            ProposalKind::SafeStop,
+            "stops at the contact floor — never pushes into a person"
+        );
     }
 
     #[test]
@@ -1344,10 +1690,27 @@ mod tests {
         let objs = [stopped_car(25.0)];
         let w = world(&corr, &objs, &[]);
         let mut p = GeometricPlanner::default();
-        let out = plan_for_intent(&mut p, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x < 25.0, "stops short of the obstacle Mick told it to drive past, got {max_x}");
-        assert!(admits(&out.trajectory, &corr, &objs), "and the bounded plan is admissible");
+        let out = plan_for_intent(
+            &mut p,
+            &MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x < 25.0,
+            "stops short of the obstacle Mick told it to drive past, got {max_x}"
+        );
+        assert!(
+            admits(&out.trajectory, &corr, &objs),
+            "and the bounded plan is admissible"
+        );
     }
 
     #[test]
@@ -1355,15 +1718,37 @@ mod tests {
         // Mick proposes a lane change across a SOLID line; Occy's behavioral layer
         // refuses it (stays in lane). Even a maneuver intent is adjudicated, not obeyed.
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
-        let solid = [LaneBoundary { y_m: -0.5, line: LineType::Solid }];
+        let solid = [LaneBoundary {
+            y_m: -0.5,
+            line: LineType::Solid,
+        }];
         let w = PlanInput {
-            goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 40.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             ..world(&corr, &[], &solid)
         };
         let mut p = GeometricPlanner::default();
-        let out = plan_for_intent(&mut p, &MickIntent::LaneChange { target_offset_m: -3.0 }, &w);
-        let min_y = out.trajectory.iter().map(|t| t.pose.y_m).fold(0.0, f64::min);
-        assert!(min_y > -0.5, "solid line → lane-change intent refused (no crossing), got {min_y}");
+        let out = plan_for_intent(
+            &mut p,
+            &MickIntent::LaneChange {
+                target_offset_m: -3.0,
+            },
+            &w,
+        );
+        let min_y = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.y_m)
+            .fold(0.0, f64::min);
+        assert!(
+            min_y > -0.5,
+            "solid line → lane-change intent refused (no crossing), got {min_y}"
+        );
     }
 
     #[test]
@@ -1381,8 +1766,19 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = world(&corr, &[], &[]);
         let mut p = GeometricPlanner::default();
-        let out = plan_for_intent(&mut p, &MickIntent::GoTo { x_m: f64::NAN, y_m: 0.0 }, &w);
-        assert_eq!(out.kind, ProposalKind::SafeStop, "a NaN goal must not flow into the planner");
+        let out = plan_for_intent(
+            &mut p,
+            &MickIntent::GoTo {
+                x_m: f64::NAN,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            out.kind,
+            ProposalKind::SafeStop,
+            "a NaN goal must not flow into the planner"
+        );
     }
 
     #[test]
@@ -1398,9 +1794,15 @@ mod tests {
         // A well-formed intent parses to the typed value.
         assert_eq!(
             MickIntent::from_llm_json(r#"{"intent":"go_to","x_m":40.0,"y_m":0.0}"#).unwrap(),
-            MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }
+            MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0
+            }
         );
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"hold"}"#).unwrap(), MickIntent::Hold);
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"hold"}"#).unwrap(),
+            MickIntent::Hold
+        );
     }
 
     #[test]
@@ -1411,17 +1813,25 @@ mod tests {
         let fenced = "```json\n{\"intent\":\"go_to\",\"x_m\":40.0,\"y_m\":0.0}\n```";
         assert_eq!(
             MickIntent::from_llm_json(fenced).unwrap(),
-            MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }
+            MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0
+            }
         );
 
         let preamble = "Sure — given the goal ahead, the intent is:\n{\"intent\":\"hold\"}";
-        assert_eq!(MickIntent::from_llm_json(preamble).unwrap(), MickIntent::Hold);
+        assert_eq!(
+            MickIntent::from_llm_json(preamble).unwrap(),
+            MickIntent::Hold
+        );
 
         let trailing =
             "{\"intent\":\"lane_change\",\"target_offset_m\":-3.0}\nLet me know if you'd like to adjust.";
         assert_eq!(
             MickIntent::from_llm_json(trailing).unwrap(),
-            MickIntent::LaneChange { target_offset_m: -3.0 }
+            MickIntent::LaneChange {
+                target_offset_m: -3.0
+            }
         );
 
         // A brace inside a string value must not mis-terminate the object.
@@ -1440,17 +1850,35 @@ mod tests {
         // Ego facing +y (heading π/2) at (5,0); a goal 40 m in +y is "40 ahead, 0 left".
         let w = PlanInput {
             ego: EgoState {
-                pose: Pose { x_m: 5.0, y_m: 0.0, heading_rad: std::f64::consts::FRAC_PI_2 },
+                pose: Pose {
+                    x_m: 5.0,
+                    y_m: 0.0,
+                    heading_rad: std::f64::consts::FRAC_PI_2,
+                },
                 linear_x_mps: 3.0,
                 yaw_rate_rads: 0.0,
                 stamp_ms: 0,
             },
-            goal: Goal { target: Pose { x_m: 5.0, y_m: 40.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 5.0,
+                    y_m: 40.0,
+                    heading_rad: 0.0,
+                },
+            },
             ..world(&corr, &[], &[])
         };
         let ctx = WorldContext::from_plan_input(&w);
-        assert!((ctx.goal_ahead_m - 40.0).abs() < 1e-9, "goal 40 m ahead, got {}", ctx.goal_ahead_m);
-        assert!(ctx.goal_left_m.abs() < 1e-9, "goal dead ahead (0 left), got {}", ctx.goal_left_m);
+        assert!(
+            (ctx.goal_ahead_m - 40.0).abs() < 1e-9,
+            "goal 40 m ahead, got {}",
+            ctx.goal_ahead_m
+        );
+        assert!(
+            ctx.goal_left_m.abs() < 1e-9,
+            "goal dead ahead (0 left), got {}",
+            ctx.goal_left_m
+        );
         assert_eq!(ctx.ego_speed_mps, 3.0);
         assert_eq!(ctx.posture, "NOMINAL");
     }
@@ -1462,7 +1890,10 @@ mod tests {
         let objs: Vec<PerceivedObject> = (0..(MICK_MAX_OBJECTS as u64 + 10))
             .map(|i| PerceivedObject {
                 id: i,
-                pos: Point { x_m: 10.0 + i as f64 * 5.0, y_m: 0.0 },
+                pos: Point {
+                    x_m: 10.0 + i as f64 * 5.0,
+                    y_m: 0.0,
+                },
                 velocity_mps: 1.0,
                 heading_rad: 0.0,
                 vel: Point { x_m: 1.0, y_m: 0.0 },
@@ -1470,22 +1901,45 @@ mod tests {
             .collect();
         let w = world(&corr, &objs, &[]);
         let ctx = WorldContext::from_plan_input(&w);
-        assert_eq!(ctx.objects.len(), MICK_MAX_OBJECTS, "the brain's object list is capped");
-        assert_eq!(ctx.objects[0].id, 0, "nearest object (id 0 at x=10) is first");
-        assert!(ctx.objects[0].ahead_m < ctx.objects[1].ahead_m, "sorted nearest-first");
+        assert_eq!(
+            ctx.objects.len(),
+            MICK_MAX_OBJECTS,
+            "the brain's object list is capped"
+        );
+        assert_eq!(
+            ctx.objects[0].id, 0,
+            "nearest object (id 0 at x=10) is first"
+        );
+        assert!(
+            ctx.objects[0].ahead_m < ctx.objects[1].ahead_m,
+            "sorted nearest-first"
+        );
     }
 
     #[test]
     fn scripted_brain_drives_the_loop_toward_the_goal() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = world(&corr, &[], &[]);
-        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }]);
+        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo {
+            x_m: 40.0,
+            y_m: 0.0,
+        }]);
         let mut p = GeometricPlanner::default();
         let out = mick_drive_once(&mut brain, &w, &mut p);
         assert_eq!(out.kind, ProposalKind::Motion);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x > 10.0, "the brain's GoTo drives the loop forward, got {max_x}");
-        assert!(admits(&out.trajectory, &corr, &[]), "and KIRRA admits the grounded plan");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x > 10.0,
+            "the brain's GoTo drives the loop forward, got {max_x}"
+        );
+        assert!(
+            admits(&out.trajectory, &corr, &[]),
+            "and KIRRA admits the grounded plan"
+        );
     }
 
     #[test]
@@ -1496,12 +1950,25 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let objs = [stopped_car(25.0)];
         let w = world(&corr, &objs, &[]);
-        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }]);
+        let mut brain = ScriptedBrain::new(vec![MickIntent::GoTo {
+            x_m: 40.0,
+            y_m: 0.0,
+        }]);
         let mut p = GeometricPlanner::default();
         let out = mick_drive_once(&mut brain, &w, &mut p);
-        let max_x = out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
-        assert!(max_x < 25.0, "loop stops short of the obstacle the brain drove at, got {max_x}");
-        assert!(admits(&out.trajectory, &corr, &objs), "the bounded plan is admissible");
+        let max_x = out
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(0.0, f64::max);
+        assert!(
+            max_x < 25.0,
+            "loop stops short of the obstacle the brain drove at, got {max_x}"
+        );
+        assert!(
+            admits(&out.trajectory, &corr, &objs),
+            "the bounded plan is admissible"
+        );
     }
 
     #[test]
@@ -1516,7 +1983,11 @@ mod tests {
         let w = world(&corr, &[], &[]);
         let mut p = GeometricPlanner::default();
         let out = mick_drive_once(&mut ErrBrain, &w, &mut p);
-        assert_eq!(out.kind, ProposalKind::SafeStop, "a brain failure must HOLD, not drive");
+        assert_eq!(
+            out.kind,
+            ProposalKind::SafeStop,
+            "a brain failure must HOLD, not drive"
+        );
         assert!(out.trajectory.iter().all(|t| t.velocity_mps == 0.0));
     }
 
@@ -1526,13 +1997,22 @@ mod tests {
     /// the default 8 m/s).
     fn cruising_world(corr: &dyn CorridorSource) -> PlanInput<'_> {
         PlanInput {
-            goal: Goal { target: Pose { x_m: 40.0, y_m: 0.0, heading_rad: 0.0 } },
+            goal: Goal {
+                target: Pose {
+                    x_m: 40.0,
+                    y_m: 0.0,
+                    heading_rad: 0.0,
+                },
+            },
             ..world(corr, &[], &[])
         }
     }
 
     fn vmax(out: &PlanOutput) -> f64 {
-        out.trajectory.iter().map(|t| t.velocity_mps).fold(0.0, f64::max)
+        out.trajectory
+            .iter()
+            .map(|t| t.velocity_mps)
+            .fold(0.0, f64::max)
     }
 
     #[test]
@@ -1541,11 +2021,33 @@ mod tests {
         let w = cruising_world(&corr);
         let mut p = GeometricPlanner::default(); // cruise ceiling 8 m/s
 
-        let fast = plan_for_intent(&mut p, &MickIntent::GoTo { x_m: 40.0, y_m: 0.0 }, &w);
-        let slow = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: 3.0 }, &w);
+        let fast = plan_for_intent(
+            &mut p,
+            &MickIntent::GoTo {
+                x_m: 40.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        let slow = plan_for_intent(
+            &mut p,
+            &MickIntent::Cruise {
+                target_speed_mps: 3.0,
+            },
+            &w,
+        );
 
-        assert!(vmax(&slow) <= 3.0 + 1e-6, "Cruise(3) caps speed at 3, got {}", vmax(&slow));
-        assert!(vmax(&fast) > vmax(&slow), "and it is slower than the uncapped GoTo ({} vs {})", vmax(&fast), vmax(&slow));
+        assert!(
+            vmax(&slow) <= 3.0 + 1e-6,
+            "Cruise(3) caps speed at 3, got {}",
+            vmax(&slow)
+        );
+        assert!(
+            vmax(&fast) > vmax(&slow),
+            "and it is slower than the uncapped GoTo ({} vs {})",
+            vmax(&fast),
+            vmax(&slow)
+        );
     }
 
     #[test]
@@ -1555,8 +2057,18 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = cruising_world(&corr);
         let mut p = GeometricPlanner::default();
-        let over = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: 50.0 }, &w);
-        assert!(vmax(&over) <= 8.0 + 1e-6, "a request above the ceiling clamps to the cruise config (8), got {}", vmax(&over));
+        let over = plan_for_intent(
+            &mut p,
+            &MickIntent::Cruise {
+                target_speed_mps: 50.0,
+            },
+            &w,
+        );
+        assert!(
+            vmax(&over) <= 8.0 + 1e-6,
+            "a request above the ceiling clamps to the cruise config (8), got {}",
+            vmax(&over)
+        );
     }
 
     #[test]
@@ -1564,18 +2076,32 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let w = cruising_world(&corr);
         let mut p = GeometricPlanner::default();
-        let out = plan_for_intent(&mut p, &MickIntent::Cruise { target_speed_mps: f64::NAN }, &w);
-        assert_eq!(out.kind, ProposalKind::SafeStop, "a NaN cruise speed must HOLD, not flow into the planner");
+        let out = plan_for_intent(
+            &mut p,
+            &MickIntent::Cruise {
+                target_speed_mps: f64::NAN,
+            },
+            &w,
+        );
+        assert_eq!(
+            out.kind,
+            ProposalKind::SafeStop,
+            "a NaN cruise speed must HOLD, not flow into the planner"
+        );
     }
 
     #[test]
     fn cruise_llm_json_parses_and_rejects_nonfinite() {
         assert_eq!(
             MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":5.0}"#).unwrap(),
-            MickIntent::Cruise { target_speed_mps: 5.0 }
+            MickIntent::Cruise {
+                target_speed_mps: 5.0
+            }
         );
         // 1e400 overflows to Inf → finiteness gate rejects it (fail-closed).
-        assert!(MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":1e400}"#).is_err());
+        assert!(
+            MickIntent::from_llm_json(r#"{"intent":"cruise","target_speed_mps":1e400}"#).is_err()
+        );
     }
 
     // ----- the Overtake intent (discretionary pass) -----
@@ -1583,7 +2109,9 @@ mod tests {
     #[test]
     fn overtake_intent_grounds_to_request_overtake() {
         // A recording planner captures the flag the intent set on the PlanInput.
-        struct Recorder { req: bool }
+        struct Recorder {
+            req: bool,
+        }
         impl Planner for Recorder {
             fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
                 self.req = input.request_overtake;
@@ -1599,13 +2127,22 @@ mod tests {
 
         // A non-overtake maneuver leaves it false (start true to prove it is cleared).
         let mut rec2 = Recorder { req: true };
-        let _ = plan_for_intent(&mut rec2, &MickIntent::Cruise { target_speed_mps: 5.0 }, &w);
+        let _ = plan_for_intent(
+            &mut rec2,
+            &MickIntent::Cruise {
+                target_speed_mps: 5.0,
+            },
+            &w,
+        );
         assert!(!rec2.req, "Cruise leaves request_overtake = false");
     }
 
     #[test]
     fn overtake_llm_json_parses() {
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"overtake"}"#).unwrap(), MickIntent::Overtake);
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"overtake"}"#).unwrap(),
+            MickIntent::Overtake
+        );
     }
 
     // ----- the PullOver intent (edge-park and stop) -----
@@ -1613,7 +2150,9 @@ mod tests {
     #[test]
     fn pull_over_intent_grounds_to_request_pull_over() {
         // A recording planner captures the flag the intent set on the PlanInput.
-        struct Recorder { req: bool }
+        struct Recorder {
+            req: bool,
+        }
         impl Planner for Recorder {
             fn plan(&mut self, input: &PlanInput<'_>) -> PlanOutput {
                 self.req = input.request_pull_over;
@@ -1629,13 +2168,22 @@ mod tests {
 
         // A non-pull-over maneuver leaves it false (start true to prove it is cleared).
         let mut rec2 = Recorder { req: true };
-        let _ = plan_for_intent(&mut rec2, &MickIntent::Cruise { target_speed_mps: 5.0 }, &w);
+        let _ = plan_for_intent(
+            &mut rec2,
+            &MickIntent::Cruise {
+                target_speed_mps: 5.0,
+            },
+            &w,
+        );
         assert!(!rec2.req, "Cruise leaves request_pull_over = false");
     }
 
     #[test]
     fn pull_over_llm_json_parses() {
-        assert_eq!(MickIntent::from_llm_json(r#"{"intent":"pull_over"}"#).unwrap(), MickIntent::PullOver);
+        assert_eq!(
+            MickIntent::from_llm_json(r#"{"intent":"pull_over"}"#).unwrap(),
+            MickIntent::PullOver
+        );
     }
 
     // ----- the TurnAt intent (junction turn) -----
@@ -1643,11 +2191,32 @@ mod tests {
     #[test]
     fn turn_at_llm_json_parses_each_direction_and_fails_closed_otherwise() {
         let parse = |s| MickIntent::from_llm_json(s);
-        assert_eq!(parse(r#"{"intent":"turn_at","direction":"left"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Left });
-        assert_eq!(parse(r#"{"intent":"turn_at","direction":"right"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Right });
-        assert_eq!(parse(r#"{"intent":"turn_at","direction":"straight"}"#).unwrap(), MickIntent::TurnAt { direction: TurnDirection::Straight });
-        assert!(parse(r#"{"intent":"turn_at","direction":"sideways"}"#).is_err(), "unknown direction fails closed");
-        assert!(parse(r#"{"intent":"turn_at"}"#).is_err(), "missing direction fails closed");
+        assert_eq!(
+            parse(r#"{"intent":"turn_at","direction":"left"}"#).unwrap(),
+            MickIntent::TurnAt {
+                direction: TurnDirection::Left
+            }
+        );
+        assert_eq!(
+            parse(r#"{"intent":"turn_at","direction":"right"}"#).unwrap(),
+            MickIntent::TurnAt {
+                direction: TurnDirection::Right
+            }
+        );
+        assert_eq!(
+            parse(r#"{"intent":"turn_at","direction":"straight"}"#).unwrap(),
+            MickIntent::TurnAt {
+                direction: TurnDirection::Straight
+            }
+        );
+        assert!(
+            parse(r#"{"intent":"turn_at","direction":"sideways"}"#).is_err(),
+            "unknown direction fails closed"
+        );
+        assert!(
+            parse(r#"{"intent":"turn_at"}"#).is_err(),
+            "missing direction fails closed"
+        );
     }
 
     #[test]
@@ -1657,20 +2226,66 @@ mod tests {
         // heading −π/2); there is no straight branch.
         let g = crate::LaneGraph::new()
             .with_lane(
-                crate::Lane::straight(1, 0.0, 0.0, 20.0, 2.0, crate::LineType::Solid, crate::LineType::Solid)
-                    .with_edge(crate::LaneEdge::Successor { to: 2 })
-                    .with_edge(crate::LaneEdge::Successor { to: 4 }),
+                crate::Lane::straight(
+                    1,
+                    0.0,
+                    0.0,
+                    20.0,
+                    2.0,
+                    crate::LineType::Solid,
+                    crate::LineType::Solid,
+                )
+                .with_edge(crate::LaneEdge::Successor { to: 2 })
+                .with_edge(crate::LaneEdge::Successor { to: 4 }),
             )
-            .with_lane(crate::Lane::straight(2, 10.0, 20.0, 40.0, 2.0, crate::LineType::Solid, crate::LineType::Solid).with_heading(FRAC_PI_2))
-            .with_lane(crate::Lane::straight(4, -10.0, 20.0, 40.0, 2.0, crate::LineType::Solid, crate::LineType::Solid).with_heading(-FRAC_PI_2));
+            .with_lane(
+                crate::Lane::straight(
+                    2,
+                    10.0,
+                    20.0,
+                    40.0,
+                    2.0,
+                    crate::LineType::Solid,
+                    crate::LineType::Solid,
+                )
+                .with_heading(FRAC_PI_2),
+            )
+            .with_lane(
+                crate::Lane::straight(
+                    4,
+                    -10.0,
+                    20.0,
+                    40.0,
+                    2.0,
+                    crate::LineType::Solid,
+                    crate::LineType::Solid,
+                )
+                .with_heading(-FRAC_PI_2),
+            );
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
 
         // Ego inside lane 1 → both turns surface; no straight branch.
-        let with_graph = PlanInput { map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let with_graph = PlanInput {
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
         let ctx = WorldContext::from_plan_input(&with_graph);
-        assert!(ctx.available_turns.contains(&"left"), "left branch surfaced: {:?}", ctx.available_turns);
-        assert!(ctx.available_turns.contains(&"right"), "right branch surfaced: {:?}", ctx.available_turns);
-        assert!(!ctx.available_turns.contains(&"straight"), "no straight branch: {:?}", ctx.available_turns);
+        assert!(
+            ctx.available_turns.contains(&"left"),
+            "left branch surfaced: {:?}",
+            ctx.available_turns
+        );
+        assert!(
+            ctx.available_turns.contains(&"right"),
+            "right branch surfaced: {:?}",
+            ctx.available_turns
+        );
+        assert!(
+            !ctx.available_turns.contains(&"straight"),
+            "no straight branch: {:?}",
+            ctx.available_turns
+        );
 
         // No graph → empty (the brain is offered no turns, and a TurnAt would HOLD anyway).
         let no_graph = WorldContext::from_plan_input(&world(&corr, &[], &[]));
@@ -1685,13 +2300,24 @@ mod tests {
         let arc: Vec<MapPoint> = (0..=12)
             .map(|i| {
                 let t = -FRAC_PI_2 + FRAC_PI_2 * (i as f64 / 12.0);
-                MapPoint { x_m: 30.0 + 12.0 * t.cos(), y_m: 12.0 + 12.0 * t.sin() }
+                MapPoint {
+                    x_m: 30.0 + 12.0 * t.cos(),
+                    y_m: 12.0 + 12.0 * t.sin(),
+                }
             })
             .collect();
         crate::LaneGraph::new()
             .with_lane(
-                crate::Lane::straight(1, 0.0, 0.0, 30.0, 3.0, crate::LineType::Solid, crate::LineType::Solid)
-                    .with_edge(crate::LaneEdge::Successor { to: 2 }),
+                crate::Lane::straight(
+                    1,
+                    0.0,
+                    0.0,
+                    30.0,
+                    3.0,
+                    crate::LineType::Solid,
+                    crate::LineType::Solid,
+                )
+                .with_edge(crate::LaneEdge::Successor { to: 2 }),
             )
             .with_lane(crate::Lane {
                 id: 2,
@@ -1704,8 +2330,16 @@ mod tests {
                 control: None,
             })
             .with_lane(
-                crate::Lane::straight(5, 0.0, 42.0, 62.0, 3.0, crate::LineType::Solid, crate::LineType::Solid)
-                    .with_heading(FRAC_PI_2),
+                crate::Lane::straight(
+                    5,
+                    0.0,
+                    42.0,
+                    62.0,
+                    3.0,
+                    crate::LineType::Solid,
+                    crate::LineType::Solid,
+                )
+                .with_heading(FRAC_PI_2),
             )
     }
 
@@ -1713,15 +2347,31 @@ mod tests {
     fn turn_route_resolves_the_approach_then_continues_the_committed_arc() {
         let g = left_turn_junction();
         // From the APPROACH lane the branch resolves and the route spans approach→arc→exit.
-        assert_eq!(turn_route(&g, 1, TurnDirection::Left), Some(vec![1, 2, 5]), "approach routes through the branch");
+        assert_eq!(
+            turn_route(&g, 1, TurnDirection::Left),
+            Some(vec![1, 2, 5]),
+            "approach routes through the branch"
+        );
         // ROUTE-PROGRESS: from the ARC lane (the ego mid-turn) a re-issued left turn CONTINUES
         // the committed arc to the exit instead of HOLDing — the fix that lets the turn finish.
-        assert_eq!(turn_route(&g, 2, TurnDirection::Left), Some(vec![2, 5]), "mid-arc continues to the exit");
+        assert_eq!(
+            turn_route(&g, 2, TurnDirection::Left),
+            Some(vec![2, 5]),
+            "mid-arc continues to the exit"
+        );
         // From the straight EXIT lane there is no left branch and no curvature → None (the turn
         // is done; a still-asserted TurnAt HOLDs, fail-closed).
-        assert_eq!(turn_route(&g, 5, TurnDirection::Left), None, "the straight exit does not continue a left turn");
+        assert_eq!(
+            turn_route(&g, 5, TurnDirection::Left),
+            None,
+            "the straight exit does not continue a left turn"
+        );
         // Fail-closed preserved: a straight approach with no branch that way is still None.
-        assert_eq!(turn_route(&g, 1, TurnDirection::Right), None, "no right branch from the approach → None (cannot turn that way here)");
+        assert_eq!(
+            turn_route(&g, 1, TurnDirection::Right),
+            None,
+            "no right branch from the approach → None (cannot turn that way here)"
+        );
     }
 
     #[test]
@@ -1734,19 +2384,50 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // On the arc (lane 2) partway up — heading between east and north, as on the curve.
         let ego = EgoState {
-            pose: Pose { x_m: 35.0, y_m: 1.6, heading_rad: 0.6 },
+            pose: Pose {
+                x_m: 35.0,
+                y_m: 1.6,
+                heading_rad: 0.6,
+            },
             linear_x_mps: 3.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         };
-        let goal = Pose { x_m: 42.0, y_m: 28.0, heading_rad: std::f64::consts::FRAC_PI_2 };
-        let w = PlanInput { ego, goal: Goal { target: goal }, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let goal = Pose {
+            x_m: 42.0,
+            y_m: 28.0,
+            heading_rad: std::f64::consts::FRAC_PI_2,
+        };
+        let w = PlanInput {
+            ego,
+            goal: Goal { target: goal },
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
 
-        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::TurnAt { direction: TurnDirection::Left }, &w);
+        let plan = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::TurnAt {
+                direction: TurnDirection::Left,
+            },
+            &w,
+        );
 
-        assert_eq!(plan.kind, crate::ProposalKind::Motion, "mid-arc TurnAt continues the turn, not a HOLD");
-        let max_y = plan.trajectory.iter().map(|p| p.pose.y_m).fold(f64::MIN, f64::max);
-        assert!(max_y > 5.0, "the continued turn climbs the arc toward the exit (y≈12), got max_y {max_y}");
+        assert_eq!(
+            plan.kind,
+            crate::ProposalKind::Motion,
+            "mid-arc TurnAt continues the turn, not a HOLD"
+        );
+        let max_y = plan
+            .trajectory
+            .iter()
+            .map(|p| p.pose.y_m)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            max_y > 5.0,
+            "the continued turn climbs the arc toward the exit (y≈12), got max_y {max_y}"
+        );
     }
 
     // ----- the RouteTo intent (multi-junction routing) -----
@@ -1769,11 +2450,21 @@ mod tests {
 
     /// A quarter-circle arc (n+1 points) sweeping `sweep` rad (±π/2) from `start_angle` about
     /// `(cx, cy)` at radius `r` — a smooth turn centerline (+ = CCW/left, − = CW/right).
-    fn quarter_arc(cx: f64, cy: f64, r: f64, start_angle: f64, sweep: f64, n: usize) -> Vec<MapPoint> {
+    fn quarter_arc(
+        cx: f64,
+        cy: f64,
+        r: f64,
+        start_angle: f64,
+        sweep: f64,
+        n: usize,
+    ) -> Vec<MapPoint> {
         (0..=n)
             .map(|i| {
                 let t = start_angle + sweep * (i as f64 / n as f64);
-                MapPoint { x_m: cx + r * t.cos(), y_m: cy + r * t.sin() }
+                MapPoint {
+                    x_m: cx + r * t.cos(),
+                    y_m: cy + r * t.sin(),
+                }
             })
             .collect()
     }
@@ -1797,28 +2488,92 @@ mod tests {
             left_line: crate::LineType::Solid,
             right_line: crate::LineType::Solid,
             heading_rad: heading,
-            edges: succ.iter().map(|&to| crate::LaneEdge::Successor { to }).collect(),
+            edges: succ
+                .iter()
+                .map(|&to| crate::LaneEdge::Successor { to })
+                .collect(),
             control: None,
         };
         crate::LaneGraph::new()
-            .with_lane(lane(1, vec![MapPoint { x_m: 0.0, y_m: 0.0 }, MapPoint { x_m: 30.0, y_m: 0.0 }], 0.0, &[2, 6]))
+            .with_lane(lane(
+                1,
+                vec![
+                    MapPoint { x_m: 0.0, y_m: 0.0 },
+                    MapPoint {
+                        x_m: 30.0,
+                        y_m: 0.0,
+                    },
+                ],
+                0.0,
+                &[2, 6],
+            ))
             .with_lane(lane(2, arc_left, FRAC_PI_4, &[3]))
-            .with_lane(lane(3, vec![MapPoint { x_m: 42.0, y_m: 12.0 }, MapPoint { x_m: 42.0, y_m: 40.0 }], FRAC_PI_2, &[4]))
+            .with_lane(lane(
+                3,
+                vec![
+                    MapPoint {
+                        x_m: 42.0,
+                        y_m: 12.0,
+                    },
+                    MapPoint {
+                        x_m: 42.0,
+                        y_m: 40.0,
+                    },
+                ],
+                FRAC_PI_2,
+                &[4],
+            ))
             .with_lane(lane(4, arc_right, FRAC_PI_4, &[5]))
-            .with_lane(lane(5, vec![MapPoint { x_m: 54.0, y_m: 52.0 }, MapPoint { x_m: 80.0, y_m: 52.0 }], 0.0, &[]))
+            .with_lane(lane(
+                5,
+                vec![
+                    MapPoint {
+                        x_m: 54.0,
+                        y_m: 52.0,
+                    },
+                    MapPoint {
+                        x_m: 80.0,
+                        y_m: 52.0,
+                    },
+                ],
+                0.0,
+                &[],
+            ))
             // Decoy: a right branch off lane 1 heading south, dead-ending (never reaches 5).
-            .with_lane(lane(6, vec![MapPoint { x_m: 30.0, y_m: 0.0 }, MapPoint { x_m: 30.0, y_m: -20.0 }], -FRAC_PI_2, &[]))
+            .with_lane(lane(
+                6,
+                vec![
+                    MapPoint {
+                        x_m: 30.0,
+                        y_m: 0.0,
+                    },
+                    MapPoint {
+                        x_m: 30.0,
+                        y_m: -20.0,
+                    },
+                ],
+                -FRAC_PI_2,
+                &[],
+            ))
     }
 
     #[test]
     fn route_to_llm_json_parses_and_fails_closed_on_nonfinite() {
         assert_eq!(
             MickIntent::from_llm_json(r#"{"intent":"route_to","x_m":72.0,"y_m":52.0}"#).unwrap(),
-            MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }
+            MickIntent::RouteTo {
+                x_m: 72.0,
+                y_m: 52.0
+            }
         );
         // A hallucinated non-finite destination must fail closed (caller HOLDs), never flow in.
-        assert!(MickIntent::from_llm_json(r#"{"intent":"route_to","x_m":1e400,"y_m":0.0}"#).is_err());
-        assert!(MickIntent::from_llm_json(r#"{"intent":"route_to","y_m":0.0}"#).is_err(), "missing field fails closed");
+        assert!(
+            MickIntent::from_llm_json(r#"{"intent":"route_to","x_m":1e400,"y_m":0.0}"#).is_err()
+        );
+        assert!(
+            MickIntent::from_llm_json(r#"{"intent":"route_to","y_m":0.0}"#).is_err(),
+            "missing field fails closed"
+        );
     }
 
     #[test]
@@ -1826,30 +2581,79 @@ mod tests {
         // The router must pick the LEFT branch at J1 (over the decoy) to reach the destination
         // in lane 5, then the route corridor stitches BOTH turns into one materialized handle.
         let g = two_junction_route();
-        assert_eq!(g.route_to_point(1, Point { x_m: 72.0, y_m: 52.0 }), Some(vec![1, 2, 3, 4, 5]),
-            "routing selects the correct branch at each junction across both turns");
+        assert_eq!(
+            g.route_to_point(
+                1,
+                Point {
+                    x_m: 72.0,
+                    y_m: 52.0
+                }
+            ),
+            Some(vec![1, 2, 3, 4, 5]),
+            "routing selects the correct branch at each junction across both turns"
+        );
 
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let ego = EgoState {
-            pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 16.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 4.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         };
-        let w = PlanInput { ego, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
+        let w = PlanInput {
+            ego,
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
 
         // The corridor the planner is grounded with is the WHOLE route's, curving through both
         // junctions up into the final east-bound exit lane (its far end sits at y≈52, x≈80) —
         // not the flat world corridor (which would end at y≈0). That is the multi-junction stitch.
-        let mut rec = MapRecorder { left_last: None, left_len: 0 };
-        let _ = plan_for_intent(&mut rec, &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &w);
-        let last = rec.left_last.expect("the route corridor was materialized and grounded");
-        assert!(last.y_m > 45.0, "the stitched corridor climbs through both junctions into lane 5 (y≈52), got y={}", last.y_m);
-        assert!(last.x_m > 60.0, "and reaches east along the final exit lane, got x={}", last.x_m);
+        let mut rec = MapRecorder {
+            left_last: None,
+            left_len: 0,
+        };
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::RouteTo {
+                x_m: 72.0,
+                y_m: 52.0,
+            },
+            &w,
+        );
+        let last = rec
+            .left_last
+            .expect("the route corridor was materialized and grounded");
+        assert!(
+            last.y_m > 45.0,
+            "the stitched corridor climbs through both junctions into lane 5 (y≈52), got y={}",
+            last.y_m
+        );
+        assert!(
+            last.x_m > 60.0,
+            "and reaches east along the final exit lane, got x={}",
+            last.x_m
+        );
 
         // And a real planner produces a MOTION plan along it (not a fail-closed HOLD).
-        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &w);
-        assert_eq!(plan.kind, crate::ProposalKind::Motion, "RouteTo grounds a motion plan along the route");
+        let plan = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::RouteTo {
+                x_m: 72.0,
+                y_m: 52.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            plan.kind,
+            crate::ProposalKind::Motion,
+            "RouteTo grounds a motion plan along the route"
+        );
     }
 
     #[test]
@@ -1857,31 +2661,100 @@ mod tests {
         let g = two_junction_route();
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let on_map = EgoState {
-            pose: Pose { x_m: 16.0, y_m: 0.0, heading_rad: 0.0 },
+            pose: Pose {
+                x_m: 16.0,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
             linear_x_mps: 4.0,
             yaw_rate_rads: 0.0,
             stamp_ms: 0,
         };
-        let is_hold = |p: &PlanOutput| p.kind == crate::ProposalKind::SafeStop && p.trajectory.iter().all(|t| t.velocity_mps == 0.0);
+        let is_hold = |p: &PlanOutput| {
+            p.kind == crate::ProposalKind::SafeStop
+                && p.trajectory.iter().all(|t| t.velocity_mps == 0.0)
+        };
 
         // No lane graph → HOLD.
-        let no_graph = PlanInput { ego: on_map, map: &corr, lane_graph: None, ..world(&corr, &[], &[]) };
-        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &no_graph)), "no graph → HOLD");
+        let no_graph = PlanInput {
+            ego: on_map,
+            map: &corr,
+            lane_graph: None,
+            ..world(&corr, &[], &[])
+        };
+        assert!(
+            is_hold(&plan_for_intent(
+                &mut GeometricPlanner::default(),
+                &MickIntent::RouteTo {
+                    x_m: 72.0,
+                    y_m: 52.0
+                },
+                &no_graph
+            )),
+            "no graph → HOLD"
+        );
 
         // Ego off the mapped road → HOLD.
-        let off = EgoState { pose: Pose { x_m: 16.0, y_m: 99.0, heading_rad: 0.0 }, ..on_map };
-        let ego_off = PlanInput { ego: off, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
-        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 52.0 }, &ego_off)), "ego off-map → HOLD");
+        let off = EgoState {
+            pose: Pose {
+                x_m: 16.0,
+                y_m: 99.0,
+                heading_rad: 0.0,
+            },
+            ..on_map
+        };
+        let ego_off = PlanInput {
+            ego: off,
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
+        assert!(
+            is_hold(&plan_for_intent(
+                &mut GeometricPlanner::default(),
+                &MickIntent::RouteTo {
+                    x_m: 72.0,
+                    y_m: 52.0
+                },
+                &ego_off
+            )),
+            "ego off-map → HOLD"
+        );
 
         // Destination off the mapped road → HOLD.
-        let w = PlanInput { ego: on_map, map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
-        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: 72.0, y_m: 999.0 }, &w)), "destination off-map → HOLD");
+        let w = PlanInput {
+            ego: on_map,
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
+        assert!(
+            is_hold(&plan_for_intent(
+                &mut GeometricPlanner::default(),
+                &MickIntent::RouteTo {
+                    x_m: 72.0,
+                    y_m: 999.0
+                },
+                &w
+            )),
+            "destination off-map → HOLD"
+        );
 
         // Reachable-only-via-the-decoy is fine, but a genuinely unreachable destination HOLDs:
         // the decoy lane 6 is a dead-end, so a point beyond it that no route reaches → HOLD.
         // (Routing to the decoy's own lane is reachable; pick a point off every lane instead —
         // covered above. Here assert a non-finite destination also HOLDs at grounding.)
-        assert!(is_hold(&plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::RouteTo { x_m: f64::NAN, y_m: 0.0 }, &w)), "non-finite destination → HOLD");
+        assert!(
+            is_hold(&plan_for_intent(
+                &mut GeometricPlanner::default(),
+                &MickIntent::RouteTo {
+                    x_m: f64::NAN,
+                    y_m: 0.0
+                },
+                &w
+            )),
+            "non-finite destination → HOLD"
+        );
     }
 
     // ----- map-intention predicted paths (lane-follow mode) -----
@@ -1896,8 +2769,22 @@ mod tests {
         let g = crate::LaneGraph::new().with_lane(crate::Lane {
             id: 1,
             centerline: vec![
-                MapPoint { x_m: 12.0, y_m: 4.0 }, MapPoint { x_m: 25.0, y_m: 4.0 },
-                MapPoint { x_m: 35.0, y_m: 0.0 }, MapPoint { x_m: 60.0, y_m: 0.0 },
+                MapPoint {
+                    x_m: 12.0,
+                    y_m: 4.0,
+                },
+                MapPoint {
+                    x_m: 25.0,
+                    y_m: 4.0,
+                },
+                MapPoint {
+                    x_m: 35.0,
+                    y_m: 0.0,
+                },
+                MapPoint {
+                    x_m: 60.0,
+                    y_m: 0.0,
+                },
             ],
             half_width_m: 2.5,
             left_line: crate::LineType::Solid,
@@ -1907,21 +2794,58 @@ mod tests {
             control: None,
         });
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
-        let obj = PerceivedObject { id: 1, pos: Point { x_m: 20.0, y_m: 4.0 }, velocity_mps: 5.0, heading_rad: 0.0, vel: Point { x_m: 5.0, y_m: 0.0 } };
+        let obj = PerceivedObject {
+            id: 1,
+            pos: Point {
+                x_m: 20.0,
+                y_m: 4.0,
+            },
+            velocity_mps: 5.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 5.0, y_m: 0.0 },
+        };
         let objs = [obj];
-        let intent = MickIntent::GoTo { x_m: 80.0, y_m: 0.0 };
-        let reach = |out: &PlanOutput| out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        let intent = MickIntent::GoTo {
+            x_m: 80.0,
+            y_m: 0.0,
+        };
+        let reach = |out: &PlanOutput| {
+            out.trajectory
+                .iter()
+                .map(|t| t.pose.x_m)
+                .fold(0.0, f64::max)
+        };
 
         // CV-only (no lane graph): the object holds y=4, never enters the ego band → no yield.
-        let w_cv = PlanInput { map: &corr, objects: &objs, ..world(&corr, &objs, &[]) };
+        let w_cv = PlanInput {
+            map: &corr,
+            objects: &objs,
+            ..world(&corr, &objs, &[])
+        };
         let cv = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_cv);
-        assert!(reach(&cv) > 30.0, "CV: a lane-parallel object → no yield, near-natural reach, got {}", reach(&cv));
+        assert!(
+            reach(&cv) > 30.0,
+            "CV: a lane-parallel object → no yield, near-natural reach, got {}",
+            reach(&cv)
+        );
 
         // With the map: the lane-follow mode predicts the merge into the ego path → yields short.
-        let w_map = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+        let w_map = PlanInput {
+            map: &corr,
+            objects: &objs,
+            lane_graph: Some(&g),
+            ..world(&corr, &objs, &[])
+        };
         let mapped = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_map);
-        assert!(reach(&mapped) < 28.0, "map-intention: the merging object is yielded to (short of the merge), got {}", reach(&mapped));
-        assert!(reach(&mapped) < reach(&cv) - 5.0, "the lane-follow mode yields meaningfully shorter than CV");
+        assert!(
+            reach(&mapped) < 28.0,
+            "map-intention: the merging object is yielded to (short of the merge), got {}",
+            reach(&mapped)
+        );
+        assert!(
+            reach(&mapped) < reach(&cv) - 5.0,
+            "the lane-follow mode yields meaningfully shorter than CV"
+        );
     }
 
     #[test]
@@ -1932,8 +2856,22 @@ mod tests {
         let g = crate::LaneGraph::new().with_lane(crate::Lane {
             id: 1,
             centerline: vec![
-                MapPoint { x_m: 12.0, y_m: 3.0 }, MapPoint { x_m: 25.0, y_m: 4.0 },
-                MapPoint { x_m: 40.0, y_m: 10.0 }, MapPoint { x_m: 60.0, y_m: 18.0 },
+                MapPoint {
+                    x_m: 12.0,
+                    y_m: 3.0,
+                },
+                MapPoint {
+                    x_m: 25.0,
+                    y_m: 4.0,
+                },
+                MapPoint {
+                    x_m: 40.0,
+                    y_m: 10.0,
+                },
+                MapPoint {
+                    x_m: 60.0,
+                    y_m: 18.0,
+                },
             ],
             half_width_m: 2.5,
             left_line: crate::LineType::Solid,
@@ -1945,12 +2883,37 @@ mod tests {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // Velocity slightly toward the ego lane (vy<0) — CV would creep it inward — but the lane
         // diverges, so the lane-follow mode keeps it clear.
-        let obj = PerceivedObject { id: 1, pos: Point { x_m: 20.0, y_m: 3.6 }, velocity_mps: 5.0, heading_rad: 0.0, vel: Point { x_m: 5.0, y_m: -0.4 } };
+        let obj = PerceivedObject {
+            id: 1,
+            pos: Point {
+                x_m: 20.0,
+                y_m: 3.6,
+            },
+            velocity_mps: 5.0,
+            heading_rad: 0.0,
+            vel: Point {
+                x_m: 5.0,
+                y_m: -0.4,
+            },
+        };
         let objs = [obj];
-        let intent = MickIntent::GoTo { x_m: 80.0, y_m: 0.0 };
-        let reach = |out: &PlanOutput| out.trajectory.iter().map(|t| t.pose.x_m).fold(0.0, f64::max);
+        let intent = MickIntent::GoTo {
+            x_m: 80.0,
+            y_m: 0.0,
+        };
+        let reach = |out: &PlanOutput| {
+            out.trajectory
+                .iter()
+                .map(|t| t.pose.x_m)
+                .fold(0.0, f64::max)
+        };
 
-        let w_map = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+        let w_map = PlanInput {
+            map: &corr,
+            objects: &objs,
+            lane_graph: Some(&g),
+            ..world(&corr, &objs, &[])
+        };
         let mapped = plan_for_intent(&mut GeometricPlanner::default(), &intent, &w_map);
         assert!(reach(&mapped) > 30.0, "lane-follow shows the object diverging → no spurious yield (near-natural reach), got {}", reach(&mapped));
     }
@@ -1971,13 +2934,38 @@ mod tests {
     /// Lane 1 (ego, y=0) has priority over lane 2 (y=10); an object sits in lane 2.
     fn priority_graph() -> crate::LaneGraph {
         crate::LaneGraph::new()
-            .with_lane(crate::Lane::straight(1, 0.0, 0.0, 30.0, 2.0, crate::LineType::Solid, crate::LineType::Solid))
-            .with_lane(crate::Lane::straight(2, 10.0, 0.0, 30.0, 2.0, crate::LineType::Solid, crate::LineType::Solid))
+            .with_lane(crate::Lane::straight(
+                1,
+                0.0,
+                0.0,
+                30.0,
+                2.0,
+                crate::LineType::Solid,
+                crate::LineType::Solid,
+            ))
+            .with_lane(crate::Lane::straight(
+                2,
+                10.0,
+                0.0,
+                30.0,
+                2.0,
+                crate::LineType::Solid,
+                crate::LineType::Solid,
+            ))
             .with_right_of_way(1, 2)
     }
 
     fn obj_in_lane2() -> PerceivedObject {
-        PerceivedObject { id: 7, pos: Point { x_m: 15.0, y_m: 10.0 }, velocity_mps: 3.0, heading_rad: 0.0, vel: Point { x_m: 3.0, y_m: 0.0 } }
+        PerceivedObject {
+            id: 7,
+            pos: Point {
+                x_m: 15.0,
+                y_m: 10.0,
+            },
+            velocity_mps: 3.0,
+            heading_rad: 0.0,
+            vel: Point { x_m: 3.0, y_m: 0.0 },
+        }
     }
 
     #[test]
@@ -1986,11 +2974,27 @@ mod tests {
         let objs = [obj_in_lane2()];
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // Ego in lane 1; no integrator cede list → derive from the map.
-        let w = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), ..world(&corr, &objs, &[]) };
+        let w = PlanInput {
+            map: &corr,
+            objects: &objs,
+            lane_graph: Some(&g),
+            ..world(&corr, &objs, &[])
+        };
 
         let mut rec = CedeRecorder { cedes: Vec::new() };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
-        assert_eq!(rec.cedes, vec![7], "the yielding-lane agent is derived into cedes_to_ego_ids");
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 25.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            rec.cedes,
+            vec![7],
+            "the yielding-lane agent is derived into cedes_to_ego_ids"
+        );
     }
 
     #[test]
@@ -1999,22 +3003,54 @@ mod tests {
         let objs = [obj_in_lane2()];
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let explicit = [99_u64];
-        let w = PlanInput { map: &corr, objects: &objs, lane_graph: Some(&g), cedes_to_ego_ids: &explicit, ..world(&corr, &objs, &[]) };
+        let w = PlanInput {
+            map: &corr,
+            objects: &objs,
+            lane_graph: Some(&g),
+            cedes_to_ego_ids: &explicit,
+            ..world(&corr, &objs, &[])
+        };
 
         let mut rec = CedeRecorder { cedes: Vec::new() };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
-        assert_eq!(rec.cedes, vec![99], "an integrator-supplied cede list stands (not overridden)");
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 25.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            rec.cedes,
+            vec![99],
+            "an integrator-supplied cede list stands (not overridden)"
+        );
     }
 
     #[test]
     fn no_graph_derives_no_cedes_and_yields_to_all() {
         let objs = [obj_in_lane2()];
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
-        let w = PlanInput { map: &corr, objects: &objs, lane_graph: None, ..world(&corr, &objs, &[]) };
+        let w = PlanInput {
+            map: &corr,
+            objects: &objs,
+            lane_graph: None,
+            ..world(&corr, &objs, &[])
+        };
 
         let mut rec = CedeRecorder { cedes: vec![1] };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 25.0, y_m: 0.0 }, &w);
-        assert!(rec.cedes.is_empty(), "no graph → empty cede list (fail-safe: yield to all)");
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 25.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert!(
+            rec.cedes.is_empty(),
+            "no graph → empty cede list (fail-safe: yield to all)"
+        );
     }
 
     // ----- junction STOP / YIELD signs wired into the loop -----
@@ -2033,42 +3069,101 @@ mod tests {
     /// A single approach lane (0,0)→(18,0) carrying control `c` at its terminus (x=18).
     fn lane_with_control(c: LaneControl) -> crate::LaneGraph {
         crate::LaneGraph::new().with_lane(
-            crate::Lane::straight(1, 0.0, 0.0, 18.0, 2.0, crate::LineType::Solid, crate::LineType::Solid)
-                .with_control(c),
+            crate::Lane::straight(
+                1,
+                0.0,
+                0.0,
+                18.0,
+                2.0,
+                crate::LineType::Solid,
+                crate::LineType::Solid,
+            )
+            .with_control(c),
         )
     }
 
-    fn derived_controls_for<'a>(g: &'a crate::LaneGraph, ego: EgoState, corr: &'a MockCorridorSource) -> Vec<TrafficControl> {
-        let w = PlanInput { ego, map: corr, lane_graph: Some(g), ..world(corr, &[], &[]) };
-        let mut rec = ControlRecorder { controls: Vec::new() };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+    fn derived_controls_for<'a>(
+        g: &'a crate::LaneGraph,
+        ego: EgoState,
+        corr: &'a MockCorridorSource,
+    ) -> Vec<TrafficControl> {
+        let w = PlanInput {
+            ego,
+            map: corr,
+            lane_graph: Some(g),
+            ..world(corr, &[], &[])
+        };
+        let mut rec = ControlRecorder {
+            controls: Vec::new(),
+        };
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
         rec.controls
     }
 
     fn ego_at(x: f64, v: f64) -> EgoState {
-        EgoState { pose: Pose { x_m: x, y_m: 0.0, heading_rad: 0.0 }, linear_x_mps: v, yaw_rate_rads: 0.0, stamp_ms: 0 }
+        EgoState {
+            pose: Pose {
+                x_m: x,
+                y_m: 0.0,
+                heading_rad: 0.0,
+            },
+            linear_x_mps: v,
+            yaw_rate_rads: 0.0,
+            stamp_ms: 0,
+        }
     }
 
     #[test]
     fn a_stop_sign_derives_an_unsatisfied_stop_while_approaching() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // Approaching at speed, well before the line → not satisfied (stop imposed).
-        let controls = derived_controls_for(&lane_with_control(LaneControl::Stop), ego_at(5.0, 2.0), &corr);
-        assert_eq!(controls, vec![TrafficControl::StopSign { stop_line_x_m: 18.0, satisfied: false }]);
+        let controls = derived_controls_for(
+            &lane_with_control(LaneControl::Stop),
+            ego_at(5.0, 2.0),
+            &corr,
+        );
+        assert_eq!(
+            controls,
+            vec![TrafficControl::StopSign {
+                stop_line_x_m: 18.0,
+                satisfied: false
+            }]
+        );
     }
 
     #[test]
     fn a_stop_sign_is_satisfied_once_stopped_at_the_line() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // Essentially stopped just before the line → satisfied (proceed) — the stateless go.
-        let controls = derived_controls_for(&lane_with_control(LaneControl::Stop), ego_at(17.0, 0.0), &corr);
-        assert_eq!(controls, vec![TrafficControl::StopSign { stop_line_x_m: 18.0, satisfied: true }]);
+        let controls = derived_controls_for(
+            &lane_with_control(LaneControl::Stop),
+            ego_at(17.0, 0.0),
+            &corr,
+        );
+        assert_eq!(
+            controls,
+            vec![TrafficControl::StopSign {
+                stop_line_x_m: 18.0,
+                satisfied: true
+            }]
+        );
     }
 
     #[test]
     fn a_yield_sign_derives_a_yield_control() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
-        let controls = derived_controls_for(&lane_with_control(LaneControl::Yield), ego_at(5.0, 2.0), &corr);
+        let controls = derived_controls_for(
+            &lane_with_control(LaneControl::Yield),
+            ego_at(5.0, 2.0),
+            &corr,
+        );
         assert_eq!(controls, vec![TrafficControl::YieldSign { line_x_m: 18.0 }]);
     }
 
@@ -2076,17 +3171,43 @@ mod tests {
     fn no_control_derives_nothing_and_explicit_controls_stand() {
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         // A lane with no control → nothing derived.
-        let plain = crate::LaneGraph::new()
-            .with_lane(crate::Lane::straight(1, 0.0, 0.0, 18.0, 2.0, crate::LineType::Solid, crate::LineType::Solid));
+        let plain = crate::LaneGraph::new().with_lane(crate::Lane::straight(
+            1,
+            0.0,
+            0.0,
+            18.0,
+            2.0,
+            crate::LineType::Solid,
+            crate::LineType::Solid,
+        ));
         assert!(derived_controls_for(&plain, ego_at(5.0, 2.0), &corr).is_empty());
 
         // An explicit integrator control list is never overridden by the map.
         let g = lane_with_control(LaneControl::Stop);
         let explicit = [TrafficControl::YieldSign { line_x_m: 9.0 }];
-        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), controls: &explicit, ..world(&corr, &[], &[]) };
-        let mut rec = ControlRecorder { controls: Vec::new() };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
-        assert_eq!(rec.controls, vec![TrafficControl::YieldSign { line_x_m: 9.0 }], "explicit controls stand");
+        let w = PlanInput {
+            ego: ego_at(5.0, 2.0),
+            map: &corr,
+            lane_graph: Some(&g),
+            controls: &explicit,
+            ..world(&corr, &[], &[])
+        };
+        let mut rec = ControlRecorder {
+            controls: Vec::new(),
+        };
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            rec.controls,
+            vec![TrafficControl::YieldSign { line_x_m: 9.0 }],
+            "explicit controls stand"
+        );
     }
 
     #[test]
@@ -2095,11 +3216,30 @@ mod tests {
         // and not pass it — the junction stop is real, not just recorded.
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
         let g = lane_with_control(LaneControl::Stop);
-        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
-        let plan = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
+        let w = PlanInput {
+            ego: ego_at(5.0, 2.0),
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
+        let plan = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
 
-        let max_x = plan.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
-        assert!(max_x <= 18.5, "the plan holds at/before the stop line x=18, got max_x {max_x}");
+        let max_x = plan
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            max_x <= 18.5,
+            "the plan holds at/before the stop line x=18, got max_x {max_x}"
+        );
         assert!(
             plan.trajectory.last().unwrap().velocity_mps < 0.5,
             "and comes to a stop at the line (final v {})",
@@ -2114,14 +3254,41 @@ mod tests {
 
         // No signal feed → RED (fail-closed): an unknown light HOLDS.
         let red_default = derived_controls_for(&g, ego_at(5.0, 2.0), &corr);
-        assert_eq!(red_default, vec![TrafficControl::TrafficLight { stop_line_x_m: 18.0, state: SignalState::Red }]);
+        assert_eq!(
+            red_default,
+            vec![TrafficControl::TrafficLight {
+                stop_line_x_m: 18.0,
+                state: SignalState::Red
+            }]
+        );
 
         // Live GREEN supplied for the ego's lane → the light passes through as green.
         let green = [(1u64, SignalState::Green)];
-        let w = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), signal_states: &green, ..world(&corr, &[], &[]) };
-        let mut rec = ControlRecorder { controls: Vec::new() };
-        let _ = plan_for_intent(&mut rec, &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w);
-        assert_eq!(rec.controls, vec![TrafficControl::TrafficLight { stop_line_x_m: 18.0, state: SignalState::Green }]);
+        let w = PlanInput {
+            ego: ego_at(5.0, 2.0),
+            map: &corr,
+            lane_graph: Some(&g),
+            signal_states: &green,
+            ..world(&corr, &[], &[])
+        };
+        let mut rec = ControlRecorder {
+            controls: Vec::new(),
+        };
+        let _ = plan_for_intent(
+            &mut rec,
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w,
+        );
+        assert_eq!(
+            rec.controls,
+            vec![TrafficControl::TrafficLight {
+                stop_line_x_m: 18.0,
+                state: SignalState::Green
+            }]
+        );
     }
 
     #[test]
@@ -2130,18 +3297,60 @@ mod tests {
         let g = lane_with_control(LaneControl::TrafficLight);
 
         // RED (absent state → red): decelerate to a stop at the line, not past it.
-        let w_red = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), ..world(&corr, &[], &[]) };
-        let red = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w_red);
-        let red_max_x = red.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
-        assert!(red_max_x <= 18.5, "red light → stop at the line x=18, got max_x {red_max_x}");
-        assert!(red.trajectory.last().unwrap().velocity_mps < 0.5, "and comes to a stop");
+        let w_red = PlanInput {
+            ego: ego_at(5.0, 2.0),
+            map: &corr,
+            lane_graph: Some(&g),
+            ..world(&corr, &[], &[])
+        };
+        let red = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w_red,
+        );
+        let red_max_x = red
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            red_max_x <= 18.5,
+            "red light → stop at the line x=18, got max_x {red_max_x}"
+        );
+        assert!(
+            red.trajectory.last().unwrap().velocity_mps < 0.5,
+            "and comes to a stop"
+        );
 
         // GREEN: drive through the line toward the goal.
         let green = [(1u64, SignalState::Green)];
-        let w_green = PlanInput { ego: ego_at(5.0, 2.0), map: &corr, lane_graph: Some(&g), signal_states: &green, ..world(&corr, &[], &[]) };
-        let go = plan_for_intent(&mut GeometricPlanner::default(), &MickIntent::GoTo { x_m: 50.0, y_m: 0.0 }, &w_green);
-        let green_max_x = go.trajectory.iter().map(|t| t.pose.x_m).fold(f64::MIN, f64::max);
-        assert!(green_max_x > 18.5, "green light → drive through the line, got max_x {green_max_x}");
+        let w_green = PlanInput {
+            ego: ego_at(5.0, 2.0),
+            map: &corr,
+            lane_graph: Some(&g),
+            signal_states: &green,
+            ..world(&corr, &[], &[])
+        };
+        let go = plan_for_intent(
+            &mut GeometricPlanner::default(),
+            &MickIntent::GoTo {
+                x_m: 50.0,
+                y_m: 0.0,
+            },
+            &w_green,
+        );
+        let green_max_x = go
+            .trajectory
+            .iter()
+            .map(|t| t.pose.x_m)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            green_max_x > 18.5,
+            "green light → drive through the line, got max_x {green_max_x}"
+        );
     }
 
     // ----- the dual-rate driver: System-2 intent rate vs System-1 grounding rate -----
@@ -2167,7 +3376,12 @@ mod tests {
         let w = cruising_world(&corr);
         let mut p = GeometricPlanner::default();
         let calls = Rc::new(Cell::new(0));
-        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Ok(MickIntent::Cruise { target_speed_mps: 5.0 }) };
+        let brain = CountingBrain {
+            calls: Rc::clone(&calls),
+            reply: Ok(MickIntent::Cruise {
+                target_speed_mps: 5.0,
+            }),
+        };
         // Decide at 2 Hz (500 ms); run 20 fast ticks at 100 ms (10 Hz).
         let mut driver = MickDriver::with_rates(brain, 500, 2_000);
 
@@ -2175,14 +3389,28 @@ mod tests {
         for tick in 1..=20u64 {
             let out = driver.drive_tick(&w, &mut p, tick * 100);
             // Fast path runs EVERY tick — always a grounded proposal.
-            assert!(matches!(out.kind, ProposalKind::Motion | ProposalKind::SafeStop));
+            assert!(matches!(
+                out.kind,
+                ProposalKind::Motion | ProposalKind::SafeStop
+            ));
             grounded += 1;
         }
-        assert_eq!(grounded, 20, "the fast path grounds an output on every tick");
+        assert_eq!(
+            grounded, 20,
+            "the fast path grounds an output on every tick"
+        );
         // Slow path: ~1 decision per 500 ms over 2 s (+ the cold-start one), NOT 20.
         let n = calls.get();
-        assert!((3..=6).contains(&n), "brain decided at the System-2 rate, not every tick: {n} calls / 20 ticks");
-        assert_eq!(driver.current_intent(), Some(MickIntent::Cruise { target_speed_mps: 5.0 }));
+        assert!(
+            (3..=6).contains(&n),
+            "brain decided at the System-2 rate, not every tick: {n} calls / 20 ticks"
+        );
+        assert_eq!(
+            driver.current_intent(),
+            Some(MickIntent::Cruise {
+                target_speed_mps: 5.0
+            })
+        );
     }
 
     #[test]
@@ -2193,7 +3421,10 @@ mod tests {
         let w = world(&corr, &[], &[]);
         let mut p = GeometricPlanner::default();
         let calls = Rc::new(Cell::new(0));
-        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Ok(MickIntent::Hold) };
+        let brain = CountingBrain {
+            calls: Rc::clone(&calls),
+            reply: Ok(MickIntent::Hold),
+        };
         let mut driver = MickDriver::with_rates(brain, 1_000, 5_000);
 
         driver.drive_tick(&w, &mut p, 100); // cold decide → Hold cached
@@ -2210,11 +3441,19 @@ mod tests {
     fn driver_fails_closed_to_hold_when_the_brain_goes_stale() {
         // The brain succeeds once (Cruise), then errors forever. After the staleness window
         // the driver must HOLD rather than keep grounding the arbitrarily-old intent.
-        struct OnceThenErr { calls: Rc<Cell<u32>> }
+        struct OnceThenErr {
+            calls: Rc<Cell<u32>>,
+        }
         impl MickBrain for OnceThenErr {
             fn decide(&mut self, _ctx: &WorldContext) -> Result<MickIntent, MickError> {
                 self.calls.set(self.calls.get() + 1);
-                if self.calls.get() == 1 { Ok(MickIntent::Cruise { target_speed_mps: 5.0 }) } else { Err("down") }
+                if self.calls.get() == 1 {
+                    Ok(MickIntent::Cruise {
+                        target_speed_mps: 5.0,
+                    })
+                } else {
+                    Err("down")
+                }
             }
         }
         let corr = MockCorridorSource::straight_5m_half_width(100.0);
@@ -2222,16 +3461,34 @@ mod tests {
         let mut p = GeometricPlanner::default();
         let calls = Rc::new(Cell::new(0));
         // decide every 500 ms, stale after 1500 ms.
-        let mut driver = MickDriver::with_rates(OnceThenErr { calls: Rc::clone(&calls) }, 500, 1_500);
+        let mut driver = MickDriver::with_rates(
+            OnceThenErr {
+                calls: Rc::clone(&calls),
+            },
+            500,
+            1_500,
+        );
 
         let out0 = driver.drive_tick(&w, &mut p, 0); // succeeds → Cruise (Motion)
-        assert_eq!(out0.kind, ProposalKind::Motion, "fresh Cruise grounds to motion");
+        assert_eq!(
+            out0.kind,
+            ProposalKind::Motion,
+            "fresh Cruise grounds to motion"
+        );
         // Within the staleness window the (now-erroring) brain leaves the last intent usable.
         let out1 = driver.drive_tick(&w, &mut p, 1_000);
-        assert_eq!(out1.kind, ProposalKind::Motion, "intent still fresh enough → still driving");
+        assert_eq!(
+            out1.kind,
+            ProposalKind::Motion,
+            "intent still fresh enough → still driving"
+        );
         // Past the staleness window → fail closed to Hold (a controlled stop).
         let out2 = driver.drive_tick(&w, &mut p, 2_000);
-        assert_eq!(out2.kind, ProposalKind::SafeStop, "stale brain → HOLD (fail-closed)");
+        assert_eq!(
+            out2.kind,
+            ProposalKind::SafeStop,
+            "stale brain → HOLD (fail-closed)"
+        );
     }
 
     #[test]
@@ -2240,7 +3497,10 @@ mod tests {
         let w = world(&corr, &[], &[]);
         let mut p = GeometricPlanner::default();
         let calls = Rc::new(Cell::new(0));
-        let brain = CountingBrain { calls: Rc::clone(&calls), reply: Err("no model") };
+        let brain = CountingBrain {
+            calls: Rc::clone(&calls),
+            reply: Err("no model"),
+        };
         let mut driver = MickDriver::new(brain);
         let out = driver.drive_tick(&w, &mut p, 0);
         assert_eq!(out.kind, ProposalKind::SafeStop, "no intent ever → HOLD");

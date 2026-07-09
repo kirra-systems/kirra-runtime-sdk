@@ -9,13 +9,13 @@
 
 use std::sync::Arc;
 
+use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
+use kirra_verifier::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
+use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
 };
-use kirra_verifier::posture_cache::{CachedFleetPosture, SharedPostureCache};
-use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier_store::VerifierStore;
-use kirra_verifier::recovery_hysteresis::AV_RECOVERY_STREAK_THRESHOLD;
 use parko_core::RssState;
 
 fn build_rss_test_app() -> (Arc<AppState>, SharedPostureCache) {
@@ -43,11 +43,19 @@ fn build_rss_test_app() -> (Arc<AppState>, SharedPostureCache) {
 }
 
 fn violation() -> RssState {
-    RssState { safe: false, longitudinal_margin: 1.2, lateral_margin: 0.4 }
+    RssState {
+        safe: false,
+        longitudinal_margin: 1.2,
+        lateral_margin: 0.4,
+    }
 }
 
 fn safe_tick() -> RssState {
-    RssState { safe: true, longitudinal_margin: 14.0, lateral_margin: 6.0 }
+    RssState {
+        safe: true,
+        longitudinal_margin: 14.0,
+        lateral_margin: 6.0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +101,10 @@ async fn test_rss_recovery_requires_full_streak() {
     let recovery_t = last_building_t + 100;
     runner
         .at_ms(recovery_t, ScenarioEvent::RssReport(safe_tick()))
-        .assert_at_ms(recovery_t, PostureAssertion::FleetPostureIs(FleetPosture::Nominal))
+        .assert_at_ms(
+            recovery_t,
+            PostureAssertion::FleetPostureIs(FleetPosture::Nominal),
+        )
         .run()
         .await;
 }

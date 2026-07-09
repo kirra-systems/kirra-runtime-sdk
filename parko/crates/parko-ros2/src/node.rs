@@ -35,11 +35,11 @@ use crate::command_mapping::OutgoingTwist;
 use crate::config::ParkoNodeConfig;
 use crate::containment_gate::{apply_containment_gate, CONTAINMENT_HORIZON_S, CONTAINMENT_STEP_S};
 use crate::imu_shim::imu_msg_to_sample;
-use crate::sensor_mapping::{ImuSample, SensorInputMapping};
-use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
 use crate::scene_vetoes::{
     apply_commit_zone_gate, apply_occlusion_gate, apply_water_gate, StampedScene,
 };
+use crate::sensor_mapping::{ImuSample, SensorInputMapping};
+use crate::taj_corridor::{laserscan_msg_to_taj, CorridorSnapshot, EGO_REAR_COVER_M};
 use crate::taj_objects::{
     apply_object_rss_gate, courier_rss_params, object_snapshot_to_vanished_scene, ObjectSnapshot,
 };
@@ -65,8 +65,8 @@ use parko_kirra::clearance_delivery::DeliveryOutcome;
 /// — alongside the LockedOut stop path. `None` is the dev lane (delivery
 /// disabled); the binary warns when it constructs `None`.
 pub async fn run_node<B, M>(
-    config:  Arc<ParkoNodeConfig>,
-    infer:   Arc<Mutex<InferenceLoop<B>>>,
+    config: Arc<ParkoNodeConfig>,
+    infer: Arc<Mutex<InferenceLoop<B>>>,
     mapping: Arc<M>,
     posture: SafetyPosture,
     clearance: Option<NodeClearance>,
@@ -141,8 +141,8 @@ where
     if detection_enabled {
         match &config.imu_topic {
             Some(topic) => {
-                let imu_stream =
-                    node.subscribe::<r2r::sensor_msgs::msg::Imu>(topic, r2r::QosProfile::default())?;
+                let imu_stream = node
+                    .subscribe::<r2r::sensor_msgs::msg::Imu>(topic, r2r::QosProfile::default())?;
                 let cell = Arc::clone(&latest_imu);
                 let arrival = Arc::clone(&imu_arrival);
                 tokio::spawn(async move {
@@ -328,10 +328,10 @@ where
     }
 
     // --- Drain task: consume the sensor stream, tick, publish ---------
-    let drain_config  = Arc::clone(&config);
-    let drain_infer   = Arc::clone(&infer);
+    let drain_config = Arc::clone(&config);
+    let drain_infer = Arc::clone(&infer);
     let drain_mapping = Arc::clone(&mapping);
-    let drain_imu     = Arc::clone(&latest_imu);
+    let drain_imu = Arc::clone(&latest_imu);
     let drain_imu_arrival = Arc::clone(&imu_arrival);
     let drain_contact = Arc::clone(&contact_state);
     let drain_corridor = Arc::clone(&latest_corridor);
@@ -377,13 +377,16 @@ where
                 }
             };
             // Project-local JSON shape: { "data": [f32, ...], "stamp_ms": u64 }
-            let sample_vec: Vec<f32> = msg.get("data")
+            let sample_vec: Vec<f32> = msg
+                .get("data")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|n| n.as_f64().map(|f| f as f32)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|n| n.as_f64().map(|f| f as f32))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let stamp_ms: u64 = msg.get("stamp_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let stamp_ms: u64 = msg.get("stamp_ms").and_then(|v| v.as_u64()).unwrap_or(0);
             frame_id = frame_id.saturating_add(1);
             let frame = drain_mapping.to_frame(frame_id, stamp_ms, &sample_vec);
 
@@ -461,14 +464,18 @@ where
                 clearance.as_mut(),
                 &impact_inputs,
                 vanished_scene.as_ref(),
-            ).await;
+            )
+            .await;
             let outcome = cleared.tick;
 
             // ADR-0029 Phase 3b: gate the governed command against the live
             // ego-relative corridor. No corridor configured/available → no-op
             // (the command passes through). A breach / stale / low-confidence
             // corridor → MRC (stopped twist + TickError::ContainmentBreach).
-            let outcome = match (drain_footprint, drain_corridor.lock().ok().and_then(|g| g.clone())) {
+            let outcome = match (
+                drain_footprint,
+                drain_corridor.lock().ok().and_then(|g| g.clone()),
+            ) {
                 (Some(fp), Some(snap)) => apply_containment_gate(
                     outcome,
                     &fp,
@@ -526,7 +533,11 @@ where
             let outcome = if drain_commit_zone_armed {
                 apply_commit_zone_gate(
                     outcome,
-                    drain_commit_zone.lock().ok().and_then(|g| g.clone()).as_ref(),
+                    drain_commit_zone
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .as_ref(),
                     &CommitZoneCfg::default(),
                     drain_config.corridor_max_age_ms,
                     current_time_ms(),
@@ -538,21 +549,28 @@ where
             // Surface the per-tick clearance delivery (a console-recorded grant
             // arriving on this node's own tick). A `NoGrant` no-op is silent.
             match &cleared.delivery {
-                Some(DeliveryOutcome::Cleared { operator_id, grant_rowid }) =>
-                    tracing::info!(operator_id = %operator_id, grant_rowid,
+                Some(DeliveryOutcome::Cleared {
+                    operator_id,
+                    grant_rowid,
+                }) => tracing::info!(operator_id = %operator_id, grant_rowid,
                         "parko-ros2: operator clearance DELIVERED — loop cleared, motion released"),
-                Some(DeliveryOutcome::Rejected { reason, grant_rowid }) =>
-                    tracing::warn!(reason = %reason, grant_rowid,
+                Some(DeliveryOutcome::Rejected {
+                    reason,
+                    grant_rowid,
+                }) => tracing::warn!(reason = %reason, grant_rowid,
                         "parko-ros2: clearance grant REJECTED at delivery (consumed, not retried) — \
                          operator must re-issue in the console"),
-                Some(DeliveryOutcome::StoreError) =>
-                    tracing::error!("parko-ros2: clearance store error — fail-closed (nothing cleared)"),
+                Some(DeliveryOutcome::StoreError) => tracing::error!(
+                    "parko-ros2: clearance store error — fail-closed (nothing cleared)"
+                ),
                 Some(DeliveryOutcome::NoGrant) | None => {}
             }
             if cleared.vetoed {
-                tracing::warn!(frame_id,
+                tracing::warn!(
+                    frame_id,
                     "parko-ros2: clearance veto ACTIVE (post-collision loop immobilized) — \
-                     publishing stop regardless of posture until an operator grant is delivered");
+                     publishing stop regardless of posture until an operator grant is delivered"
+                );
             }
 
             if let Some(err) = &outcome.error {
@@ -594,16 +612,16 @@ where
                      the next tick will retry");
             }
         }
-        tracing::error!("parko-ros2: sensor subscription stream closed — \
-                         tick loop exiting; the actuator will see staleness");
+        tracing::error!(
+            "parko-ros2: sensor subscription stream closed — \
+                         tick loop exiting; the actuator will see staleness"
+        );
     });
 
     // Drive the r2r executor until the drain task ends or we're
     // cancelled by the binary's shutdown handler.
-    let spin_task = tokio::task::spawn_blocking(move || {
-        loop {
-            node.spin_once(std::time::Duration::from_millis(50));
-        }
+    let spin_task = tokio::task::spawn_blocking(move || loop {
+        node.spin_once(std::time::Duration::from_millis(50));
     });
 
     tokio::select! {
@@ -624,6 +642,7 @@ fn publish_twist(
         "linear":  { "x": twist.linear_x_mps,  "y": 0.0, "z": 0.0 },
         "angular": { "x": 0.0, "y": 0.0,        "z": twist.angular_z_rads },
     });
-    publisher.publish(payload)
+    publisher
+        .publish(payload)
         .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("publish: {e:?}")))
 }

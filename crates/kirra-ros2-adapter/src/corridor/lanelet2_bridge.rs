@@ -73,13 +73,10 @@ pub mod ffi {
         ///   - any unknown lanelet ID (the caller's route is stale or
         ///     the map is wrong) → `Err`
         ///   - any geometry NaN/Inf → `Err`
-        fn extract_corridor(
-            map: &LaneletMap,
-            lanelet_ids: &[i64],
-        ) -> Result<CorridorPoints>;
+        fn extract_corridor(map: &LaneletMap, lanelet_ids: &[i64]) -> Result<CorridorPoints>;
     }
 }
 
 // Re-export the bridge types under more ergonomic Rust paths.
-pub use ffi::{CorridorPoint, CorridorPoints, LaneletMap};
 pub use ffi::{extract_corridor, load_lanelet_map};
+pub use ffi::{CorridorPoint, CorridorPoints, LaneletMap};

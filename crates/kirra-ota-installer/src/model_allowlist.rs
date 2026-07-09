@@ -131,12 +131,12 @@ pub fn derive_model_allowlist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kirra_release_token::uptane::{SnapshotMetadata, TargetsMetadata, TimestampMetadata};
     use ed25519_dalek::SigningKey;
     use kirra_release_token::uptane::{
         author_initial_root, sign_snapshot, sign_targets, sign_timestamp, RootMetadata,
         TargetEntry, UptaneError,
     };
+    use kirra_release_token::uptane::{SnapshotMetadata, TargetsMetadata, TimestampMetadata};
     use std::path::PathBuf;
 
     const EXP: u64 = 10_000;
@@ -171,11 +171,21 @@ mod tests {
         }
         /// A consistent signed bundle at `version` carrying `models`.
         fn bundle(&self, version: u64, models: Vec<TargetEntry>) -> ModelMetadataBundle {
-            let targets = TargetsMetadata { version, expires_at_ms: EXP, targets: models };
-            let snapshot =
-                SnapshotMetadata { version, expires_at_ms: EXP, targets_version: version };
-            let timestamp =
-                TimestampMetadata { version, expires_at_ms: EXP, snapshot_version: version };
+            let targets = TargetsMetadata {
+                version,
+                expires_at_ms: EXP,
+                targets: models,
+            };
+            let snapshot = SnapshotMetadata {
+                version,
+                expires_at_ms: EXP,
+                targets_version: version,
+            };
+            let timestamp = TimestampMetadata {
+                version,
+                expires_at_ms: EXP,
+                snapshot_version: version,
+            };
             ModelMetadataBundle {
                 timestamp_sig_b64: sign_timestamp(&timestamp, &self.timestamp_sk),
                 snapshot_sig_b64: sign_snapshot(&snapshot, &self.snapshot_sk),
@@ -188,12 +198,18 @@ mod tests {
     }
 
     fn model(digest: &str, version: &str) -> TargetEntry {
-        TargetEntry { digest_hex: digest.into(), length_bytes: 1024, version: version.into() }
+        TargetEntry {
+            digest_hex: digest.into(),
+            length_bytes: 1024,
+            version: version.into(),
+        }
     }
 
     fn provisioned_store(name: &str, repo: &Repo) -> (UptaneTrustStore, PathBuf) {
-        let path = std::env::temp_dir()
-            .join(format!("kirra_model_allowlist_{}_{name}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "kirra_model_allowlist_{}_{name}.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let store = UptaneTrustStore::new(&path);
         store
@@ -211,7 +227,10 @@ mod tests {
         let bundle = repo.bundle(5, vec![model(D1, "m-v1"), model(D2, "m-v2")]);
 
         let (text, verified) = derive_model_allowlist(&store, &bundle, NOW).expect("derive");
-        assert!(text.contains(&format!("KIRRA_MODEL_ALLOWLIST={D1},{D2}\n")), "{text}");
+        assert!(
+            text.contains(&format!("KIRRA_MODEL_ALLOWLIST={D1},{D2}\n")),
+            "{text}"
+        );
         assert!(text.contains("KIRRA_MODEL_ALLOWLIST_STRICT=1\n"), "{text}");
         assert_eq!(verified.targets().version, 5);
         // The floor advanced durably: the SAME bundle replayed is now refused.

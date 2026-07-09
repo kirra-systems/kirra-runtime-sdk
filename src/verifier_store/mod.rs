@@ -7,11 +7,11 @@
 // descendant-module visibility, so the split is a pure move (no new public
 // surface beyond a few `pub(crate)` helpers needed across domains).
 
-use std::collections::HashMap;
-use rusqlite::{params, Connection, Result};
-use crate::verifier::{NodeTrustState, RegisteredNode};
 use crate::federation::FederatedTrustReport;
+use crate::verifier::{NodeTrustState, RegisteredNode};
 use base64::{engine::general_purpose::STANDARD as b64e, Engine as _};
+use rusqlite::{params, Connection, Result};
+use std::collections::HashMap;
 
 pub struct AuditChainVerifyResult {
     /// Hash-linkage integrity ONLY (recomputed record hash matches, prev-linkage
@@ -291,7 +291,10 @@ pub enum DurableWriteError {
     /// handler maps it to a clean `FEDERATED_GENERATION_REGRESS` rejection (+ audit),
     /// NOT an opaque HTTP 500. `found` is the offered generation; `high_water` is the
     /// last accepted generation it failed to exceed.
-    GenerationRegress { found: u64, high_water: u64 },
+    GenerationRegress {
+        found: u64,
+        high_water: u64,
+    },
     Db(rusqlite::Error),
 }
 
@@ -414,7 +417,10 @@ fn audit_signing_payload(
     use crate::audit_chain::{canonical_signing_payload, canonical_signing_payload_v2};
     match hash_version {
         2 => canonical_signing_payload_v2(
-            prev, rec, event_type, created_at_ms,
+            prev,
+            rec,
+            event_type,
+            created_at_ms,
             sequence.unwrap_or(0).max(0) as u64,
         ),
         _ => canonical_signing_payload(prev, rec, event_type, created_at_ms),
@@ -431,7 +437,10 @@ fn audit_verify_sig(vk: &ed25519_dalek::VerifyingKey, payload: &str, sig_b64: &s
         // L-2: verify_strict rejects malleable / non-canonical signatures, matching
         // the rest of the crate's crypto discipline (the federation path already
         // uses it). `verify_strict` is inherent on VerifyingKey — no Verifier trait.
-        .map(|arr| vk.verify_strict(payload.as_bytes(), &Signature::from_bytes(&arr)).is_ok())
+        .map(|arr| {
+            vk.verify_strict(payload.as_bytes(), &Signature::from_bytes(&arr))
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -442,10 +451,16 @@ fn extend_keyring_from_rotation(
     keyring: &mut std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
     event_json: &str,
 ) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(event_json) else { return };
-    let (Some(npk), Some(nkid)) =
-        (v["new_public_key_b64"].as_str(), v["new_key_id"].as_str()) else { return };
-    let Some(nvk) = audit_decode_vk(npk) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(event_json) else {
+        return;
+    };
+    let (Some(npk), Some(nkid)) = (v["new_public_key_b64"].as_str(), v["new_key_id"].as_str())
+    else {
+        return;
+    };
+    let Some(nvk) = audit_decode_vk(npk) else {
+        return;
+    };
     if crate::audit_chain::verifying_key_id(&nvk) == nkid {
         keyring.insert(nkid.to_string(), nvk);
     }
@@ -527,7 +542,9 @@ fn ledger_row_is_self_attested(r: &LedgerRow) -> bool {
     if r.signature_b64.is_empty() {
         return false;
     }
-    let Some(vk) = audit_decode_vk(&r.pubkey_b64) else { return false };
+    let Some(vk) = audit_decode_vk(&r.pubkey_b64) else {
+        return false;
+    };
     if crate::audit_chain::verifying_key_id(&vk) != r.key_id {
         return false; // content-addressing violated
     }
@@ -559,7 +576,6 @@ pub struct CausalEventInput<'a> {
     pub timestamp_ms: u64,
 }
 
-
 // Domain submodules — split from the original monolithic verifier_store.rs.
 // Each child module holds an `impl VerifierStore` block for one table-domain;
 // all share the struct's private connection handles via descendant visibility.
@@ -567,16 +583,16 @@ mod nodes;
 // WP-18 (G-9 store half) — the node-registry storage trait + its in-memory
 // reference backend (the 2nd VerifierStorage-family seam after EpochFence).
 pub use nodes::{assert_node_store_contract, InMemoryNodeStore, NodeStore};
-mod posture;
-mod audit;
-mod operators;
-mod principals;
-mod cert_principals;
-mod ota_campaigns;
-mod federation;
 mod attestation;
+mod audit;
 mod av_subsystem;
+mod cert_principals;
 mod epoch;
+mod federation;
+mod operators;
+mod ota_campaigns;
+mod posture;
+mod principals;
 // WP-18 3/3 (G-9 store half) — the backend-portable HA epoch-fence trait + its
 // in-memory reference backend (SQLite realizes it via `ha_state` + BEGIN IMMEDIATE,
 // a future Postgres backend via SELECT … FOR UPDATE).
@@ -767,9 +783,10 @@ impl VerifierStore {
         // tolerate-duplicate convention as the ota_campaigns/nodes ALTERs; runs AFTER
         // the CREATE so a fresh database is never "no such table"). An older row keeps
         // a NULL `not_after_ms` (no expiry tracked) until it is re-registered.
-        if let Err(e) =
-            conn.execute("ALTER TABLE cert_principals ADD COLUMN not_after_ms INTEGER", [])
-        {
+        if let Err(e) = conn.execute(
+            "ALTER TABLE cert_principals ADD COLUMN not_after_ms INTEGER",
+            [],
+        ) {
             if !e.to_string().contains("duplicate column name") {
                 return Err(e);
             }
@@ -801,9 +818,10 @@ impl VerifierStore {
         // WP-12 ADD-COLUMN migration for a pre-existing ota_campaigns table
         // (same tolerate-duplicate convention as the nodes/clearance ALTERs;
         // runs AFTER the CREATE so a fresh database is never "no such table").
-        if let Err(e) =
-            conn.execute("ALTER TABLE ota_campaigns ADD COLUMN artifact_signature_b64 TEXT", [])
-        {
+        if let Err(e) = conn.execute(
+            "ALTER TABLE ota_campaigns ADD COLUMN artifact_signature_b64 TEXT",
+            [],
+        ) {
             if !e.to_string().contains("duplicate column name") {
                 return Err(e);
             }
@@ -988,7 +1006,7 @@ impl VerifierStore {
             CREATE INDEX IF NOT EXISTS idx_causal_log_asset
                 ON fabric_causal_log(asset_id, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_causal_log_time
-                ON fabric_causal_log(timestamp_ms);"
+                ON fabric_causal_log(timestamp_ms);",
         )?;
 
         // WP-18 (G-20): the baseline DDL above (idempotent) IS schema version 1. Apply
@@ -1161,28 +1179,7 @@ impl VerifierStore {
 
     // --- #165 durable audit-key trust map -----------------------------------
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // --- v0.9.7 posture event log -------------------------------------------
-
-
-
-
-
-
 
     // --- v0.9.8 HA probes & backup export ---
 
@@ -1211,60 +1208,17 @@ impl VerifierStore {
             .unwrap_or(false)
     }
 
-
     // --- v1.1 tamper-evident audit chain ------------------------------------
-
-
-
-
-
 
     // --- #314 Phase 1 — operator registry -----------------------------------
 
-
-
-
-
-
-
-
-
-
     // --- v1.1 trusted federation controller registry ------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // --- Patch 1: attestation identity registry ----------------------------
 
-
-
     // --- AV subsystem metadata ---------------------------------------------
 
-
-
-
-
-
-
-
-
-
     // --- Posture engine persistent state -----------------------------------
-
-
-
-
 
     // --- HA epoch fence (durable split-brain guard) -------------------------
     //
@@ -1275,13 +1229,7 @@ impl VerifierStore {
     // The atomic on AppState is per-process and CANNOT do this — that is
     // why we keep the durable epoch as source of truth.
 
-
-
-
-
     // --- Fabric asset persistence -------------------------------------------
-
-
 
     // --- #87: forensic causal-log forensic chain ---------------------------
 }

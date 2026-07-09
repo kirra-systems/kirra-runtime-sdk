@@ -1,10 +1,10 @@
 // src/bin/ai_robot_sim_diagnostic.rs
 // Simulation diagnostic tool for Kirra safety governor validation.
 
-use kirra_verifier::kirra_core::KirraKernelGovernor;
-use kirra_verifier::kinematics_contract::KinematicContract;
 use kirra_verifier::action_filter::ActionFilter;
 use kirra_verifier::action_policy::UnstructuredTextParser;
+use kirra_verifier::kinematics_contract::KinematicContract;
+use kirra_verifier::kirra_core::KirraKernelGovernor;
 
 fn main() {
     println!("=== Kirra Sim Diagnostic v1.0-rc20 ===\n");
@@ -38,5 +38,8 @@ fn main() {
         }
     }
 
-    println!("\nFinal trust score: {}", governor.trust_engine.current_score);
+    println!(
+        "\nFinal trust score: {}",
+        governor.trust_engine.current_score
+    );
 }

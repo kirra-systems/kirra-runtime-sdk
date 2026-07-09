@@ -50,7 +50,10 @@ pub enum ImageDecodeError {
     UnsupportedEncoding { encoding: String },
     /// The message encoding is supported but differs from the configured one
     /// (channel order and/or count) — the channel-swap guard.
-    EncodingMismatch { message: String, expected: CameraEncoding },
+    EncodingMismatch {
+        message: String,
+        expected: CameraEncoding,
+    },
     /// `step` is smaller than `width * bytes_per_pixel` — a row cannot even hold
     /// its tight pixels.
     InvalidStep { step: usize, tight_row: usize },
@@ -91,9 +94,10 @@ pub fn decode_image(
     }
 
     // Reconcile the declared encoding against the configured one.
-    let message_encoding = parse_encoding(encoding).ok_or_else(|| {
-        ImageDecodeError::UnsupportedEncoding { encoding: encoding.to_string() }
-    })?;
+    let message_encoding =
+        parse_encoding(encoding).ok_or_else(|| ImageDecodeError::UnsupportedEncoding {
+            encoding: encoding.to_string(),
+        })?;
     if message_encoding != expected {
         return Err(ImageDecodeError::EncodingMismatch {
             message: encoding.to_string(),
@@ -108,7 +112,10 @@ pub fn decode_image(
     let step_us = step as usize;
 
     if step_us < tight_row {
-        return Err(ImageDecodeError::InvalidStep { step: step_us, tight_row });
+        return Err(ImageDecodeError::InvalidStep {
+            step: step_us,
+            tight_row,
+        });
     }
 
     // `step * height` is the strided buffer length the message must carry.
@@ -117,11 +124,17 @@ pub fn decode_image(
     let needed = match step_us.checked_mul(height_us) {
         Some(n) => n,
         None => {
-            return Err(ImageDecodeError::TruncatedBuffer { needed: usize::MAX, got: data.len() })
+            return Err(ImageDecodeError::TruncatedBuffer {
+                needed: usize::MAX,
+                got: data.len(),
+            })
         }
     };
     if data.len() < needed {
-        return Err(ImageDecodeError::TruncatedBuffer { needed, got: data.len() });
+        return Err(ImageDecodeError::TruncatedBuffer {
+            needed,
+            got: data.len(),
+        });
     }
 
     // De-stride: copy each row's tight pixels, dropping per-row padding.
@@ -131,7 +144,11 @@ pub fn decode_image(
         out.extend_from_slice(&data[start..start + tight_row]);
     }
 
-    Ok(OwnedCameraSample { bytes: out, src_width: width, src_height: height })
+    Ok(OwnedCameraSample {
+        bytes: out,
+        src_width: width,
+        src_height: height,
+    })
 }
 
 // ===========================================================================
@@ -236,7 +253,9 @@ mod tests {
             let err = decode_image(&data, enc, 2, 2, 8, false, CameraEncoding::Rgb8).unwrap_err();
             assert_eq!(
                 err,
-                ImageDecodeError::UnsupportedEncoding { encoding: enc.to_string() },
+                ImageDecodeError::UnsupportedEncoding {
+                    encoding: enc.to_string()
+                },
                 "encoding {enc} must be unsupported"
             );
         }
@@ -256,7 +275,13 @@ mod tests {
         // rgb8 width 2 → tight_row 6, but step 4 < 6.
         let data = vec![0u8; 8];
         let err = decode_image(&data, "rgb8", 2, 2, 4, false, CameraEncoding::Rgb8).unwrap_err();
-        assert_eq!(err, ImageDecodeError::InvalidStep { step: 4, tight_row: 6 });
+        assert_eq!(
+            err,
+            ImageDecodeError::InvalidStep {
+                step: 4,
+                tight_row: 6
+            }
+        );
     }
 
     #[test]
@@ -264,11 +289,17 @@ mod tests {
         let data = vec![0u8; 4];
         assert_eq!(
             decode_image(&data, "mono8", 0, 2, 0, false, CameraEncoding::Mono8).unwrap_err(),
-            ImageDecodeError::InvalidDimensions { width: 0, height: 2 }
+            ImageDecodeError::InvalidDimensions {
+                width: 0,
+                height: 2
+            }
         );
         assert_eq!(
             decode_image(&data, "mono8", 2, 0, 2, false, CameraEncoding::Mono8).unwrap_err(),
-            ImageDecodeError::InvalidDimensions { width: 2, height: 0 }
+            ImageDecodeError::InvalidDimensions {
+                width: 2,
+                height: 0
+            }
         );
     }
 

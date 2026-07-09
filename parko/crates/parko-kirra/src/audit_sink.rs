@@ -87,10 +87,7 @@ fn parse_signing_key(key_b64: &str) -> Result<SigningKey, FatalAuditConfig> {
         .decode(key_b64.trim())
         .map_err(|e| FatalAuditConfig::InvalidSigningKey(e.to_string()))?;
     let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
-        FatalAuditConfig::InvalidSigningKey(format!(
-            "expected 32 key bytes, got {}",
-            raw.len()
-        ))
+        FatalAuditConfig::InvalidSigningKey(format!("expected 32 key bytes, got {}", raw.len()))
     })?;
     Ok(SigningKey::from_bytes(&bytes))
 }
@@ -212,8 +209,11 @@ impl DivergenceEventSink for AuditChainLinkerDivergenceSink {
                 return;
             }
         };
-        self.writer
-            .record("governor_comparator", COMPARATOR_DIVERGENCE_EVENT_TYPE, &body);
+        self.writer.record(
+            "governor_comparator",
+            COMPARATOR_DIVERGENCE_EVENT_TYPE,
+            &body,
+        );
     }
 }
 
@@ -711,9 +711,11 @@ impl RecordedClearanceLoop {
         // Operator-escalation rising edge (once per incident).
         let pending = self.clearance.escalation_pending();
         if pending && !self.last_escalation_pending {
-            self.sink.record_escalation_raised(&ImpactEscalationPayload {
-                detail: "post-collision immobilization — operator clearance required".to_string(),
-            });
+            self.sink
+                .record_escalation_raised(&ImpactEscalationPayload {
+                    detail: "post-collision immobilization — operator clearance required"
+                        .to_string(),
+                });
         }
         self.last_escalation_pending = pending;
     }
@@ -729,9 +731,7 @@ impl RecordedClearanceLoop {
         now_ms: u64,
         max_grant_age_ms: u64,
     ) -> Result<(), ClearanceRejection> {
-        let outcome = self
-            .clearance
-            .try_clear(grant, now_ms, max_grant_age_ms);
+        let outcome = self.clearance.try_clear(grant, now_ms, max_grant_age_ms);
         match &outcome {
             Ok(()) => {
                 self.last_escalation_pending = false;
@@ -789,7 +789,11 @@ mod tests {
 
         let sink = AuditChainLinkerDivergenceSink::new(store.clone());
         sink.record(sample_event());
-        assert_eq!(sink.write_failures(), 0, "the divergence must have been durably recorded");
+        assert_eq!(
+            sink.write_failures(),
+            0,
+            "the divergence must have been durably recorded"
+        );
 
         let (v, events) = store.with(|guard| {
             // Durable + hash-linked + SIGNED (verifies under the real key).
@@ -798,8 +802,15 @@ mod tests {
             (v, events)
         });
         assert!(v.chain_intact, "audit chain must be hash-intact");
-        assert!(v.signature_valid, "the signature must verify under the signing key");
-        assert!(v.signed_entries >= 1, "the divergence entry must be signed, got {}", v.signed_entries);
+        assert!(
+            v.signature_valid,
+            "the signature must verify under the signing key"
+        );
+        assert!(
+            v.signed_entries >= 1,
+            "the divergence entry must be signed, got {}",
+            v.signed_entries
+        );
 
         // The entry is a `ComparatorDivergence` carrying the event body.
         let div = events
@@ -856,7 +867,11 @@ mod tests {
             divergence_accumulator: 0,
             ticks_processed: 4,
         });
-        assert_eq!(client.write_failures(), 0, "all four records must be durably recorded");
+        assert_eq!(
+            client.write_failures(),
+            0,
+            "all four records must be durably recorded"
+        );
 
         let (v, events) = store.with(|guard| {
             let v = guard.verify_audit_chain_full(Some(&vk)).expect("verify");
@@ -864,8 +879,15 @@ mod tests {
             (v, events)
         });
         assert!(v.chain_intact, "audit chain must be hash-intact");
-        assert!(v.signature_valid, "the signatures must verify under the signing key");
-        assert!(v.signed_entries >= 4, "all four entries must be signed, got {}", v.signed_entries);
+        assert!(
+            v.signature_valid,
+            "the signatures must verify under the signing key"
+        );
+        assert!(
+            v.signed_entries >= 4,
+            "all four entries must be signed, got {}",
+            v.signed_entries
+        );
 
         for et in [
             PARKO_DECISION_EVENT_TYPE,
@@ -935,8 +957,7 @@ mod tests {
     /// db unset + key set → still ephemeral (a key with no DB is harmless).
     #[test]
     fn select_key_without_db_yields_in_memory_sink() {
-        let sink =
-            select_divergence_sink(None, Some(key_b64(9))).expect("in-memory is Ok");
+        let sink = select_divergence_sink(None, Some(key_b64(9))).expect("in-memory is Ok");
         sink.record(sample_event());
     }
 
@@ -1029,10 +1050,17 @@ mod tests {
         ImpactCfg::default() // spike_threshold = 30.0
     }
     fn clean_ev() -> ImpactEvidence {
-        ImpactEvidence { imu_accel_spike_mps2: 0.5, contact_sensor: false, vanished_object: false }
+        ImpactEvidence {
+            imu_accel_spike_mps2: 0.5,
+            contact_sensor: false,
+            vanished_object: false,
+        }
     }
     fn contact_ev() -> ImpactEvidence {
-        ImpactEvidence { contact_sensor: true, ..clean_ev() }
+        ImpactEvidence {
+            contact_sensor: true,
+            ..clean_ev()
+        }
     }
     fn count_type(sink: &InMemoryImpactSink, ty: &str) -> usize {
         sink.events().iter().filter(|(t, _)| t == ty).count()
@@ -1068,8 +1096,16 @@ mod tests {
         assert!(!latch.is_latched());
         latch.observe(&contact_ev(), &icfg()); // detect #2 (re-latch)
 
-        assert_eq!(count_type(&sink, IMPACT_DETECTED_EVENT_TYPE), 2, "re-latch must emit a second ImpactDetected");
-        assert_eq!(count_type(&sink, IMPACT_CLEARED_EVENT_TYPE), 1, "exactly one ImpactCleared on the single falling edge");
+        assert_eq!(
+            count_type(&sink, IMPACT_DETECTED_EVENT_TYPE),
+            2,
+            "re-latch must emit a second ImpactDetected"
+        );
+        assert_eq!(
+            count_type(&sink, IMPACT_CLEARED_EVENT_TYPE),
+            1,
+            "exactly one ImpactCleared on the single falling edge"
+        );
     }
 
     /// File-backed durability + signing (mirrors the divergence sink's test): the
@@ -1091,20 +1127,34 @@ mod tests {
         let mut latch = RecordedImpactLatch::new(sink.clone());
         latch.observe(&contact_ev(), &icfg());
         latch.clear(true, "supervisor_reset");
-        assert_eq!(sink.write_failures(), 0, "both transitions must be durably recorded");
+        assert_eq!(
+            sink.write_failures(),
+            0,
+            "both transitions must be durably recorded"
+        );
 
         let verifier = VerifierStore::new(&db_path).expect("re-open store");
         let v = verifier.verify_audit_chain_full(Some(&vk)).expect("verify");
         assert!(v.chain_intact, "audit chain must be hash-intact");
         assert!(v.signature_valid, "signatures must verify under the key");
-        assert!(v.signed_entries >= 2, "both impact entries must be signed, got {}", v.signed_entries);
+        assert!(
+            v.signed_entries >= 2,
+            "both impact entries must be signed, got {}",
+            v.signed_entries
+        );
 
         let events = verifier.load_all_posture_events().expect("load events");
-        let detected = events.iter().find(|e| e["event_type"] == IMPACT_DETECTED_EVENT_TYPE)
+        let detected = events
+            .iter()
+            .find(|e| e["event_type"] == IMPACT_DETECTED_EVENT_TYPE)
             .expect("an ImpactDetected entry must exist");
         assert_eq!(detected["posture"]["contact_sensor"], true);
-        assert!(events.iter().any(|e| e["event_type"] == IMPACT_CLEARED_EVENT_TYPE),
-            "an ImpactCleared entry must exist");
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event_type"] == IMPACT_CLEARED_EVENT_TYPE),
+            "an ImpactCleared entry must exist"
+        );
     }
 
     /// DB-actor migration phase 1: `StoreHandle` recovers a transient poison, so
@@ -1128,8 +1178,15 @@ mod tests {
         let mut latch = RecordedImpactLatch::new(sink.clone());
         latch.observe(&contact_ev(), &icfg());
 
-        assert_eq!(sink.write_failures(), 0, "the handle recovers the poison; the transition is recorded");
-        assert!(latch.is_latched(), "the latch (motion veto) must be UNCHANGED by the audit path");
+        assert_eq!(
+            sink.write_failures(),
+            0,
+            "the handle recovers the poison; the transition is recorded"
+        );
+        assert!(
+            latch.is_latched(),
+            "the latch (motion veto) must be UNCHANGED by the audit path"
+        );
     }
 
     /// No durable sink (in-memory fallback) → the wrapped latch behaves IDENTICALLY
@@ -1144,8 +1201,11 @@ mod tests {
         for ev in &seq {
             recorded.observe(ev, &icfg());
             bare.observe(ev, &icfg());
-            assert_eq!(recorded.is_latched(), bare.is_latched(),
-                "wrapped latch must track the bare latch bit-for-bit");
+            assert_eq!(
+                recorded.is_latched(),
+                bare.is_latched(),
+                "wrapped latch must track the bare latch bit-for-bit"
+            );
         }
         // and on clear
         recorded.clear(true, "reset");
@@ -1159,15 +1219,29 @@ mod tests {
         let sink = Arc::new(InMemoryImpactSink::new());
         let mut latch = RecordedImpactLatch::new(sink.clone());
         // contact + vanished fire; spike below threshold does not.
-        let ev = ImpactEvidence { imu_accel_spike_mps2: 1.0, contact_sensor: true, vanished_object: true };
+        let ev = ImpactEvidence {
+            imu_accel_spike_mps2: 1.0,
+            contact_sensor: true,
+            vanished_object: true,
+        };
         latch.observe(&ev, &icfg());
 
-        let (_, body) = sink.events().into_iter().find(|(t, _)| t == IMPACT_DETECTED_EVENT_TYPE).expect("detected");
+        let (_, body) = sink
+            .events()
+            .into_iter()
+            .find(|(t, _)| t == IMPACT_DETECTED_EVENT_TYPE)
+            .expect("detected");
         let json: serde_json::Value = serde_json::from_str(&body).expect("json");
         assert_eq!(json["contact_sensor"], true);
         assert_eq!(json["vanished_object"], true);
-        assert_eq!(json["spike_over_threshold"], false, "a sub-threshold spike must not read as fired");
-        assert_eq!(json["spike_magnitude_mps2"], 1.0, "a finite magnitude is retained");
+        assert_eq!(
+            json["spike_over_threshold"], false,
+            "a sub-threshold spike must not read as fired"
+        );
+        assert_eq!(
+            json["spike_magnitude_mps2"], 1.0,
+            "a finite magnitude is retained"
+        );
     }
 
     /// A non-finite spike magnitude is OMITTED from the payload entirely (it never
@@ -1177,15 +1251,28 @@ mod tests {
     fn test_nonfinite_spike_magnitude_omitted() {
         let sink = Arc::new(InMemoryImpactSink::new());
         let mut latch = RecordedImpactLatch::new(sink.clone());
-        let ev = ImpactEvidence { imu_accel_spike_mps2: f64::NAN, contact_sensor: true, vanished_object: false };
+        let ev = ImpactEvidence {
+            imu_accel_spike_mps2: f64::NAN,
+            contact_sensor: true,
+            vanished_object: false,
+        };
         latch.observe(&ev, &icfg());
 
-        let (_, body) = sink.events().into_iter().find(|(t, _)| t == IMPACT_DETECTED_EVENT_TYPE).expect("detected");
-        assert!(!body.contains("spike_magnitude_mps2"),
-            "a non-finite spike magnitude must be omitted from the payload, got {body}");
+        let (_, body) = sink
+            .events()
+            .into_iter()
+            .find(|(t, _)| t == IMPACT_DETECTED_EVENT_TYPE)
+            .expect("detected");
+        assert!(
+            !body.contains("spike_magnitude_mps2"),
+            "a non-finite spike magnitude must be omitted from the payload, got {body}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body).expect("json");
         assert_eq!(json["contact_sensor"], true);
-        assert_eq!(json["spike_over_threshold"], false, "a non-finite spike never reads as fired");
+        assert_eq!(
+            json["spike_over_threshold"], false,
+            "a non-finite spike never reads as fired"
+        );
     }
 
     // ─────────────── #103 clearance-loop audit integration ──────────────────
@@ -1193,7 +1280,10 @@ mod tests {
     const LOOP_MAX_AGE: u64 = 60_000;
 
     fn good_grant(now: u64) -> OperatorClearanceGrant {
-        OperatorClearanceGrant { operator_id: "op-7".to_string(), granted_at_ms: now - 100 }
+        OperatorClearanceGrant {
+            operator_id: "op-7".to_string(),
+            granted_at_ms: now - 100,
+        }
     }
     /// Drive a recorded loop into EscalationRaised.
     fn escalate(loop_: &mut RecordedClearanceLoop) {
@@ -1214,10 +1304,16 @@ mod tests {
             loop_.observe(&clean_ev(), &icfg(), 2_000 + t);
         }
         loop_.observe(&contact_ev(), &icfg(), 3_000); // re-impact while escalated
-        assert_eq!(count_type(&sink, IMPACT_ESCALATION_RAISED_EVENT_TYPE), 1,
-            "exactly one ImpactEscalationRaised per incident");
-        assert_eq!(count_type(&sink, IMPACT_DETECTED_EVENT_TYPE), 1,
-            "exactly one ImpactDetected on the incident-open edge");
+        assert_eq!(
+            count_type(&sink, IMPACT_ESCALATION_RAISED_EVENT_TYPE),
+            1,
+            "exactly one ImpactEscalationRaised per incident"
+        );
+        assert_eq!(
+            count_type(&sink, IMPACT_DETECTED_EVENT_TYPE),
+            1,
+            "exactly one ImpactDetected on the incident-open edge"
+        );
     }
 
     /// A well-formed grant emits ONE `ImpactCleared` (operator id as source) and
@@ -1230,11 +1326,26 @@ mod tests {
         let now = 5_000u64;
         assert!(loop_.try_clear(&good_grant(now), now, LOOP_MAX_AGE).is_ok());
         assert_eq!(loop_.state(), ClearanceState::Normal);
-        assert_eq!(count_type(&sink, IMPACT_CLEARED_EVENT_TYPE), 1, "one ImpactCleared on success");
-        assert_eq!(count_type(&sink, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE), 0, "no rejection on success");
-        let (_, body) = sink.events().into_iter().find(|(t, _)| t == IMPACT_CLEARED_EVENT_TYPE).unwrap();
+        assert_eq!(
+            count_type(&sink, IMPACT_CLEARED_EVENT_TYPE),
+            1,
+            "one ImpactCleared on success"
+        );
+        assert_eq!(
+            count_type(&sink, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE),
+            0,
+            "no rejection on success"
+        );
+        let (_, body) = sink
+            .events()
+            .into_iter()
+            .find(|(t, _)| t == IMPACT_CLEARED_EVENT_TYPE)
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["clearance_source"], "op-7", "the clearing operator id is the source");
+        assert_eq!(
+            json["clearance_source"], "op-7",
+            "the clearing operator id is the source"
+        );
     }
 
     /// A rejected clearance is RECORDED (reason + operator id) and leaves the
@@ -1245,16 +1356,33 @@ mod tests {
         let mut loop_ = RecordedClearanceLoop::new(sink.clone());
         escalate(&mut loop_);
         let now = 5_000u64;
-        let malformed = OperatorClearanceGrant { operator_id: "op-9".to_string(), granted_at_ms: now + 10 }; // future
+        let malformed = OperatorClearanceGrant {
+            operator_id: "op-9".to_string(),
+            granted_at_ms: now + 10,
+        }; // future
         let r = loop_.try_clear(&malformed, now, LOOP_MAX_AGE);
         assert_eq!(r, Err(ClearanceRejection::MalformedGrant));
-        assert!(loop_.is_immobilized(), "state must be unchanged after a rejected grant");
+        assert!(
+            loop_.is_immobilized(),
+            "state must be unchanged after a rejected grant"
+        );
         assert_eq!(count_type(&sink, IMPACT_CLEARANCE_REJECTED_EVENT_TYPE), 1);
-        assert_eq!(count_type(&sink, IMPACT_CLEARED_EVENT_TYPE), 0, "no ImpactCleared on rejection");
-        let (_, body) = sink.events().into_iter().find(|(t, _)| t == IMPACT_CLEARANCE_REJECTED_EVENT_TYPE).unwrap();
+        assert_eq!(
+            count_type(&sink, IMPACT_CLEARED_EVENT_TYPE),
+            0,
+            "no ImpactCleared on rejection"
+        );
+        let (_, body) = sink
+            .events()
+            .into_iter()
+            .find(|(t, _)| t == IMPACT_CLEARANCE_REJECTED_EVENT_TYPE)
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["reason"], "malformed_grant");
-        assert_eq!(json["operator_id"], "op-9", "the operator id (audit subject) is recorded");
+        assert_eq!(
+            json["operator_id"], "op-9",
+            "the operator id (audit subject) is recorded"
+        );
     }
 
     /// The audit sink does NOT affect the state machine or the motion veto — the
@@ -1279,12 +1407,22 @@ mod tests {
         loop_.observe(&contact_ev(), &icfg(), 1_000);
         loop_.observe(&clean_ev(), &icfg(), 1_001);
         assert!(loop_.is_immobilized(), "veto unaffected by the audit path");
-        assert!(loop_.escalation_pending(), "escalation state unaffected by the audit path");
-        assert_eq!(sink.write_failures(), 0, "the handle recovers the poison; writes land");
+        assert!(
+            loop_.escalation_pending(),
+            "escalation state unaffected by the audit path"
+        );
+        assert_eq!(
+            sink.write_failures(),
+            0,
+            "the handle recovers the poison; writes land"
+        );
         // A good grant still clears the state machine regardless of audit outcome.
         let now = 5_000u64;
         assert!(loop_.try_clear(&good_grant(now), now, LOOP_MAX_AGE).is_ok());
-        assert!(!loop_.is_immobilized(), "clearance state machine unaffected by the audit path");
+        assert!(
+            !loop_.is_immobilized(),
+            "clearance state machine unaffected by the audit path"
+        );
     }
 
     /// The wrapped loop's veto tracks a bare `ClearanceLoop` bit-for-bit over a
@@ -1301,11 +1439,17 @@ mod tests {
             let now = 1_000 + i as u64;
             recorded.observe(ev, &icfg(), now);
             bare.observe(ev, &icfg(), now);
-            assert_eq!(recorded.is_immobilized(), bare.is_immobilized(),
-                "wrapped loop veto must track the bare loop");
+            assert_eq!(
+                recorded.is_immobilized(),
+                bare.is_immobilized(),
+                "wrapped loop veto must track the bare loop"
+            );
         }
         let now = 9_000u64;
-        let g = OperatorClearanceGrant { operator_id: "op".to_string(), granted_at_ms: now - 10 };
+        let g = OperatorClearanceGrant {
+            operator_id: "op".to_string(),
+            granted_at_ms: now - 10,
+        };
         let _ = recorded.try_clear(&g, now, LOOP_MAX_AGE);
         let _ = bare.try_clear(&g, now, LOOP_MAX_AGE);
         assert_eq!(recorded.is_immobilized(), bare.is_immobilized());
@@ -1377,7 +1521,10 @@ impl crate::comparator::PostureSignalSink for PostureEngineSenderSink {
     fn divergence_posture_tick(&self, significant: bool, escalated: bool) {
         use kirra_verifier::posture_engine_v2::PostureRecalcTrigger;
         use std::sync::atomic::Ordering;
-        match self.tx.try_send(PostureRecalcTrigger::GovernorDivergence { significant, escalated }) {
+        match self.tx.try_send(PostureRecalcTrigger::GovernorDivergence {
+            significant,
+            escalated,
+        }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 // Coalescing worker saturated; next tick re-signals. Count it —
@@ -1412,7 +1559,10 @@ mod posture_sink_tests {
         let sink = PostureEngineSenderSink::new(tx);
         sink.divergence_posture_tick(true, true);
         match rx.try_recv().expect("trigger forwarded") {
-            PostureRecalcTrigger::GovernorDivergence { significant, escalated } => {
+            PostureRecalcTrigger::GovernorDivergence {
+                significant,
+                escalated,
+            } => {
                 assert!(significant && escalated);
             }
             other => panic!("wrong trigger: {other}"),

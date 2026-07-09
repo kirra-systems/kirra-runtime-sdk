@@ -35,13 +35,9 @@ use tower::ServiceExt; // oneshot
 use kirra_verifier::gateway::kinematics_contract::{
     ProposedVehicleCommand, VehicleKinematicsContract,
 };
-use kirra_verifier::gateway::policy_layer::{
-    enforce_actuator_safety_envelope, EnforcementOutcome,
-};
+use kirra_verifier::gateway::policy_layer::{enforce_actuator_safety_envelope, EnforcementOutcome};
 use kirra_verifier::kinematics_sim::VehicleState;
-use kirra_verifier::posture_cache::{
-    CachedFleetPosture, ServiceState, SharedPostureCache,
-};
+use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::scenario_runner::{PostureAssertion, ScenarioEvent, ScenarioRunner};
 use kirra_verifier::verifier::{
     AppState, FleetPosture, NodeTrustState, RegisteredNode, VerifierOperationMode,
@@ -65,8 +61,9 @@ async fn echo_outcome(Extension(outcome): Extension<EnforcementOutcome>) -> Json
 fn service_state(posture: FleetPosture) -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(posture))));
+    let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(posture),
+    )));
     service_state_from(app, cache)
 }
 
@@ -78,7 +75,9 @@ fn service_state_from(app: Arc<AppState>, cache: SharedPostureCache) -> Arc<Serv
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
@@ -111,10 +110,16 @@ async fn enforce_once(router: &Router, cmd: &ProposedVehicleCommand) -> Enforced
         .header("content-type", "application/json")
         .body(Body::from(body))
         .unwrap();
-    let resp = router.clone().oneshot(req).await.expect("router must not panic");
+    let resp = router
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("router must not panic");
     let status = resp.status();
     if status == StatusCode::OK {
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         let action = v["action"].as_str().unwrap_or("").to_string();
         Enforced {
@@ -125,7 +130,12 @@ async fn enforce_once(router: &Router, cmd: &ProposedVehicleCommand) -> Enforced
         }
     } else {
         // 403 (LockedOut) / 400 (DenyBreach) → command rejected, vehicle holds.
-        Enforced { denied: true, clamped: false, v: 0.0, delta: 0.0 }
+        Enforced {
+            denied: true,
+            clamped: false,
+            v: 0.0,
+            delta: 0.0,
+        }
     }
 }
 
@@ -254,43 +264,59 @@ async fn axis1_governor_gates_violations_and_bounds_the_trajectory_vs_bypassed()
 
     // (1) Violations are GATED — the governor clamped (the over-speed and
     //     over-steer commands were not passed through untouched).
-    assert!(gov.clamp_count > 0, "governor must clamp the violating commands");
+    assert!(
+        gov.clamp_count > 0,
+        "governor must clamp the violating commands"
+    );
     // ...and every governed command honors the envelope per-command.
     assert!(
         gov.max_enforced_speed <= max_speed + TOL,
-        "enforced speed {} exceeded ceiling {}", gov.max_enforced_speed, max_speed
+        "enforced speed {} exceeded ceiling {}",
+        gov.max_enforced_speed,
+        max_speed
     );
 
     // (2) The integrated TRAJECTORY stays within the safe envelope across the run
     //     — the loop-level consequence, not just the per-command check.
     assert!(
         gov.peak_speed <= max_speed + TOL,
-        "governed trajectory peak speed {} exceeded {}", gov.peak_speed, max_speed
+        "governed trajectory peak speed {} exceeded {}",
+        gov.peak_speed,
+        max_speed
     );
     assert!(
         gov.peak_lateral <= max_lateral + TOL,
-        "governed trajectory peak lateral {} exceeded {}", gov.peak_lateral, max_lateral
+        "governed trajectory peak lateral {} exceeded {}",
+        gov.peak_lateral,
+        max_lateral
     );
 
     // NEGATIVE CONTROL — the SAME commands WITHOUT the governor WOULD violate.
     assert!(
         raw.peak_speed > max_speed + TOL,
-        "bypassed run must violate the speed envelope (got {} vs {})", raw.peak_speed, max_speed
+        "bypassed run must violate the speed envelope (got {} vs {})",
+        raw.peak_speed,
+        max_speed
     );
     assert!(
         raw.peak_lateral > max_lateral + TOL,
-        "bypassed run must violate the lateral envelope (got {} vs {})", raw.peak_lateral, max_lateral
+        "bypassed run must violate the lateral envelope (got {} vs {})",
+        raw.peak_lateral,
+        max_lateral
     );
 
     // THE PROOF — the on-vs-off DELTA. The governor changed the outcome.
     assert!(
         raw.peak_speed > gov.peak_speed + TOL,
-        "governor must reduce peak speed ({} bypassed vs {} governed)", raw.peak_speed, gov.peak_speed
+        "governor must reduce peak speed ({} bypassed vs {} governed)",
+        raw.peak_speed,
+        gov.peak_speed
     );
     assert!(
         raw.peak_lateral > gov.peak_lateral + TOL,
         "governor must reduce peak lateral accel ({} bypassed vs {} governed)",
-        raw.peak_lateral, gov.peak_lateral
+        raw.peak_lateral,
+        gov.peak_lateral
     );
 }
 
@@ -321,17 +347,25 @@ fn register_av_infra(app: &Arc<AppState>) {
         "trajectory_planner".to_string(),
         vec!["perception_fusion".to_string()],
     );
-    for id in ["lidar_front", "camera_front", "perception_fusion", "trajectory_planner"] {
-        app.nodes.insert(id.to_string(), RegisteredNode {
-            node_id: id.to_string(),
-            status: NodeTrustState::Trusted,
-            registered_at_ms: 0,
-            last_trust_update_ms: 0,
-            ak_public_pem: None,
-            expected_pcr16_digest_hex: None,
-            site: None,
-            firmware_version: None,
-        });
+    for id in [
+        "lidar_front",
+        "camera_front",
+        "perception_fusion",
+        "trajectory_planner",
+    ] {
+        app.nodes.insert(
+            id.to_string(),
+            RegisteredNode {
+                node_id: id.to_string(),
+                status: NodeTrustState::Trusted,
+                registered_at_ms: 0,
+                last_trust_update_ms: 0,
+                ak_public_pem: None,
+                expected_pcr16_digest_hex: None,
+                site: None,
+                firmware_version: None,
+            },
+        );
     }
 }
 
@@ -345,16 +379,23 @@ async fn axis2a_sensor_fault_drives_posture_to_locked_out() {
     let store = VerifierStore::new(":memory:").unwrap();
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     register_av_infra(&app);
-    let cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(FleetPosture::Nominal),
+    )));
 
     // A critical perception node faults → Untrusted propagates LockedOut up the DAG.
     ScenarioRunner::new(Arc::clone(&app), Arc::clone(&cache))
-        .at_ms(0, ScenarioEvent::MarkUntrusted {
-            node_id: "lidar_front".to_string(),
-            reason: "hardware_fault".to_string(),
-        })
-        .assert_at_ms(0, PostureAssertion::NodeIsUntrusted("lidar_front".to_string()))
+        .at_ms(
+            0,
+            ScenarioEvent::MarkUntrusted {
+                node_id: "lidar_front".to_string(),
+                reason: "hardware_fault".to_string(),
+            },
+        )
+        .assert_at_ms(
+            0,
+            PostureAssertion::NodeIsUntrusted("lidar_front".to_string()),
+        )
         .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::LockedOut))
         .run()
         .await;
@@ -369,15 +410,19 @@ async fn axis2a_rss_fault_drives_posture_to_degraded() {
     // sensor-fault test), so the RSS fault escalates Nominal → Degraded. (An
     // EMPTY live set now fails closed to LockedOut — the M-9 guard.)
     register_av_infra(&app);
-    let cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(FleetPosture::Nominal),
+    )));
 
     ScenarioRunner::new(Arc::clone(&app), Arc::clone(&cache))
-        .at_ms(0, ScenarioEvent::RssReport(parko_core::RssState {
-            safe: false,
-            longitudinal_margin: 0.0,
-            lateral_margin: f64::MAX,
-        }))
+        .at_ms(
+            0,
+            ScenarioEvent::RssReport(parko_core::RssState {
+                safe: false,
+                longitudinal_margin: 0.0,
+                lateral_margin: f64::MAX,
+            }),
+        )
         .assert_at_ms(0, PostureAssertion::FleetPostureIs(FleetPosture::Degraded))
         .run()
         .await;
@@ -402,16 +447,21 @@ async fn axis2b_degraded_posture_decels_to_stop_and_holds_vs_nominal() {
     let initial = VehicleState::new(0.0, 0.0, 0.0, 1.0);
     let mut commands: Vec<ProposedVehicleCommand> = Vec::new();
     for _ in 0..20 {
-        commands.push(cmd(0.0, 0.0));          // cooperative decel + hold at stop
+        commands.push(cmd(0.0, 0.0)); // cooperative decel + hold at stop
     }
     for _ in 0..20 {
-        commands.push(cmd(3.0, 0.0));          // attempt to re-initiate motion
+        commands.push(cmd(3.0, 0.0)); // attempt to re-initiate motion
     }
 
     // Fault-driven (Degraded): bleeds speed to 0, HOLDS, and DENIES every
     // re-initiation attempt.
-    let degraded =
-        governed_run_seeded(service_state(FleetPosture::Degraded), wb, initial.clone(), &commands).await;
+    let degraded = governed_run_seeded(
+        service_state(FleetPosture::Degraded),
+        wb,
+        initial.clone(),
+        &commands,
+    )
+    .await;
     assert!(
         degraded.peak_speed <= 1.0 + TOL,
         "Degraded must never increase speed beyond the initial 1 m/s (got peak {})",
@@ -419,7 +469,8 @@ async fn axis2b_degraded_posture_decels_to_stop_and_holds_vs_nominal() {
     );
     assert!(
         degraded.final_speed <= TOL,
-        "Degraded must come to rest and HOLD (final speed {})", degraded.final_speed
+        "Degraded must come to rest and HOLD (final speed {})",
+        degraded.final_speed
     );
     assert_eq!(
         degraded.deny_count, 20,
@@ -430,12 +481,16 @@ async fn axis2b_degraded_posture_decels_to_stop_and_holds_vs_nominal() {
     // — the vehicle is moving again by the end of the run, and nothing is denied.
     let nominal =
         governed_run_seeded(service_state(FleetPosture::Nominal), wb, initial, &commands).await;
-    assert_eq!(nominal.deny_count, 0, "Nominal must not deny any of these commands");
+    assert_eq!(
+        nominal.deny_count, 0,
+        "Nominal must not deny any of these commands"
+    );
     assert!(
         nominal.final_speed > degraded.final_speed + TOL,
         "the fault-driven Degraded posture must keep the vehicle stopped while \
          Nominal re-accelerates (nominal final {} vs degraded final {})",
-        nominal.final_speed, degraded.final_speed
+        nominal.final_speed,
+        degraded.final_speed
     );
 }
 
@@ -499,16 +554,22 @@ async fn axis2b_locked_out_posture_holds_vehicle_stopped_vs_nominal() {
     let cruise = cruise_commands(10.0, 40);
 
     let locked = governed_run(service_state(FleetPosture::LockedOut), wb, &cruise).await;
-    assert_eq!(locked.deny_count, cruise.len(), "LockedOut must deny every command");
+    assert_eq!(
+        locked.deny_count,
+        cruise.len(),
+        "LockedOut must deny every command"
+    );
     assert!(
         locked.peak_speed <= TOL,
-        "LockedOut must hold the vehicle stopped (peak speed {})", locked.peak_speed
+        "LockedOut must hold the vehicle stopped (peak speed {})",
+        locked.peak_speed
     );
 
     // Negative control: Nominal moves the vehicle on the same commands.
     let nominal = governed_run(service_state(FleetPosture::Nominal), wb, &cruise).await;
     assert!(
         nominal.peak_speed > 1.0,
-        "Nominal must move the vehicle on the same cruise (peak speed {})", nominal.peak_speed
+        "Nominal must move the vehicle on the same cruise (peak speed {})",
+        nominal.peak_speed
     );
 }

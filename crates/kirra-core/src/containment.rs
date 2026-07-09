@@ -518,8 +518,14 @@ mod tests {
         let mut right = Vec::with_capacity(n);
         for i in 0..n {
             let x = i as f64 * dx;
-            left.push(Point { x_m: x, y_m: half_w });
-            right.push(Point { x_m: x, y_m: -half_w });
+            left.push(Point {
+                x_m: x,
+                y_m: half_w,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: -half_w,
+            });
         }
         (left, right)
     }
@@ -536,7 +542,11 @@ mod tests {
     }
 
     fn pose(x: f64, y: f64, heading_rad: f64) -> Pose {
-        Pose { x_m: x, y_m: y, heading_rad }
+        Pose {
+            x_m: x,
+            y_m: y,
+            heading_rad,
+        }
     }
 
     #[test]
@@ -544,7 +554,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(20.0, 0.0, 0.0), pose(30.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(action, EnforceAction::Allow, "centered pose must Allow");
     }
 
@@ -558,12 +569,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(50.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(
-            &traj,
-            &corridor,
-            &sedan(),
-            FrameTrust::Untrusted,
-        );
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Untrusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::FrameIntegrityUntrusted),
@@ -598,7 +605,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 2.5, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -611,7 +619,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, -2.5, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -624,7 +633,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 0.0, std::f64::consts::FRAC_PI_2)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -642,7 +652,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(40.0, 2.0, 0.1)]; // ~5.7° yaw left
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -656,7 +667,8 @@ mod tests {
         let mut corridor = healthy_corridor(&left, &right);
         corridor.confidence = 0.1; // below min_confidence
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -670,7 +682,8 @@ mod tests {
         let mut corridor = healthy_corridor(&left, &right);
         corridor.age_ms = 10_000; // > max_age_ms
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -689,7 +702,8 @@ mod tests {
             max_age_ms: 500,
         };
         let traj = vec![pose(0.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -705,7 +719,8 @@ mod tests {
         let traj: Vec<Pose> = (0..(MAX_TRAJECTORY_HORIZON + 1))
             .map(|i| pose(i as f64, 0.0, 0.0))
             .collect();
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::TrajectoryHorizonExceeded),
@@ -720,7 +735,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj: Vec<Pose> = vec![];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -732,7 +748,8 @@ mod tests {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(f64::NAN, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture)
@@ -754,7 +771,8 @@ mod tests {
                 pose(x, y, 0.0)
             })
             .collect();
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::Allow,
@@ -799,8 +817,20 @@ mod tests {
     #[test]
     fn containment_rejects_self_intersecting_bowtie_corridor() {
         // left and right cross between station 0 and station 1.
-        let left = vec![Point { x_m: 0.0, y_m: 1.0 }, Point { x_m: 2.0, y_m: -1.0 }];
-        let right = vec![Point { x_m: 0.0, y_m: -1.0 }, Point { x_m: 2.0, y_m: 1.0 }];
+        let left = vec![
+            Point { x_m: 0.0, y_m: 1.0 },
+            Point {
+                x_m: 2.0,
+                y_m: -1.0,
+            },
+        ];
+        let right = vec![
+            Point {
+                x_m: 0.0,
+                y_m: -1.0,
+            },
+            Point { x_m: 2.0, y_m: 1.0 },
+        ];
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(1.0, 0.0, 0.0)];
         assert_eq!(
@@ -824,8 +854,14 @@ mod tests {
         for i in 0..n {
             let x = i as f64 * 5.0;
             let yc = (i as f64 * 0.4).sin() * 2.0; // wavy centerline
-            left.push(Point { x_m: x, y_m: yc + 3.0 });
-            right.push(Point { x_m: x, y_m: yc - 3.0 });
+            left.push(Point {
+                x_m: x,
+                y_m: yc + 3.0,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: yc - 3.0,
+            });
         }
         let corridor = healthy_corridor(&left, &right);
         let traj = vec![pose(25.0, (5.0_f64 * 0.4).sin() * 2.0, 0.0)];
@@ -848,8 +884,14 @@ mod tests {
         let mut right = Vec::with_capacity(n);
         for i in 0..n {
             let x = ox + i as f64 * (x_max / (n as f64 - 1.0));
-            left.push(Point { x_m: x, y_m: oy + half_w });
-            right.push(Point { x_m: x, y_m: oy - half_w });
+            left.push(Point {
+                x_m: x,
+                y_m: oy + half_w,
+            });
+            right.push(Point {
+                x_m: x,
+                y_m: oy - half_w,
+            });
         }
         let traj = vec![pose(ox + 50.0, oy, 0.0)];
 
@@ -872,7 +914,10 @@ mod tests {
     fn deny_code_drivable_space_departure_renders_stable_token() {
         // Audit-chain hash stability: the rendered token must match what
         // serde produces (SCREAMING_SNAKE_CASE) and the .reason() arm.
-        assert_eq!(DenyCode::DrivableSpaceDeparture.reason(), "DRIVABLE_SPACE_DEPARTURE");
+        assert_eq!(
+            DenyCode::DrivableSpaceDeparture.reason(),
+            "DRIVABLE_SPACE_DEPARTURE"
+        );
         let as_json = serde_json::to_string(&DenyCode::DrivableSpaceDeparture).expect("serialize");
         assert_eq!(as_json, "\"DRIVABLE_SPACE_DEPARTURE\"");
     }
@@ -894,17 +939,27 @@ mod tests {
     #[test]
     fn containment_rejects_when_right_side_too_short() {
         let left = vec![
-            Point { x_m: 0.0,   y_m: 3.0 },
-            Point { x_m: 100.0, y_m: 3.0 },
+            Point { x_m: 0.0, y_m: 3.0 },
+            Point {
+                x_m: 100.0,
+                y_m: 3.0,
+            },
         ];
-        let right = vec![Point { x_m: 0.0, y_m: -3.0 }]; // < 2
+        let right = vec![Point {
+            x_m: 0.0,
+            y_m: -3.0,
+        }]; // < 2
         let corridor = Corridor {
-            left: &left, right: &right,
-            confidence: 0.95, age_ms: 10,
-            min_confidence: 0.5, max_age_ms: 500,
+            left: &left,
+            right: &right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -917,18 +972,28 @@ mod tests {
     #[test]
     fn containment_rejects_when_left_side_overflows_max_vertices() {
         let left: Vec<Point> = (0..(MAX_CORRIDOR_VERTICES + 1))
-            .map(|i| Point { x_m: i as f64, y_m: 3.0 })
+            .map(|i| Point {
+                x_m: i as f64,
+                y_m: 3.0,
+            })
             .collect();
         let right: Vec<Point> = (0..8)
-            .map(|i| Point { x_m: (i as f64) * 10.0, y_m: -3.0 })
+            .map(|i| Point {
+                x_m: (i as f64) * 10.0,
+                y_m: -3.0,
+            })
             .collect();
         let corridor = Corridor {
-            left: &left, right: &right,
-            confidence: 0.95, age_ms: 10,
-            min_confidence: 0.5, max_age_ms: 500,
+            left: &left,
+            right: &right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -941,18 +1006,28 @@ mod tests {
     #[test]
     fn containment_rejects_when_right_side_overflows_max_vertices() {
         let left: Vec<Point> = (0..8)
-            .map(|i| Point { x_m: (i as f64) * 10.0, y_m: 3.0 })
+            .map(|i| Point {
+                x_m: (i as f64) * 10.0,
+                y_m: 3.0,
+            })
             .collect();
         let right: Vec<Point> = (0..(MAX_CORRIDOR_VERTICES + 1))
-            .map(|i| Point { x_m: i as f64, y_m: -3.0 })
+            .map(|i| Point {
+                x_m: i as f64,
+                y_m: -3.0,
+            })
             .collect();
         let corridor = Corridor {
-            left: &left, right: &right,
-            confidence: 0.95, age_ms: 10,
-            min_confidence: 0.5, max_age_ms: 500,
+            left: &left,
+            right: &right,
+            confidence: 0.95,
+            age_ms: 10,
+            min_confidence: 0.5,
+            max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),
@@ -968,13 +1043,16 @@ mod tests {
     fn containment_rejects_when_confidence_is_nan() {
         let (left, right) = straight_corridor(3.0, 100.0);
         let corridor = Corridor {
-            left: &left, right: &right,
+            left: &left,
+            right: &right,
             confidence: f32::NAN, // breaks is_finite()
             age_ms: 10,
-            min_confidence: 0.5, max_age_ms: 500,
+            min_confidence: 0.5,
+            max_age_ms: 500,
         };
         let traj = vec![pose(20.0, 0.0, 0.0)];
-        let action = validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
+        let action =
+            validate_trajectory_containment(&traj, &corridor, &sedan(), FrameTrust::Trusted);
         assert_eq!(
             action,
             EnforceAction::DenyBreach(DenyCode::DrivableSpaceDeparture),

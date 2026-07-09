@@ -154,7 +154,10 @@ pub fn check_resolution(reg: &SpiRegistry, emitted: &BTreeSet<String>) -> Resolu
             reason,
         });
     }
-    ResolutionReport { rows, duplicate_ids }
+    ResolutionReport {
+        rows,
+        duplicate_ids,
+    }
 }
 
 fn resolve_one(spi: &SpiDef, emitted: &BTreeSet<String>) -> (bool, Option<String>) {
@@ -167,7 +170,10 @@ fn resolve_one(spi: &SpiDef, emitted: &BTreeSet<String>) -> (bool, Option<String
     match spi.source {
         SpiSource::Emitted | SpiSource::Derived => {
             if spi.event_types.is_empty() {
-                return (false, Some("an emitted/derived SPI must cite ≥ 1 event_type".into()));
+                return (
+                    false,
+                    Some("an emitted/derived SPI must cite ≥ 1 event_type".into()),
+                );
             }
             let mut lits: Vec<&String> = spi.event_types.iter().collect();
             if let Some(d) = &spi.denominator {
@@ -177,18 +183,30 @@ fn resolve_one(spi: &SpiDef, emitted: &BTreeSet<String>) -> (bool, Option<String
             if missing.is_empty() {
                 (true, None)
             } else {
-                (false, Some(format!("event_type(s) not emitted in src/: {}", missing.join(", "))))
+                (
+                    false,
+                    Some(format!(
+                        "event_type(s) not emitted in src/: {}",
+                        missing.join(", ")
+                    )),
+                )
             }
         }
         SpiSource::Parko => {
             if spi.event_types.is_empty() || spi.note.trim().is_empty() {
-                return (false, Some("a parko-scope SPI must cite its event_type + a note".into()));
+                return (
+                    false,
+                    Some("a parko-scope SPI must cite its event_type + a note".into()),
+                );
             }
             // The numerator lives in the node-local chain (external); the
             // verifier-side denominator, if any, still must resolve.
             if let Some(d) = &spi.denominator {
                 if !emitted.contains(d.as_str()) {
-                    return (false, Some(format!("denominator `{d}` not emitted in src/")));
+                    return (
+                        false,
+                        Some(format!("denominator `{d}` not emitted in src/")),
+                    );
                 }
             }
             (true, None)
@@ -197,7 +215,13 @@ fn resolve_one(spi: &SpiDef, emitted: &BTreeSet<String>) -> (bool, Option<String
             if spi.event_types.is_empty() {
                 (true, None)
             } else {
-                (false, Some("the integrity SPI is a verify precondition, not a tally — no event_type".into()))
+                (
+                    false,
+                    Some(
+                        "the integrity SPI is a verify precondition, not a tally — no event_type"
+                            .into(),
+                    ),
+                )
             }
         }
     }
@@ -225,7 +249,10 @@ pub fn scan_emitted_literals(root: &Path) -> BTreeSet<String> {
 
 fn scan_dir(dir: &Path, out: &mut BTreeSet<String>) {
     // Skip dedicated test trees and build output entirely.
-    if dir.file_name().is_some_and(|n| n == "tests" || n == "target") {
+    if dir
+        .file_name()
+        .is_some_and(|n| n == "tests" || n == "target")
+    {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -281,7 +308,8 @@ fn extract_upper_snake_literals(src: &str, out: &mut BTreeSet<String>) {
 
 fn is_upper_snake(s: &str) -> bool {
     s.len() >= 6
-        && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         && s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
@@ -327,7 +355,11 @@ impl SpiRollup {
 /// result of `verify_audit_chain_full` for the window (SPI-G06 / §5.1 precondition).
 #[must_use]
 pub fn evaluate(reg: &SpiRegistry, tallies: &BTreeMap<String, u64>, chain_ok: bool) -> SpiRollup {
-    let count = |lits: &[String]| -> u64 { lits.iter().map(|l| tallies.get(l).copied().unwrap_or(0)).sum() };
+    let count = |lits: &[String]| -> u64 {
+        lits.iter()
+            .map(|l| tallies.get(l).copied().unwrap_or(0))
+            .sum()
+    };
 
     let mut values = Vec::new();
     for spi in &reg.spis {
@@ -349,19 +381,28 @@ pub fn evaluate(reg: &SpiRegistry, tallies: &BTreeMap<String, u64>, chain_ok: bo
                             (0.0, false, false)
                         } else {
                             let value = numerator / denom as f64;
-                            let breached = spi.threshold.is_some_and(|t| breaches(value, t, spi.direction));
+                            let breached = spi
+                                .threshold
+                                .is_some_and(|t| breaches(value, t, spi.direction));
                             (value, true, breached)
                         }
                     }
                     // A raw count is always evaluable.
                     None => {
-                        let breached = spi.threshold.is_some_and(|t| breaches(numerator, t, spi.direction));
+                        let breached = spi
+                            .threshold
+                            .is_some_and(|t| breaches(numerator, t, spi.direction));
                         (numerator, true, breached)
                     }
                 }
             }
         };
-        values.push(SpiValue { id: spi.id.clone(), value, evaluated, breached });
+        values.push(SpiValue {
+            id: spi.id.clone(),
+            value,
+            evaluated,
+            breached,
+        });
     }
     SpiRollup { chain_ok, values }
 }
@@ -398,8 +439,10 @@ mod tests {
     use super::*;
 
     const REGISTRY_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/ci/spi_registry.json");
-    const SAFETY_CASE_MD: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/docs/safety/UL4600_SAFETY_CASE.md");
+    const SAFETY_CASE_MD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/safety/UL4600_SAFETY_CASE.md"
+    );
     const SRC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
     const CRATES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/crates");
 
@@ -431,7 +474,10 @@ mod tests {
         let reg = committed_registry();
         let emitted = workspace_emitted();
         let report = check_resolution(&reg, &emitted);
-        assert!(report.passed(), "committed SPI registry must resolve: {report:#?}");
+        assert!(
+            report.passed(),
+            "committed SPI registry must resolve: {report:#?}"
+        );
 
         let catalogue = parse_catalogue_spi_ids(
             &std::fs::read_to_string(SAFETY_CASE_MD).expect("safety case exists"),
@@ -448,12 +494,20 @@ mod tests {
     #[test]
     fn scanner_finds_known_emitted_literals() {
         let emitted = workspace_emitted();
-        for lit in ["MOTION_COMMAND_ADMITTED", "RSS_VIOLATION", "SYSTEM_POSTURE_TRANSITION", "DETECTION_RANGE_UNTRUSTED"] {
+        for lit in [
+            "MOTION_COMMAND_ADMITTED",
+            "RSS_VIOLATION",
+            "SYSTEM_POSTURE_TRANSITION",
+            "DETECTION_RANGE_UNTRUSTED",
+        ] {
             assert!(emitted.contains(lit), "scanner must find {lit}");
         }
         // And it does NOT invent an event that no non-test code emits — a
         // removed/renamed literal would vanish from this set and fail to resolve.
-        assert!(!emitted.contains("TOTALLY_ABSENT_EVENT_XYZ"), "an unemitted token must not resolve");
+        assert!(
+            !emitted.contains("TOTALLY_ABSENT_EVENT_XYZ"),
+            "an unemitted token must not resolve"
+        );
     }
 
     /// A typo in the reviewed `direction` fails to deserialize — it can no longer
@@ -491,7 +545,11 @@ mod tests {
         emitted.insert("MOTION_COMMAND_ADMITTED".to_string());
         let report = check_resolution(&reg, &emitted);
         assert!(!report.passed());
-        assert!(report.rows[0].reason.as_deref().unwrap().contains("not emitted"));
+        assert!(report.rows[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("not emitted"));
     }
 
     /// A duplicate SPI ID reds the gate.
@@ -508,7 +566,10 @@ mod tests {
             threshold: None,
             note: "n".into(),
         };
-        let reg = SpiRegistry { comment: String::new(), spis: vec![def("SPI-G06"), def("SPI-G06")] };
+        let reg = SpiRegistry {
+            comment: String::new(),
+            spis: vec![def("SPI-G06"), def("SPI-G06")],
+        };
         let report = check_resolution(&reg, &BTreeSet::new());
         assert!(!report.passed());
         assert_eq!(report.duplicate_ids, vec!["SPI-G06".to_string()]);
@@ -567,11 +628,20 @@ mod tests {
             }],
         };
         let r = evaluate(&reg, &BTreeMap::new(), false);
-        assert!(r.values[0].breached, "SPI-G06 must breach on a failed verify");
-        assert!(!r.all_clear(), "a failed chain verify invalidates the window");
+        assert!(
+            r.values[0].breached,
+            "SPI-G06 must breach on a failed verify"
+        );
+        assert!(
+            !r.all_clear(),
+            "a failed chain verify invalidates the window"
+        );
 
         let ok = evaluate(&reg, &BTreeMap::new(), true);
-        assert!(ok.all_clear(), "a verified chain with no events is all-clear");
+        assert!(
+            ok.all_clear(),
+            "a verified chain with no events is all-clear"
+        );
     }
 
     /// A RATE over a window with no denominator traffic is undefined — it is NOT
@@ -598,14 +668,23 @@ mod tests {
         let mut t = BTreeMap::new();
         t.insert("FABRIC_COMMAND_DENIED".to_string(), 2);
         let r = evaluate(&reg, &t, true);
-        assert!(!r.values[0].evaluated, "a zero-denominator rate window is not evaluated");
-        assert!(!r.values[0].breached, "an unevaluated rate must not manufacture a breach");
+        assert!(
+            !r.values[0].evaluated,
+            "a zero-denominator rate window is not evaluated"
+        );
+        assert!(
+            !r.values[0].breached,
+            "an unevaluated rate must not manufacture a breach"
+        );
         assert!(r.values[0].value.is_finite());
         assert!(r.all_clear(), "an empty-denominator window is not an alarm");
 
         // With traffic, the same SPI evaluates and can breach.
         t.insert("MOTION_COMMAND_ADMITTED".to_string(), 2); // 2/2 = 1.0 > 0.5
         let r = evaluate(&reg, &t, true);
-        assert!(r.values[0].evaluated && r.values[0].breached, "a real 1.0 rate breaches 0.5");
+        assert!(
+            r.values[0].evaluated && r.values[0].breached,
+            "a real 1.0 rate breaches 0.5"
+        );
     }
 }

@@ -8,8 +8,8 @@
 //!
 //! Test-only — no production code changes.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -24,9 +24,7 @@ use kirra_verifier::gateway::kinematics_contract::{
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
 };
-use kirra_verifier::posture_cache::{
-    CachedFleetPosture, ServiceState, SharedPostureCache,
-};
+use kirra_verifier::posture_cache::{CachedFleetPosture, ServiceState, SharedPostureCache};
 use kirra_verifier::verifier::{AppState, FleetPosture, VerifierOperationMode};
 use kirra_verifier::verifier_store::VerifierStore;
 
@@ -37,8 +35,9 @@ use kirra_verifier::verifier_store::VerifierStore;
 fn build_state_with_posture(posture: FleetPosture) -> Arc<ServiceState> {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(posture))));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(posture),
+    )));
     Arc::new(ServiceState {
         app,
         posture_cache,
@@ -46,14 +45,18 @@ fn build_state_with_posture(posture: FleetPosture) -> Arc<ServiceState> {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
     })
 }
 
-async fn ok_handler() -> &'static str { "ok" }
+async fn ok_handler() -> &'static str {
+    "ok"
+}
 
 fn build_actuator_app(svc: Arc<ServiceState>) -> Router {
     Router::new()
@@ -82,7 +85,8 @@ fn valid_cmd_json() -> Vec<u8> {
         delta_time_s: 0.1,
         steering_angle_deg: 1.0,
         current_steering_angle_deg: 0.5,
-    }).unwrap()
+    })
+    .unwrap()
 }
 
 async fn send(app: Router, body: Body) -> StatusCode {
@@ -92,7 +96,10 @@ async fn send(app: Router, body: Body) -> StatusCode {
         .header("content-type", "application/json")
         .body(body)
         .expect("build request");
-    app.oneshot(req).await.expect("router service must not panic").status()
+    app.oneshot(req)
+        .await
+        .expect("router service must not panic")
+        .status()
 }
 
 // ---------------------------------------------------------------------------
@@ -105,8 +112,11 @@ async fn send(app: Router, body: Body) -> StatusCode {
 async fn test_actuator_envelope_lockedout_returns_403() {
     let svc = build_state_with_posture(FleetPosture::LockedOut);
     let status = send(build_actuator_app(svc), Body::from(valid_cmd_json())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN,
-        "LockedOut posture must short-circuit to 403, got {status}");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "LockedOut posture must short-circuit to 403, got {status}"
+    );
 }
 
 /// SG8 / GAP 14b: body exceeding MAX_VEHICLE_COMMAND_BYTES (16 KiB) → 413.
@@ -117,8 +127,11 @@ async fn test_actuator_envelope_oversize_body_returns_413() {
     // 32 KiB of arbitrary bytes — well past the 16 KiB cap.
     let oversize = vec![b'x'; 32 * 1024];
     let status = send(build_actuator_app(svc), Body::from(oversize)).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE,
-        "body > 16 KiB must be rejected 413, got {status}");
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "body > 16 KiB must be rejected 413, got {status}"
+    );
 }
 
 /// SG8 / GAP 14c: malformed JSON in the body → 400 BAD_REQUEST.
@@ -128,8 +141,11 @@ async fn test_actuator_envelope_malformed_json_returns_400() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
     let bogus = b"{ this is not json".to_vec();
     let status = send(build_actuator_app(svc), Body::from(bogus)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST,
-        "malformed JSON must be rejected 400, got {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "malformed JSON must be rejected 400, got {status}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -148,14 +164,18 @@ async fn test_actuator_envelope_deny_breach_persists_audit_row() {
 
     // Pre-condition: chain is empty.
     let before = app_ref.store.with(|store| {
-        store.load_audit_chain_page(100, 0, None)
+        store
+            .load_audit_chain_page(100, 0, None)
             .expect("read page")
             .entries
             .into_iter()
             .filter(|e| e.event_type == "KINEMATIC_CONTRACT_VIOLATION")
             .count()
     });
-    assert_eq!(before, 0, "test setup: no KINEMATIC_CONTRACT_VIOLATION rows yet");
+    assert_eq!(
+        before, 0,
+        "test setup: no KINEMATIC_CONTRACT_VIOLATION rows yet"
+    );
 
     // Submit a non-physical-dt command — Priority-1 InvalidTimeDelta triggers
     // DenyBreach. (NaN can't be expressed in JSON; serde_json renders NaN as
@@ -167,23 +187,30 @@ async fn test_actuator_envelope_deny_breach_persists_audit_row() {
         delta_time_s: -0.1,
         steering_angle_deg: 0.0,
         current_steering_angle_deg: 0.0,
-    }).unwrap();
+    })
+    .unwrap();
 
     let status = send(build_actuator_app(svc), Body::from(deny_cmd)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST,
-        "DenyBreach must return 400; got {status}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "DenyBreach must return 400; got {status}"
+    );
 
     // Post-condition: exactly one new KINEMATIC_CONTRACT_VIOLATION row.
     let after = app_ref.store.with(|store| {
-        store.load_audit_chain_page(100, 0, None)
+        store
+            .load_audit_chain_page(100, 0, None)
             .expect("read page")
             .entries
             .into_iter()
             .filter(|e| e.event_type == "KINEMATIC_CONTRACT_VIOLATION")
             .count()
     });
-    assert_eq!(after, 1,
-        "DenyBreach must persist exactly one audit-chain row (persist-on-deny)");
+    assert_eq!(
+        after, 1,
+        "DenyBreach must persist exactly one audit-chain row (persist-on-deny)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +245,10 @@ async fn send_json(app: Router, body: Body) -> (StatusCode, Value) {
         .header("content-type", "application/json")
         .body(body)
         .expect("build request");
-    let resp = app.oneshot(req).await.expect("router service must not panic");
+    let resp = app
+        .oneshot(req)
+        .await
+        .expect("router service must not panic");
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
         .await
@@ -243,8 +273,11 @@ fn cmd_json(linear: f64, current_v: f64, dt: f64, steer: f64, current_s: f64) ->
 #[tokio::test]
 async fn test_response_schema_allow_carries_interceptor_keys() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(10.0, 9.8, 0.1, 2.0, 1.8))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(10.0, 9.8, 0.1, 2.0, 1.8)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "Allow");
     // interceptor keys present and equal to the original (no clamp).
@@ -261,15 +294,23 @@ async fn test_response_schema_allow_carries_interceptor_keys() {
 #[tokio::test]
 async fn test_response_schema_clamp_linear_is_visible_to_interceptor() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(100.0, 30.0, 0.1, 0.0, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(100.0, 30.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "over-speed is clamped, not denied");
     assert_eq!(v["action"], "ClampLinear", "response must report the clamp");
 
     // The interceptor key MUST be present and carry the clamped value (Nominal
     // ceiling 35.0) — not the original 100.0 it would otherwise forward.
-    let enforced = v["enforced_linear_velocity_mps"].as_f64().expect("key present");
-    assert!((enforced - 35.0).abs() < 0.01, "clamped to 35.0, got {enforced}");
+    let enforced = v["enforced_linear_velocity_mps"]
+        .as_f64()
+        .expect("key present");
+    assert!(
+        (enforced - 35.0).abs() < 0.01,
+        "clamped to 35.0, got {enforced}"
+    );
     assert!(enforced < 100.0);
     // Legacy value key carries the same enforced value (internal consistency).
     assert_eq!(v["linear_velocity_mps"], v["enforced_linear_velocity_mps"]);
@@ -282,12 +323,20 @@ async fn test_response_schema_clamp_linear_is_visible_to_interceptor() {
 #[tokio::test]
 async fn test_response_schema_clamp_steering_is_visible_to_interceptor() {
     let svc = build_state_with_posture(FleetPosture::Nominal);
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(2.0, 2.0, 0.1, 90.0, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(2.0, 2.0, 0.1, 90.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "ClampSteering");
-    let enforced = v["enforced_steering_angle_deg"].as_f64().expect("key present");
-    assert!(enforced < 90.0 && enforced > 0.0, "clamped below 90°, sign kept, got {enforced}");
+    let enforced = v["enforced_steering_angle_deg"]
+        .as_f64()
+        .expect("key present");
+    assert!(
+        enforced < 90.0 && enforced > 0.0,
+        "clamped below 90°, sign kept, got {enforced}"
+    );
     assert_eq!(v["steering_angle_deg"], v["enforced_steering_angle_deg"]);
     assert_eq!(v["original_steering_angle_deg"], 90.0);
 }
@@ -304,14 +353,25 @@ async fn test_posture_gate_fences_diverged_epoch_and_demotes() {
     // Arrange the fence: held != db, both non-zero.
     svc.app.held_epoch.store(7, Ordering::SeqCst);
     svc.app.cached_db_epoch.store(8, Ordering::SeqCst);
-    assert!(svc.app.mode_active.load(Ordering::SeqCst),
-        "test precondition: mode_active starts true on an Active instance");
+    assert!(
+        svc.app.mode_active.load(Ordering::SeqCst),
+        "test precondition: mode_active starts true on an Active instance"
+    );
 
-    let status = send(build_posture_gate_app(Arc::clone(&svc)), Body::from(valid_cmd_json())).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE,
-        "diverged epoch on a mutation must be fenced 503; got {status}");
-    assert!(!svc.app.mode_active.load(Ordering::SeqCst),
-        "fenced mutation must clear mode_active (self-demote)");
+    let status = send(
+        build_posture_gate_app(Arc::clone(&svc)),
+        Body::from(valid_cmd_json()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "diverged epoch on a mutation must be fenced 503; got {status}"
+    );
+    assert!(
+        !svc.app.mode_active.load(Ordering::SeqCst),
+        "fenced mutation must clear mode_active (self-demote)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +403,9 @@ async fn test_posture_gate_fences_diverged_epoch_and_demotes() {
 /// set and are checked separately.)
 fn assert_axis_keys_hide_original(v: &Value, enforced_key: &str, legacy_key: &str, original: f64) {
     for key in [enforced_key, legacy_key] {
-        let x = v[key].as_f64().unwrap_or_else(|| panic!("interceptor key `{key}` must be present"));
+        let x = v[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("interceptor key `{key}` must be present"));
         assert!(
             (x - original).abs() > 1e-9,
             "interceptor-read key `{key}` carries the ORIGINAL unclamped value {original} — \
@@ -366,22 +428,41 @@ async fn test_capstone_degraded_overspeed_clamps_and_hides_original() {
     // to exercise the envelope clamp — a speed *increase* under Degraded is
     // denied, not clamped (see the decel-to-stop-and-hold gate). 100 m/s is
     // still far over the 5 m/s MRC ceiling, so the envelope clamps it.
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(original, 120.0, 0.1, 0.0, 0.0))).await;
-    assert_eq!(status, StatusCode::OK, "over-speed (decelerating) is clamped, not denied");
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(original, 120.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "over-speed (decelerating) is clamped, not denied"
+    );
 
     // Clamp is reported (not a hardcoded "Allow") under both key families.
     assert_eq!(v["action"], "ClampLinear");
     assert_eq!(v["enforcement_action"], "ClampLinear");
 
     // Canonical + legacy value keys carry the MRC ceiling, not the original.
-    let enforced = v["enforced_linear_velocity_mps"].as_f64().expect("canonical key present");
-    assert!((enforced - ceiling).abs() < 1e-9, "clamped to MRC ceiling {ceiling}, got {enforced}");
-    assert_eq!(v["linear_velocity_mps"], v["enforced_linear_velocity_mps"],
-        "legacy value key must equal the enforced (clamped) value");
+    let enforced = v["enforced_linear_velocity_mps"]
+        .as_f64()
+        .expect("canonical key present");
+    assert!(
+        (enforced - ceiling).abs() < 1e-9,
+        "clamped to MRC ceiling {ceiling}, got {enforced}"
+    );
+    assert_eq!(
+        v["linear_velocity_mps"], v["enforced_linear_velocity_mps"],
+        "legacy value key must equal the enforced (clamped) value"
+    );
 
     // CRUCIAL: no interceptor-read key carries the original 100.0.
-    assert_axis_keys_hide_original(&v, "enforced_linear_velocity_mps", "linear_velocity_mps", original);
+    assert_axis_keys_hide_original(
+        &v,
+        "enforced_linear_velocity_mps",
+        "linear_velocity_mps",
+        original,
+    );
 
     // Original is preserved ONLY under the observability key (intentional).
     assert_eq!(v["original_linear_velocity_mps"], original);
@@ -396,20 +477,34 @@ async fn test_capstone_degraded_oversteer_clamps_and_hides_original() {
     let svc = build_state_with_posture(FleetPosture::Degraded);
     let original = 90.0;
 
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(2.0, 2.0, 0.1, original, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(2.0, 2.0, 0.1, original, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "ClampSteering");
     assert_eq!(v["enforcement_action"], "ClampSteering");
 
-    let enforced = v["enforced_steering_angle_deg"].as_f64().expect("canonical key present");
-    assert!(enforced > 0.0 && enforced < original,
-        "steering clamped below {original}° with sign kept, got {enforced}");
-    assert_eq!(v["steering_angle_deg"], v["enforced_steering_angle_deg"],
-        "legacy steering key must equal the enforced (clamped) value");
+    let enforced = v["enforced_steering_angle_deg"]
+        .as_f64()
+        .expect("canonical key present");
+    assert!(
+        enforced > 0.0 && enforced < original,
+        "steering clamped below {original}° with sign kept, got {enforced}"
+    );
+    assert_eq!(
+        v["steering_angle_deg"], v["enforced_steering_angle_deg"],
+        "legacy steering key must equal the enforced (clamped) value"
+    );
 
     // CRUCIAL: no interceptor-read steering key carries the original 90°.
-    assert_axis_keys_hide_original(&v, "enforced_steering_angle_deg", "steering_angle_deg", original);
+    assert_axis_keys_hide_original(
+        &v,
+        "enforced_steering_angle_deg",
+        "steering_angle_deg",
+        original,
+    );
     assert_eq!(v["original_steering_angle_deg"], original);
 }
 
@@ -419,8 +514,11 @@ async fn test_capstone_degraded_oversteer_clamps_and_hides_original() {
 #[tokio::test]
 async fn test_capstone_degraded_in_envelope_passes_through_unclamped() {
     let svc = build_state_with_posture(FleetPosture::Degraded);
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(3.0, 3.0, 0.1, 1.0, 1.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(3.0, 3.0, 0.1, 1.0, 1.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "Allow");
     assert_eq!(v["enforcement_action"], "Allow");
@@ -444,8 +542,9 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
     // enabled=true is set on the ServiceState below; cap 3.0 m/s, command 10 m/s.
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app_state = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(FleetPosture::Nominal),
+    )));
     let perception_cap = kirra_verifier::gateway::perception_monitor::empty_perception_cap();
     {
         use kirra_verifier::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
@@ -464,19 +563,26 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
     });
 
     // 10 m/s steady (current==linear so no accel/steer clamp) → clamp to cap 3.0.
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "ClampLinear");
-    assert_eq!(v["enforced_linear_velocity_mps"], 3.0,
-        "enabled+fresh perception cap must clamp the forwarded command to 3.0");
+    assert_eq!(
+        v["enforced_linear_velocity_mps"], 3.0,
+        "enabled+fresh perception cap must clamp the forwarded command to 3.0"
+    );
 }
 
 /// PMON-002 state 1 (disabled): identical to the no-perception baseline — a
@@ -485,10 +591,16 @@ async fn test_perception_cap_enabled_fresh_clamps_to_published_cap() {
 #[tokio::test]
 async fn test_perception_cap_disabled_is_noop() {
     let svc = build_state_with_posture(FleetPosture::Nominal); // enabled = false
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["action"], "Allow", "disabled monitor must be a pure no-op");
+    assert_eq!(
+        v["action"], "Allow",
+        "disabled monitor must be a pure no-op"
+    );
     assert_eq!(v["enforced_linear_velocity_mps"], 10.0);
 }
 
@@ -498,8 +610,9 @@ async fn test_perception_cap_disabled_is_noop() {
 async fn test_perception_cap_enabled_stale_controlled_stop() {
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app_state = Arc::new(AppState::new(store, VerifierOperationMode::Active));
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(FleetPosture::Nominal),
+    )));
     let perception_cap = kirra_verifier::gateway::perception_monitor::empty_perception_cap();
     {
         use kirra_verifier::gateway::perception_monitor::{CachedPerceptionCap, DerateCode};
@@ -518,18 +631,25 @@ async fn test_perception_cap_enabled_stale_controlled_stop() {
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap,
         perception_monitor_enabled: true,
     });
 
-    let (status, v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0))).await;
+    let (status, v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(10.0, 10.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["action"], "ClampLinear");
-    assert_eq!(v["enforced_linear_velocity_mps"], 0.0,
-        "enabled+stale monitor must fail closed to a controlled stop (cap 0.0)");
+    assert_eq!(
+        v["enforced_linear_velocity_mps"], 0.0,
+        "enabled+stale monitor must fail closed to a controlled stop (cap 0.0)"
+    );
 }
 
 /// FAIL-CLOSED: the handler's signature declares `Extension<EnforcementOutcome>`
@@ -544,8 +664,11 @@ async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() 
         .route("/actuator/motion/command", post(echo_outcome))
         .with_state(svc);
     let status = send(app, Body::from(valid_cmd_json())).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR,
-        "missing EnforcementOutcome extension must fail closed 500, never a defaulted Allow");
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "missing EnforcementOutcome extension must fail closed 500, never a defaulted Allow"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -556,17 +679,19 @@ async fn test_capstone_missing_enforcement_outcome_extension_fails_closed_500() 
 
 /// Build a Nominal state with a capture writer installed; return (svc, rx) so the
 /// test can both drive the gateway and observe the emitted records.
-fn build_state_with_capture()
-    -> (Arc<ServiceState>, tokio::sync::mpsc::Receiver<kirra_verifier::capture::CaptureRecord>)
-{
+fn build_state_with_capture() -> (
+    Arc<ServiceState>,
+    tokio::sync::mpsc::Receiver<kirra_verifier::capture::CaptureRecord>,
+) {
     use kirra_verifier::verifier::{AppState, VerifierOperationMode};
     use kirra_verifier::verifier_store::VerifierStore;
     let store = VerifierStore::new(":memory:").expect("in-memory store");
     let app = Arc::new(AppState::new(store, VerifierOperationMode::Active));
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     app.install_capture_writer(tx);
-    let posture_cache: SharedPostureCache =
-        Arc::new(std::sync::RwLock::new(Some(CachedFleetPosture::new(FleetPosture::Nominal))));
+    let posture_cache: SharedPostureCache = Arc::new(std::sync::RwLock::new(Some(
+        CachedFleetPosture::new(FleetPosture::Nominal),
+    )));
     let svc = Arc::new(ServiceState {
         app,
         posture_cache,
@@ -574,7 +699,9 @@ fn build_state_with_capture()
         audit_verifying_key: None,
         fabric_router: Arc::new(kirra_verifier::fabric::router::FabricRouter::new()),
         fabric_telemetry: Arc::new(kirra_verifier::fabric::telemetry::FabricTelemetry::new()),
-        fabric_causal_log: Arc::new(kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None)),
+        fabric_causal_log: Arc::new(
+            kirra_verifier::fabric::causal_log::FabricCausalLog::new_in_memory(None),
+        ),
         posture_engine_tx: std::sync::OnceLock::new(),
         perception_cap: kirra_verifier::gateway::perception_monitor::empty_perception_cap(),
         perception_monitor_enabled: false,
@@ -610,8 +737,11 @@ async fn test_capture_emits_a_record_per_arm() {
 
     // Allow.
     let (svc, mut rx) = build_state_with_capture();
-    let (status, _v) =
-        send_json(build_schema_app(svc), Body::from(cmd_json(20.0, 20.0, 0.1, 0.0, 0.0))).await;
+    let (status, _v) = send_json(
+        build_schema_app(svc),
+        Body::from(cmd_json(20.0, 20.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let rec = rx.try_recv().expect("a capture record for the Allow");
     assert_eq!(rec.outcome, CaptureOutcome::Allow);
@@ -622,10 +752,15 @@ async fn test_capture_emits_a_record_per_arm() {
 
     // ClampLinear → records the substituted safe value (the correction).
     let (svc2, mut rx2) = build_state_with_capture();
-    let (status2, _v2) =
-        send_json(build_schema_app(svc2), Body::from(cmd_json(40.0, 40.0, 0.1, 0.0, 0.0))).await;
+    let (status2, _v2) = send_json(
+        build_schema_app(svc2),
+        Body::from(cmd_json(40.0, 40.0, 0.1, 0.0, 0.0)),
+    )
+    .await;
     assert_eq!(status2, StatusCode::OK);
-    let rec2 = rx2.try_recv().expect("a capture record for the ClampLinear");
+    let rec2 = rx2
+        .try_recv()
+        .expect("a capture record for the ClampLinear");
     assert_eq!(rec2.outcome, CaptureOutcome::ClampLinear);
     assert_eq!(rec2.safe_value, Some(35.0), "the correction Kirra imposed");
 }
@@ -661,15 +796,38 @@ async fn a3_drop_counters_count_audit_and_capture_overflow() {
     .unwrap();
 
     // Request 1: both capacity-1 channels fill (no drop yet).
-    let s1 = send(build_actuator_app(Arc::clone(&svc)), Body::from(deny.clone())).await;
+    let s1 = send(
+        build_actuator_app(Arc::clone(&svc)),
+        Body::from(deny.clone()),
+    )
+    .await;
     assert_eq!(s1, StatusCode::BAD_REQUEST, "DenyBreach must 400");
-    assert_eq!(svc.app.capture_drops.load(Ordering::Relaxed), 0, "first capture record fits");
-    assert_eq!(svc.app.audit_write_drops.load(Ordering::Relaxed), 0, "first audit record fits");
+    assert_eq!(
+        svc.app.capture_drops.load(Ordering::Relaxed),
+        0,
+        "first capture record fits"
+    );
+    assert_eq!(
+        svc.app.audit_write_drops.load(Ordering::Relaxed),
+        0,
+        "first audit record fits"
+    );
 
     // Request 2: both overflow → the A3 counters increment; response still a clean 400.
     let s2 = send(build_actuator_app(Arc::clone(&svc)), Body::from(deny)).await;
-    assert_eq!(s2, StatusCode::BAD_REQUEST, "drop is off the verdict path — still 400");
-    assert_eq!(svc.app.capture_drops.load(Ordering::Relaxed), 1, "capture drop counted");
-    assert_eq!(svc.app.audit_write_drops.load(Ordering::Relaxed), 1, "audit drop counted");
+    assert_eq!(
+        s2,
+        StatusCode::BAD_REQUEST,
+        "drop is off the verdict path — still 400"
+    );
+    assert_eq!(
+        svc.app.capture_drops.load(Ordering::Relaxed),
+        1,
+        "capture drop counted"
+    );
+    assert_eq!(
+        svc.app.audit_write_drops.load(Ordering::Relaxed),
+        1,
+        "audit drop counted"
+    );
 }
-

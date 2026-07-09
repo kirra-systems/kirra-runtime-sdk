@@ -21,18 +21,31 @@ pub struct FunctionalSafetyPosture {
     pub tracking_metrics_observational_only: bool,
 }
 
-pub struct EnterpriseHAEngine { pub node_identifier: String }
+pub struct EnterpriseHAEngine {
+    pub node_identifier: String,
+}
 
 impl EnterpriseHAEngine {
-    pub fn new(node_id: &str) -> Self { Self { node_identifier: node_id.to_string() } }
-
-    #[inline]
-    pub fn evaluate_liveness_probe(&self) -> DeploymentLivenessStatus {
-        DeploymentLivenessStatus { process_alive: true, allocation_state_stable: true }
+    pub fn new(node_id: &str) -> Self {
+        Self {
+            node_identifier: node_id.to_string(),
+        }
     }
 
     #[inline]
-    pub fn evaluate_readiness_probe(&self, network_stalled: bool, active_connections: u32) -> DeploymentReadinessStatus {
+    pub fn evaluate_liveness_probe(&self) -> DeploymentLivenessStatus {
+        DeploymentLivenessStatus {
+            process_alive: true,
+            allocation_state_stable: true,
+        }
+    }
+
+    #[inline]
+    pub fn evaluate_readiness_probe(
+        &self,
+        network_stalled: bool,
+        active_connections: u32,
+    ) -> DeploymentReadinessStatus {
         DeploymentReadinessStatus {
             can_accept_ingress_traffic: !network_stalled && active_connections < 120,
             plc_egress_link_connected: !network_stalled,

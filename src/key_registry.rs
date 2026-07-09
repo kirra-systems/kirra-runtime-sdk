@@ -138,10 +138,17 @@ impl<'a> KeyRegistry<'a> {
         let Ok(Some(key_bytes)) = self.resolve_ed25519_pubkey(principal_id, role) else {
             return false;
         };
-        let Ok(vk) = VerifyingKey::from_bytes(&key_bytes) else { return false };
-        let Ok(sig_raw) = B64.decode(signature_b64.trim()) else { return false };
-        let Ok(sig_arr) = <[u8; 64]>::try_from(sig_raw.as_slice()) else { return false };
-        vk.verify_strict(payload, &Signature::from_bytes(&sig_arr)).is_ok()
+        let Ok(vk) = VerifyingKey::from_bytes(&key_bytes) else {
+            return false;
+        };
+        let Ok(sig_raw) = B64.decode(signature_b64.trim()) else {
+            return false;
+        };
+        let Ok(sig_arr) = <[u8; 64]>::try_from(sig_raw.as_slice()) else {
+            return false;
+        };
+        vk.verify_strict(payload, &Signature::from_bytes(&sig_arr))
+            .is_ok()
     }
 }
 
@@ -165,7 +172,10 @@ fn b64_to_key_bytes(b64: &str) -> Option<[u8; 32]> {
     match <[u8; 32]>::try_from(raw.as_slice()) {
         Ok(k) => Some(k),
         Err(_) => {
-            tracing::warn!(len = raw.len(), "key_registry: stored key is not 32 bytes — rejected");
+            tracing::warn!(
+                len = raw.len(),
+                "key_registry: stored key is not 32 bytes — rejected"
+            );
             None
         }
     }
@@ -180,8 +190,9 @@ mod tests {
     /// A deterministic keypair + its SPKI PEM (the in-repo RFC-8410 12-byte prefix
     /// convention) — derived from a seed, NOT a hardcoded key.
     fn keypair(seed: u8) -> (SigningKey, String, String) {
-        const ED25519_SPKI_PREFIX: [u8; 12] =
-            [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
         let sk = SigningKey::from_bytes(&[seed; 32]);
         let raw = sk.verifying_key().to_bytes();
         let mut der = ED25519_SPKI_PREFIX.to_vec();
@@ -219,8 +230,14 @@ mod tests {
         let store = store();
         save_node_with_pem(&store, "robot-01", Some(pem));
         let reg = KeyRegistry::new(&store);
-        let got = reg.resolve_ed25519_pubkey("robot-01", KeyRole::NodeAttestation).unwrap();
-        assert_eq!(got, Some(sk.verifying_key().to_bytes()), "PEM node key → the exact 32 bytes");
+        let got = reg
+            .resolve_ed25519_pubkey("robot-01", KeyRole::NodeAttestation)
+            .unwrap();
+        assert_eq!(
+            got,
+            Some(sk.verifying_key().to_bytes()),
+            "PEM node key → the exact 32 bytes"
+        );
     }
 
     #[test]
@@ -230,24 +247,50 @@ mod tests {
         let (sk, pem, raw_b64) = keypair(9);
         let store = store();
         save_node_with_pem(&store, "node-A", Some(pem));
-        store.save_trusted_federation_controller("ctrl-A", &raw_b64, 1).unwrap();
+        store
+            .save_trusted_federation_controller("ctrl-A", &raw_b64, 1)
+            .unwrap();
         let reg = KeyRegistry::new(&store);
-        let via_pem = reg.resolve_ed25519_pubkey("node-A", KeyRole::NodeAttestation).unwrap();
-        let via_b64 = reg.resolve_ed25519_pubkey("ctrl-A", KeyRole::FederationController).unwrap();
+        let via_pem = reg
+            .resolve_ed25519_pubkey("node-A", KeyRole::NodeAttestation)
+            .unwrap();
+        let via_b64 = reg
+            .resolve_ed25519_pubkey("ctrl-A", KeyRole::FederationController)
+            .unwrap();
         assert_eq!(via_pem, Some(sk.verifying_key().to_bytes()));
-        assert_eq!(via_pem, via_b64, "PEM and b64 paths normalize to identical bytes");
+        assert_eq!(
+            via_pem, via_b64,
+            "PEM and b64 paths normalize to identical bytes"
+        );
         // FleetGrant resolves from the same controller registry.
-        let via_fleet = reg.resolve_ed25519_pubkey("ctrl-A", KeyRole::FleetGrant).unwrap();
-        assert_eq!(via_fleet, via_b64, "FleetGrant shares the controller registry");
+        let via_fleet = reg
+            .resolve_ed25519_pubkey("ctrl-A", KeyRole::FleetGrant)
+            .unwrap();
+        assert_eq!(
+            via_fleet, via_b64,
+            "FleetGrant shares the controller registry"
+        );
     }
 
     #[test]
     fn unknown_principal_is_none_not_error() {
         let store = store();
         let reg = KeyRegistry::new(&store);
-        assert_eq!(reg.resolve_ed25519_pubkey("ghost", KeyRole::NodeAttestation).unwrap(), None);
-        assert_eq!(reg.resolve_ed25519_pubkey("ghost", KeyRole::FederationController).unwrap(), None);
-        assert_eq!(reg.resolve_ed25519_pubkey("ghost", KeyRole::Operator).unwrap(), None);
+        assert_eq!(
+            reg.resolve_ed25519_pubkey("ghost", KeyRole::NodeAttestation)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reg.resolve_ed25519_pubkey("ghost", KeyRole::FederationController)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reg.resolve_ed25519_pubkey("ghost", KeyRole::Operator)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -256,12 +299,18 @@ mod tests {
         let mut store = store();
         store.register_operator("alice", &pem, 1).unwrap();
         let reg = KeyRegistry::new(&store);
-        assert!(reg.resolve_ed25519_pubkey("alice", KeyRole::Operator).unwrap().is_some(), "active resolves");
+        assert!(
+            reg.resolve_ed25519_pubkey("alice", KeyRole::Operator)
+                .unwrap()
+                .is_some(),
+            "active resolves"
+        );
         // Revoke, then it must read as unknown.
         store.revoke_operator("alice", 2).unwrap();
         let reg = KeyRegistry::new(&store);
         assert_eq!(
-            reg.resolve_ed25519_pubkey("alice", KeyRole::Operator).unwrap(),
+            reg.resolve_ed25519_pubkey("alice", KeyRole::Operator)
+                .unwrap(),
             None,
             "a revoked operator resolves to None (treated as unknown)"
         );
@@ -276,26 +325,41 @@ mod tests {
 
         let payload = b"attestation-challenge-bytes";
         let good = B64.encode(sk.sign(payload).to_bytes());
-        assert!(reg.verify_for("robot-02", KeyRole::NodeAttestation, payload, &good), "valid sig → true");
+        assert!(
+            reg.verify_for("robot-02", KeyRole::NodeAttestation, payload, &good),
+            "valid sig → true"
+        );
 
         // Tampered payload → bad signature.
-        assert!(!reg.verify_for("robot-02", KeyRole::NodeAttestation, b"different", &good), "bad sig → false");
+        assert!(
+            !reg.verify_for("robot-02", KeyRole::NodeAttestation, b"different", &good),
+            "bad sig → false"
+        );
 
         // Unknown principal → false (fail-closed), never an ignored error.
-        assert!(!reg.verify_for("ghost", KeyRole::NodeAttestation, payload, &good), "unknown → false");
+        assert!(
+            !reg.verify_for("ghost", KeyRole::NodeAttestation, payload, &good),
+            "unknown → false"
+        );
 
         // Malformed signature base64 → false.
-        assert!(!reg.verify_for("robot-02", KeyRole::NodeAttestation, payload, "!!notb64"), "malformed sig → false");
+        assert!(
+            !reg.verify_for("robot-02", KeyRole::NodeAttestation, payload, "!!notb64"),
+            "malformed sig → false"
+        );
     }
 
     #[test]
     fn wrong_length_b64_key_is_none_no_panic() {
         let store = store();
         // 16 bytes, not 32 — a structurally invalid Ed25519 key.
-        store.save_trusted_federation_controller("ctrl-bad", &B64.encode([0u8; 16]), 1).unwrap();
+        store
+            .save_trusted_federation_controller("ctrl-bad", &B64.encode([0u8; 16]), 1)
+            .unwrap();
         let reg = KeyRegistry::new(&store);
         assert_eq!(
-            reg.resolve_ed25519_pubkey("ctrl-bad", KeyRole::FederationController).unwrap(),
+            reg.resolve_ed25519_pubkey("ctrl-bad", KeyRole::FederationController)
+                .unwrap(),
             None,
             "a wrong-length stored key is rejected (None), not a panic"
         );
@@ -310,7 +374,8 @@ mod tests {
         {
             let reg = KeyRegistry::new(&store);
             assert_eq!(
-                reg.resolve_ed25519_pubkey("anything", KeyRole::AuditSigning).unwrap(),
+                reg.resolve_ed25519_pubkey("anything", KeyRole::AuditSigning)
+                    .unwrap(),
                 None,
                 "no audit signer installed → None"
             );
@@ -323,7 +388,8 @@ mod tests {
 
         // The live audit key resolves by its verifying_key_id (the chain's key_id).
         assert_eq!(
-            reg.resolve_ed25519_pubkey(&fp, KeyRole::AuditSigning).unwrap(),
+            reg.resolve_ed25519_pubkey(&fp, KeyRole::AuditSigning)
+                .unwrap(),
             Some(vk.to_bytes()),
             "the live audit key resolves by its verifying_key_id"
         );
@@ -331,7 +397,8 @@ mod tests {
         // (this store has no rotations) → None. Fail-closed. (The rotated-out-key
         // resolution is exercised in `audit_signing_key_resolves_a_rotated_out_key_from_the_ledger`.)
         assert_eq!(
-            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning).unwrap(),
+            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning)
+                .unwrap(),
             None,
             "a fingerprint in neither the live signer nor the ledger → None"
         );
@@ -339,8 +406,14 @@ mod tests {
         // verify_for over the audit key: good sig true; wrong fingerprint false.
         let payload = b"a-signed-audit-event";
         let sig = B64.encode(sk.sign(payload).to_bytes());
-        assert!(reg.verify_for(&fp, KeyRole::AuditSigning, payload, &sig), "audit-key signature verifies");
-        assert!(!reg.verify_for("wrong-fp", KeyRole::AuditSigning, payload, &sig), "wrong fingerprint → false");
+        assert!(
+            reg.verify_for(&fp, KeyRole::AuditSigning, payload, &sig),
+            "audit-key signature verifies"
+        );
+        assert!(
+            !reg.verify_for("wrong-fp", KeyRole::AuditSigning, payload, &sig),
+            "wrong fingerprint → false"
+        );
     }
 
     /// #329 residual CLOSED: after a key rotation, a ROTATED-OUT audit key still
@@ -357,28 +430,37 @@ mod tests {
 
         // Bootstrap genesis A (live), then rotate A→B→C. The live signer is now C;
         // A and B are RETIRED but recorded as self-attested ledger rows.
-        store.admit_signing_key(a.clone(), true, None, 1_000).expect("admit genesis A");
+        store
+            .admit_signing_key(a.clone(), true, None, 1_000)
+            .expect("admit genesis A");
         let held = store.try_claim_epoch(0, "test-node", 0).unwrap().unwrap();
-        store.record_key_rotation(b.clone(), "scheduled", 2_000, held).expect("rotate A→B");
-        store.record_key_rotation(c.clone(), "scheduled", 3_000, held).expect("rotate B→C");
+        store
+            .record_key_rotation(b.clone(), "scheduled", 2_000, held)
+            .expect("rotate A→B");
+        store
+            .record_key_rotation(c.clone(), "scheduled", 3_000, held)
+            .expect("rotate B→C");
 
         let reg = KeyRegistry::new(&store);
 
         // The LIVE key resolves via the in-memory signer (the hot path).
         assert_eq!(
-            reg.resolve_ed25519_pubkey(&kid(&c), KeyRole::AuditSigning).unwrap(),
+            reg.resolve_ed25519_pubkey(&kid(&c), KeyRole::AuditSigning)
+                .unwrap(),
             Some(c.verifying_key().to_bytes()),
             "the live signer resolves"
         );
         // The ROTATED-OUT key B resolves from the LEDGER — the residual being closed.
         assert_eq!(
-            reg.resolve_ed25519_pubkey(&kid(&b), KeyRole::AuditSigning).unwrap(),
+            reg.resolve_ed25519_pubkey(&kid(&b), KeyRole::AuditSigning)
+                .unwrap(),
             Some(b.verifying_key().to_bytes()),
             "a rotated-out key resolves from the audit_key_ledger (residual closed)"
         );
         // A fingerprint in neither the live signer nor the ledger → None (fail-closed).
         assert_eq!(
-            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning).unwrap(),
+            reg.resolve_ed25519_pubkey("deadbeef", KeyRole::AuditSigning)
+                .unwrap(),
             None,
             "an unknown fingerprint resolves to None"
         );
