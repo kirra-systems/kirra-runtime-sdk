@@ -60,12 +60,14 @@ fn stale_trajectory_mrcs() {
 #[test]
 fn horizon_exhausted_mrcs() {
     // Arm B: no pose with `time_from_start_s >= elapsed` — the trajectory's
-    // whole horizon is in the past (fresh enough to pass staleness, but every
-    // pose's time has elapsed). 3 poses over 0.2 s, elapsed 0.19 s: still fresh
-    // (< 200 ms), but only the last pose (0.2 s) could match — nudge elapsed
-    // just past it so `find` returns None.
+    // whole horizon is in the past while it is still fresh enough to pass
+    // `is_stale(now)`. The accepted trajectory spans 0.04 s (poses at
+    // 0.00/0.02/0.04 s) but elapsed since promotion is 0.15 s, so `find`
+    // returns None → MRCFallback. The exact numbers matter: 150 ms keeps the
+    // trajectory fresh (< DEFAULT_MAX_AGE_MS = 200 ms) yet past the 0.04 s
+    // horizon, so this pins horizon exhaustion WITHOUT tripping staleness.
     let promoted = 100_000;
-    let now = promoted + 150; // < DEFAULT_MAX_AGE_MS (fresh), but past a short horizon
+    let now = promoted + 150; // 0.15 s: < DEFAULT_MAX_AGE_MS (fresh), past the 0.04 s horizon
     let traj = fresh_accepted(promoted, straight_pts(3, 5.0, 0.02)); // poses at 0, 0.02, 0.04 s
     let cmd = IncomingControl { velocity_mps: 5.0, steering_rad: 0.0, stamp_ms: now };
     let cfg = VehicleConfig::default_urban();
