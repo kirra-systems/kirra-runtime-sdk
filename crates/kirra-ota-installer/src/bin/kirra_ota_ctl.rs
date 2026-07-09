@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 use kirra_ota_installer::{
     adoption_report_payload, artifact_sha256_hex, decide_pull, derive_model_allowlist,
     parse_metadata_bundle, plan_commit, plan_rollback, plan_run, plan_stage,
-    verify_staged_artifact, AssignmentView, BootRecord, FileBootController, HealthGate,
-    PullAction, Slot, UptaneTrustStore,
+    uptane_pull_gate, verify_staged_artifact, AssignmentView, BootRecord, FileBootController,
+    HealthGate, PullAction, Slot, UptaneTrustStore,
 };
 
 struct Cfg {
@@ -439,6 +439,11 @@ struct PullOpts {
     /// signature on the assignment (fail-closed); unset = legacy hash-only
     /// mode (pre-provisioning), with a loud warning.
     release_pubkey: Option<String>,
+    /// EP-13 — durable Uptane trust-store path. If the file EXISTS the node is
+    /// anchored: the assignment must carry a metadata set that verifies against
+    /// the persisted root/floor and authorizes the assigned digest (fail-closed);
+    /// no file = legacy mode, warned loudly like the release key.
+    trust_store: String,
 }
 
 impl PullOpts {
@@ -448,6 +453,8 @@ impl PullOpts {
         let mut cohorts = std::env::var("KIRRA_NODE_COHORTS").ok().unwrap_or_default();
         let mut artifact_base = std::env::var("KIRRA_OTA_ARTIFACT_BASE").ok();
         let mut release_pubkey = std::env::var("KIRRA_OTA_RELEASE_PUBKEY").ok();
+        let mut trust_store = std::env::var("KIRRA_OTA_TRUST_STORE")
+            .unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
 
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -462,6 +469,7 @@ impl PullOpts {
                 "--cohorts" => cohorts = next("--cohorts")?,
                 "--artifact-base" => artifact_base = Some(next("--artifact-base")?),
                 "--release-pubkey" => release_pubkey = Some(next("--release-pubkey")?),
+                "--trust-store" => trust_store = next("--trust-store")?,
                 other => return Err(format!("unknown pull flag {other:?}")),
             }
         }
@@ -478,6 +486,7 @@ impl PullOpts {
             artifact_base: artifact_base
                 .ok_or("pull requires --artifact-base <url> (or KIRRA_OTA_ARTIFACT_BASE)")?,
             release_pubkey,
+            trust_store,
         })
     }
 }
@@ -560,6 +569,40 @@ fn cmd_pull(args: &[String]) -> Result<(), String> {
                 version.as_deref().unwrap_or("?"),
                 campaign_id.as_deref().unwrap_or("?")
             );
+            // EP-13: with a provisioned Uptane trust anchor the assignment MUST
+            // carry a metadata set that verifies end-to-end at the node (root-
+            // keyed role signatures, freshness, chain agreement, rollback
+            // floors) AND whose targets authorize exactly this digest — all
+            // BEFORE the download. The verifier is an untrusted carrier here.
+            // No anchor = legacy mode, warned loudly (same posture as WP-12).
+            let trust_store = UptaneTrustStore::new(&opts.trust_store);
+            let trust_state = if Path::new(&opts.trust_store).exists() {
+                // An anchored node whose trust state fails to LOAD must refuse
+                // the pull outright — never degrade to a legacy pull.
+                Some(trust_store.load().map_err(|e| format!(
+                    "uptane trust state at {} is unreadable — refusing to stage \
+                     (fail-closed): {e}",
+                    opts.trust_store
+                ))?)
+            } else {
+                None
+            };
+            let uptane_floor = uptane_pull_gate(
+                trust_state.as_ref(),
+                assignment.uptane_metadata.as_ref(),
+                &digest,
+                now_ms(),
+            )
+            .map_err(|e| e.to_string())?;
+            match &uptane_floor {
+                Some(_) => println!("uptane metadata set verified; digest is authorized"),
+                None => eprintln!(
+                    "WARNING: no uptane trust anchor provisioned \
+                     (`trust-provision` / --trust-store / KIRRA_OTA_TRUST_STORE) \
+                     — the assignment's metadata set is NOT enforced (legacy \
+                     mode); anchor the node to enforce Uptane end-to-end"
+                ),
+            }
             // WP-12: with a provisioned release key the assignment MUST carry
             // a valid release signature over the digest — verified BEFORE the
             // download (a forged assignment costs nothing). No key = legacy
@@ -588,6 +631,18 @@ fn cmd_pull(args: &[String]) -> Result<(), String> {
             let result = dl.and_then(|()| stage_verified(&cfg, &tmp, &digest));
             std::fs::remove_file(&tmp).ok();
             let target = result?;
+            // EP-13: only AFTER the artifact itself verified and staged does
+            // the node advance its durable rollback floor — a failed download
+            // or stage never burns the floor (the same set can be retried).
+            if let Some(floor) = uptane_floor {
+                trust_store.record_versions(floor).map_err(|e| {
+                    format!("staged, but persisting the uptane version floor failed: {e}")
+                })?;
+                println!(
+                    "uptane rollback floor advanced (targets v{}, snapshot v{}, timestamp v{})",
+                    floor.targets, floor.snapshot, floor.timestamp
+                );
+            }
             println!(
                 "staged assigned artifact into slot {} ({}); `systemctl restart` then `probe`",
                 target.as_str(),
@@ -1151,10 +1206,12 @@ fn cmd_trust_provision(args: &[String]) -> Result<(), String> {
 /// Fail-closed: ANY refusal (no trust state, bad signature, expiry, rollback,
 /// tampered targets) exits non-zero and leaves the previous env file
 /// UNTOUCHED — a node never runs under an allow-list derived from unverified
-/// bytes. How the bundle lands on the node is the transport's concern (file
-/// drop today; the full repo client is the recorded EP-13 follow-up).
+/// bytes. The bundle arrives either as a file drop (`--metadata`) or FETCHED
+/// over HTTP (`--metadata-url`, the EP-13 client replacing the file-drop
+/// stub) — either way the carrier is untrusted and verification happens here.
 fn cmd_model_allowlist(args: &[String]) -> Result<(), String> {
     let mut metadata = std::env::var("KIRRA_OTA_MODEL_METADATA").ok().map(PathBuf::from);
+    let mut metadata_url = std::env::var("KIRRA_OTA_MODEL_METADATA_URL").ok();
     let mut out = std::env::var("KIRRA_OTA_MODEL_ENV_FILE").ok().map(PathBuf::from);
     let mut store_path = std::env::var("KIRRA_OTA_TRUST_STORE")
         .unwrap_or_else(|_| DEFAULT_TRUST_STORE.to_string());
@@ -1165,18 +1222,40 @@ fn cmd_model_allowlist(args: &[String]) -> Result<(), String> {
         };
         match a.as_str() {
             "--metadata" => metadata = Some(PathBuf::from(next("--metadata")?)),
+            "--metadata-url" => metadata_url = Some(next("--metadata-url")?),
             "--out" => out = Some(PathBuf::from(next("--out")?)),
             "--trust-store" => store_path = next("--trust-store")?,
             other => return Err(format!("unknown model-allowlist flag {other:?}")),
         }
     }
-    let metadata = metadata
-        .ok_or("model-allowlist requires --metadata <bundle.json> (or KIRRA_OTA_MODEL_METADATA)")?;
     let out = out
         .ok_or("model-allowlist requires --out <env-file> (or KIRRA_OTA_MODEL_ENV_FILE)")?;
 
-    let text = std::fs::read_to_string(&metadata)
-        .map_err(|e| format!("read metadata bundle {}: {e}", metadata.display()))?;
+    let text = match (metadata, metadata_url) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--metadata and --metadata-url are mutually exclusive — pick one source".into(),
+            )
+        }
+        (Some(path), None) => std::fs::read_to_string(&path)
+            .map_err(|e| format!("read metadata bundle {}: {e}", path.display()))?,
+        (None, Some(url)) => {
+            let (code, body) = http_get(&url)?;
+            if code != 200 {
+                // Fail-closed: a fetch failure emits NOTHING (the previous env
+                // file survives untouched); the next poll retries.
+                return Err(format!("metadata fetch {url} returned HTTP {code}"));
+            }
+            body
+        }
+        (None, None) => {
+            return Err(
+                "model-allowlist requires --metadata <bundle.json> or --metadata-url <url> \
+                 (or KIRRA_OTA_MODEL_METADATA / KIRRA_OTA_MODEL_METADATA_URL)"
+                    .into(),
+            )
+        }
+    };
     let bundle = parse_metadata_bundle(&text).map_err(|e| e.to_string())?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1246,7 +1325,10 @@ fn print_usage() {
          \x20            --interval-secs S (2) --successes K (3) --unit NAME (kirra-governor)\n\
          \x20            --no-restart\n\
          pull flags:  --verifier <url> --node-id <id> --cohorts a,b --artifact-base <url>\n\
-         \x20            (each also from KIRRA_VERIFIER_URL/KIRRA_NODE_ID/KIRRA_NODE_COHORTS/KIRRA_OTA_ARTIFACT_BASE)\n\
+         \x20            [--release-pubkey <key>] [--trust-store <path>]\n\
+         \x20            (each also from KIRRA_VERIFIER_URL/KIRRA_NODE_ID/KIRRA_NODE_COHORTS/KIRRA_OTA_ARTIFACT_BASE\n\
+         \x20            /KIRRA_OTA_RELEASE_PUBKEY/KIRRA_OTA_TRUST_STORE; an anchored trust store\n\
+         \x20            makes the pull enforce the full Uptane metadata set, fail-closed)\n\
          report flags: --verifier <url> --node-id <id> [--token T --client-id C]\n\
          \x20            [--campaign-id X --artifact-version V] [--ak-key <pkcs8.pem>]\n\
          \x20            (--ak-key signs the report → unforgeable; also KIRRA_OTA_AK_KEY)\n\
@@ -1254,8 +1336,10 @@ fn print_usage() {
          \x20            (--ak-key <pkcs8.pem> | --ak-pub <spki.pem>) [--site S --firmware-version V]\n\
          \x20            [--no-require-quote]  (also KIRRA_OTA_AK_KEY/KIRRA_OTA_AK_PUB/KIRRA_OTA_PCR16)\n\
          trust-provision flags: --root <signed-root.json> [--trust-store <path>]\n\
-         model-allowlist flags: --metadata <bundle.json> --out <env-file> [--trust-store <path>]\n\
-         \x20            (also KIRRA_OTA_MODEL_METADATA/KIRRA_OTA_MODEL_ENV_FILE/KIRRA_OTA_TRUST_STORE)\n\
+         model-allowlist flags: --metadata <bundle.json> | --metadata-url <url> --out <env-file>\n\
+         \x20            [--trust-store <path>]\n\
+         \x20            (also KIRRA_OTA_MODEL_METADATA/KIRRA_OTA_MODEL_METADATA_URL\n\
+         \x20            /KIRRA_OTA_MODEL_ENV_FILE/KIRRA_OTA_TRUST_STORE)\n\
          \n\
          ENV: KIRRA_OTA_SLOT_A KIRRA_OTA_SLOT_B KIRRA_OTA_BOOT_RECORD KIRRA_OTA_GOVERNOR_BIN KIRRA_OTA_UNIT"
     );

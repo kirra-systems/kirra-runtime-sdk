@@ -458,6 +458,42 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  # EP-10 (MGA G-9) — the live-Postgres storage-backend conformance lane. The
+  # workspace-detached `crates/kirra-verifier-pg` binds the root crate's
+  # `PgExecutor` / `EpochFence` / `NodeStore` seams to the sync `postgres`
+  # client, and its tests run the SAME conformance suites the root crate runs
+  # against SQLite (`assert_fence_contract` / `assert_node_store_contract`)
+  # against a REAL server — plus PG-only drills (two-connection CAS race, the
+  # migration engine's future-schema refusal, the `SELECT … FOR UPDATE`
+  # actuator fence). Without `KIRRA_PG_URL` the tests skip vacuously; this lane
+  # provides the server, so it is the lane that proves G-9's "second backend".
+  postgres-conformance:
+    name: Postgres backend conformance (EP-10, G-9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Gate the job's steps on a genuinely-accepting server (the container
+        # can lag the job start by several seconds).
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Conformance suites vs live PostgreSQL 16
+        # --locked: build the committed lockfile exactly; fail if it would drift.
+        env:
+          KIRRA_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cd crates/kirra-verifier-pg && cargo test --locked
+
   # M5 — loom concurrency-model tests. Exhaustively permutes thread interleavings
   # for the posture-generation protocol (`crates/kirra-loom-models`), proving the
   # "generations are unique / the cache never regresses" invariants hold under

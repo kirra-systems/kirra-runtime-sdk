@@ -34,24 +34,19 @@
 //! this module verifies bytes it is handed and never trusts the carrier.
 
 use kirra_release_token::model_targets::model_allowlist_env_value;
-use kirra_release_token::uptane::{
-    verify_update, SnapshotMetadata, TargetsMetadata, TimestampMetadata, VerifiedUpdate,
-};
+use kirra_release_token::uptane::{verify_update, VerifiedUpdate};
 
 use crate::uptane_trust::{TrustStoreError, UptaneTrustStore};
 
 /// The metadata set a repository publishes for the model allow-list: the three
 /// non-root roles + their signatures, as one JSON document. The `targets`
 /// entries ARE the authorized model artifacts (digest + version).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ModelMetadataBundle {
-    pub timestamp: TimestampMetadata,
-    pub timestamp_sig_b64: String,
-    pub snapshot: SnapshotMetadata,
-    pub snapshot_sig_b64: String,
-    pub targets: TargetsMetadata,
-    pub targets_sig_b64: String,
-}
+///
+/// EP-13: this is exactly the shared
+/// [`UptaneMetadataSet`](kirra_release_token::uptane::UptaneMetadataSet) wire
+/// shape (the same document the governor-artifact campaign channel carries) —
+/// one type, so the two consumers can never drift apart.
+pub type ModelMetadataBundle = kirra_release_token::uptane::UptaneMetadataSet;
 
 /// Why the allow-list could not be derived. Every variant means: emit nothing.
 #[derive(Debug)]
@@ -136,6 +131,7 @@ pub fn derive_model_allowlist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kirra_release_token::uptane::{SnapshotMetadata, TargetsMetadata, TimestampMetadata};
     use ed25519_dalek::SigningKey;
     use kirra_release_token::uptane::{
         author_initial_root, sign_snapshot, sign_targets, sign_timestamp, RootMetadata,

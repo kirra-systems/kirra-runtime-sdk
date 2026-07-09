@@ -54,7 +54,7 @@ use crate::gateway::kinematics_contract::{
 
 /// Env var selecting the deployment's vehicle class (#312). Parsed FAIL-CLOSED via
 /// [`VehicleClass::from_str`]: `courier` | `delivery-av` | `robotaxi`. There is NO
-/// default — an unset/empty/unknown value aborts startup (`init_vehicle_class_from_env`).
+/// default — an unset/empty/unknown value is refused at boot (validated in `env_config::EffectiveConfig`; `init_vehicle_class` pins the result).
 pub const VEHICLE_CLASS_ENV: &str = "KIRRA_VEHICLE_CLASS";
 
 // ---------------------------------------------------------------------------
@@ -187,58 +187,45 @@ pub fn mrc_fallback_for(class: VehicleClass) -> VehicleKinematicsContract {
 /// `ServiceState` / handler construction.
 static GLOBAL_VEHICLE_CLASS: OnceLock<VehicleClass> = OnceLock::new();
 
-/// Resolve `KIRRA_VEHICLE_CLASS` once at startup into the process-wide class.
+/// Install the boot-validated vehicle class as the process-wide selection.
 ///
-/// FAIL-CLOSED (the user-confirmed disposition + `docs/CONTRACT_PROFILES.md`
-/// "there is no default class"): an unset / empty / unknown value is a FATAL
-/// configuration error — log and `exit(1)` rather than silently selecting a
-/// (possibly faster) envelope. A typo'd class must never pick another class's
-/// limits. Mirrors the parko node's `KIRRA_NODE_ID` "no safe default" handling.
-pub fn init_vehicle_class_from_env() {
-    let raw = std::env::var(VEHICLE_CLASS_ENV).unwrap_or_default();
-    match VehicleClass::from_str(&raw) {
-        Ok(class) => {
-            if GLOBAL_VEHICLE_CLASS.set(class).is_err() {
-                // Already initialized. A matching re-init is a benign idempotent
-                // no-op; a CONFLICTING second value must fail closed rather than
-                // be silently dropped (the selected envelope would then disagree
-                // with what this call requested).
-                let existing = GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(class);
-                if existing != class {
-                    tracing::error!(
-                        existing = existing.as_str(),
-                        attempted = class.as_str(),
-                        "FATAL: {VEHICLE_CLASS_ENV} initialized more than once with DIFFERENT \
-                         values — refusing to continue (the vehicle class must be unambiguous)."
-                    );
-                    std::process::exit(1);
-                }
-                tracing::debug!(
-                    vehicle_class = class.as_str(),
-                    "vehicle class re-init with the same value — idempotent no-op (#312)"
-                );
-                return;
-            }
-            tracing::info!(
-                vehicle_class = class.as_str(),
-                "vehicle class selected — per-class kinematic contract + ODD cap in effect (#312)"
-            );
-        }
-        Err(e) => {
+/// EP-12 (Config Slice B): the `KIRRA_VEHICLE_CLASS` read + validation now live
+/// in `env_config::EffectiveConfig` (an unset/empty/unknown value is a
+/// [`ConfigError`](crate::env_config::ConfigError) the binary treats as a fatal
+/// boot error — the same fail-closed "there is no default class" disposition,
+/// enforced one layer earlier). This module performs no environment reads; it
+/// only pins the ALREADY-VALID class.
+///
+/// A matching re-init is a benign idempotent no-op; a CONFLICTING second value
+/// is refused fail-closed (the selected envelope would otherwise disagree with
+/// what this call requested).
+pub fn init_vehicle_class(class: VehicleClass) {
+    if GLOBAL_VEHICLE_CLASS.set(class).is_err() {
+        let existing = GLOBAL_VEHICLE_CLASS.get().copied().unwrap_or(class);
+        if existing != class {
             tracing::error!(
-                value = %raw, error = %e,
-                "FATAL: {VEHICLE_CLASS_ENV} unset or unknown — there is NO default vehicle class \
-                 (a wrong class would select another class's envelope). Set it to one of \
-                 courier | delivery-av | robotaxi. Refusing to start."
+                existing = existing.as_str(),
+                attempted = class.as_str(),
+                "FATAL: {VEHICLE_CLASS_ENV} initialized more than once with DIFFERENT \
+                 values — refusing to continue (the vehicle class must be unambiguous)."
             );
             std::process::exit(1);
         }
+        tracing::debug!(
+            vehicle_class = class.as_str(),
+            "vehicle class re-init with the same value — idempotent no-op (#312)"
+        );
+        return;
     }
+    tracing::info!(
+        vehicle_class = class.as_str(),
+        "vehicle class selected — per-class kinematic contract + ODD cap in effect (#312)"
+    );
 }
 
 /// The process-wide selected vehicle class.
 ///
-/// Production calls [`init_vehicle_class_from_env`] at startup (which aborts on an
+/// Production calls [`init_vehicle_class`] at startup (the binary aborts on an
 /// unset/unknown value), so the live request path always observes the configured
 /// class. When uninitialized — in-process tests / library embedding that never
 /// called init — this returns the **frozen reference instance** (`Robotaxi`), the

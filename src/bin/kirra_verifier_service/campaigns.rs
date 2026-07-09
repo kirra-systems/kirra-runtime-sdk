@@ -36,6 +36,18 @@ pub(crate) struct CreateCampaignRequest {
     /// refuses to stage an assignment without it.
     #[serde(default)]
     artifact_signature_b64: Option<String>,
+    /// EP-13 — the campaign's full signed Uptane metadata set (the JSON object
+    /// the repository published: timestamp/snapshot/targets + role signatures).
+    /// Optional (legacy campaigns); validated fail-closed at authoring (must
+    /// parse and must authorize `artifact_digest`), then stored + relayed to
+    /// nodes structurally intact. The verifier is an untrusted carrier: it may
+    /// re-serialize the JSON (so byte-for-byte formatting/key-order is NOT
+    /// preserved) but never re-signs — role signatures cover each metadata's
+    /// canonical binary `signing_image` (built from the parsed fields), so JSON
+    /// formatting is immaterial. Nodes verify end-to-end against their
+    /// provisioned root anchor.
+    #[serde(default)]
+    uptane_metadata: Option<serde_json::Value>,
 }
 
 /// The lifecycle-operation result surfaced from a `store.call` closure back to the
@@ -79,10 +91,28 @@ pub(crate) async fn create_campaign_handler(
         req.stages,
         now,
     ) {
-        Ok(c) => match req.artifact_signature_b64.as_deref().map(str::trim) {
-            Some(sig) if !sig.is_empty() => c.with_artifact_signature(sig),
-            _ => c,
-        },
+        Ok(c) => {
+            let c = match req.artifact_signature_b64.as_deref().map(str::trim) {
+                Some(sig) if !sig.is_empty() => c.with_artifact_signature(sig),
+                _ => c,
+            };
+            // EP-13: attach + validate the signed Uptane metadata set (parse +
+            // the targets must authorize this campaign's digest — an authoring
+            // error is refused here, not discovered fleet-wide at pull time).
+            match req.uptane_metadata.as_ref() {
+                Some(set) => match c.with_uptane_metadata(&set.to_string()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(json!({ "error": e.to_string() })),
+                        )
+                            .into_response();
+                    }
+                },
+                None => c,
+            }
+        }
         Err(e) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,

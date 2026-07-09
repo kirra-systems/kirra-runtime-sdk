@@ -159,6 +159,10 @@ pub enum CampaignError {
         from: CampaignState,
         action: &'static str,
     },
+    /// EP-13 — the attached Uptane metadata set is unparseable or does not
+    /// authorize the campaign's artifact digest (an authoring error caught
+    /// fail-closed before persistence, not fleet-wide at pull time).
+    InvalidUptaneMetadata(String),
 }
 
 impl std::fmt::Display for CampaignError {
@@ -176,6 +180,9 @@ impl std::fmt::Display for CampaignError {
             ),
             CampaignError::InvalidTransition { from, action } => {
                 write!(f, "cannot {action} a campaign in state {from:?}")
+            }
+            CampaignError::InvalidUptaneMetadata(reason) => {
+                write!(f, "invalid uptane metadata set: {reason}")
             }
         }
     }
@@ -203,6 +210,18 @@ pub struct Campaign {
     /// so unsigned campaigns are the rejected legacy mode fleet-side.
     #[serde(default)]
     pub artifact_signature_b64: Option<String>,
+    /// EP-13 (G-7 remainder) — the full SIGNED Uptane metadata set
+    /// (timestamp/snapshot/targets + role signatures) for this campaign, stored
+    /// and relayed to nodes structurally intact (the verifier is an untrusted
+    /// carrier — it may re-serialize the JSON, so byte-for-byte formatting is
+    /// NOT preserved, but it never re-signs; role signatures cover each
+    /// metadata's canonical binary `signing_image` built from the parsed fields,
+    /// so JSON formatting/key-order is immaterial; verification is end-to-end at
+    /// the node against its provisioned root anchor). Optional for legacy
+    /// campaigns; an Uptane-anchored node refuses an assignment without it
+    /// (fail-closed node-side).
+    #[serde(default)]
+    pub uptane_metadata_json: Option<String>,
     pub artifact_version: String,
     /// Target cohort labels (node groups). Non-empty.
     pub cohorts: Vec<String>,
@@ -255,6 +274,7 @@ impl Campaign {
             campaign_id,
             artifact_digest,
             artifact_signature_b64: None,
+            uptane_metadata_json: None,
             artifact_version,
             cohorts,
             stages,
@@ -274,6 +294,37 @@ impl Campaign {
     pub fn with_artifact_signature(mut self, signature_b64: impl Into<String>) -> Self {
         self.artifact_signature_b64 = Some(signature_b64.into());
         self
+    }
+
+    /// EP-13 — attach the campaign's signed Uptane metadata set (the raw JSON the
+    /// repository published). Validated fail-closed at AUTHORING time:
+    ///
+    /// - the JSON must parse as a [`kirra_release_token::uptane::UptaneMetadataSet`]
+    ///   (a malformed blob is refused here, not discovered fleet-wide at pull time);
+    /// - the set's `targets` must AUTHORIZE this campaign's `artifact_digest` — a
+    ///   metadata set that does not list the artifact being rolled would make every
+    ///   anchored node refuse the assignment, so it is an authoring error.
+    ///
+    /// The set is stored as submitted and served unchanged. JSON formatting is
+    /// immaterial to trust: each role signature covers the metadata's canonical
+    /// binary `signing_image` (domain-separated field encoding), NOT the JSON
+    /// bytes, so any serialization round-trip verifies identically. No signature
+    /// verification happens server-side — the server does not hold (and must not
+    /// need) the fleet root; nodes verify end-to-end.
+    pub fn with_uptane_metadata(mut self, metadata_json: &str) -> Result<Self, CampaignError> {
+        let set: kirra_release_token::uptane::UptaneMetadataSet =
+            serde_json::from_str(metadata_json).map_err(|e| {
+                CampaignError::InvalidUptaneMetadata(format!("unparseable metadata set: {e}"))
+            })?;
+        if set.targets.find(&self.artifact_digest).is_none() {
+            return Err(CampaignError::InvalidUptaneMetadata(format!(
+                "the targets metadata does not authorize this campaign's artifact digest \
+                 {} — an anchored node would refuse every assignment",
+                self.artifact_digest
+            )));
+        }
+        self.uptane_metadata_json = Some(metadata_json.to_string());
+        Ok(self)
     }
 
     /// Arm the campaign for rollout: `Draft → Staged`. The deliberate operator
@@ -421,6 +472,13 @@ pub struct NodeAssignment {
     /// legacy unsigned campaign; a key-provisioned node then refuses to stage).
     #[serde(default)]
     pub artifact_signature_b64: Option<String>,
+    /// EP-13 — the campaign's signed Uptane metadata set, embedded as the JSON
+    /// object the repository published (structurally unchanged; the role
+    /// signatures cover the binary signing image, so JSON formatting is
+    /// immaterial). Absent on a legacy campaign; an Uptane-anchored node then
+    /// refuses to stage — fail-closed node-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptane_metadata: Option<serde_json::Value>,
     pub artifact_version: Option<String>,
 }
 
@@ -493,6 +551,14 @@ pub fn resolve_node_assignment(
             campaign_id: Some(c.campaign_id.clone()),
             artifact_digest: Some(c.artifact_digest.clone()),
             artifact_signature_b64: c.artifact_signature_b64.clone(),
+            // Embedded as the ORIGINAL published object (parse of a blob this
+            // campaign validated at authoring; a later-corrupted row parses to
+            // None rather than serving garbage — the anchored node then
+            // refuses fail-closed).
+            uptane_metadata: c
+                .uptane_metadata_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok()),
             artifact_version: Some(c.artifact_version.clone()),
         },
         None => NodeAssignment {
@@ -501,6 +567,7 @@ pub fn resolve_node_assignment(
             campaign_id: None,
             artifact_digest: None,
             artifact_signature_b64: None,
+            uptane_metadata: None,
             artifact_version: None,
         },
     }
@@ -1223,6 +1290,87 @@ mod tests {
         c.rollout_percent = 100;
         let m = campaign_metrics_prometheus(&summarize_campaigns(std::slice::from_ref(&c), &[]));
         assert!(m.contains("campaign_id=\"a\\\"b\\\\c\""), "got: {m}");
+    }
+
+    // --- EP-13: Uptane metadata carriage ---------------------------------
+
+    /// A correctly-signed metadata set (fixed test keys) authorizing `digest`.
+    fn signed_metadata_json(digest: &str) -> String {
+        use ed25519_dalek::SigningKey;
+        use kirra_release_token::uptane::{
+            sign_snapshot, sign_targets, sign_timestamp, SnapshotMetadata, TargetEntry,
+            TargetsMetadata, TimestampMetadata, UptaneMetadataSet,
+        };
+        let targets = TargetsMetadata {
+            version: 3,
+            expires_at_ms: 100_000,
+            targets: vec![TargetEntry {
+                digest_hex: digest.to_string(),
+                length_bytes: 9,
+                version: "v1.2.3".into(),
+            }],
+        };
+        let snapshot = SnapshotMetadata { version: 3, expires_at_ms: 100_000, targets_version: 3 };
+        let timestamp = TimestampMetadata { version: 3, expires_at_ms: 100_000, snapshot_version: 3 };
+        let set = UptaneMetadataSet {
+            timestamp_sig_b64: sign_timestamp(&timestamp, &SigningKey::from_bytes(&[4u8; 32])),
+            timestamp,
+            snapshot_sig_b64: sign_snapshot(&snapshot, &SigningKey::from_bytes(&[3u8; 32])),
+            snapshot,
+            targets_sig_b64: sign_targets(&targets, &SigningKey::from_bytes(&[2u8; 32])),
+            targets,
+        };
+        serde_json::to_string(&set).unwrap()
+    }
+
+    #[test]
+    fn with_uptane_metadata_attaches_a_set_authorizing_the_campaign_digest() {
+        let c = campaign()
+            .with_uptane_metadata(&signed_metadata_json(DIGEST))
+            .expect("a set authorizing the digest attaches");
+        assert!(c.uptane_metadata_json.is_some());
+    }
+
+    #[test]
+    fn with_uptane_metadata_rejects_unparseable_json() {
+        assert!(matches!(
+            campaign().with_uptane_metadata("{not json"),
+            Err(CampaignError::InvalidUptaneMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn with_uptane_metadata_rejects_a_set_not_authorizing_the_digest() {
+        // The set authorizes a DIFFERENT digest than the campaign's — every
+        // anchored node would refuse the assignment, so creation refuses first.
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert!(matches!(
+            campaign().with_uptane_metadata(&signed_metadata_json(other)),
+            Err(CampaignError::InvalidUptaneMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn assignment_relays_the_campaign_metadata_set() {
+        let mut c = campaign()
+            .with_uptane_metadata(&signed_metadata_json(DIGEST))
+            .unwrap();
+        c.state = CampaignState::Rolling;
+        c.rollout_percent = 100;
+        let node = "any-node";
+        let a = resolve_node_assignment(node, &["fleet".into()], std::slice::from_ref(&c));
+        assert!(a.rolled);
+        let relayed = a.uptane_metadata.expect("assignment carries the set");
+        let submitted: serde_json::Value =
+            serde_json::from_str(&signed_metadata_json(DIGEST)).unwrap();
+        assert_eq!(relayed, submitted, "relayed structurally unchanged");
+        // A campaign WITHOUT metadata assigns none (legacy).
+        let mut legacy = campaign();
+        legacy.state = CampaignState::Rolling;
+        legacy.rollout_percent = 100;
+        legacy.campaign_id = "camp-legacy".into();
+        let a2 = resolve_node_assignment(node, &["fleet".into()], std::slice::from_ref(&legacy));
+        assert!(a2.rolled && a2.uptane_metadata.is_none());
     }
 
     #[test]

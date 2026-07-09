@@ -31,7 +31,13 @@ use sha2::{Digest, Sha256};
 /// The effective-config schema version. Bumped when the captured field SET of
 /// [`EffectiveConfig`] changes (adding/removing a field changes every digest), so
 /// a digest is only ever compared within one schema version.
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (EP-12, Config Slice B): the HA timing knobs (heartbeat interval /
+/// promotion timeout / promotion poll / force-promote / lease gate) and the
+/// audit-ship sink path fold into the captured set, and construction becomes
+/// VALIDATING — a malformed value in any migrated variable fails at boot
+/// ([`ConfigError`]), never silently defaulting at use.
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
 
 /// One row of the `KIRRA_*` env schema — the single source of truth for a variable.
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +123,62 @@ pub fn unknown_kirra_env_vars<'a>(env_keys: impl Iterator<Item = &'a str>) -> Ve
     unknown
 }
 
+/// Why the boot-time configuration was REFUSED — a malformed value in a
+/// migrated `KIRRA_*` variable. EP-12's contract: a bad value fails at BOOT
+/// (the binary logs this error and exits), never silently defaulting at use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError {
+    /// The offending variable name (e.g. `KIRRA_HEARTBEAT_INTERVAL`).
+    pub key: &'static str,
+    /// The rejected raw value (trimmed).
+    pub value: String,
+    /// What a valid value looks like.
+    pub expected: &'static str,
+}
+
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "invalid {}={:?} — expected {} (fail-closed: fix the environment and restart)",
+            self.key, self.value, self.expected
+        )
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// The RAW (pre-validation) boot values — one optional string per migrated
+/// variable, exactly as the environment presents them. `Default` is "nothing
+/// set". Pure data: [`EffectiveConfig::from_values`] consumes it without
+/// touching the process environment, so the whole validation truth table is
+/// unit-tested without `set_var` (INVARIANT #13).
+#[derive(Debug, Clone, Default)]
+pub struct RawConfig<'a> {
+    pub verifier_addr: Option<&'a str>,
+    pub db_path: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub vehicle_class: Option<&'a str>,
+    pub tls_cert: Option<&'a str>,
+    pub tls_key: Option<&'a str>,
+    pub tls_client_ca: Option<&'a str>,
+    pub trusted_ingress: Option<&'a str>,
+    pub require_secure_transport: Option<&'a str>,
+    pub require_tpm_quote_default: Option<&'a str>,
+    pub audit_ship_path: Option<&'a str>,
+    pub audit_signing_key: Option<&'a str>,
+    // --- EP-12 Slice B: HA (standby_monitor / lease) ---
+    pub heartbeat_interval_ms: Option<&'a str>,
+    pub promotion_timeout_ms: Option<&'a str>,
+    pub promotion_poll_ms: Option<&'a str>,
+    pub force_promote: Option<&'a str>,
+    pub ha_lease_enabled: Option<&'a str>,
+    // --- EP-12 Slice B: instance identity (raw inputs; resolution is I/O) ---
+    pub instance_id: Option<&'a str>,
+    pub hostname: Option<&'a str>,
+    pub instance_id_file: Option<&'a str>,
+}
+
 /// A versioned snapshot of the boot-time service configuration actually in effect.
 /// Its [`effective_digest`](Self::effective_digest) is committed to the audit chain
 /// at startup. Field order + set are FROZEN per [`CONFIG_SCHEMA_VERSION`]: the
@@ -124,8 +186,10 @@ pub fn unknown_kirra_env_vars<'a>(env_keys: impl Iterator<Item = &'a str>) -> Ve
 /// under the same config produce the same digest, and any change is detectable.
 ///
 /// Captures the stable boot knobs (not secrets — never the admin token or key
-/// bytes; only whether a key source is configured). v1 is the service spine; the
-/// captured set expands under a version bump as more reads fold in.
+/// bytes; only whether a key source is configured). Per-INSTANCE identity (the
+/// instance id and its fallback inputs) is carried for injection but
+/// `#[serde(skip)]`-ped out of the digest, so two instances of one fleet booted
+/// under the same fleet config still produce the same digest.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EffectiveConfig {
     pub config_version: u32,
@@ -140,6 +204,28 @@ pub struct EffectiveConfig {
     pub require_tpm_quote_default: bool,
     pub audit_shipping_enabled: bool,
     pub audit_signing_key_configured: bool,
+    // --- v2 (EP-12): validated HA timings + the audit-ship sink path ---
+    pub heartbeat_interval_ms: u64,
+    pub promotion_timeout_ms: u64,
+    pub promotion_poll_ms: u64,
+    pub force_promote: bool,
+    pub ha_lease_enabled: bool,
+    pub audit_ship_path: Option<String>,
+    /// The validated typed vehicle class (same information as `vehicle_class`,
+    /// already canonical there — skipped from the digest to keep the canonical
+    /// encoding primitives-only).
+    #[serde(skip)]
+    pub vehicle_class_typed: crate::gateway::contract_profiles::VehicleClass,
+    /// Per-instance identity inputs (raw): deliberately OUTSIDE the digest —
+    /// identity is per-instance by design, and the digest compares fleet
+    /// config. Resolved (with filesystem fallbacks) by
+    /// [`Self::resolve_instance_id`].
+    #[serde(skip)]
+    pub instance_id_raw: Option<String>,
+    #[serde(skip)]
+    pub hostname_raw: Option<String>,
+    #[serde(skip)]
+    pub instance_id_file_raw: Option<String>,
 }
 
 /// A trimmed, non-empty view of an optional value (whitespace-only counts as unset).
@@ -157,27 +243,60 @@ fn env_flag(raw: Option<&str>) -> bool {
     .unwrap_or(false)
 }
 
+/// Parse a millisecond knob: absent/empty → `default`; a non-numeric value —
+/// or `0` when `reject_zero` (a 0 disables the #689 promotion-floor clamp AND
+/// panics `tokio::time::interval`) — is a boot-time [`ConfigError`].
+fn parse_ms(
+    key: &'static str,
+    raw: Option<&str>,
+    default: u64,
+    reject_zero: bool,
+) -> Result<u64, ConfigError> {
+    let Some(v) = non_empty(raw) else { return Ok(default) };
+    match v.parse::<u64>() {
+        Ok(0) if reject_zero => Err(ConfigError {
+            key,
+            value: v.to_string(),
+            expected: "a positive integer (milliseconds); 0 is rejected",
+        }),
+        Ok(n) => Ok(n),
+        Err(_) => Err(ConfigError {
+            key,
+            value: v.to_string(),
+            expected: "an integer number of milliseconds",
+        }),
+    }
+}
+
+/// Parse a STRICT boolean gate: absent/empty → `false`; `1`/`true` → `true`;
+/// `0`/`false` → `false` (case-insensitive, trimmed); anything else is a
+/// boot-time [`ConfigError`]. Stricter than [`env_flag`] on purpose — for the
+/// migrated HA gates a typo (`ture`) silently reading as "off" would leave the
+/// operator believing a failover feature is armed when it is not.
+fn strict_flag(key: &'static str, raw: Option<&str>) -> Result<bool, ConfigError> {
+    match non_empty(raw) {
+        None => Ok(false),
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => Ok(true),
+        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") => Ok(false),
+        Some(v) => Err(ConfigError {
+            key,
+            value: v.to_string(),
+            expected: "1/true or 0/false",
+        }),
+    }
+}
+
 impl EffectiveConfig {
-    /// Build the snapshot from already-extracted values (pure — no env). Normalizes
-    /// mode/vehicle-class casing and applies the documented defaults for addr/db so
+    /// Build the snapshot from already-extracted values (pure — no env, no I/O).
+    /// Normalizes mode/vehicle-class casing and applies the documented defaults so
     /// the digest reflects the EFFECTIVE value, not the raw presence.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_values(
-        verifier_addr: Option<&str>,
-        db_path: Option<&str>,
-        mode_raw: Option<&str>,
-        vehicle_class: Option<&str>,
-        tls_cert: Option<&str>,
-        tls_key: Option<&str>,
-        tls_client_ca: Option<&str>,
-        trusted_ingress: Option<&str>,
-        require_secure_transport: Option<&str>,
-        require_tpm_quote_default: Option<&str>,
-        audit_ship_path: Option<&str>,
-        audit_signing_key: Option<&str>,
-    ) -> Self {
-        let mode = match mode_raw.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+    ///
+    /// VALIDATING (EP-12): a malformed value in a migrated variable — the vehicle
+    /// class, any HA timing knob, or an HA gate — is a [`ConfigError`], and the
+    /// binary treats it as a fatal boot error. A bad value can therefore never
+    /// reach the module that would have silently defaulted it at use.
+    pub fn from_values(raw: RawConfig<'_>) -> Result<Self, ConfigError> {
+        let mode = match raw.mode.unwrap_or("").trim().to_ascii_lowercase().as_str() {
             "passive" | "passive_standby" | "standby" => "passive_standby",
             _ => "active",
         }
@@ -185,41 +304,139 @@ impl EffectiveConfig {
         // TLS is on only when BOTH cert and key are present; mTLS additionally needs
         // the client CA. (A half-config is a fail-closed startup abort elsewhere; the
         // snapshot records the effective on/off the same way.)
-        let tls_enabled = non_empty(tls_cert).is_some() && non_empty(tls_key).is_some();
-        let mtls_enabled = tls_enabled && non_empty(tls_client_ca).is_some();
-        Self {
+        let tls_enabled = non_empty(raw.tls_cert).is_some() && non_empty(raw.tls_key).is_some();
+        let mtls_enabled = tls_enabled && non_empty(raw.tls_client_ca).is_some();
+
+        // #312 — the vehicle class is REQUIRED and validated here (fail at boot):
+        // there is no default class; a wrong class would select another class's
+        // envelope. (`init_vehicle_class` then only receives an already-valid class.)
+        let class_raw = non_empty(raw.vehicle_class).unwrap_or("");
+        let vehicle_class_typed = class_raw
+            .parse::<crate::gateway::contract_profiles::VehicleClass>()
+            .map_err(|_| ConfigError {
+                key: "KIRRA_VEHICLE_CLASS",
+                value: class_raw.to_string(),
+                expected: "one of courier | delivery-av | robotaxi (no default — fail-closed)",
+            })?;
+
+        Ok(Self {
             config_version: CONFIG_SCHEMA_VERSION,
-            verifier_addr: non_empty(verifier_addr).unwrap_or("0.0.0.0:8090").to_string(),
-            db_path: non_empty(db_path).unwrap_or("kirra_verifier.sqlite").to_string(),
+            verifier_addr: non_empty(raw.verifier_addr).unwrap_or("0.0.0.0:8090").to_string(),
+            db_path: non_empty(raw.db_path).unwrap_or("kirra_verifier.sqlite").to_string(),
             mode,
-            vehicle_class: non_empty(vehicle_class).unwrap_or("").to_ascii_lowercase(),
+            vehicle_class: vehicle_class_typed.as_str().to_string(),
             tls_enabled,
             mtls_enabled,
-            trusted_ingress: env_flag(trusted_ingress),
-            require_secure_transport: env_flag(require_secure_transport),
-            require_tpm_quote_default: env_flag(require_tpm_quote_default),
-            audit_shipping_enabled: non_empty(audit_ship_path).is_some(),
-            audit_signing_key_configured: non_empty(audit_signing_key).is_some(),
-        }
+            trusted_ingress: env_flag(raw.trusted_ingress),
+            require_secure_transport: env_flag(raw.require_secure_transport),
+            require_tpm_quote_default: env_flag(raw.require_tpm_quote_default),
+            audit_shipping_enabled: non_empty(raw.audit_ship_path).is_some(),
+            audit_signing_key_configured: non_empty(raw.audit_signing_key).is_some(),
+            heartbeat_interval_ms: parse_ms(
+                "KIRRA_HEARTBEAT_INTERVAL",
+                raw.heartbeat_interval_ms,
+                crate::standby_monitor::HEARTBEAT_INTERVAL_MS,
+                /* reject_zero (#707) */ true,
+            )?,
+            promotion_timeout_ms: parse_ms(
+                "KIRRA_PROMOTION_TIMEOUT",
+                raw.promotion_timeout_ms,
+                crate::standby_monitor::PROMOTION_TIMEOUT_MS,
+                // 0 is tolerated here: the #689 floor clamp at use raises any
+                // too-small timeout to the safe minimum (and logs).
+                false,
+            )?,
+            promotion_poll_ms: parse_ms(
+                "KIRRA_PROMOTION_POLL",
+                raw.promotion_poll_ms,
+                crate::standby_monitor::PROMOTION_POLL_MS,
+                /* reject_zero (tokio interval panics on 0) */ true,
+            )?,
+            force_promote: strict_flag("KIRRA_FORCE_PROMOTE", raw.force_promote)?,
+            ha_lease_enabled: strict_flag("KIRRA_HA_LEASE_ENABLED", raw.ha_lease_enabled)?,
+            audit_ship_path: non_empty(raw.audit_ship_path).map(str::to_string),
+            vehicle_class_typed,
+            instance_id_raw: non_empty(raw.instance_id).map(str::to_string),
+            hostname_raw: non_empty(raw.hostname).map(str::to_string),
+            instance_id_file_raw: non_empty(raw.instance_id_file).map(str::to_string),
+        })
     }
 
     /// The production wrapper: read the environment once and build the snapshot.
-    #[must_use]
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let g = |k: &str| std::env::var(k).ok();
-        Self::from_values(
-            g("KIRRA_VERIFIER_ADDR").as_deref(),
-            g("KIRRA_DB_PATH").as_deref(),
-            g("KIRRA_VERIFIER_MODE").as_deref(),
-            g("KIRRA_VEHICLE_CLASS").as_deref(),
-            g("KIRRA_TLS_CERT_PATH").as_deref(),
-            g("KIRRA_TLS_KEY_PATH").as_deref(),
-            g("KIRRA_TLS_CLIENT_CA_PATH").as_deref(),
-            g("KIRRA_TRUSTED_INGRESS_MODE").as_deref(),
-            g("KIRRA_REQUIRE_SECURE_TRANSPORT").as_deref(),
-            g("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT").as_deref(),
-            g("KIRRA_AUDIT_SHIP_PATH").as_deref(),
-            g("KIRRA_LOG_SIGNING_KEY").as_deref(),
+        let vals = [
+            g("KIRRA_VERIFIER_ADDR"),
+            g("KIRRA_DB_PATH"),
+            g("KIRRA_VERIFIER_MODE"),
+            g("KIRRA_VEHICLE_CLASS"),
+            g("KIRRA_TLS_CERT_PATH"),
+            g("KIRRA_TLS_KEY_PATH"),
+            g("KIRRA_TLS_CLIENT_CA_PATH"),
+            g("KIRRA_TRUSTED_INGRESS_MODE"),
+            g("KIRRA_REQUIRE_SECURE_TRANSPORT"),
+            g("KIRRA_ATTEST_REQUIRE_QUOTE_DEFAULT"),
+            g("KIRRA_AUDIT_SHIP_PATH"),
+            g("KIRRA_LOG_SIGNING_KEY"),
+            g("KIRRA_HEARTBEAT_INTERVAL"),
+            g("KIRRA_PROMOTION_TIMEOUT"),
+            g("KIRRA_PROMOTION_POLL"),
+            g("KIRRA_FORCE_PROMOTE"),
+            g("KIRRA_HA_LEASE_ENABLED"),
+            g("KIRRA_INSTANCE_ID"),
+            g("HOSTNAME"),
+            g("KIRRA_INSTANCE_ID_FILE"),
+        ];
+        Self::from_values(RawConfig {
+            verifier_addr: vals[0].as_deref(),
+            db_path: vals[1].as_deref(),
+            mode: vals[2].as_deref(),
+            vehicle_class: vals[3].as_deref(),
+            tls_cert: vals[4].as_deref(),
+            tls_key: vals[5].as_deref(),
+            tls_client_ca: vals[6].as_deref(),
+            trusted_ingress: vals[7].as_deref(),
+            require_secure_transport: vals[8].as_deref(),
+            require_tpm_quote_default: vals[9].as_deref(),
+            audit_ship_path: vals[10].as_deref(),
+            audit_signing_key: vals[11].as_deref(),
+            heartbeat_interval_ms: vals[12].as_deref(),
+            promotion_timeout_ms: vals[13].as_deref(),
+            promotion_poll_ms: vals[14].as_deref(),
+            force_promote: vals[15].as_deref(),
+            ha_lease_enabled: vals[16].as_deref(),
+            instance_id: vals[17].as_deref(),
+            hostname: vals[18].as_deref(),
+            instance_id_file: vals[19].as_deref(),
+        })
+    }
+
+    /// The validated HA timing bundle the standby-monitor loops consume — the
+    /// injection seam that replaced their per-loop env reads (EP-12).
+    #[must_use]
+    pub fn ha_timings(&self) -> crate::standby_monitor::HaTimings {
+        crate::standby_monitor::HaTimings {
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
+            promotion_timeout_ms: self.promotion_timeout_ms,
+            promotion_poll_ms: self.promotion_poll_ms,
+            force_promote: self.force_promote,
+            lease: self
+                .ha_lease_enabled
+                .then(crate::lease::LeaseParams::default_params),
+        }
+    }
+
+    /// Resolve this instance's HA identity from the captured raw inputs, with
+    /// the documented filesystem fallbacks (machine-id → persisted id file →
+    /// loud unstable last resort). The one deliberately-impure accessor:
+    /// identity resolution touches the filesystem, so it runs once at boot in
+    /// the binary, never in a hot path.
+    #[must_use]
+    pub fn resolve_instance_id(&self) -> String {
+        crate::standby_monitor::resolve_instance_id(
+            self.instance_id_raw.as_deref(),
+            self.hostname_raw.as_deref(),
+            self.instance_id_file_raw.as_deref(),
         )
     }
 
@@ -246,18 +463,59 @@ impl EffectiveConfig {
     }
 }
 
-// NOTE (WP-17 follow-up, recorded): the per-module env READS (verifier.rs's three
-// `from_env` structs, standby_monitor, backpressure, the industrial adapters, the
-// TLS resolver) are not yet routed THROUGH this struct — each stays its own
-// fail-closed read for now. Folding them in field-by-field (so `EffectiveConfig`
-// becomes the single loader every module borrows from) is mechanical and versioned
-// (each fold bumps CONFIG_SCHEMA_VERSION as the captured set grows). This slice
-// lands the registry, the sweep, and the audit-chained digest — the observability
-// + single-source-of-truth spine — without a risky big-bang refactor.
+// NOTE (WP-17 → EP-12 progress ledger): Config Slice B (EP-12, v2) routed the
+// FIRST module families through this struct — the gateway/actuator envelope
+// class (`contract_profiles`: `init_vehicle_class` consumes the validated
+// class), HA (`standby_monitor` + `lease`: the loops consume `ha_timings()`,
+// identity via `resolve_instance_id()`), and the audit-shipper monitor
+// (`spawn_audit_shipper` takes the captured path). Those modules now have ZERO
+// direct env reads (greppable), and a malformed value in any of their
+// variables fails at BOOT (`ConfigError`), not at use. STILL UN-MIGRATED
+// (each remains its own fail-closed read): verifier.rs's three `from_env`
+// structs, backpressure, the industrial adapters, the TLS resolver, and the
+// audit signing-key/genesis-pin reads in the binary. Folding those in stays
+// mechanical and versioned (each fold bumps CONFIG_SCHEMA_VERSION as the
+// captured set grows).
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-v2 positional constructor shape, preserved for the existing
+    /// tests (all of which pass VALID migrated values, so `unwrap` is fine —
+    /// the new EP-12 tests below exercise the `Err` paths explicitly).
+    #[allow(clippy::too_many_arguments)]
+    fn legacy(
+        verifier_addr: Option<&str>,
+        db_path: Option<&str>,
+        mode: Option<&str>,
+        vehicle_class: Option<&str>,
+        tls_cert: Option<&str>,
+        tls_key: Option<&str>,
+        tls_client_ca: Option<&str>,
+        trusted_ingress: Option<&str>,
+        require_secure_transport: Option<&str>,
+        require_tpm_quote_default: Option<&str>,
+        audit_ship_path: Option<&str>,
+        audit_signing_key: Option<&str>,
+    ) -> EffectiveConfig {
+        EffectiveConfig::from_values(RawConfig {
+            verifier_addr,
+            db_path,
+            mode,
+            vehicle_class,
+            tls_cert,
+            tls_key,
+            tls_client_ca,
+            trusted_ingress,
+            require_secure_transport,
+            require_tpm_quote_default,
+            audit_ship_path,
+            audit_signing_key,
+            ..RawConfig::default()
+        })
+        .expect("valid legacy-test config")
+    }
 
     #[test]
     fn registry_has_no_duplicates_and_covers_the_core() {
@@ -302,7 +560,7 @@ mod tests {
     #[test]
     fn effective_config_applies_defaults_and_normalizes() {
         // Empty everything → the documented defaults + off flags.
-        let c = EffectiveConfig::from_values(
+        let c = legacy(
             None, None, None, Some("robotaxi"), None, None, None, None, None, None, None, None,
         );
         assert_eq!(c.verifier_addr, "0.0.0.0:8090");
@@ -314,7 +572,7 @@ mod tests {
         assert_eq!(c.config_version, CONFIG_SCHEMA_VERSION);
 
         // Standby aliases normalize; a whitespace addr counts as unset.
-        let s = EffectiveConfig::from_values(
+        let s = legacy(
             Some("   "), Some("/db"), Some("STANDBY"), Some("Courier"),
             None, None, None, None, None, None, None, None,
         );
@@ -325,17 +583,17 @@ mod tests {
 
     #[test]
     fn tls_requires_both_cert_and_key_mtls_also_ca() {
-        let cert_only = EffectiveConfig::from_values(
+        let cert_only = legacy(
             None, None, None, Some("robotaxi"), Some("/c.pem"), None, None, None, None, None, None, None,
         );
         assert!(!cert_only.tls_enabled, "cert without key is not effective TLS (half-config aborts elsewhere)");
 
-        let tls = EffectiveConfig::from_values(
+        let tls = legacy(
             None, None, None, Some("robotaxi"), Some("/c.pem"), Some("/k.pem"), None, None, None, None, None, None,
         );
         assert!(tls.tls_enabled && !tls.mtls_enabled);
 
-        let mtls = EffectiveConfig::from_values(
+        let mtls = legacy(
             None, None, None, Some("robotaxi"), Some("/c.pem"), Some("/k.pem"), Some("/ca.pem"),
             None, None, None, None, None,
         );
@@ -344,14 +602,14 @@ mod tests {
 
     #[test]
     fn flags_follow_the_one_true_convention() {
-        let on = EffectiveConfig::from_values(
+        let on = legacy(
             None, None, None, Some("robotaxi"), None, None, None,
             Some("1"), Some("TRUE"), Some(" true "), Some("/ship.log"), Some("seedbytes"),
         );
         assert!(on.trusted_ingress && on.require_secure_transport && on.require_tpm_quote_default);
         assert!(on.audit_shipping_enabled && on.audit_signing_key_configured);
 
-        let off = EffectiveConfig::from_values(
+        let off = legacy(
             None, None, None, Some("robotaxi"), None, None, None,
             Some("yes"), Some("0"), Some(""), Some("  "), None,
         );
@@ -362,7 +620,7 @@ mod tests {
 
     #[test]
     fn digest_is_deterministic_and_change_sensitive() {
-        let a = EffectiveConfig::from_values(
+        let a = legacy(
             Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
             None, None, None, None, None, None, None, None,
         );
@@ -371,7 +629,7 @@ mod tests {
         assert_eq!(a.effective_digest().len(), 64, "sha-256 hex");
 
         // Any captured field change moves the digest.
-        let c = EffectiveConfig::from_values(
+        let c = legacy(
             Some("0.0.0.0:8090"), Some("/db"), Some("passive_standby"), Some("robotaxi"),
             None, None, None, None, None, None, None, None,
         );
@@ -384,7 +642,7 @@ mod tests {
         // passed a None key, so it could not have caught an accidental leak). Only the
         // `audit_signing_key_configured` boolean is captured — the bytes must be absent
         // from the exact input the digest hashes.
-        let with_secret = EffectiveConfig::from_values(
+        let with_secret = legacy(
             Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
             None, None, None, None, None, None, None, Some("SUPER_SECRET_SEED_BYTES"),
         );
@@ -396,7 +654,7 @@ mod tests {
         // And the digest reflects only the boolean: a config that differs ONLY by a
         // present-vs-absent key still moves the digest (configured is captured), but a
         // config with a DIFFERENT key value hashes identically (bytes not captured).
-        let other_secret = EffectiveConfig::from_values(
+        let other_secret = legacy(
             Some("0.0.0.0:8090"), Some("/db"), Some("active"), Some("robotaxi"),
             None, None, None, None, None, None, None, Some("A_DIFFERENT_SEED"),
         );
@@ -405,5 +663,175 @@ mod tests {
             other_secret.effective_digest(),
             "two different key VALUES hash the same — only 'configured' is captured"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EP-12 (Config Slice B) — a bad value in a MIGRATED variable fails at
+    // BOOT (`from_values` → Err), never silently defaulting at use. One test
+    // per migrated module family, all pure (no set_var — INVARIANT #13).
+    // -----------------------------------------------------------------------
+
+    /// A valid baseline every bad-value test perturbs one field of.
+    fn valid_raw() -> RawConfig<'static> {
+        RawConfig { vehicle_class: Some("robotaxi"), ..RawConfig::default() }
+    }
+
+    #[test]
+    fn a_bad_vehicle_class_fails_at_boot() {
+        // Gateway/actuator envelope class (contract_profiles): unset, empty,
+        // and a near-miss typo are all refused — there is NO default class.
+        for bad in [None, Some(""), Some("   "), Some("robotxi"), Some("fast")] {
+            let err = EffectiveConfig::from_values(RawConfig {
+                vehicle_class: bad,
+                ..RawConfig::default()
+            })
+            .expect_err("an unset/unknown vehicle class must refuse boot");
+            assert_eq!(err.key, "KIRRA_VEHICLE_CLASS", "{err}");
+        }
+        // The three valid classes normalize case and construct.
+        for good in ["courier", "Delivery-AV", "ROBOTAXI"] {
+            let c = EffectiveConfig::from_values(RawConfig {
+                vehicle_class: Some(good),
+                ..RawConfig::default()
+            })
+            .expect("a valid class constructs");
+            assert_eq!(c.vehicle_class, c.vehicle_class_typed.as_str());
+        }
+    }
+
+    #[test]
+    fn a_bad_heartbeat_interval_fails_at_boot() {
+        // HA (standby_monitor): non-numeric or zero (the #707 hazard — 0
+        // disables the #689 clamp AND panics tokio::interval) refuse boot.
+        for bad in ["abc", "0", "-5", "2.5", "2000ms"] {
+            let err = EffectiveConfig::from_values(RawConfig {
+                heartbeat_interval_ms: Some(bad),
+                ..valid_raw()
+            })
+            .expect_err("a malformed heartbeat interval must refuse boot");
+            assert_eq!(err.key, "KIRRA_HEARTBEAT_INTERVAL", "{err}");
+        }
+        // Absent → the documented default; a valid value is carried verbatim.
+        let d = EffectiveConfig::from_values(valid_raw()).unwrap();
+        assert_eq!(d.heartbeat_interval_ms, crate::standby_monitor::HEARTBEAT_INTERVAL_MS);
+        let v = EffectiveConfig::from_values(RawConfig {
+            heartbeat_interval_ms: Some("2500"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert_eq!(v.heartbeat_interval_ms, 2_500);
+    }
+
+    #[test]
+    fn a_bad_promotion_poll_or_timeout_fails_at_boot() {
+        for bad in ["fast", "0"] {
+            let err = EffectiveConfig::from_values(RawConfig {
+                promotion_poll_ms: Some(bad),
+                ..valid_raw()
+            })
+            .expect_err("a malformed/zero promotion poll must refuse boot");
+            assert_eq!(err.key, "KIRRA_PROMOTION_POLL", "{err}");
+        }
+        let err = EffectiveConfig::from_values(RawConfig {
+            promotion_timeout_ms: Some("ten seconds"),
+            ..valid_raw()
+        })
+        .expect_err("a non-numeric promotion timeout must refuse boot");
+        assert_eq!(err.key, "KIRRA_PROMOTION_TIMEOUT");
+        // Timeout 0 is admitted here: the #689 floor clamp at use raises it
+        // (validated numeric, policy-clamped downstream — unchanged).
+        let z = EffectiveConfig::from_values(RawConfig {
+            promotion_timeout_ms: Some("0"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert_eq!(z.promotion_timeout_ms, 0);
+    }
+
+    #[test]
+    fn a_bad_ha_gate_fails_at_boot_instead_of_silently_disarming() {
+        // HA gates (lease.rs / force-promote): the STRICT flag — a typo like
+        // "ture" must not read as "off" while the operator believes the
+        // feature is armed.
+        for (field_name, raw) in [
+            ("KIRRA_FORCE_PROMOTE", RawConfig { force_promote: Some("maybe"), ..valid_raw() }),
+            ("KIRRA_HA_LEASE_ENABLED", RawConfig { ha_lease_enabled: Some("ture"), ..valid_raw() }),
+            ("KIRRA_HA_LEASE_ENABLED", RawConfig { ha_lease_enabled: Some("yes"), ..valid_raw() }),
+        ] {
+            let err = EffectiveConfig::from_values(raw)
+                .expect_err("an unrecognized HA gate value must refuse boot");
+            assert_eq!(err.key, field_name, "{err}");
+        }
+        // The documented on/off spellings still work; default is off.
+        let on = EffectiveConfig::from_values(RawConfig {
+            ha_lease_enabled: Some("TRUE"),
+            force_promote: Some("1"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert!(on.ha_lease_enabled && on.force_promote);
+        let off = EffectiveConfig::from_values(RawConfig {
+            ha_lease_enabled: Some("0"),
+            force_promote: Some("false"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert!(!off.ha_lease_enabled && !off.force_promote);
+        assert!(!EffectiveConfig::from_values(valid_raw()).unwrap().ha_lease_enabled);
+    }
+
+    #[test]
+    fn ha_timings_carries_the_validated_values_and_defaults_match() {
+        // The injection seam the standby-monitor loops consume: defaults equal
+        // HaTimings::default() (what an unset environment produced before), and
+        // configured values arrive verbatim with the lease gate mapped to the
+        // default-TTL LeaseParams.
+        let d = EffectiveConfig::from_values(valid_raw()).unwrap().ha_timings();
+        assert_eq!(d, crate::standby_monitor::HaTimings::default());
+
+        let t = EffectiveConfig::from_values(RawConfig {
+            heartbeat_interval_ms: Some("1000"),
+            promotion_timeout_ms: Some("9000"),
+            promotion_poll_ms: Some("500"),
+            ha_lease_enabled: Some("1"),
+            ..valid_raw()
+        })
+        .unwrap()
+        .ha_timings();
+        assert_eq!(t.heartbeat_interval_ms, 1_000);
+        assert_eq!(t.promotion_timeout_ms, 9_000);
+        assert_eq!(t.promotion_poll_ms, 500);
+        assert_eq!(t.lease, Some(crate::lease::LeaseParams::default_params()));
+        assert!(!t.force_promote);
+    }
+
+    #[test]
+    fn v2_fields_move_the_digest_but_instance_identity_does_not() {
+        // A captured v2 knob change (heartbeat cadence) moves the digest…
+        let a = EffectiveConfig::from_values(valid_raw()).unwrap();
+        let b = EffectiveConfig::from_values(RawConfig {
+            heartbeat_interval_ms: Some("3000"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert_ne!(a.effective_digest(), b.effective_digest());
+
+        // …but per-INSTANCE identity is serde-skipped: two instances of one
+        // fleet differing only in identity produce the SAME digest (the digest
+        // compares fleet config, and identity never enters the hashed bytes).
+        let i1 = EffectiveConfig::from_values(RawConfig {
+            instance_id: Some("node-a"),
+            hostname: Some("host-a"),
+            ..valid_raw()
+        })
+        .unwrap();
+        let i2 = EffectiveConfig::from_values(RawConfig {
+            instance_id: Some("node-b"),
+            hostname: Some("host-b"),
+            ..valid_raw()
+        })
+        .unwrap();
+        assert_eq!(i1.effective_digest(), i2.effective_digest());
+        assert!(!i1.canonical_json().contains("node-a"));
     }
 }

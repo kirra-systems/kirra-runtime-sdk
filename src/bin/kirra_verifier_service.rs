@@ -48,10 +48,17 @@ use kirra_verifier::federation_reconciliation::{
     authoritative_posture, dissenting_restriction, evaluate_federated_report_v2,
     verify_federated_report_signature_v2, FederatedTrustReportV2,
 };
+use kirra_verifier::env_config::EffectiveConfig;
 use kirra_verifier::standby_monitor::{
     instance_id as ha_instance_id, spawn_heartbeat_writer, spawn_promotion_monitor,
     HEARTBEAT_KEY, PROMOTION_TIMEOUT_MS,
 };
+
+/// EP-12 (Config Slice B): the boot-validated configuration snapshot, set ONCE
+/// in `main` after validation. The spawn-registry closures (which run again on
+/// standby promotion via `wire_active_posture_freshness`) read the audit-ship
+/// path from here — the same values the digest was computed over.
+static EFFECTIVE_CONFIG: std::sync::OnceLock<EffectiveConfig> = std::sync::OnceLock::new();
 use kirra_verifier::gateway::kinematics_contract::ProposedVehicleCommand;
 use kirra_verifier::gateway::policy_layer::{
     enforce_actuator_safety_envelope, enforce_posture_routing, EnforcementOutcome,
@@ -379,7 +386,14 @@ fn wire_active_posture_freshness(svc: &Arc<ServiceState>) {
     // KIRRA_AUDIT_SHIP_PATH names an append-only sink file so the tamper-evidence
     // log survives loss of this box.
     monitors.register("audit_shipper", |svc: &Arc<ServiceState>| {
-        if kirra_verifier::audit_shipper::spawn_audit_shipper(Arc::clone(&svc.app)) {
+        // EP-12: the sink path comes from the boot-validated snapshot (the
+        // module reads no env). Unset → shipping off (the opt-in default).
+        let ship_path =
+            EFFECTIVE_CONFIG.get().and_then(|c| c.audit_ship_path.clone());
+        if kirra_verifier::audit_shipper::spawn_audit_shipper(
+            Arc::clone(&svc.app),
+            ship_path.as_deref(),
+        ) {
             tracing::info!(
                 interval_ms = kirra_verifier::audit_shipper::AUDIT_SHIP_INTERVAL_MS,
                 "WORM off-box audit shipper spawned (WS-4 audit survivability)"
@@ -922,12 +936,35 @@ async fn main() {
     // faithfully decoded by its declared type and bounded (fail-closed on breach).
     kirra_verifier::adapters::ethernet_ip::init_cip_bounds_from_env();
 
-    // #312: select the deployment's vehicle class from KIRRA_VEHICLE_CLASS
-    // (courier | delivery-av | robotaxi). FAIL-CLOSED: unset/unknown aborts
-    // startup (there is no default class — a wrong class would pick another
+    // EP-12 (Config Slice B): build the boot-time EffectiveConfig snapshot ONCE,
+    // VALIDATING every migrated variable (vehicle class, HA timing knobs, HA
+    // gates). FAIL-CLOSED: a malformed value refuses startup here — it can never
+    // reach a module that would have silently defaulted it at use. The migrated
+    // modules (contract_profiles, standby_monitor, lease, audit_shipper) perform
+    // no environment reads; they consume this snapshot.
+    let effective_cfg = EFFECTIVE_CONFIG
+        .get_or_init(|| match EffectiveConfig::from_env() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "FATAL: invalid boot configuration — refusing to start");
+                std::process::exit(1);
+            }
+        })
+        .clone();
+
+    // #312: pin the (already-validated) deployment vehicle class. FAIL-CLOSED
+    // semantics unchanged: unset/unknown was refused by the config validation
+    // above (there is no default class — a wrong class would pick another
     // class's envelope). Drives the per-class kinematic contract in the actuator
     // gate (`enforce_actuator_safety_envelope`).
-    kirra_verifier::gateway::contract_profiles::init_vehicle_class_from_env();
+    kirra_verifier::gateway::contract_profiles::init_vehicle_class(
+        effective_cfg.vehicle_class_typed,
+    );
+
+    // EP-12: resolve + pin the HA instance identity from the captured raw inputs
+    // (KIRRA_INSTANCE_ID → HOSTNAME → machine-id/id-file fallbacks). One
+    // resolution at boot; every later `instance_id()` read returns this value.
+    kirra_verifier::standby_monitor::init_instance_id(effective_cfg.resolve_instance_id());
 
     let audit_signing_key: Option<ed25519_dalek::SigningKey> =
         std::env::var("KIRRA_LOG_SIGNING_KEY").ok()
@@ -1031,7 +1068,7 @@ async fn main() {
     // instance booted under and detect drift across restarts. Observability only —
     // the sweep never fails startup (a future var on an older binary is legitimate).
     {
-        use kirra_verifier::env_config::{unknown_kirra_env_vars, EffectiveConfig};
+        use kirra_verifier::env_config::unknown_kirra_env_vars;
         let env_names: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
         let unknown = unknown_kirra_env_vars(env_names.iter().map(String::as_str));
         if !unknown.is_empty() {
@@ -1041,7 +1078,9 @@ async fn main() {
                  that is NOT taking effect; see the env schema registry"
             );
         }
-        let cfg = EffectiveConfig::from_env();
+        // EP-12: reuse the boot-validated snapshot (built once, above) — the
+        // digest and the injected module configs come from the SAME values.
+        let cfg = effective_cfg.clone();
         let digest = cfg.effective_digest();
         let now = now_ms();
         let unknown_count = unknown.len();
@@ -1311,9 +1350,13 @@ async fn main() {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    // EP-12: the HA loops consume the boot-validated timing bundle (heartbeat
+    // interval / promotion timeout + poll / force-promote / lease gate) —
+    // a malformed knob already refused startup at config validation.
+    let ha_timings = effective_cfg.ha_timings();
     match effective_mode {
         VerifierOperationMode::Active => {
-            spawn_heartbeat_writer(Arc::clone(&svc_state.app));
+            spawn_heartbeat_writer(Arc::clone(&svc_state.app), ha_timings);
             tracing::info!("Heartbeat writer started (Active mode)");
         }
         VerifierOperationMode::PassiveStandby => {
@@ -1329,6 +1372,7 @@ async fn main() {
                 Arc::clone(&svc_state.app),
                 Arc::clone(&svc_state.posture_cache),
                 Arc::new(move || wire_active_posture_freshness(&svc_for_promote)),
+                ha_timings,
             );
             tracing::info!("Promotion monitor started (PassiveStandby mode)");
         }

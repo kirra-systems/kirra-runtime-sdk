@@ -566,7 +566,7 @@ pub struct CausalEventInput<'a> {
 mod nodes;
 // WP-18 (G-9 store half) — the node-registry storage trait + its in-memory
 // reference backend (the 2nd VerifierStorage-family seam after EpochFence).
-pub use nodes::{InMemoryNodeStore, NodeStore};
+pub use nodes::{assert_node_store_contract, InMemoryNodeStore, NodeStore};
 mod posture;
 mod audit;
 mod operators;
@@ -580,7 +580,7 @@ mod epoch;
 // WP-18 3/3 (G-9 store half) — the backend-portable HA epoch-fence trait + its
 // in-memory reference backend (SQLite realizes it via `ha_state` + BEGIN IMMEDIATE,
 // a future Postgres backend via SELECT … FOR UPDATE).
-pub use epoch::{EpochFence, HaLease, InMemFenceError, InMemoryEpochFence};
+pub use epoch::{assert_fence_contract, EpochFence, HaLease, InMemFenceError, InMemoryEpochFence};
 mod fabric;
 pub mod migrations; // WP-18/G-20 versioned schema migration framework (user_version)
 pub mod migrations_postgres; // WP-18 slice 3 — Postgres SchemaBackend over an injected executor seam

@@ -28,12 +28,13 @@
 
 use rusqlite::Connection;
 
-/// The schema version this binary targets. Version `1` is the current baseline
+/// The schema version this binary targets. Version `1` is the original baseline
 /// schema (every `CREATE TABLE`/`ADD COLUMN` in `VerifierStore::new` +
-/// `init_audit_chain_schema`). BUMP this and push a [`Migration`] onto
+/// `init_audit_chain_schema`); version `2` (EP-13) adds
+/// `ota_campaigns.uptane_metadata_json`. BUMP this and push a [`Migration`] onto
 /// [`MIGRATIONS`] for any future schema change — additive → MINOR, destructive →
 /// MAJOR per `docs/VERSIONING_POLICY.md`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// One registered schema migration to a specific target `version` (≥ 2 — version 1
 /// is the unconditional idempotent baseline DDL, not a registered step). `apply`
@@ -44,11 +45,33 @@ pub struct Migration {
     pub apply: fn(&Connection) -> rusqlite::Result<()>,
 }
 
-/// The ordered (ascending by `version`) registry of post-baseline migrations. Empty
-/// today: version 1 is the baseline the existing DDL establishes. A future schema
-/// change adds a `Migration { version: 2, apply: … }` here (and bumps
-/// [`SCHEMA_VERSION`] to 2) — the framework then upgrades a v1 DB to v2 in order.
-pub const MIGRATIONS: &[Migration] = &[];
+/// The ordered (ascending by `version`) registry of post-baseline migrations.
+///
+/// The baseline-interaction rule: a step's DDL must apply cleanly on BOTH a
+/// fresh store (baseline just ran, `user_version` 0) and an upgraded old store —
+/// so the baseline `CREATE TABLE` deliberately does NOT gain a column a step
+/// adds (the step is the single place the column is born: a fresh store runs
+/// baseline then the step; an old store runs just the step).
+pub const MIGRATIONS: &[Migration] = &[
+    // v2 (EP-13, G-7 remainder): the campaign's signed Uptane metadata set,
+    // stored as submitted (nullable — legacy campaigns carry none; the role
+    // signatures cover the binary signing image, so JSON formatting is
+    // immaterial). Tolerates "duplicate column" (the mod.rs ALTER convention):
+    // a version-0 stamp means UNKNOWN provenance — the DB may have been
+    // written by a binary that already had the column — and an additive step
+    // that finds its column already present has nothing left to do.
+    Migration {
+        version: 2,
+        apply: |conn| {
+            match conn
+                .execute_batch("ALTER TABLE ota_campaigns ADD COLUMN uptane_metadata_json TEXT")
+            {
+                Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+                other => other,
+            }
+        },
+    },
+];
 
 /// What to do given a database's current schema version vs the binary's target.
 /// Pure — the whole policy, unit-tested without a DB.
@@ -317,6 +340,20 @@ mod tests {
     fn a_fresh_db_reads_version_zero_then_stamps_to_baseline() {
         let c = mem();
         assert_eq!(read_user_version(&c).unwrap(), 0, "an unstamped DB is version 0");
+        // Precondition of `run_migrations`: the baseline DDL has run (in
+        // `VerifierStore::new` it always precedes this call). The v2 step
+        // ALTERs `ota_campaigns`, so create the baseline-shaped table here.
+        c.execute_batch(
+            "CREATE TABLE ota_campaigns (
+                campaign_id TEXT PRIMARY KEY, artifact_digest TEXT NOT NULL,
+                artifact_version TEXT NOT NULL, cohorts_json TEXT NOT NULL,
+                stages_json TEXT NOT NULL, stage_index INTEGER NOT NULL DEFAULT 0,
+                rollout_percent INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                halt_reason TEXT, created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL, artifact_signature_b64 TEXT
+            )",
+        )
+        .unwrap();
         let before = run_migrations(&c).unwrap();
         assert_eq!(before, 0);
         assert_eq!(read_user_version(&c).unwrap(), SCHEMA_VERSION, "stamped to the baseline");
@@ -337,8 +374,8 @@ mod tests {
 
     #[test]
     fn registered_steps_apply_in_order_and_advance_the_stamp() {
-        // A synthetic v2 + v3 registry to exercise the engine (the real MIGRATIONS is
-        // empty at the v1 baseline). Each step creates a marker table.
+        // A synthetic v2 + v3 registry to exercise the engine in isolation from
+        // the real [`MIGRATIONS`] steps. Each step creates a marker table.
         fn mk_v2(c: &Connection) -> rusqlite::Result<()> {
             c.execute_batch("CREATE TABLE m2 (x INTEGER)")
         }

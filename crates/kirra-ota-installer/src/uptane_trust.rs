@@ -17,7 +17,8 @@
 use std::path::{Path, PathBuf};
 
 use kirra_release_token::uptane::{
-    apply_root_rotation, verify_root_self, RootMetadata, SignedRoot, TrustedVersions, UptaneError,
+    apply_root_rotation, verify_root_self, RootMetadata, SignedRoot, TrustedVersions,
+    UptaneError, UptaneMetadataSet,
 };
 
 /// The durable trust state a node persists between OTA polls / restarts.
@@ -58,6 +59,74 @@ impl From<UptaneError> for TrustStoreError {
     fn from(e: UptaneError) -> Self {
         TrustStoreError::Uptane(e)
     }
+}
+
+/// Why the EP-13 Uptane pull gate refused an assignment. All fail-closed —
+/// any of these must abort the stage, never degrade to a legacy pull.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UptaneGateError {
+    /// The node is Uptane-anchored but the assignment carries no metadata set.
+    /// An anchored node NEVER falls back to an unattested pull — a stripped
+    /// metadata set (a freeze/downgrade-by-omission attack) must refuse.
+    MetadataMissing,
+    /// The presented metadata set failed Uptane verification (bad signature,
+    /// rollback attempt, expired role, chain mismatch, ...).
+    Verify(UptaneError),
+    /// The metadata set verified, but its `targets` do not authorize the
+    /// digest this assignment tells the node to pull — the campaign plane and
+    /// the release plane disagree, so nothing is pulled.
+    DigestNotAuthorized(String),
+}
+
+impl std::fmt::Display for UptaneGateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UptaneGateError::MetadataMissing => write!(
+                f,
+                "uptane trust anchored but the assignment carries no metadata set — refusing to stage (fail-closed)"
+            ),
+            UptaneGateError::Verify(e) => write!(f, "uptane metadata verification failed: {e:?}"),
+            UptaneGateError::DigestNotAuthorized(d) => write!(
+                f,
+                "verified targets metadata does not authorize the assigned digest {d} — refusing to stage"
+            ),
+        }
+    }
+}
+impl std::error::Error for UptaneGateError {}
+impl From<UptaneError> for UptaneGateError {
+    fn from(e: UptaneError) -> Self {
+        UptaneGateError::Verify(e)
+    }
+}
+
+/// EP-13 (MGA G-7) — the node-side Uptane gate on an OTA pull, run BEFORE the
+/// artifact download. Pure over injected trust state and clock.
+///
+/// - **Unanchored** (`state == None`, no provisioned trust store): `Ok(None)` —
+///   the legacy WP-12 signature path still applies; the caller warns loudly,
+///   mirroring the release-key posture (present ⇒ enforced, absent ⇒ legacy).
+/// - **Anchored**: the assignment MUST carry a metadata set, the set must pass
+///   full `verify_update` (root-keyed signatures, freshness, chain agreement,
+///   rollback floors), and the verified `targets` must authorize exactly the
+///   digest the node was assigned — pull only by authorized digest. On success
+///   returns the advanced version floor for the caller to persist AFTER the
+///   staged artifact itself verifies.
+pub fn uptane_pull_gate(
+    state: Option<&TrustState>,
+    set: Option<&UptaneMetadataSet>,
+    assigned_digest: &str,
+    now_ms: u64,
+) -> Result<Option<TrustedVersions>, UptaneGateError> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let set = set.ok_or(UptaneGateError::MetadataMissing)?;
+    let verified = set.verify(&state.root.meta, state.versions, now_ms)?;
+    if verified.targets().find(assigned_digest).is_none() {
+        return Err(UptaneGateError::DigestNotAuthorized(assigned_digest.to_string()));
+    }
+    Ok(Some(verified.new_versions()))
 }
 
 /// A file-backed [`TrustState`] store.
@@ -333,6 +402,118 @@ mod tests {
         store.adopt_rotation(&by_new).expect("the new root authorizes the next rotation");
         assert_eq!(store.load().unwrap().root.meta.version, 3);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A full, correctly-signed metadata set for `Repo` at role version `v`,
+    /// authorizing `DIGEST`.
+    fn metadata_set(r: &Repo, v: u64) -> UptaneMetadataSet {
+        let targets = TargetsMetadata {
+            version: v,
+            expires_at_ms: EXP,
+            targets: vec![TargetEntry {
+                digest_hex: DIGEST.into(),
+                length_bytes: 9,
+                version: "v2".into(),
+            }],
+        };
+        let snap = SnapshotMetadata { version: v, expires_at_ms: EXP, targets_version: v };
+        let tsm = TimestampMetadata { version: v, expires_at_ms: EXP, snapshot_version: v };
+        UptaneMetadataSet {
+            timestamp_sig_b64: sign_timestamp(&tsm, &r.timestamp_sk),
+            timestamp: tsm,
+            snapshot_sig_b64: sign_snapshot(&snap, &r.snapshot_sk),
+            snapshot: snap,
+            targets_sig_b64: sign_targets(&targets, &r.targets_sk),
+            targets,
+        }
+    }
+
+    fn anchored_state(r: &Repo) -> TrustState {
+        TrustState {
+            root: author_initial_root(r.root(1), &r.root_sk),
+            versions: TrustedVersions::default(),
+        }
+    }
+
+    // --- EP-13 pull gate ---------------------------------------------------
+
+    #[test]
+    fn pull_gate_unanchored_is_legacy_passthrough() {
+        // No trust anchor → the gate defers to the legacy path (caller warns).
+        let r = Repo::new();
+        let set = metadata_set(&r, 3);
+        assert_eq!(uptane_pull_gate(None, Some(&set), DIGEST, NOW), Ok(None));
+        assert_eq!(uptane_pull_gate(None, None, DIGEST, NOW), Ok(None));
+    }
+
+    #[test]
+    fn pull_gate_anchored_refuses_a_missing_metadata_set() {
+        // Downgrade-by-omission: an anchored node must never accept an
+        // assignment stripped of its metadata set.
+        let r = Repo::new();
+        let state = anchored_state(&r);
+        assert_eq!(
+            uptane_pull_gate(Some(&state), None, DIGEST, NOW),
+            Err(UptaneGateError::MetadataMissing)
+        );
+    }
+
+    #[test]
+    fn pull_gate_verifies_and_returns_the_advanced_floor() {
+        let r = Repo::new();
+        let state = anchored_state(&r);
+        let set = metadata_set(&r, 3);
+        let floor = uptane_pull_gate(Some(&state), Some(&set), DIGEST, NOW)
+            .expect("valid set must pass")
+            .expect("anchored path returns a floor");
+        assert_eq!(floor, TrustedVersions { targets: 3, snapshot: 3, timestamp: 3 });
+    }
+
+    #[test]
+    fn pull_gate_rejects_a_rollback_attack() {
+        // The node's floor has advanced to v5 (a prior accepted update); a
+        // re-served OLDER set (v3) — the classic rollback attack — must refuse.
+        let r = Repo::new();
+        let mut state = anchored_state(&r);
+        state.versions = TrustedVersions { targets: 5, snapshot: 5, timestamp: 5 };
+        let stale = metadata_set(&r, 3);
+        assert!(
+            matches!(
+                uptane_pull_gate(Some(&state), Some(&stale), DIGEST, NOW),
+                Err(UptaneGateError::Verify(UptaneError::RollbackAttempt(_)))
+            ),
+            "a metadata set below the persisted floor is a rollback attack"
+        );
+    }
+
+    #[test]
+    fn pull_gate_rejects_an_unauthorized_digest() {
+        // The set verifies, but the assignment tells the node to pull a digest
+        // the targets metadata does not authorize — the campaign plane and the
+        // release plane disagree, so nothing is pulled.
+        let r = Repo::new();
+        let state = anchored_state(&r);
+        let set = metadata_set(&r, 3);
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert_eq!(
+            uptane_pull_gate(Some(&state), Some(&set), other, NOW),
+            Err(UptaneGateError::DigestNotAuthorized(other.to_string()))
+        );
+    }
+
+    #[test]
+    fn pull_gate_rejects_a_forged_signature() {
+        // A set re-signed by an attacker's key (not the anchored role keys)
+        // must refuse even though it is structurally valid.
+        let r = Repo::new();
+        let state = anchored_state(&r);
+        let mut set = metadata_set(&r, 3);
+        let attacker = SigningKey::from_bytes(&[66u8; 32]);
+        set.targets_sig_b64 = sign_targets(&set.targets, &attacker);
+        assert!(matches!(
+            uptane_pull_gate(Some(&state), Some(&set), DIGEST, NOW),
+            Err(UptaneGateError::Verify(UptaneError::SignatureInvalid(Role::Targets)))
+        ));
     }
 
     #[test]

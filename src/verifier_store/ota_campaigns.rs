@@ -30,8 +30,9 @@ impl VerifierStore {
             "INSERT INTO ota_campaigns
                  (campaign_id, artifact_digest, artifact_version, cohorts_json,
                   stages_json, stage_index, rollout_percent, state, halt_reason,
-                  created_at_ms, updated_at_ms, artifact_signature_b64)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  created_at_ms, updated_at_ms, artifact_signature_b64,
+                  uptane_metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 campaign.campaign_id,
                 campaign.artifact_digest,
@@ -45,6 +46,7 @@ impl VerifierStore {
                 campaign.created_at_ms as i64,
                 campaign.updated_at_ms as i64,
                 campaign.artifact_signature_b64,
+                campaign.uptane_metadata_json,
             ],
         )?;
         crate::audit_chain::AuditChainLinker::append_audit_event_tx(
@@ -106,7 +108,7 @@ impl VerifierStore {
             .query_row(
                 "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                         stages_json, stage_index, rollout_percent, state, halt_reason,
-                        created_at_ms, updated_at_ms, artifact_signature_b64
+                        created_at_ms, updated_at_ms, artifact_signature_b64, uptane_metadata_json
                  FROM ota_campaigns WHERE campaign_id = ?1",
                 params![campaign_id],
                 Self::map_campaign_row,
@@ -119,7 +121,7 @@ impl VerifierStore {
         let mut stmt = self.conn.prepare(
             "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                     stages_json, stage_index, rollout_percent, state, halt_reason,
-                    created_at_ms, updated_at_ms, artifact_signature_b64
+                    created_at_ms, updated_at_ms, artifact_signature_b64, uptane_metadata_json
              FROM ota_campaigns ORDER BY created_at_ms DESC, campaign_id ASC",
         )?;
         let rows = stmt.query_map([], Self::map_campaign_row)?;
@@ -135,7 +137,7 @@ impl VerifierStore {
         let mut stmt = self.conn.prepare(
             "SELECT campaign_id, artifact_digest, artifact_version, cohorts_json,
                     stages_json, stage_index, rollout_percent, state, halt_reason,
-                    created_at_ms, updated_at_ms, artifact_signature_b64
+                    created_at_ms, updated_at_ms, artifact_signature_b64, uptane_metadata_json
              FROM ota_campaigns
              WHERE state IN ('staged', 'rolling')
              ORDER BY created_at_ms ASC, campaign_id ASC",
@@ -254,6 +256,7 @@ impl VerifierStore {
             created_at_ms: row.get::<_, i64>(9)? as u64,
             updated_at_ms: row.get::<_, i64>(10)? as u64,
             artifact_signature_b64: row.get(11)?,
+            uptane_metadata_json: row.get(12)?,
         })
     }
 }
@@ -336,6 +339,66 @@ mod tests {
         let loaded = s.load_campaign("camp-1").unwrap().expect("present");
         assert_eq!(loaded, c);
         assert!(s.load_campaign("absent").unwrap().is_none());
+    }
+
+    #[test]
+    fn uptane_metadata_json_roundtrips() {
+        // EP-13: the carried metadata set survives persistence byte-for-byte
+        // (the store is part of the untrusted carrier — it must relay, never
+        // rewrite, what the repository signed over).
+        let mut s = store();
+        let mut c = draft();
+        c.uptane_metadata_json = Some(r#"{"timestamp":{"version":3}}"#.to_string());
+        s.insert_campaign(&c).unwrap();
+        let loaded = s.load_campaign("camp-1").unwrap().expect("present");
+        assert_eq!(loaded, c);
+        assert_eq!(loaded.uptane_metadata_json.as_deref(), Some(r#"{"timestamp":{"version":3}}"#));
+        // A legacy campaign without metadata loads as None.
+        let mut legacy = draft();
+        legacy.campaign_id = "camp-legacy".into();
+        s.insert_campaign(&legacy).unwrap();
+        assert!(s.load_campaign("camp-legacy").unwrap().unwrap().uptane_metadata_json.is_none());
+    }
+
+    /// EP-13 live-upgrade drill: a REAL v1-era database (ota_campaigns without
+    /// the `uptane_metadata_json` column, `user_version` stamped 1) opened by
+    /// this binary migrates in place — the v2 step adds the column, legacy rows
+    /// load as `None`, and a metadata-carrying campaign then persists.
+    #[test]
+    fn a_v1_database_migrates_in_place_and_gains_the_uptane_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE ota_campaigns (
+                    campaign_id       TEXT    PRIMARY KEY,
+                    artifact_digest   TEXT    NOT NULL,
+                    artifact_version  TEXT    NOT NULL,
+                    cohorts_json      TEXT    NOT NULL,
+                    stages_json       TEXT    NOT NULL,
+                    stage_index       INTEGER NOT NULL DEFAULT 0,
+                    rollout_percent   INTEGER NOT NULL DEFAULT 0,
+                    state             TEXT    NOT NULL,
+                    halt_reason       TEXT,
+                    created_at_ms     INTEGER NOT NULL,
+                    updated_at_ms     INTEGER NOT NULL,
+                    artifact_signature_b64 TEXT
+                );
+                INSERT INTO ota_campaigns VALUES
+                    ('camp-old', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'v1', '[\"fleet\"]', '[100]', 0, 0, 'draft', NULL, 1, 1, NULL);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let mut s = VerifierStore::new(path.to_str().unwrap()).expect("v1 DB migrates on open");
+        let legacy = s.load_campaign("camp-old").unwrap().expect("legacy row survives");
+        assert!(legacy.uptane_metadata_json.is_none(), "pre-migration row reads None");
+        let mut c = draft();
+        c.uptane_metadata_json = Some("{}".to_string());
+        s.insert_campaign(&c).unwrap();
+        assert_eq!(s.load_campaign("camp-1").unwrap().unwrap().uptane_metadata_json.as_deref(), Some("{}"));
     }
 
     #[test]

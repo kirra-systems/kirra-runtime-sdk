@@ -204,22 +204,58 @@ const PROMOTION_RECORD_KEY: &str = "last_promotion_instance_id";
 // Instance identity
 // ---------------------------------------------------------------------------
 
-/// Returns a unique identifier for this Kirra instance.
-/// Reads KIRRA_INSTANCE_ID env var; falls back to hostname; falls back to
-/// a process-lifetime stable ID derived from startup time.
+/// The process-wide HA instance identity, set once at boot by
+/// [`init_instance_id`] from the validated `EffectiveConfig` (EP-12 — this
+/// module no longer reads the environment; the raw `KIRRA_INSTANCE_ID` /
+/// `HOSTNAME` / `KIRRA_INSTANCE_ID_FILE` inputs are captured by
+/// `env_config::EffectiveConfig` and resolved via [`resolve_instance_id`]).
+static INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Install the boot-resolved instance id (idempotent for the same value; a
+/// CONFLICTING second value is refused — identity must be unambiguous, the
+/// epoch-reclaim path keys on it).
+pub fn init_instance_id(id: String) {
+    if INSTANCE_ID.set(id.clone()).is_err() {
+        let existing = INSTANCE_ID.get().cloned().unwrap_or_default();
+        if existing != id {
+            tracing::error!(
+                existing = %existing, attempted = %id,
+                "FATAL: instance id initialized more than once with DIFFERENT values — \
+                 refusing to continue (HA identity must be unambiguous)."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Returns this Kirra instance's unique identifier: the boot-installed value
+/// ([`init_instance_id`]), else the stable no-input fallback chain
+/// (machine-id → persisted id file → loud unstable last resort) — the same
+/// resolution [`resolve_instance_id`] performs with no explicit inputs, which
+/// keeps tests and library callers working without boot wiring.
 pub fn instance_id() -> String {
-    if let Ok(id) = std::env::var("KIRRA_INSTANCE_ID") {
-        if !id.trim().is_empty() {
-            return id.trim().to_string();
-        }
+    INSTANCE_ID.get_or_init(|| resolve_instance_id(None, None, None)).clone()
+}
+
+/// Resolve the HA instance identity from EXPLICIT inputs (pure over its
+/// arguments except the documented filesystem fallbacks): the configured id if
+/// present, else the hostname, else the stable filesystem fallback chain with the
+/// optional id-file override. The env-reading production path is
+/// `EffectiveConfig::resolve_instance_id` (EP-12) — this module performs no
+/// environment reads.
+#[must_use]
+pub fn resolve_instance_id(
+    explicit: Option<&str>,
+    hostname: Option<&str>,
+    id_file: Option<&str>,
+) -> String {
+    if let Some(id) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return id.to_string();
     }
-    if let Ok(host) = std::env::var("HOSTNAME") {
-        if !host.trim().is_empty() {
-            return host.trim().to_string();
-        }
+    if let Some(host) = hostname.map(str::trim).filter(|s| !s.is_empty()) {
+        return host.to_string();
     }
-    static FALLBACK_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FALLBACK_ID.get_or_init(stable_fallback_instance_id).clone()
+    stable_fallback_instance_id(id_file)
 }
 
 /// Derive a fallback instance id that is STABLE across process restarts (HA
@@ -229,11 +265,12 @@ pub fn instance_id() -> String {
 /// on every restart, breaking that reclaim. Resolution order (most→least stable):
 ///   1. `/etc/machine-id` — the canonical per-host stable identity (distinct per
 ///      container/host in an HA deployment).
-///   2. A persisted id file (`KIRRA_INSTANCE_ID_FILE`, else `kirra_instance_id`
+///   2. A persisted id file (the caller-supplied `id_file` override — the
+///      captured `KIRRA_INSTANCE_ID_FILE` value — else `kirra_instance_id`
 ///      in the CWD): read if present, else generate once and best-effort persist.
 ///   3. Last resort: `kirra-<now_ms>` with a LOUD warning (not stable — operators
 ///      should set `KIRRA_INSTANCE_ID` / `HOSTNAME` in any real HA deployment).
-fn stable_fallback_instance_id() -> String {
+fn stable_fallback_instance_id(id_file: Option<&str>) -> String {
     if let Ok(mid) = std::fs::read_to_string("/etc/machine-id") {
         let mid = mid.trim();
         if !mid.is_empty() {
@@ -241,8 +278,9 @@ fn stable_fallback_instance_id() -> String {
         }
     }
 
-    let path = std::env::var("KIRRA_INSTANCE_ID_FILE")
-        .unwrap_or_else(|_| "kirra_instance_id".to_string());
+    let path = id_file
+        .map(str::to_string)
+        .unwrap_or_else(|| "kirra_instance_id".to_string());
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let existing = existing.trim();
         if !existing.is_empty() {
@@ -264,10 +302,43 @@ fn stable_fallback_instance_id() -> String {
 // Heartbeat writer (Primary / Active)
 // ---------------------------------------------------------------------------
 
+/// The validated HA timing bundle (EP-12, Config Slice B) — the heartbeat and
+/// promotion loops consume THIS, injected from the boot-validated
+/// `EffectiveConfig` (`EffectiveConfig::ha_timings()`), instead of reading the
+/// environment per loop. A malformed knob therefore fails at BOOT, never
+/// silently defaulting inside a running loop. `Default` is the documented
+/// constant cadence (lease off) — what an unset environment produced before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HaTimings {
+    /// Heartbeat write cadence (ms); validated > 0 (#707).
+    pub heartbeat_interval_ms: u64,
+    /// Standby promotes after this much primary silence (ms); still clamped UP
+    /// at use to the #689 floor against the heartbeat interval.
+    pub promotion_timeout_ms: u64,
+    /// Standby heartbeat poll cadence (ms); validated > 0.
+    pub promotion_poll_ms: u64,
+    /// Break-glass: promote immediately, bypassing the heartbeat check.
+    pub force_promote: bool,
+    /// EP-03 lease gate: `Some` = lease-conjunctive failover armed.
+    pub lease: Option<crate::lease::LeaseParams>,
+}
+
+impl Default for HaTimings {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
+            promotion_timeout_ms: PROMOTION_TIMEOUT_MS,
+            promotion_poll_ms: PROMOTION_POLL_MS,
+            force_promote: false,
+            lease: None,
+        }
+    }
+}
+
 /// Spawns the background heartbeat writer task for an Active instance.
 ///
 /// Writes the current timestamp and instance ID to the `posture_engine_state`
-/// table every `HEARTBEAT_INTERVAL_MS`. A standby monitoring this table will
+/// table every `ha.heartbeat_interval_ms`. A standby monitoring this table will
 /// detect the primary as alive as long as writes are succeeding.
 ///
 /// If the primary loses its store lock (mutex poisoned) or SQLite write fails
@@ -279,7 +350,7 @@ fn stable_fallback_instance_id() -> String {
 /// recorded itself as promoted, the primary logs a structured warning and
 /// terminates its heartbeat. The primary should then be manually restarted
 /// in PassiveStandby mode.
-pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
+pub fn spawn_heartbeat_writer(app: Arc<AppState>, ha: HaTimings) {
     let id = instance_id();
     // C2: supervised so a panic doesn't silently stop heartbeats (which would
     // trigger a spurious standby promotion). NON-critical — a genuinely dead
@@ -290,25 +361,19 @@ pub fn spawn_heartbeat_writer(app: Arc<AppState>) {
         /* critical   */ false,
         /* run-forever */ false,
         None,
-        move || heartbeat_loop(Arc::clone(&app), id.clone()),
+        move || heartbeat_loop(Arc::clone(&app), id.clone(), ha),
     );
 }
 
-async fn heartbeat_loop(app: Arc<AppState>, id: String) {
-        let env_interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&v| v > 0) // #707: reject 0 — disables the #689 clamp AND panics tokio::interval
-            .unwrap_or(HEARTBEAT_INTERVAL_MS);
-
+async fn heartbeat_loop(app: Arc<AppState>, id: String, ha: HaTimings) {
         // EP-03: the lease gate. When armed, the holder must renew at the lease
         // half-life — which is FASTER than the default heartbeat interval
         // (1.5 s vs 2 s at the default TTL) — so the loop runs at the tighter
         // of the two cadences (each tick both heartbeats AND renews).
-        let lease = crate::lease::lease_params_from_env();
+        let lease = ha.lease;
         let interval_ms = match &lease {
-            Some(p) => env_interval_ms.min(p.renew_interval_ms.max(1)),
-            None => env_interval_ms,
+            Some(p) => ha.heartbeat_interval_ms.min(p.renew_interval_ms.max(1)),
+            None => ha.heartbeat_interval_ms,
         };
 
         let mut tick = interval(Duration::from_millis(interval_ms));
@@ -640,7 +705,12 @@ impl HeartbeatFreshness {
 /// factory can clone it across a restart.
 pub type OnPromote = Arc<dyn Fn() + Send + Sync + 'static>;
 
-pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache, on_promote: OnPromote) {
+pub fn spawn_promotion_monitor(
+    app: Arc<AppState>,
+    cache: SharedPostureCache,
+    on_promote: OnPromote,
+    ha: HaTimings,
+) {
     let id = instance_id();
     // C2: supervised so a panic doesn't permanently disable failover. NON-critical
     // (a standby cannot serve writes anyway, so a LockedOut escalation is moot);
@@ -650,7 +720,9 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache, on
         /* critical   */ false,
         /* run-forever */ false,
         None,
-        move || promotion_loop(Arc::clone(&app), cache.clone(), id.clone(), Arc::clone(&on_promote)),
+        move || {
+            promotion_loop(Arc::clone(&app), cache.clone(), id.clone(), Arc::clone(&on_promote), ha)
+        },
     );
 }
 
@@ -677,7 +749,7 @@ pub fn spawn_promotion_monitor(app: Arc<AppState>, cache: SharedPostureCache, on
 /// calls `std::process::exit` — the double-set guard in
 /// `wire_active_posture_freshness` — already terminates without unwinding, so
 /// `catch_unwind` is transparent to it.)
-fn apply_post_promotion(app: &Arc<AppState>, on_promote: &(dyn Fn() + Send + Sync)) {
+fn apply_post_promotion(app: &Arc<AppState>, on_promote: &(dyn Fn() + Send + Sync), ha: HaTimings) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_promote)).is_err() {
         tracing::error!(
             "on_promote hook panicked after a successful promotion — exiting \
@@ -685,7 +757,7 @@ fn apply_post_promotion(app: &Arc<AppState>, on_promote: &(dyn Fn() + Send + Syn
         );
         std::process::exit(1);
     }
-    spawn_heartbeat_writer(Arc::clone(app));
+    spawn_heartbeat_writer(Arc::clone(app), ha);
 }
 
 async fn promotion_loop(
@@ -693,31 +765,23 @@ async fn promotion_loop(
     cache: SharedPostureCache,
     id: String,
     on_promote: OnPromote,
+    timings: HaTimings,
 ) {
-        let poll_ms = std::env::var("KIRRA_PROMOTION_POLL")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(PROMOTION_POLL_MS);
+        let poll_ms = timings.promotion_poll_ms;
 
-        let env_timeout_ms = std::env::var("KIRRA_PROMOTION_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(PROMOTION_TIMEOUT_MS);
-        // #689: cross-check the ENV timeout against the ENV heartbeat interval (the
-        // const assert only guards the defaults). Clamp UP to the (MAX+1)×interval
-        // floor so there is at least one full heartbeat interval between the
-        // primary's self-demote and the standby's promotion (see
-        // `enforce_promotion_timeout_floor`).
-        let interval_ms = std::env::var("KIRRA_HEARTBEAT_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&v| v > 0) // #707: reject 0 — disables the #689 clamp AND panics tokio::interval
-            .unwrap_or(HEARTBEAT_INTERVAL_MS);
-        let (timeout_ms, clamped) = enforce_promotion_timeout_floor(env_timeout_ms, interval_ms);
+        // #689: cross-check the configured timeout against the configured
+        // heartbeat interval (the const assert only guards the defaults). Clamp
+        // UP to the (MAX+1)×interval floor so there is at least one full
+        // heartbeat interval between the primary's self-demote and the
+        // standby's promotion (see `enforce_promotion_timeout_floor`). Both
+        // values arrive boot-VALIDATED via `HaTimings` (EP-12) — a malformed
+        // env value now refuses startup instead of silently defaulting here.
+        let (timeout_ms, clamped) =
+            enforce_promotion_timeout_floor(timings.promotion_timeout_ms, timings.heartbeat_interval_ms);
         if clamped {
             tracing::error!(
-                env_timeout_ms,
-                interval_ms,
+                configured_timeout_ms = timings.promotion_timeout_ms,
+                interval_ms = timings.heartbeat_interval_ms,
                 resolved_timeout_ms = timeout_ms,
                 max_consecutive_failures = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
                 "KIRRA_PROMOTION_TIMEOUT below the safe floor for KIRRA_HEARTBEAT_INTERVAL \
@@ -727,11 +791,7 @@ async fn promotion_loop(
             );
         }
 
-        let force_promote = std::env::var("KIRRA_FORCE_PROMOTE")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false);
-
-        if force_promote {
+        if timings.force_promote {
             tracing::warn!(
                 instance_id = %id,
                 "KIRRA_FORCE_PROMOTE=1: bypassing heartbeat check, promoting immediately"
@@ -739,7 +799,7 @@ async fn promotion_loop(
             if perform_promotion(&app, &cache, &id, "FORCE_PROMOTE").await {
                 // reviews H2 + H3: re-wire posture freshness AND start
                 // heartbeating on the newly-Active node (see apply_post_promotion).
-                apply_post_promotion(&app, on_promote.as_ref());
+                apply_post_promotion(&app, on_promote.as_ref(), timings);
             }
             return;
         }
@@ -749,7 +809,7 @@ async fn promotion_loop(
         // instead of the legacy heartbeat timeout (~10 s) — the ≤5 s failover
         // property. The durable epoch CAS in `perform_promotion` remains the
         // sole takeover authority either way.
-        let lease = crate::lease::lease_params_from_env();
+        let lease = timings.lease;
         let poll_ms = match &lease {
             // The challenger must observe every renewal: clamp the poll DOWN to
             // half the renew cadence if the configured poll is too slow
@@ -850,7 +910,7 @@ async fn promotion_loop(
                         "Lease expired unobserved past the promote deadline — promoting to Active"
                     );
                     if perform_promotion(&app, &cache, &id, "LEASE_EXPIRED").await {
-                        apply_post_promotion(&app, on_promote.as_ref());
+                        apply_post_promotion(&app, on_promote.as_ref(), timings);
                     }
                     return;
                 }
@@ -924,7 +984,7 @@ async fn promotion_loop(
                 if perform_promotion(&app, &cache, &id, "HEARTBEAT_TIMEOUT").await {
                     // reviews H2 + H3: re-wire posture freshness AND start
                     // heartbeating on the newly-Active node (see apply_post_promotion).
-                    apply_post_promotion(&app, on_promote.as_ref());
+                    apply_post_promotion(&app, on_promote.as_ref(), timings);
                 }
                 return;
             } else {
@@ -1914,7 +1974,7 @@ mod sg_009_promotion_act_tests {
             .build()
             .expect("runtime");
         rt.block_on(async {
-            apply_post_promotion(&app, on_promote.as_ref());
+            apply_post_promotion(&app, on_promote.as_ref(), HaTimings::default());
         });
 
         assert_eq!(

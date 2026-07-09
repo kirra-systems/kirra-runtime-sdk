@@ -195,46 +195,24 @@ pub fn holder_must_self_demote(now_ms: u64, last_renew_ms: u64, params: &LeasePa
 }
 
 // ---------------------------------------------------------------------------
-// EP-03 — the env gate. Default OFF (unset/""/0/false → legacy heartbeat path,
+// EP-03 — the gate. Default OFF (unset/""/0/false → legacy heartbeat path,
 // byte-identical). "1"/"true" → the lease path with the DEFAULT TTL (the ≤5 s
 // product property is defined at the default TTL; there is deliberately no TTL
 // env knob — a mis-sized TTL would silently change the split-brain margins).
-// An unrecognized value falls back to the PROVEN legacy path with an ERROR log
-// (fail to the safe path, loudly — never guess for an HA trigger).
+//
+// EP-12 (Config Slice B): the environment read + validation moved to
+// `env_config::EffectiveConfig` (STRICT: an unrecognized value is now a BOOT
+// error, not a silent fall-back-to-legacy — a typo like "ture" must not leave
+// the operator believing the lease trigger is armed when it is not). The HA
+// loops receive the resolved `Option<LeaseParams>` via
+// `standby_monitor::HaTimings`; this module performs no environment reads.
 // ---------------------------------------------------------------------------
 
-/// Env var arming the lease-based failover trigger ("1"/"true"; default off).
-/// MUST be set consistently on every instance sharing a store — though the
-/// promotion conjunction keeps a mixed fleet safe (see the module docs).
+/// Env var arming the lease-based failover trigger ("1"/"true"; default off;
+/// any other value refuses startup — validated in `env_config`). MUST be set
+/// consistently on every instance sharing a store — though the promotion
+/// conjunction keeps a mixed fleet safe (see the module docs).
 pub const KIRRA_HA_LEASE_ENABLED_ENV: &str = "KIRRA_HA_LEASE_ENABLED";
-
-/// Pure routing for the gate value (testable without `set_var`).
-#[must_use]
-pub fn lease_params_from_env_value(raw: Option<&str>) -> Option<LeaseParams> {
-    match raw.map(str::trim) {
-        None | Some("") => None,
-        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") => None,
-        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => {
-            Some(LeaseParams::default_params())
-        }
-        Some(v) => {
-            tracing::error!(
-                value = %v,
-                env = KIRRA_HA_LEASE_ENABLED_ENV,
-                "unrecognized lease-gate value — staying on the legacy heartbeat \
-                 failover path (fail-safe); use 1/true or 0/false"
-            );
-            None
-        }
-    }
-}
-
-/// Read the gate from the process env (once, at loop start).
-#[must_use]
-pub fn lease_params_from_env() -> Option<LeaseParams> {
-    let raw = std::env::var(KIRRA_HA_LEASE_ENABLED_ENV).ok();
-    lease_params_from_env_value(raw.as_deref())
-}
 
 #[cfg(test)]
 mod tests {
@@ -334,24 +312,10 @@ mod tests {
         assert!(!holder_must_self_demote(renew_at - 5_000, renew_at, &p), "skew must not self-demote");
     }
 
-    #[test]
-    fn the_env_gate_defaults_off_and_refuses_to_guess() {
-        assert_eq!(lease_params_from_env_value(None), None);
-        assert_eq!(lease_params_from_env_value(Some("")), None);
-        assert_eq!(lease_params_from_env_value(Some("0")), None);
-        assert_eq!(lease_params_from_env_value(Some("false")), None);
-        assert_eq!(
-            lease_params_from_env_value(Some("1")),
-            Some(LeaseParams::default_params())
-        );
-        assert_eq!(
-            lease_params_from_env_value(Some("TRUE")),
-            Some(LeaseParams::default_params())
-        );
-        // A typo must not silently arm OR silently pick a different timing —
-        // it falls back to the proven legacy path (logged at ERROR).
-        assert_eq!(lease_params_from_env_value(Some("yes")), None);
-    }
+    // (The env-gate routing tests moved with the read itself: EP-12 validates
+    // KIRRA_HA_LEASE_ENABLED strictly in `env_config` — see its
+    // `a_bad_ha_lease_gate_fails_at_boot` / default-off tests. A typo now
+    // refuses startup instead of silently falling back.)
 
     #[test]
     fn the_default_poll_cadence_observes_every_renewal() {

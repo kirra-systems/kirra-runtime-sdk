@@ -16,7 +16,10 @@
 //! Because the version value the framework stamps is a trusted `i64` it controls
 //! (never user input), it is formatted inline, so the seam needs no parameter
 //! binding. The pure SQL + transaction semantics are exercised here against a
-//! modelled executor; binding a real server is the recorded follow-up.
+//! modelled executor; the real-server binding is EP-10's workspace-detached
+//! `crates/kirra-verifier-pg` (`LivePgExecutor`, the promised ~10-line adapter),
+//! whose tests run this backend against a live `services: postgres` container
+//! in the `postgres-conformance` CI lane.
 
 use super::migrations::{run_migrations_generic, SchemaBackend};
 
@@ -309,7 +312,7 @@ mod tests {
         use std::error::Error as _;
         // A driver error type that implements std::error::Error → the Executor
         // variant must expose it via source(); the framework variants have none.
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io = std::io::Error::other("boom");
         let e: PgMigrationError<std::io::Error> = PgMigrationError::Executor(io);
         assert!(e.source().is_some(), "Executor variant chains its cause");
         let fut: PgMigrationError<std::io::Error> =
