@@ -332,19 +332,25 @@ pub const AUDIT_SHIP_INTERVAL_MS: u64 = 5_000;
 /// byte-identical prior behaviour).
 pub const AUDIT_SHIP_PATH_ENV: &str = "KIRRA_AUDIT_SHIP_PATH";
 
-/// Spawn the background audit shipper IF `KIRRA_AUDIT_SHIP_PATH` names a sink file;
-/// otherwise a no-op (shipping is opt-in, default OFF). Supervised **non-critical**
-/// on a `AUDIT_SHIP_INTERVAL_MS` loop: a wedged shipper cannot make anything unsafe
-/// (the LOCAL audit chain is intact and independently verifiable; off-box shipping
-/// is a survivability enhancement), so a panic restarts it but never forces
-/// `LockedOut`. Each cycle runs `ship_and_advance` off the async thread via
-/// `StoreHandle::call`; the `JsonlFileAuditSink` is cheap (a path; it opens +
-/// fsyncs per append), so a fresh one per cycle is fine.
+/// Spawn the background audit shipper IF `ship_path` names a sink file (the
+/// boot-captured `KIRRA_AUDIT_SHIP_PATH` value, injected from
+/// `env_config::EffectiveConfig::audit_ship_path` — EP-12: this module performs
+/// no environment reads); otherwise a no-op (shipping is opt-in, default OFF).
+/// Supervised **non-critical** on a `AUDIT_SHIP_INTERVAL_MS` loop: a wedged
+/// shipper cannot make anything unsafe (the LOCAL audit chain is intact and
+/// independently verifiable; off-box shipping is a survivability enhancement),
+/// so a panic restarts it but never forces `LockedOut`. Each cycle runs
+/// `ship_and_advance` off the async thread via `StoreHandle::call`; the
+/// `JsonlFileAuditSink` is cheap (a path; it opens + fsyncs per append), so a
+/// fresh one per cycle is fine.
 ///
 /// Returns `true` if the shipper was spawned, `false` if shipping is disabled.
-pub fn spawn_audit_shipper(app: std::sync::Arc<crate::verifier::AppState>) -> bool {
-    let path = match std::env::var(AUDIT_SHIP_PATH_ENV) {
-        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+pub fn spawn_audit_shipper(
+    app: std::sync::Arc<crate::verifier::AppState>,
+    ship_path: Option<&str>,
+) -> bool {
+    let path = match ship_path.map(str::trim) {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => return false, // shipping off (default)
     };
 

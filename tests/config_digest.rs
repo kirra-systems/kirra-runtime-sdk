@@ -8,7 +8,7 @@
 //! chain, that the chain integrity holds with the config event in it, and that a
 //! config change yields a different committed digest.
 
-use kirra_verifier::env_config::EffectiveConfig;
+use kirra_verifier::env_config::{EffectiveConfig, RawConfig};
 use kirra_verifier::verifier_store::VerifierStore;
 
 fn config_event_payload(cfg: &EffectiveConfig) -> String {
@@ -26,20 +26,14 @@ fn config_event_payload(cfg: &EffectiveConfig) -> String {
 fn effective_config_digest_commits_to_the_audit_chain_and_verifies() {
     let mut store = VerifierStore::new(":memory:").expect("in-memory store");
 
-    let cfg = EffectiveConfig::from_values(
-        Some("0.0.0.0:8090"),
-        Some("/data/kirra.sqlite"),
-        Some("active"),
-        Some("robotaxi"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let cfg = EffectiveConfig::from_values(RawConfig {
+        verifier_addr: Some("0.0.0.0:8090"),
+        db_path: Some("/data/kirra.sqlite"),
+        mode: Some("active"),
+        vehicle_class: Some("robotaxi"),
+        ..RawConfig::default()
+    })
+    .expect("valid config");
     let len_before = store.audit_chain_len().expect("len");
     store
         .append_clearance_audit_event("EffectiveConfigDigest", &config_event_payload(&cfg), 1_000)
@@ -58,20 +52,14 @@ fn effective_config_digest_commits_to_the_audit_chain_and_verifies() {
 
     // A DIFFERENT effective config commits a DIFFERENT digest — drift is detectable
     // in the durable trail (here: standby vs active mode).
-    let standby = EffectiveConfig::from_values(
-        Some("0.0.0.0:8090"),
-        Some("/data/kirra.sqlite"),
-        Some("passive_standby"),
-        Some("robotaxi"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let standby = EffectiveConfig::from_values(RawConfig {
+        verifier_addr: Some("0.0.0.0:8090"),
+        db_path: Some("/data/kirra.sqlite"),
+        mode: Some("passive_standby"),
+        vehicle_class: Some("robotaxi"),
+        ..RawConfig::default()
+    })
+    .expect("valid standby config");
     assert_ne!(cfg.effective_digest(), standby.effective_digest());
     store
         .append_clearance_audit_event("EffectiveConfigDigest", &config_event_payload(&standby), 2_000)

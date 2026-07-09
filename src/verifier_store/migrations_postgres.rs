@@ -312,7 +312,7 @@ mod tests {
         use std::error::Error as _;
         // A driver error type that implements std::error::Error → the Executor
         // variant must expose it via source(); the framework variants have none.
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io = std::io::Error::other("boom");
         let e: PgMigrationError<std::io::Error> = PgMigrationError::Executor(io);
         assert!(e.source().is_some(), "Executor variant chains its cause");
         let fut: PgMigrationError<std::io::Error> =

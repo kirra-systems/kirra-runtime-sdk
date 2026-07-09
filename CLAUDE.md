@@ -513,7 +513,17 @@ var is `KIRRA_ENV_KEYS` in `src/env_config.rs`** — this table mirrors it. At s
 the service WARNs on any `KIRRA_*` env var NOT in the registry (a typo / stale var
 that is not taking effect) and commits an `EffectiveConfigDigest` audit event (the
 SHA-256 of the boot-config snapshot, so drift is detectable across restarts). Adding
-a new `KIRRA_*` read means adding its `EnvKeySpec` row.
+a new `KIRRA_*` read means adding its `EnvKeySpec` row. **EP-12 (Config Slice B,
+config v2):** the migrated module families — the gateway/actuator envelope class
+(`contract_profiles`), HA (`standby_monitor` + `lease`: `KIRRA_INSTANCE_ID{,_FILE}`,
+`KIRRA_HEARTBEAT_INTERVAL`, `KIRRA_PROMOTION_{TIMEOUT,POLL}`, `KIRRA_FORCE_PROMOTE`,
+`KIRRA_HA_LEASE_ENABLED`), and the audit shipper (`KIRRA_AUDIT_SHIP_PATH`) — read
+ONLY through the boot-validated `EffectiveConfig` snapshot (zero direct env reads,
+greppable). **A malformed value in any migrated var now fails at BOOT
+(`ConfigError` → startup abort), never silently defaulting at use** — including
+`KIRRA_HA_LEASE_ENABLED`, where a typo previously fell back to the legacy path
+with only an error log. Per-instance identity is carried on the snapshot but
+`serde(skip)`ped out of the digest (fleet digests stay instance-independent).
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
