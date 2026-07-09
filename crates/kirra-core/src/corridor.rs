@@ -50,6 +50,15 @@ pub trait CorridorSource: Send + Sync {
 /// exercise the adapter end-to-end in Phase 1 unit / smoke tests
 /// without a Lanelet2 dependency. Production builds use a Lanelet2-
 /// derived source (Phase 2).
+///
+/// NOT `#[cfg(test)]`-gated on purpose: the adapter node binary and the
+/// examples construct it for explicit smoke runs. The guard against a
+/// production deployment silently landing on it lives at the construction
+/// site instead (ADR-0033 companion): `kirra_ros2_adapter_node` has NO
+/// default corridor source — `--corridor-source mock` must be passed
+/// explicitly and logs a WARN banner. Anything that selects this type for
+/// a real deployment is a configuration error: it is a straight-line test
+/// stand-in, not drivable space.
 pub struct MockCorridorSource {
     left: Vec<Point>,
     right: Vec<Point>,
