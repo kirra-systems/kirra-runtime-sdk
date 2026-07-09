@@ -799,8 +799,6 @@ mod tests {
         );
     }
 
-    /// lat_accel_max = 0 with stationary actors (raw numerator would be 0)
-    /// must fail safe — the 0/0 NaN would otherwise collapse to 0.0 m.
     // ── lateral_safe_distance_split (WP-07 / #408) ─────────────────────────
 
     /// STRICT CONSERVATISM: the split with `lat_brake_min <= lat_accel_max`
@@ -937,6 +935,8 @@ mod tests {
         }
     }
 
+    /// lat_accel_max = 0 with stationary actors (raw numerator would be 0)
+    /// must fail safe — the 0/0 NaN would otherwise collapse to 0.0 m.
     #[test]
     fn test_lat_zero_accel_is_failsafe() {
         let r = lateral_safe_distance(0.0, 0.0, 0.0, 0.5);

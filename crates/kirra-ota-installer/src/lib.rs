@@ -37,7 +37,9 @@ pub use nvbootctrl::{NvbootctrlBootController, NvbootctrlRunner, SystemNvbootctr
 // application (persists the adopted root + version floor so a revoked key
 // stays revoked across restarts).
 pub mod uptane_trust;
-pub use uptane_trust::{TrustState, TrustStoreError, UptaneTrustStore};
+pub use uptane_trust::{
+    uptane_pull_gate, TrustState, TrustStoreError, UptaneGateError, UptaneTrustStore,
+};
 
 // EP-06 (M1) — signed manifest → node model allow-list: verify a presented
 // Uptane metadata bundle through the durable trust state and render the
@@ -738,6 +740,13 @@ pub struct AssignmentView {
     /// provisioned release key refuses to stage without it.
     #[serde(default)]
     pub artifact_signature_b64: Option<String>,
+    /// EP-13 — the campaign's full signed Uptane metadata set (timestamp /
+    /// snapshot / targets + role signatures), as the verifier relays it from
+    /// the repository. Absent on legacy assignments; an Uptane-ANCHORED node
+    /// refuses to stage without it (`uptane_trust::uptane_pull_gate`,
+    /// fail-closed).
+    #[serde(default)]
+    pub uptane_metadata: Option<kirra_release_token::uptane::UptaneMetadataSet>,
     #[serde(default)]
     pub artifact_version: Option<String>,
     #[serde(default)]
@@ -1374,6 +1383,7 @@ mod tests {
             artifact_signature_b64: None,
             artifact_version: Some("v2".into()),
             campaign_id: Some("camp-1".into()),
+            uptane_metadata: None,
         }
     }
 

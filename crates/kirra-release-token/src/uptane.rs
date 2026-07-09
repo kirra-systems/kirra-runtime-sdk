@@ -471,6 +471,51 @@ pub fn verify_update(
     })
 }
 
+/// EP-13 — the WIRE bundle of one full signed metadata set: the three role
+/// metadata documents + their signatures, exactly what a repository publishes
+/// per Uptane cycle and what the verifier's campaign-assignment endpoint
+/// relays to a node VERBATIM (the server is an untrusted carrier — it stores
+/// and serves the set, never re-signs or re-encodes its meaning; all
+/// verification is end-to-end at the node against its provisioned root).
+///
+/// Serde-gated like the role metadata themselves; the verifier and the
+/// node-side installer both speak this one struct, so the wire cannot drift.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UptaneMetadataSet {
+    pub timestamp: TimestampMetadata,
+    pub timestamp_sig_b64: String,
+    pub snapshot: SnapshotMetadata,
+    pub snapshot_sig_b64: String,
+    pub targets: TargetsMetadata,
+    pub targets_sig_b64: String,
+}
+
+impl UptaneMetadataSet {
+    /// Run the full [`verify_update`] pipeline over this bundle: role-key
+    /// signatures, freshness, the strict `version > floor` rollback guard, and
+    /// the timestamp→snapshot→targets chain agreement. Fail-closed on every
+    /// arm; `Ok` yields the verified targets + the new floor to persist.
+    pub fn verify(
+        &self,
+        root: &RootMetadata,
+        trusted: TrustedVersions,
+        now_ms: u64,
+    ) -> Result<VerifiedUpdate, UptaneError> {
+        verify_update(
+            root,
+            trusted,
+            now_ms,
+            &self.timestamp,
+            &self.timestamp_sig_b64,
+            &self.snapshot,
+            &self.snapshot_sig_b64,
+            &self.targets,
+            &self.targets_sig_b64,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
