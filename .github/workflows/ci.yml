@@ -419,7 +419,7 @@ jobs:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - name: Run MC/DC coverage
+      - name: Workspace branch coverage (attempts MC/DC, falls back — #65)
         # DECISION (EP-07 / issue #65): true MC/DC is TOOLCHAIN-BLOCKED — current
         # nightly rejects `-Zcoverage-options=mcdc` (only block|branch|condition
         # are accepted), so no Rust toolchain can express it today. This job stays
