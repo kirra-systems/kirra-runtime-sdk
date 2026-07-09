@@ -1390,3 +1390,105 @@ mod degraded_angular_gate_tests {
         assert!(degraded_angular_violation(0.1, f64::INFINITY, EPS));
     }
 }
+
+// EP-08 — the two RSS reference frames pinned to exact values. Both resolve a
+// longitudinal gap, a signed lateral offset, and the object velocity's
+// longitudinal/lateral components; every product/sum/sign in that resolution
+// is load-bearing (a snapshot RSS conjunction rides on the signs), so these
+// tests pin all four outputs of each frame to 1e-9 — the mutation gate's
+// arithmetic mutants in `rss_tangent_frame` / `rss_frenet_frame` each move at
+// least one output well past that tolerance.
+#[cfg(test)]
+mod rss_frame_tests {
+    use super::*;
+    use crate::state::Pose as AdapterPose;
+
+    fn traj_point(x: f64, y: f64, heading: f64) -> TrajectoryPoint {
+        TrajectoryPoint {
+            pose: AdapterPose { x_m: x, y_m: y, heading_rad: heading },
+            velocity_mps: 0.0,
+            time_from_start_s: 0.0,
+        }
+    }
+
+    fn obj_at(px: f64, py: f64, vx: f64, vy: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: Point { x_m: px, y_m: py },
+            velocity_mps: (vx * vx + vy * vy).sqrt(),
+            heading_rad: vy.atan2(vx),
+            vel: Point { x_m: vx, y_m: vy },
+        }
+    }
+
+    #[test]
+    fn tangent_frame_resolves_gap_offset_and_velocity_exactly() {
+        // Heading π/6 → cos = √3/2, sin = 1/2 (both non-trivial and distinct).
+        // Ego at (5, 7); object 2 m +X, 3 m +Y of it; velocity (1, 4).
+        let h = std::f64::consts::FRAC_PI_6;
+        let (cos_h, sin_h) = (h.cos(), h.sin());
+        let (dx, dy) = (2.0_f64, 3.0_f64);
+        let (vx, vy) = (1.0_f64, 4.0_f64);
+        let f = rss_tangent_frame(&traj_point(5.0, 7.0, h), &obj_at(5.0 + dx, 7.0 + dy, vx, vy));
+        assert!((f.lon_gap - (cos_h * dx + sin_h * dy)).abs() < 1e-9, "lon_gap {}", f.lon_gap);
+        assert!((f.lat_off - (-sin_h * dx + cos_h * dy)).abs() < 1e-9, "lat_off {}", f.lat_off);
+        assert!((f.obj_lon_v - (cos_h * vx + sin_h * vy)).abs() < 1e-9, "obj_lon_v {}", f.obj_lon_v);
+        assert!((f.obj_lat_v - (-sin_h * vx + cos_h * vy)).abs() < 1e-9, "obj_lat_v {}", f.obj_lat_v);
+        // Concrete values (independent of the formula above): with these inputs
+        // lon_gap ≈ 3.232, lat_off ≈ 1.598 — a sign flip or product→sum mutant
+        // lands elsewhere.
+        assert!((f.lon_gap - 3.232_050_8).abs() < 1e-6);
+        assert!((f.lat_off - 1.598_076_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frenet_frame_resolves_along_a_rotated_lane_exactly() {
+        // A straight lane at 30° (tangent (cos30, sin30) = (0.866, 0.5)) — the
+        // frame BUILDS regardless of straightness (engagement is gated
+        // elsewhere), and a rotated tangent makes the velocity-resolution signs
+        // load-bearing (a +X lane would zero the lateral term and hide mutants).
+        let h = std::f64::consts::FRAC_PI_6;
+        let (tx, ty) = (h.cos(), h.sin());
+        // Left/right boundaries offset ±2 m along the left normal (-sin, cos).
+        let (nx, ny) = (-ty, tx);
+        let center = |s: f64| Point { x_m: tx * s, y_m: ty * s };
+        let off = |p: Point, k: f64| Point { x_m: p.x_m + k * nx, y_m: p.y_m + k * ny };
+        let left: Vec<Point> = (0..=20).map(|i| off(center(i as f64), 2.0)).collect();
+        let right: Vec<Point> = (0..=20).map(|i| off(center(i as f64), -2.0)).collect();
+        let frenet = CenterlineFrenet::from_boundaries(&left, &right).unwrap();
+
+        // Ego on the centerline at s = 5; object at s = 12, 1 m to the LEFT.
+        let ego_w = center(5.0);
+        let obj_w = off(center(12.0), 1.0);
+        let (vx, vy) = (2.0_f64, 3.0_f64);
+        let f = rss_frenet_frame(
+            &frenet,
+            &traj_point(ego_w.x_m, ego_w.y_m, h),
+            &obj_at(obj_w.x_m, obj_w.y_m, vx, vy),
+        )
+        .expect("both points project onto the lane");
+        // Arc gap 12 - 5 = 7; lateral offset +1 (object left of ego).
+        assert!((f.lon_gap - 7.0).abs() < 1e-6, "lon_gap {}", f.lon_gap);
+        assert!((f.lat_off - 1.0).abs() < 1e-6, "lat_off {}", f.lat_off);
+        // Velocity resolved against the lane tangent at the object.
+        assert!((f.obj_lon_v - (tx * vx + ty * vy)).abs() < 1e-6, "obj_lon_v {}", f.obj_lon_v);
+        assert!((f.obj_lat_v - (-ty * vx + tx * vy)).abs() < 1e-6, "obj_lat_v {}", f.obj_lat_v);
+        // The lateral component is non-zero (≈ 1.598) — the sign/product mutants
+        // in the `-ty*vx + tx*vy` resolution cannot hide.
+        assert!(f.obj_lat_v.abs() > 1.0);
+    }
+
+    #[test]
+    fn frenet_frame_falls_back_when_a_point_cannot_project() {
+        // A degenerate (single-point-after-collapse) frame is unbuildable, so
+        // instead pin the None path via a non-finite object position: project
+        // returns None → the caller uses the tangent frame for that pair.
+        let (l, r) = (
+            vec![Point { x_m: 0.0, y_m: 2.0 }, Point { x_m: 40.0, y_m: 2.0 }],
+            vec![Point { x_m: 0.0, y_m: -2.0 }, Point { x_m: 40.0, y_m: -2.0 }],
+        );
+        let frenet = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
+        let bad = obj_at(f64::NAN, 0.0, 1.0, 0.0);
+        assert!(rss_frenet_frame(&frenet, &traj_point(5.0, 0.0, 0.0), &bad).is_none());
+    }
+}

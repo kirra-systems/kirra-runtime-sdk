@@ -98,14 +98,19 @@ fn sample_at_fraction(poly: &[Point], cum: &[f64], frac: f64) -> Point {
 
 /// Cumulative arc length of a polyline; `None` when any coordinate is
 /// non-finite or the total length is not strictly positive.
+///
+/// The single trailing `s.is_finite()` guard is sufficient for BOTH failure
+/// modes: a non-finite input coordinate poisons the running sum (NaN/±∞
+/// propagate through the subtraction, `powi`, `sqrt` and `+`), and a finite
+/// input that overflows to `±∞` is caught the same way — so there is no need
+/// for a redundant per-window finiteness pre-check (it could reject nothing
+/// the trailing guard does not). `s > 0.0` additionally rejects a
+/// zero-length (all-coincident) polyline.
 fn cumulative_arc(poly: &[Point]) -> Option<Vec<f64>> {
     let mut cum = Vec::with_capacity(poly.len());
     let mut s = 0.0;
     cum.push(0.0);
     for w in poly.windows(2) {
-        if !(w[0].x_m.is_finite() && w[0].y_m.is_finite() && w[1].x_m.is_finite() && w[1].y_m.is_finite()) {
-            return None;
-        }
         s += ((w[1].x_m - w[0].x_m).powi(2) + (w[1].y_m - w[0].y_m).powi(2)).sqrt();
         cum.push(s);
     }
@@ -466,5 +471,120 @@ mod tests {
         let f = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
         let c = f.project(Point { x_m: 30.0, y_m: 0.0 }).unwrap();
         assert!(c.d.abs() < 1e-9, "centerline must sit on y=0, d = {}", c.d);
+    }
+
+    #[test]
+    fn cumulative_arc_pins_the_running_length_and_rejects_degenerate() {
+        // Exact per-vertex arc length — a 3-4-5 triangle leg pair pins the
+        // hypotenuse arithmetic (the `-`, `powi`, `+`, `sqrt` chain).
+        let poly = vec![
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 3.0, y_m: 4.0 }, // +5
+            Point { x_m: 3.0, y_m: 4.0 + 12.0 }, // +12
+        ];
+        assert_eq!(cumulative_arc(&poly).unwrap(), vec![0.0, 5.0, 17.0]);
+        // The single trailing guard rejects BOTH failure modes:
+        //   - a zero-length (all-coincident) polyline → s == 0, not > 0.
+        let p = Point { x_m: 2.0, y_m: 7.0 };
+        assert!(cumulative_arc(&[p, p]).is_none(), "s>0 must reject zero length");
+        assert!(cumulative_arc(&[p, p, p]).is_none());
+        //   - a non-finite coordinate → s non-finite (poisoned through the sum).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(cumulative_arc(&[Point { x_m: bad, y_m: 0.0 }, p]).is_none());
+            assert!(cumulative_arc(&[p, Point { x_m: 0.0, y_m: bad }]).is_none());
+        }
+    }
+
+    #[test]
+    fn sample_at_fraction_pins_the_interpolation() {
+        // L-corner polyline: seg0 (0,0)→(10,0) len 10, seg1 (10,0)→(10,10) len 10.
+        let poly = vec![
+            Point { x_m: 0.0, y_m: 0.0 },
+            Point { x_m: 10.0, y_m: 0.0 },
+            Point { x_m: 10.0, y_m: 10.0 },
+        ];
+        let cum = vec![0.0, 10.0, 20.0];
+        // frac 0.25 → target 5 → seg0, t = 0.5 → (5, 0). Pins the `target-cum[i]`
+        // numerator, the `/seg` division and the two lerp expressions.
+        let a = sample_at_fraction(&poly, &cum, 0.25);
+        assert!((a.x_m - 5.0).abs() < 1e-12 && a.y_m.abs() < 1e-12, "{a:?}");
+        // frac 0.75 → target 15 → seg1, t = 0.5 → (10, 5).
+        let b = sample_at_fraction(&poly, &cum, 0.75);
+        assert!((b.x_m - 10.0).abs() < 1e-12 && (b.y_m - 5.0).abs() < 1e-12, "{b:?}");
+        // Endpoints resolve exactly (frac 0 → start, frac 1 → end).
+        let s0 = sample_at_fraction(&poly, &cum, 0.0);
+        assert!(s0.x_m.abs() < 1e-12 && s0.y_m.abs() < 1e-12);
+        let s1 = sample_at_fraction(&poly, &cum, 1.0);
+        assert!((s1.x_m - 10.0).abs() < 1e-12 && (s1.y_m - 10.0).abs() < 1e-12);
+    }
+
+    // A hand-built frame with EXACT geometry (bypassing resampling error) so the
+    // projection / tangent / heading arithmetic can be pinned to 1e-12.
+    fn corner_frame() -> CenterlineFrenet {
+        // Two unit-scaled 3-4-5 legs: seg0 dir (0.8,0.6) len 5, seg1 dir
+        // (0.6,0.8) len 5 — both tangents non-axis-aligned and distinct, so
+        // every operand of the cross/dot/normalize arithmetic is load-bearing.
+        CenterlineFrenet {
+            pts: vec![
+                Point { x_m: 0.0, y_m: 0.0 },
+                Point { x_m: 4.0, y_m: 3.0 },
+                Point { x_m: 7.0, y_m: 7.0 },
+            ],
+            cum_s: vec![0.0, 5.0, 10.0],
+        }
+    }
+
+    #[test]
+    fn tangent_at_pins_the_segment_direction() {
+        let f = corner_frame();
+        // Inside seg0 → unit (0.8, 0.6); inside seg1 → unit (0.6, 0.8).
+        let (t0x, t0y) = f.tangent_at(2.5);
+        assert!((t0x - 0.8).abs() < 1e-12 && (t0y - 0.6).abs() < 1e-12, "{t0x},{t0y}");
+        let (t1x, t1y) = f.tangent_at(7.5);
+        assert!((t1x - 0.6).abs() < 1e-12 && (t1y - 0.8).abs() < 1e-12, "{t1x},{t1y}");
+        // Neither is (1,0): kills the whole-function default-return mutant.
+        assert!((t0x - 1.0).abs() > 0.1 || t0y.abs() > 0.1);
+    }
+
+    #[test]
+    fn total_heading_change_pins_the_corner_angle() {
+        let f = corner_frame();
+        // Angle between (0.8,0.6) and (0.6,0.8): cross = .8*.8-.6*.6 = 0.28,
+        // dot = .8*.6+.6*.8 = 0.96 → atan2(0.28, 0.96).
+        let expected = 0.28_f64.atan2(0.96);
+        assert!(
+            (f.total_heading_change_rad() - expected).abs() < 1e-12,
+            "{} vs {expected}",
+            f.total_heading_change_rad()
+        );
+        // A single straight segment turns through nothing.
+        let straight = CenterlineFrenet {
+            pts: vec![Point { x_m: 0.0, y_m: 0.0 }, Point { x_m: 3.0, y_m: 4.0 }],
+            cum_s: vec![0.0, 5.0],
+        };
+        assert!(straight.total_heading_change_rad().abs() < 1e-12);
+    }
+
+    #[test]
+    fn project_pins_signed_offset_on_both_sides() {
+        // L-corner: seg0 (0,0)→(10,0), seg1 (10,0)→(10,10).
+        let f = CenterlineFrenet {
+            pts: vec![
+                Point { x_m: 0.0, y_m: 0.0 },
+                Point { x_m: 10.0, y_m: 0.0 },
+                Point { x_m: 10.0, y_m: 10.0 },
+            ],
+            cum_s: vec![0.0, 10.0, 20.0],
+        };
+        // Beside seg0, LEFT of +X travel (y>0) → d = +2, s = 5.
+        let a = f.project(Point { x_m: 5.0, y_m: 2.0 }).unwrap();
+        assert!((a.s - 5.0).abs() < 1e-12 && (a.d - 2.0).abs() < 1e-12, "{a:?}");
+        // Beside seg1 (travel +Y), a point at x=12 is to the RIGHT → d = -2,
+        // s = 10 + 5. The ex=0 branch makes the `ey*dx` sign load-bearing.
+        let b = f.project(Point { x_m: 12.0, y_m: 5.0 }).unwrap();
+        assert!((b.s - 15.0).abs() < 1e-12 && (b.d + 2.0).abs() < 1e-12, "{b:?}");
+        // Nearest-segment retention: (12,5) is 2 m from seg1 but ~5.4 m from
+        // seg0's end — the near-vs-far comparison must keep seg1.
+        assert!(b.s > 10.0, "must have chosen seg1, s = {}", b.s);
     }
 }
