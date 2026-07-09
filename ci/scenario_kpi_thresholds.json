@@ -1,7 +1,9 @@
 {
-  "_comment": "WS-3.1 scenario-KPI gate thresholds (see crates/kirra-kpi-gate). The corpus is deterministic (closed-form generators, seeded planner), so measured values are exact rationals and these bounds sit AT the current floor: geometric admissibility 240/248 = 0.96774..., learned (SafetyAware, seed 7) 224/248 = 0.90322...; perception runs through the scripted MockSemanticDetector seam and pins perfection (unsafe_miss_rate 0, hazard_recall 1) — the real detector inherits these bars behind the same trait. A KPI may only move DOWN past its bound with a reviewed justification in the PR that changes this file; improvements should tighten the bound here (ratchet).",
+  "_comment": "WS-3.1 scenario-KPI gate thresholds (see crates/kirra-kpi-gate). The corpus is deterministic (closed-form generators, seeded planner), so measured values are exact rationals and these bounds sit AT the current floor: geometric admissibility 240/248 = 0.96774..., learned (SafetyAware, seed 7) 224/248 = 0.90322...; perception runs through the scripted MockSemanticDetector seam and pins perfection (unsafe_miss_rate 0, hazard_recall 1) — the real detector inherits these bars behind the same trait. A KPI may only move DOWN past its bound with a reviewed justification in the PR that changes this file; improvements should tighten the bound here (ratchet). EP-20 differential rows: Phase-A (geometric, hazard-blind) vs Phase-B (semantic fusion) over the shared ground-truth corpus — differential_missed_tighten_max bounds the truth-hazard frames where the REQUIRED Phase-B tighten did not happen (unsafe direction); differential_phantom_tighten_max bounds unjustified tightens (availability). Both seam-pinned exact 0 today (mock detector = truth); the forbidden-loosen row (fusion may never extend Phase-A) is a HARD 0 in code, not a threshold. Discriminance comes from the differential negative-control rows (each detector fault family must breach missed-tighten >= 0.9; the phantom control must breach phantom-tighten).",
   "geometric_admissibility_min": 0.9677,
   "learned_admissibility_min": 0.9032,
   "unsafe_miss_rate_max": 0.0,
-  "hazard_recall_min": 1.0
+  "hazard_recall_min": 1.0,
+  "differential_missed_tighten_max": 0.0,
+  "differential_phantom_tighten_max": 0.0
 }
