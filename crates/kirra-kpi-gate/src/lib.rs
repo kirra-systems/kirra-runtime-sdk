@@ -38,6 +38,7 @@
 //! prints the scorecard either way.
 
 pub mod confidence;
+pub mod differential;
 pub mod montecarlo;
 pub mod sotif_coverage;
 
@@ -356,6 +357,12 @@ pub struct KpiThresholds {
     pub unsafe_miss_rate_max: f64,
     /// Min fraction of true binding hazards the detector catches.
     pub hazard_recall_min: f64,
+    /// EP-20 differential: max fraction of truth-hazard frames where Phase-B
+    /// FAILED to diverge from hazard-blind Phase-A (the unsafe direction).
+    pub differential_missed_tighten_max: f64,
+    /// EP-20 differential: max fraction of all frames with an UNJUSTIFIED
+    /// Phase-B tighten (availability cost, over-conservative direction).
+    pub differential_phantom_tighten_max: f64,
 }
 
 /// One evaluated KPI row: measured value vs its bound.
@@ -468,6 +475,77 @@ pub fn run_gate(t: &KpiThresholds) -> GateReport {
         NEG_CONTROL_BREACH_MIN,
     ));
     rows.push(KpiRow::at_most("negctl_phantom_no_unsafe_miss", ps.unsafe_miss_rate(), 0.0));
+
+    // EP-20 — differential perception rows: Phase-A (geometric, hazard-blind)
+    // vs Phase-B (semantic fusion) over the SHARED ground-truth corpus. The
+    // seam-pinned rows are the harness smoke test (mock detector = truth ⇒
+    // exact 0s); the DISCRIMINANCE evidence is the differential negative
+    // controls below, mirroring the #777 pattern.
+    let diff = differential::differential_summary(
+        cases.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+    );
+    rows.push(KpiRow::at_most(
+        "differential_forbidden_loosen",
+        diff.forbidden_loosen as f64,
+        0.0, // HARD invariant: semantic fusion is derate-only, never looser.
+    ));
+    rows.push(KpiRow::at_most(
+        "differential_missed_tighten_seam_pinned",
+        diff.missed_tighten_rate(),
+        t.differential_missed_tighten_max,
+    ));
+    rows.push(KpiRow::at_most(
+        "differential_phantom_tighten_seam_pinned",
+        diff.phantom_tighten_rate(),
+        t.differential_phantom_tighten_max,
+    ));
+
+    // EP-20 negative controls: every detector fault family must surface as a
+    // MISSED Phase-A/Phase-B divergence (the fusion went hazard-blind), and a
+    // hallucinated hazard must surface as a PHANTOM divergence — proving the
+    // differential classifier discriminates both directions.
+    for fault in [
+        DetectorFault::Dropout,
+        DetectorFault::RangeBiasFar,
+        DetectorFault::ClassConfusion,
+        DetectorFault::LateralShrink,
+    ] {
+        let faulted = negative_control_corpus(&cases, fault);
+        let d = differential::differential_summary(
+            faulted.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+        );
+        let name: &'static str = match fault {
+            DetectorFault::Dropout => "negctl_dropout_differential_missed",
+            DetectorFault::RangeBiasFar => "negctl_range_bias_far_differential_missed",
+            DetectorFault::ClassConfusion => "negctl_class_confusion_differential_missed",
+            DetectorFault::LateralShrink => "negctl_lateral_shrink_differential_missed",
+        };
+        rows.push(KpiRow::at_least(name, d.missed_tighten_rate(), NEG_CONTROL_BREACH_MIN));
+        rows.push(KpiRow::at_most(
+            match fault {
+                DetectorFault::Dropout => "negctl_dropout_differential_no_loosen",
+                DetectorFault::RangeBiasFar => "negctl_range_bias_far_differential_no_loosen",
+                DetectorFault::ClassConfusion => "negctl_class_confusion_differential_no_loosen",
+                DetectorFault::LateralShrink => "negctl_lateral_shrink_differential_no_loosen",
+            },
+            d.forbidden_loosen as f64,
+            0.0,
+        ));
+    }
+    {
+        let phantom = phantom_control_corpus(&cases);
+        let d = differential::differential_summary(
+            phantom.iter().map(|c| (&c.corridor, c.truth.as_slice(), c.detected.as_slice())),
+        );
+        // Every phantom-corpus frame is clear-truth with a hallucinated
+        // detection, so the differential must classify (nearly) all of them
+        // PhantomTighten — the over-conservative direction, discriminated.
+        rows.push(KpiRow::at_least(
+            "negctl_phantom_differential_phantom_tighten",
+            d.phantom_tighten_rate(),
+            NEG_CONTROL_BREACH_MIN,
+        ));
+    }
 
     GateReport {
         doer_scenarios: corpus.len(),

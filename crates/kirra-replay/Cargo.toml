@@ -1,0 +1,29 @@
+# EP-19 — deterministic replay: feed a captured session back through the REAL
+# gateway checker and assert BIT-IDENTICAL verdicts. The incident-reconstruction
+# tool: capture JSONL in, per-record Identical / DIVERGENT / NotReplayable out,
+# non-zero exit on any divergence. See docs/REPLAY_INCIDENT_RECONSTRUCTION.md.
+[package]
+name = "kirra-replay"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+# The REAL checker + the per-class contract profiles (the replayed verdict is
+# computed by the same functions the deployed gateway runs — no reimplementation).
+kirra-verifier = { path = "../.." }
+# The REAL verdict→record mapping (`capture::record_from_verdict`) — reusing it
+# means the replay comparison can never drift from the deployed emit mapping.
+kirra-core = { path = "../kirra-core", features = ["capture"] }
+# The authoritative on-disk capture JSONL shape.
+kirra-capture-schema = { path = "../kirra-capture-schema" }
+# `float_roundtrip` is LOAD-BEARING for bit-identical replay: serde_json's
+# DEFAULT float parse is the faster approximate path, which can be one ulp off
+# the nearest double — the emitted `-10.757967088390005` parsed back to a
+# DIFFERENT f64 and broke bit-identity (found by this crate's own tests). The
+# feature switches to the exact (correctly-rounded) parser.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[[bin]]
+name = "kirra-replay"
+path = "src/bin/kirra_replay.rs"

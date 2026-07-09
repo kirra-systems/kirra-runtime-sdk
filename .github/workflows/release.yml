@@ -280,6 +280,40 @@ jobs:
           path: kirra-*.cdx.json
           retention-days: 1
 
+  # EP-18 — the safety-case-as-code bundle: reviewed evidence manifests +
+  # safety-case documents + gates RE-EXECUTED at bundle time (safety-constant
+  # provenance match, quality ratchet, frozen-talisman blob pin) + referenced
+  # CI lanes, assembled into one hash-chained, SELF-VERIFYING bundle
+  # (ci/build_safety_case.py). Tarred as kirra-<version>-safety-case.tar.gz so
+  # the release job's existing *.tar.gz handling carries it into SHA256SUMS and
+  # the keyless cosign signing, exactly like the platform tarballs.
+  safety-case:
+    name: Safety-case evidence bundle (EP-18)
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Build + self-verify the bundle
+        run: make safety-case
+
+      - name: Tar the bundle (version-prefixed, self-identifying)
+        run: |
+          tar -C target -czf "kirra-${VERSION}-safety-case.tar.gz" safety-case
+          ls -l kirra-*-safety-case.tar.gz
+
+      - name: Upload safety-case artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kirra-safety-case
+          path: kirra-*-safety-case.tar.gz
+          retention-days: 1
+
   # WS-5.1 — the QNX governor-judge artifact: the no_std core-only verdict
   # staticlib for both QNX 8.0 tuples, tarred with its ABI header and
   # provenance manifest. Named kirra-<version>-qnx800-judge.tar.gz so the
@@ -344,7 +378,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build, sbom, qnx-artifact]
+    needs: [build, sbom, qnx-artifact, safety-case]
     runs-on: ubuntu-latest
     # #775 F1 — the ONLY job granted the OIDC signing identity + release-write.
     # It runs no third-party build scripts (checkout, download, checksum, cosign,
