@@ -252,3 +252,10 @@ never presented as WCET.
 * **#275** — the transport ADR (iceoryx2 over classic; Rust end-to-end; FFI
   demoted). This spike supplies the no-FFI demonstration and the
   transport-eliminates-TornHeader finding.
+* **WP-21b (production adoption)** — `src/inline.rs`: the assembled EP-01
+  governor loop (`GovernorStation` → release token → `ActuatorStation`) runs
+  over this carrier — release, clamp, replay-refusal, CRC-refusal, and NaN-denial
+  proven end-to-end on the received bytes, in both feature configs. The
+  dependency direction stays spike → SDK crates, so the #275 isolation holds;
+  adopting the iceoryx2 carrier is a crate-level opt-in (build this tree), and
+  the default SDK build is byte-identical without it.

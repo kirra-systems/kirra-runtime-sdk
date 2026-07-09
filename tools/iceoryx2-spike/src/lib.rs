@@ -13,5 +13,6 @@
 
 pub mod frozen;
 pub mod harness;
+pub mod inline;
 pub mod judge;
 pub mod wire;

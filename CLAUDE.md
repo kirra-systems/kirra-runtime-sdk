@@ -586,8 +586,16 @@ demoted to the C/C++ integration boundary (**ADR-0006 Clause 3**) — not the ho
   The concern split is load-bearing: memory faults die in the driver, contract faults
   reach the judge. Sequence rule mirrors the kernel: `sequence <= last_accepted ⇒
   reject` (equal = replay).
-- **`tools/iceoryx2-spike/`** (#273) — host-side iceoryx2 feature-subset spike
-  (seqlock-style owned snapshot; same `<=` replay rule; `src/judge.rs`).
+- **`tools/iceoryx2-spike/`** (#273 → WP-21b) — the iceoryx2 carrier tree (own
+  isolated workspace; iceoryx2 never enters the SDK/parko dep tree). Three tiers:
+  the original feature-subset spike (`src/judge.rs`, seqlock-style owned snapshot,
+  same `<=` replay rule), the frozen-contract carrier (`src/frozen.rs`, #275/L2 —
+  the production `GovernorContractView` + `validate()` over a real channel), and
+  **WP-21b production adoption** (`src/inline.rs`): the ASSEMBLED EP-01 loop
+  (`GovernorStation` → Ed25519 release token → `ActuatorStation`
+  verify-before-release) consuming commands received over iceoryx2 —
+  release/clamp/replay/CRC/NaN rows, both feature configs, gated by the
+  `iceoryx2-spike` CI lane. Crate-level opt-in = the feature gate.
 - **`docs/safety/HYPERVISOR_CONTRACT_CHANNEL.md`** (KIRRA-OCCY-HVCHAN-001, #278) —
   frozen `#[repr(C)]` pointer-free `GovernorContractView` over hypervisor shared
   memory; 7-step seqlock write/read trust chain; **two-clock-domain model (§5)** with
