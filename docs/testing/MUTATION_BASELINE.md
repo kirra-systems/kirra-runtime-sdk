@@ -105,3 +105,33 @@ case leans on; they are NOT evidence the code is wrong.
 4. Re-baseline (full run, both scopes recorded) after each wave of kills;
    parko-core's RSS primitives are the next crate to bring under the gate
    (separate workspace — needs its own lane scope).
+
+## 6. Accepted EQUIVALENT mutants — EP-08 curved-RSS geometry (`frenet.rs`)
+
+The EP-08 curved-geometry Frenet frame added `src/frenet.rs` plus the
+per-class longitudinal-overlap gate. Its arithmetic — projection, tangent,
+heading-change, both RSS reference frames, the overlap gate on BOTH the
+snapshot and predictive paths — is pinned by exact value tests
+(`frenet.rs` unit tests + `validation.rs::rss_frame_tests` +
+`validation_tests.rs::{snapshot,predictive}_overlap_gate_*`); the `--in-diff`
+gate confirmed those mutants die. What remains are a small set of **provably
+equivalent** mutants that no test can kill because they do not change
+observable behaviour. Per policy §3.3 (accept-with-reason only when the
+mutation is behaviour-preserving), they are excluded in `.cargo/mutants.toml`
+with a written justification:
+
+| Mutant class | Location | Why equivalent |
+|---|---|---|
+| Duplicate-midpoint collapse predicate (`<`→`==`/`<=`/`>`) and its coordinate subtraction (`-`→`+`/`/`) | `CenterlineFrenet::from_boundaries` | The collapse only drops a zero-length centerline segment; `project`, `tangent_at` and `total_heading_change_rad` all already skip a zero-length segment, so every corridor the resampler can produce yields byte-identical output with or without the collapse. |
+| Nearest-segment retention `dist2 < best` → `<=` | `CenterlineFrenet::project` | Differs only when two segments are exactly equidistant, where both choices return the same `(s, d)`. |
+| Per-class overlap gate `|dy| < overlap` → `<=` | `validate_trajectory_slow_capped` (:553), `predictive_rss_breach` (:911) | Strict-vs-nonstrict on a float comparison differs only at exact bit-equality `|dy| == overlap` — a measure-zero boundary, behaviourally identical for any real input. |
+
+Other EP-08 equivalent mutants were **removed at the source** rather than
+excluded: two redundant length pre-checks (`left.len() < 2 || right.len() < 2`
+and `pts.len() < 2`) whose job `cumulative_arc` already does fail-closed (a
+polyline with < 2 vertices, or a fully-collapsed centerline, has zero total
+length → `None`); the length normalization in `total_heading_change_rad` (the
+`atan2(cross, dot)` turn angle is invariant to the segment-vector magnitudes);
+and the duplicated Err-branch `.min(len - 2)` segment-index clamp in
+`sample_at_fraction` / `tangent_at` (unified to one reachable site). These
+simplifications delete the equivalent mutants instead of masking them.

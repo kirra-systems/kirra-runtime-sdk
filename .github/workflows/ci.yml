@@ -218,6 +218,40 @@ jobs:
         # never silently rot if the unification path changes.
         run: cargo test -p kirra-core --features capture --locked
 
+  miri:
+    name: Miri — seqlock UB/memory-model check (EP-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Miri interprets the program against Rust's memory model, catching UB and
+    # (with many seeds) weak-memory/data-race bugs the type system cannot. The
+    # lane covers the Clause-2 CONTRACT PROTOCOL — the seqlock trust chain in
+    # kirra-contract-channel, including the concurrent writer/reader torn-read
+    # test (iteration count auto-scaled under cfg(miri)).
+    #
+    # kirra-hv-carrier is EXCLUDED, deliberately: Miri cannot interpret the
+    # `shm_open`/`mmap` FFI its mapping needs ("can't call foreign function
+    # `shm_open`"). Its unsafe budget is bounded + enumerated (ADR-0030 Clause
+    # A), its AtomicView layout is compile-time-asserted against the frozen
+    # contract, and its atomic ORDERINGS reproduce InProcessRegion's exactly —
+    # which is what this lane Miri-checks. The mapping itself is exercised by
+    # the cross-process tests in the inline-governor job.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+        with:
+          components: miri
+      - name: Contract-channel under Miri (lib + integration + doctests)
+        run: cargo miri test -p kirra-contract-channel --locked
+      - name: Seqlock writer/reader race under many seeds
+        # -Zmiri-many-seeds re-runs the nondeterministic schedule with 16
+        # different seeds, exploring distinct interleavings of the concurrent
+        # torn-read test — the closest Miri gets to a schedule sweep.
+        env:
+          MIRIFLAGS: "-Zmiri-many-seeds=0..16"
+        run: cargo miri test -p kirra-contract-channel --lib --locked concurrent
+
   inline-governor:
     name: In-line governor loop (EP-01) — fault matrix + cross-process demo
     runs-on: ubuntu-latest
@@ -274,8 +308,96 @@ jobs:
         # libkirra_verifier cdylib and runs it — keeps the C ABI examples from rotting.
         run: ./examples/c/build_and_run.sh
 
+  safety-constants:
+    name: Safety-constants provenance gate (EP-09)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Every VALIDATION-PENDING safety constant (RSS terms, redundancy
+    # tolerances, CTRV bounds, VRU caps, …) is pinned in
+    # ci/safety_constants_manifest.json with its provenance and sign-off
+    # status. This job verifies the declared values still match the manifest —
+    # a silent retune of a safety constant reds CI until the manifest is
+    # re-signed alongside it. The RELEASE path runs the same script with
+    # KIRRA_RELEASE_GATE=1, which additionally FAILS while any entry is still
+    # `pending` — no placeholder can reach a release.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: declared constants match the signed manifest
+        run: python3 ci/check_safety_constants.py
+      - name: release gate refuses pending constants (red-path self-test)
+        # Prove the release-blocking arm actually fires: with KIRRA_RELEASE_GATE=1
+        # the script must exit non-zero exactly when a `pending` entry exists.
+        # Once every constant is signed off this inverts automatically (release
+        # mode passes and this step asserts that instead).
+        run: |
+          set -euo pipefail
+          pending=$(python3 -c "import json; print(sum(1 for c in json.load(open('ci/safety_constants_manifest.json'))['constants'] if c['status'] == 'pending'))")
+          if [ "$pending" -gt 0 ]; then
+            if KIRRA_RELEASE_GATE=1 python3 ci/check_safety_constants.py; then
+              echo "release gate FAILED TO BLOCK with $pending pending constants" >&2
+              exit 1
+            fi
+            echo "release gate correctly blocks ($pending constants pending sign-off)"
+          else
+            KIRRA_RELEASE_GATE=1 python3 ci/check_safety_constants.py
+            echo "all constants signed off — release gate green"
+          fi
+
+  checker-coverage:
+    name: Checker decision coverage — gated floors (EP-07; true MC/DC toolchain-blocked, #65)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The certification-relevant CHECKER crates get a GATED decision-coverage
+    # floor (the workspace `coverage` job uploads but does not gate). Each crate
+    # first attempts `--mcdc`: rustc currently rejects `-Zcoverage-options=mcdc`
+    # (block|branch|condition only — the EP-07 spike result recorded in #65), so
+    # the attempt falls back to BRANCH coverage (decision coverage — the
+    # strongest gate the toolchain can express) and ci/check_decision_floor.py
+    # gates on the strongest metric present in the export. The day nightly
+    # restores mcdc, this lane upgrades itself with no workflow change.
+    #
+    # Floors sit ~2 points under the measured baselines (kirra-trajectory
+    # 80.08 %, kirra-core 81.15 %, parko-core 79.82 % branch) — real gates with
+    # anti-flake headroom; RATCHET them up as coverage improves, never down
+    # without reviewer sign-off.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+      - name: Gate the checker crates (root workspace)
+        run: |
+          set -euo pipefail
+          gate () {
+            local crate="$1" floor="$2"
+            if cargo llvm-cov -p "$crate" --mcdc --json --summary-only > "cov-$crate.json" 2> "mcdc-$crate.err"; then
+              echo "[$crate] MC/DC accepted by toolchain — gating on MC/DC."
+            else
+              echo "[$crate] --mcdc rejected by the toolchain (#65) — gating on branch (decision) coverage."
+              cargo llvm-cov -p "$crate" --branch --json --summary-only > "cov-$crate.json"
+            fi
+            python3 ci/check_decision_floor.py "cov-$crate.json" "$floor" "$crate"
+          }
+          gate kirra-trajectory 78.0
+          gate kirra-core 79.0
+      - name: Gate parko-core (parko workspace)
+        working-directory: parko
+        run: |
+          set -euo pipefail
+          if cargo llvm-cov -p parko-core --mcdc --json --summary-only > cov-parko-core.json 2> mcdc.err; then
+            echo "[parko-core] MC/DC accepted by toolchain — gating on MC/DC."
+          else
+            echo "[parko-core] --mcdc rejected by the toolchain (#65) — gating on branch (decision) coverage."
+            cargo llvm-cov -p parko-core --branch --json --summary-only > cov-parko-core.json
+          fi
+          python3 ../ci/check_decision_floor.py cov-parko-core.json 77.0 parko-core
+
   coverage:
-    name: Branch Coverage (MC/DC pending — issue #65)
+    name: Branch Coverage (workspace)
     runs-on: ubuntu-latest
     # Bumped 30→45: when --mcdc is unsupported the instrumented workspace test
     # suite runs TWICE (mcdc attempt, then branch fallback). Instrumented runs
@@ -297,13 +419,14 @@ jobs:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      - name: Run MC/DC coverage
-        # Prefer MC/DC (issue #65 / CERT-001) when the installed cargo-llvm-cov +
-        # nightly support it; fall back to branch coverage only when the toolchain
-        # rejects `--mcdc`. Historically nightly accepted only block|branch|
-        # condition for the coverage-options value and `--mcdc` would not compile,
-        # so branch was the closest substitute; this opportunistically uses MC/DC
-        # once the toolchain realigns, without breaking CI before then.
+      - name: Workspace branch coverage (attempts MC/DC, falls back — #65)
+        # DECISION (EP-07 / issue #65): true MC/DC is TOOLCHAIN-BLOCKED — current
+        # nightly rejects `-Zcoverage-options=mcdc` (only block|branch|condition
+        # are accepted), so no Rust toolchain can express it today. This job stays
+        # the WORKSPACE-WIDE branch gate (observability via Codecov); the GATED
+        # decision-coverage floors for the certification-relevant checker crates
+        # live in the dedicated `checker-coverage` job below, which attempts
+        # `--mcdc` first every run so it auto-upgrades the day rustc restores it.
         #
         # The `if` swallows a non-zero `--mcdc` exit (set -e is suppressed in an
         # if-condition) and falls back; a genuine deterministic failure also fails

@@ -1,4 +1,4 @@
-// crates/kirra-ros2-adapter/tests/validation_tests.rs
+// crates/kirra-trajectory/tests/validation_tests.rs
 //
 // S131 Phase 2A — integration tests for the slow-loop validator.
 //
@@ -8,7 +8,7 @@
 // the corridor seam (Phase 2B replaces it with the real
 // Lanelet2CorridorSource).
 
-use kirra_ros2_adapter::{
+use kirra_trajectory::{
     config::VehicleConfig,
     corridor::{MockCorridorSource, Point},
     state::{PerceivedObject, Pose, TrajectoryPoint, TrajectoryVerdict},
@@ -654,18 +654,9 @@ fn degraded_with_corridor_breach_still_mrcs() {
         "Degraded + corridor breach must still MRC — most-restrictive-wins; got {verdict:?}");
 }
 
-#[test]
-fn nominal_behavior_matches_prior_default() {
-    // Regression: every prior test in this file passed Nominal explicitly
-    // (above). This test pins the rule that Nominal is the construction
-    // default for `AdaptorState::current_posture` — until M1b wires a
-    // live posture source, the slow-loop verdict is byte-for-byte the
-    // pre-M1 behaviour.
-    use kirra_ros2_adapter::state::AdaptorState;
-    let state = AdaptorState::new();
-    assert_eq!(state.current_posture(), FleetPosture::Nominal,
-        "AdaptorState must default to Nominal so pre-M1 callers see no behaviour change");
-}
+// (`nominal_behavior_matches_prior_default` — the AdaptorState construction-
+// default pin — stays in the adapter crate: `AdaptorState` is adapter-LOCAL,
+// so it lives in `kirra-ros2-adapter/tests/adaptor_state_default.rs`.)
 
 // ---------------------------------------------------------------------------
 // 7. H2 + M1 reconciliation — the proof test
@@ -728,7 +719,7 @@ fn nominal_posture_clamps_above_odd_cap_to_22_35() {
 // Limited-visibility / occlusion bound (RSS Rule 4)
 // ---------------------------------------------------------------------------
 
-use kirra_ros2_adapter::validation::validate_trajectory_slow_capped;
+use kirra_trajectory::validation::validate_trajectory_slow_capped;
 
 /// A decel-to-stop straight trajectory: starts at `v0`, brakes at `decel` to 0,
 /// then holds. Stays at y=0 from x=5 (inside the corridor).
@@ -824,7 +815,7 @@ fn occlusion_admits_a_decel_to_stop_within_visibility() {
 // Multi-modal predictive RSS (space-time over predicted modes)
 // ---------------------------------------------------------------------------
 
-use kirra_ros2_adapter::validation::{PredictedMode, PredictedSample};
+use kirra_trajectory::validation::{PredictedMode, PredictedSample};
 
 /// Build a predicted mode: an object moving in a straight line from `(x0,y0)` at
 /// `(vx,vy)` m/s, sampled every 0.5 s over `horizon_s`.
@@ -1012,12 +1003,16 @@ fn predictive_rss_lateral_brake_parameter_is_load_bearing() {
     );
 }
 
-/// SNAPSHOT lateral brake parameter is load-bearing (validation.rs:518,
-/// `RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2`, `* → +`
-/// mutant). A moderate cut-in whose lateral gap is UNSAFE under the correct
-/// brake-min (2.45 m/s²) but would be admitted if `*` became `+` (brake-min
-/// 0.7+3.5 = 4.2 m/s² — a STRONGER brake shrinks the required separation).
-/// Correct MRCs, mutant admits. 45° ego heading (rotation exercised).
+/// SNAPSHOT lateral brake parameter is load-bearing
+/// (`RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2`, `* → +`
+/// mutant). The ego is HELD (stopped poses), so the EP-08 stopped-pose rule
+/// applies the STATIONARY-EGO lateral form — which still charges the object's
+/// braking envelope through this parameter, keeping it load-bearing on the
+/// stopped path too. A moderate cut-in whose lateral gap (2.3 m) is UNSAFE
+/// under the correct brake-min (2.45 m/s² → requires ≈2.68 m) but would be
+/// admitted if `*` became `+` (brake-min 0.7+3.5 = 4.2 m/s² → requires
+/// ≈2.04 m — a STRONGER brake shrinks the required separation). Correct MRCs,
+/// mutant admits. 45° ego heading (rotation exercised).
 #[test]
 fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
     use std::f64::consts::FRAC_PI_4;
@@ -1031,12 +1026,13 @@ fn snapshot_rss_lateral_brake_parameter_is_load_bearing() {
         .collect();
     let corridor = MockCorridorSource::straight_5m_half_width(200.0);
     let cfg = VehicleConfig::default_urban();
-    // Object at ego-frame (dx=3, dy=3.4), lateral-closing at 1 m/s (ego-frame
-    // velocity (0,-1) → world (s, -c)). obj_lat_vel = -1.0, cut-in fires;
-    // lat_required ≈ 3.74 m (correct) > 3.4 → MRC; ≈ 2.84 m (brake 4.2) < 3.4 → admit.
+    // Object at ego-frame (dx=3, dy=2.3), lateral-closing at 1 m/s (ego-frame
+    // velocity (0,-1) → world (s, -c)). obj_lat_vel = -1.0, cut-in fires; the
+    // stopped ego takes the STATIONARY-EGO form: lat_required ≈ 2.68 m
+    // (correct) > 2.3 → MRC; ≈ 2.04 m (brake 4.2 mutant) < 2.3 → admit.
     let obj = PerceivedObject {
         id: 1,
-        pos: Point { x_m: 10.0 + 3.0 * c - 3.4 * s, y_m: 3.0 * s + 3.4 * c },
+        pos: Point { x_m: 10.0 + 3.0 * c - 2.3 * s, y_m: 3.0 * s + 2.3 * c },
         velocity_mps: 1.0,
         heading_rad: 0.0,
         vel: Point { x_m: s, y_m: -c },
@@ -1162,7 +1158,7 @@ fn predictive_rss_catches_a_mid_band_lateral_cut_in() {
 // perceived objects into modes the checker then acts on — the bridge that makes the multi-modal
 // pass run against real perception instead of dormant `None`.
 
-use kirra_ros2_adapter::prediction::predicted_modes_from_objects;
+use kirra_trajectory::prediction::predicted_modes_from_objects;
 
 fn perceived(id: u64, x: f64, y: f64, vx: f64, vy: f64) -> PerceivedObject {
     PerceivedObject {
@@ -1451,6 +1447,87 @@ fn rss_conjunction_still_rejects_a_lateral_cut_in_at_a_safe_longitudinal_distanc
     }
 }
 
+#[test]
+fn snapshot_overlap_gate_is_the_sole_reason_an_in_band_closing_object_mrcs() {
+    // EP-08 per-class longitudinal-overlap gate (validation.rs:553):
+    //   `dy_ego.abs() < rss_longitudinal_overlap_m && lon_unsafe → MRCFallback`.
+    // An object INSIDE the overlap band (|dy| = 2.0 m < 2.5 m) but BEYOND the
+    // lateral safe distance, closing HEAD-ON (purely longitudinal, no lateral
+    // cut-in), against a STOPPED ego (whose stationary-ego lateral required gap
+    // ≈ 1.26 m < 2.0 m, so the lateral branch does not fire) is MRC'd ONLY by
+    // this gate. A `< → ==` / `< → >` comparison mutant stops the MRC. Two
+    // controls make the gate the provable sole cause:
+    //   (a) the SAME object placed longitudinally FAR is admitted — nothing
+    //       else about the geometry MRCs it;
+    //   (b) at the SAME near geometry but NOT closing (stationary object,
+    //       `lon_unsafe` false), it is admitted — proving the lateral branch
+    //       does not fire at 2.0 m offset, so the closing-case MRC is the gate.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0); // stopped ego → stationary-ego lateral form
+    let closing = |x: f64| PerceivedObject {
+        id: 7,
+        pos: Point { x_m: x, y_m: 2.0 },
+        velocity_mps: 6.0,
+        heading_rad: std::f64::consts::PI, // facing −X: head-on, no lateral component
+        vel: Point { x_m: -6.0, y_m: 0.0 },
+    };
+    // NEAR + closing (dx = 3 m, longitudinally unsafe) → MRC via the gate.
+    let near = validate_trajectory_slow(&ego, &corridor, &[closing(13.0)], &cfg, None, FleetPosture::Nominal);
+    assert_eq!(near, TrajectoryVerdict::MRCFallback,
+        "an in-band (2.0<2.5), head-on-closing object must MRC via the overlap gate; got {near:?}");
+    // (a) FAR + closing (dx = 60 m, longitudinally safe) → admitted.
+    let far = validate_trajectory_slow(&ego, &corridor, &[closing(70.0)], &cfg, None, FleetPosture::Nominal);
+    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same object 60 m away must be admitted; got {far:?}");
+    // (b) NEAR but stationary (not closing) → admitted: the lateral branch does
+    // not fire at a 2.0 m offset, so only the closing-case gate MRCs.
+    let near_still = validate_trajectory_slow(&ego, &corridor, &[stopped_object(13.0, 2.0)], &cfg, None, FleetPosture::Nominal);
+    assert!(matches!(near_still, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "a stationary in-band object at 2.0 m offset must be admitted (no lateral MRC); got {near_still:?}");
+}
+
+#[test]
+fn predictive_overlap_gate_is_the_sole_reason_an_in_band_closing_mode_breaches() {
+    // The predictive twin of the snapshot gate (validation.rs:911) — the same
+    // `dy_ego.abs() < rss_longitudinal_overlap_m && lon_unsafe` comparison, over
+    // a predicted MODE. A mode closing HEAD-ON at |dy| = 2.0 m (in-band, beyond
+    // the stopped-ego lateral gap, no predicted lateral motion) breaches ONLY
+    // via this gate; a `< → ==` / `< → >` / `< → <=`-off mutant stops the breach.
+    // Control: the same mode kept longitudinally FAR is admitted.
+    let corridor = MockCorridorSource::straight_5m_half_width(200.0);
+    let cfg = VehicleConfig::default_urban();
+    let ego = held_ego(10.0);
+    // Closing head-on: x decreases 13→9 over 1.0 s (≈4 m/s), y fixed at 2.4 →
+    // zero predicted lateral velocity. |dy| = 2.4 sits in (lat_required ≈ 2.325,
+    // overlap 2.5): the predictive lateral branch does NOT fire, so the breach is
+    // the overlap gate's alone (a `< → ==`/`>` mutant on it stops the breach).
+    let near_samples = [
+        PredictedSample { pos: Point { x_m: 13.0, y_m: 2.4 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 11.0, y_m: 2.4 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 9.0, y_m: 2.4 }, time_from_start_s: 1.0 },
+    ];
+    let near_modes = [PredictedMode { object_id: 1, samples: &near_samples }];
+    let near = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&near_modes), None, FrameTrust::Trusted,
+    );
+    assert_eq!(near, TrajectoryVerdict::MRCFallback,
+        "an in-band, head-on-closing predicted mode must breach via the overlap gate; got {near:?}");
+    // Control: same closing motion but far ahead (x 63→59) → longitudinally
+    // safe, admitted.
+    let far_samples = [
+        PredictedSample { pos: Point { x_m: 63.0, y_m: 2.0 }, time_from_start_s: 0.0 },
+        PredictedSample { pos: Point { x_m: 61.0, y_m: 2.0 }, time_from_start_s: 0.5 },
+        PredictedSample { pos: Point { x_m: 59.0, y_m: 2.0 }, time_from_start_s: 1.0 },
+    ];
+    let far_modes = [PredictedMode { object_id: 1, samples: &far_samples }];
+    let far = validate_trajectory_slow_capped(
+        &ego, &corridor, &[], &cfg, None, FleetPosture::Nominal, None, None, Some(&far_modes), None, FrameTrust::Trusted,
+    );
+    assert!(matches!(far, TrajectoryVerdict::Accept | TrajectoryVerdict::Clamp),
+        "the same mode far ahead must be admitted; got {far:?}");
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0029 — courier angular (yaw-rate) channel
 // ---------------------------------------------------------------------------
@@ -1537,8 +1614,8 @@ fn in_place_rotation_seq(omegas: &[f64], dt: f64) -> Vec<TrajectoryPoint> {
 }
 
 /// Ego odometry snapshot carrying a current yaw rate (linear stopped).
-fn odom_yaw(yaw_rate_rads: f64) -> kirra_ros2_adapter::state::EgoOdom {
-    kirra_ros2_adapter::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
+fn odom_yaw(yaw_rate_rads: f64) -> kirra_trajectory::state::EgoOdom {
+    kirra_trajectory::state::EgoOdom { linear_x_mps: 0.0, yaw_rate_rads, stamp_ms: 0 }
 }
 
 #[test]

@@ -29,11 +29,12 @@ use kirra_core::frame_integrity::FrameTrust;
 use kirra_core::FleetPosture;
 use parko_core::rss::{
     lateral_safe_distance_split, longitudinal_safe_distance, opposite_direction_safe_distance,
-    RSS_LONGITUDINAL_CONFLICT_M, RSS_LONGITUDINAL_OVERLAP_M,
+    RSS_LONGITUDINAL_CONFLICT_M,
 };
 
 use crate::config::VehicleConfig;
 use crate::corridor::{CorridorSource, Point};
+use crate::frenet::CenterlineFrenet;
 use crate::state::{
     AcceptedTrajectory, EgoOdom, PerceivedObject, Pose, TrajectoryPoint,
     TrajectoryVerdict,
@@ -141,6 +142,65 @@ pub struct PredictedMode<'a> {
 ///  mapping so the AV slow-loop and the differential-drive bridge stay
 ///  consistent. M1b — wiring `current_posture` to the live verifier
 ///  stream — is tracked at the slow-loop call site in `node.rs`.)
+/// EP-08 — the per-(object, pose) RSS measurement frame: the longitudinal gap,
+/// lateral offset, and the object's velocity resolved into (longitudinal,
+/// lateral) components. Two constructors:
+/// - [`rss_tangent_frame`] — the pose-heading chord frame (the original math,
+///   verbatim; exact on a straight lane);
+/// - [`rss_frenet_frame`] — the corridor-centerline Frenet frame (EP-08):
+///   longitudinal = ARC distance along the lane, lateral = signed-offset
+///   difference, velocity resolved against the centerline tangent AT the
+///   object. Correct on curved lanes, where the chord frame lets an in-lane
+///   object around the bend escape the lateral filter (fail-open) and
+///   spuriously rejects an out-of-lane object dead ahead on the tangent.
+struct RssFrame {
+    /// Longitudinal gap, ego → object (m; ≤ 0 = behind the ego).
+    lon_gap: f64,
+    /// Lateral offset, object relative to ego (m, signed).
+    lat_off: f64,
+    /// Object velocity, longitudinal component (m/s; negative = oncoming).
+    obj_lon_v: f64,
+    /// Object velocity, lateral component (m/s, signed).
+    obj_lat_v: f64,
+}
+
+/// The original pose-tangent (chord) frame — expression-for-expression the
+/// pre-EP-08 math, so the straight-lane path stays bit-for-bit.
+fn rss_tangent_frame(traj_point: &TrajectoryPoint, obj: &PerceivedObject) -> RssFrame {
+    let dx = obj.pos.x_m - traj_point.pose.x_m;
+    let dy = obj.pos.y_m - traj_point.pose.y_m;
+    let cos_h = traj_point.pose.heading_rad.cos();
+    let sin_h = traj_point.pose.heading_rad.sin();
+    RssFrame {
+        lon_gap: cos_h * dx + sin_h * dy,
+        lat_off: -sin_h * dx + cos_h * dy,
+        obj_lon_v: cos_h * obj.vel.x_m + sin_h * obj.vel.y_m,
+        obj_lat_v: -sin_h * obj.vel.x_m + cos_h * obj.vel.y_m,
+    }
+}
+
+/// The corridor-centerline Frenet frame (EP-08). `None` when either point
+/// fails to project — the caller falls back to the tangent frame for that
+/// pair (exactly the pre-EP-08 behaviour, never a skip).
+fn rss_frenet_frame(
+    frenet: &CenterlineFrenet,
+    traj_point: &TrajectoryPoint,
+    obj: &PerceivedObject,
+) -> Option<RssFrame> {
+    let ego = frenet.project(Point { x_m: traj_point.pose.x_m, y_m: traj_point.pose.y_m })?;
+    let o = frenet.project(obj.pos)?;
+    // Velocity resolves against the lane direction AT THE OBJECT — on a curve
+    // the tangent rotates, and it is the object's local lane direction that
+    // decides "closing along the lane" vs "cutting across it".
+    let (tx, ty) = frenet.tangent_at(o.s);
+    Some(RssFrame {
+        lon_gap: o.s - ego.s,
+        lat_off: o.d - ego.d,
+        obj_lon_v: tx * obj.vel.x_m + ty * obj.vel.y_m,
+        obj_lat_v: -ty * obj.vel.x_m + tx * obj.vel.y_m,
+    })
+}
+
 pub fn validate_trajectory_slow(
     trajectory: &[TrajectoryPoint],
     corridor: &dyn CorridorSource,
@@ -167,7 +227,7 @@ pub fn validate_trajectory_slow(
 
 /// As [`validate_trajectory_slow`], plus the Track-C perception-derate cap
 /// (KIRRA-OCCY-PMON-003 D3a). `effective_perception_cap` is the value resolved
-/// by [`resolve_perception_cap`] at the call site (the adapter slow loop):
+/// by `resolve_perception_cap` at the call site (the adapter slow loop):
 /// `None` when the monitor is disabled/absent (state 1 → no-op), `Some(0.0)`
 /// MRC floor when an enabled monitor is stale/silent (state 3).
 ///
@@ -391,6 +451,20 @@ pub fn validate_trajectory_slow_capped(
     // gates the longitudinal check: if the object is far enough off the
     // ego corridor laterally, containment handled it; longitudinal is
     // skipped to avoid spurious violations from objects in another lane.
+    // EP-08: derive the corridor-centerline Frenet reference ONCE per call.
+    // Engaged ONLY when the corridor is genuinely curved — a straight (or
+    // degenerate) corridor leaves `frenet` None and every pair below runs the
+    // original tangent-frame math bit-for-bit. On a curved corridor a pair
+    // whose projection fails also falls back per-pair (fail-safe: exactly the
+    // pre-EP-08 measurement, never a skip). The multi-modal PREDICTIVE pass
+    // (§C2) keeps its tangent frame — extending Frenet to the time-matched
+    // pass is the recorded follow-up.
+    let frenet = CenterlineFrenet::from_boundaries(
+        corridor.left_boundary(),
+        corridor.right_boundary(),
+    )
+    .filter(|f| !f.is_effectively_straight());
+
     for obj in objects {
         // H-2 (fail-closed RSS): a non-finite object field would poison every
         // RSS `<` / `abs()` comparison below — NaN compares false against every
@@ -405,15 +479,16 @@ pub fn validate_trajectory_slow_capped(
             return TrajectoryVerdict::MRCFallback;
         }
         for traj_point in trajectory {
-            let dx = obj.pos.x_m - traj_point.pose.x_m;
-            let dy = obj.pos.y_m - traj_point.pose.y_m;
-
-            // Skip if behind ego pose (objects we've already passed).
-            // Ego-frame: rotate world delta by -heading.
-            let cos_h = traj_point.pose.heading_rad.cos();
-            let sin_h = traj_point.pose.heading_rad.sin();
-            let dx_ego =  cos_h * dx + sin_h * dy;     // longitudinal
-            let dy_ego = -sin_h * dx + cos_h * dy;     // lateral
+            // EP-08: measure the pair in the lane's frame. Curved corridor →
+            // Frenet (arc-length longitudinal, signed-offset lateral, velocity
+            // against the local lane tangent); straight/degenerate corridor or
+            // a failed projection → the original pose-tangent frame, verbatim.
+            let frame = frenet
+                .as_ref()
+                .and_then(|f| rss_frenet_frame(f, traj_point, obj))
+                .unwrap_or_else(|| rss_tangent_frame(traj_point, obj));
+            let dx_ego = frame.lon_gap;
+            let dy_ego = frame.lat_off;
 
             // Behind ego — RSS does not apply (the object is no longer
             // a forward collision risk; containment + posture handle
@@ -444,7 +519,9 @@ pub fn validate_trajectory_slow_capped(
             // object. Reuses the ego-frame rotation already computed for dx/dy_ego;
             // the longitudinal bound now takes the true longitudinal closing
             // component (matching `predictive_rss_breach`), not the full speed.
-            let obj_lon_v = cos_h * obj.vel.x_m + sin_h * obj.vel.y_m;
+            // EP-08: the component comes from the SAME frame as the gaps above
+            // (lane tangent on a curve; pose tangent on a straight).
+            let obj_lon_v = frame.obj_lon_v;
             let lon_required = if obj_lon_v < 0.0 {
                 // Closing magnitudes; symmetric brake_min (both in their lanes).
                 opposite_direction_safe_distance(
@@ -472,7 +549,8 @@ pub fn validate_trajectory_slow_capped(
             // the ego's path). Applying it to an object the ego is laterally CLEAR of — a vehicle
             // being passed, or oncoming traffic safely in the next lane — over-rejected (§4): it
             // was why a car centered in the ego lane could not be overtaken.
-            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M && lon_unsafe {
+            // EP-08: per-class footprint-overlap gate (was the global 2.5 m).
+            if dy_ego.abs() < config.rss_longitudinal_overlap_m && lon_unsafe {
                 return TrajectoryVerdict::MRCFallback;
             }
 
@@ -492,8 +570,8 @@ pub fn validate_trajectory_slow_capped(
             // normal), mirroring `predictive_rss_breach`'s `obj_lat_v`. A car still
             // FACING forward but MOVING laterally (a cut-in) now registers lateral
             // motion here — the orientation-based `sin(heading − ego)` form read it
-            // as ~0 and could miss the cut-in.
-            let obj_lat_vel = -sin_h * obj.vel.x_m + cos_h * obj.vel.y_m;
+            // as ~0 and could miss the cut-in. EP-08: from the same frame.
+            let obj_lat_vel = frame.obj_lat_v;
             let lateral_cut_in = obj_lat_vel.abs() > RSS_LATERAL_MOTION_EPS_MPS;
             // #683/#684: scale the lateral-conflict longitudinal window by closing
             // SPEED (via `lon_required`), floored at the 8 m urban minimum. A FIXED 8 m
@@ -510,15 +588,41 @@ pub fn validate_trajectory_slow_capped(
             // gate (overtaking) is untouched.
             let lat_conflict_window = RSS_LONGITUDINAL_CONFLICT_M.max(lon_required);
             if dx_ego <= lat_conflict_window && (lon_unsafe || lateral_cut_in) {
-                let ego_lat_vel = 0.0; // straight-following assumption per §3
-                let lat_required = lateral_safe_distance_split(
-                    ego_lat_vel,
-                    obj_lat_vel,
-                    kinematics.max_lateral_accel_mps2,
-                    RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
-                    RSS_REACTION_TIME_S,
-                    RSS_MU_LATERAL_M,
-                );
+                // EP-08 stopped-pose rule (RSS responsibility, Shalev-Shwartz
+                // §3.4 — the same principle behind the §4 stopped-queue
+                // admission): a pose at which the committed trajectory is
+                // STOPPED provably contributes no lateral motion — the split
+                // form's ego response-phase swerve term is a hypothesis the
+                // trajectory itself falsifies. Such a pose is charged the
+                // OBJECT's full closing envelope + mu only
+                // (`lateral_safe_distance_split_stationary_ego`): a cut-in
+                // that can actually reach the stopped ego is still rejected
+                // (the 0.3 m held-ego pins), while a smooth yield-to-a-stop
+                // short of a crossing vehicle is no longer refused at its
+                // final stopped pose (which would merely swap the planner's
+                // yield for an MRC stop at the same spot). Moving poses keep
+                // the full split form unchanged.
+                let ego_stopped = traj_point.velocity_mps.abs()
+                    <= kirra_core::kinematics_contract::STOP_EPSILON_MPS;
+                let lat_required = if ego_stopped {
+                    parko_core::rss::lateral_safe_distance_split_stationary_ego(
+                        obj_lat_vel,
+                        kinematics.max_lateral_accel_mps2,
+                        RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
+                        RSS_REACTION_TIME_S,
+                        RSS_MU_LATERAL_M,
+                    )
+                } else {
+                    let ego_lat_vel = 0.0; // straight-following assumption per §3
+                    lateral_safe_distance_split(
+                        ego_lat_vel,
+                        obj_lat_vel,
+                        kinematics.max_lateral_accel_mps2,
+                        RSS_LAT_BRAKE_FRACTION * kinematics.max_lateral_accel_mps2,
+                        RSS_REACTION_TIME_S,
+                        RSS_MU_LATERAL_M,
+                    )
+                };
                 if dy_ego.abs() < lat_required {
                     return TrajectoryVerdict::MRCFallback;
                 }
@@ -802,8 +906,9 @@ fn predictive_rss_breach(
             };
             let lon_unsafe = dx_ego < lon_required;
 
-            // Longitudinal RSS — gated on lateral footprint overlap (same as snapshot).
-            if dy_ego.abs() < RSS_LONGITUDINAL_OVERLAP_M && lon_unsafe {
+            // Longitudinal RSS — gated on lateral footprint overlap (same as
+            // snapshot; EP-08: the per-class window).
+            if dy_ego.abs() < config.rss_longitudinal_overlap_m && lon_unsafe {
                 return true;
             }
 
@@ -1283,5 +1388,109 @@ mod degraded_angular_gate_tests {
         assert!(degraded_angular_violation(0.1, f64::NAN, EPS));
         assert!(degraded_angular_violation(f64::NAN, 0.1, EPS));
         assert!(degraded_angular_violation(0.1, f64::INFINITY, EPS));
+    }
+}
+
+// EP-08 — the two RSS reference frames pinned to exact values. Both resolve a
+// longitudinal gap, a signed lateral offset, and the object velocity's
+// longitudinal/lateral components; every product/sum/sign in that resolution
+// is load-bearing (a snapshot RSS conjunction rides on the signs), so these
+// tests pin all four outputs of each frame to 1e-9 — the mutation gate's
+// arithmetic mutants in `rss_tangent_frame` / `rss_frenet_frame` each move at
+// least one output well past that tolerance.
+#[cfg(test)]
+mod rss_frame_tests {
+    use super::*;
+    use crate::state::Pose as AdapterPose;
+
+    fn traj_point(x: f64, y: f64, heading: f64) -> TrajectoryPoint {
+        TrajectoryPoint {
+            pose: AdapterPose { x_m: x, y_m: y, heading_rad: heading },
+            velocity_mps: 0.0,
+            time_from_start_s: 0.0,
+        }
+    }
+
+    fn obj_at(px: f64, py: f64, vx: f64, vy: f64) -> PerceivedObject {
+        PerceivedObject {
+            id: 1,
+            pos: Point { x_m: px, y_m: py },
+            velocity_mps: (vx * vx + vy * vy).sqrt(),
+            heading_rad: vy.atan2(vx),
+            vel: Point { x_m: vx, y_m: vy },
+        }
+    }
+
+    #[test]
+    fn tangent_frame_resolves_gap_offset_and_velocity_exactly() {
+        // Heading π/6 → cos = √3/2, sin = 1/2 (both non-trivial and distinct).
+        // Ego at (5, 7); object 2 m +X, 3 m +Y of it; velocity (1, 4).
+        let h = std::f64::consts::FRAC_PI_6;
+        let (cos_h, sin_h) = (h.cos(), h.sin());
+        let (dx, dy) = (2.0_f64, 3.0_f64);
+        let (vx, vy) = (1.0_f64, 4.0_f64);
+        let f = rss_tangent_frame(&traj_point(5.0, 7.0, h), &obj_at(5.0 + dx, 7.0 + dy, vx, vy));
+        assert!((f.lon_gap - (cos_h * dx + sin_h * dy)).abs() < 1e-9, "lon_gap {}", f.lon_gap);
+        assert!((f.lat_off - (-sin_h * dx + cos_h * dy)).abs() < 1e-9, "lat_off {}", f.lat_off);
+        assert!((f.obj_lon_v - (cos_h * vx + sin_h * vy)).abs() < 1e-9, "obj_lon_v {}", f.obj_lon_v);
+        assert!((f.obj_lat_v - (-sin_h * vx + cos_h * vy)).abs() < 1e-9, "obj_lat_v {}", f.obj_lat_v);
+        // Concrete values (independent of the formula above): with these inputs
+        // lon_gap ≈ 3.232, lat_off ≈ 1.598 — a sign flip or product→sum mutant
+        // lands elsewhere.
+        assert!((f.lon_gap - 3.232_050_8).abs() < 1e-6);
+        assert!((f.lat_off - 1.598_076_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frenet_frame_resolves_along_a_rotated_lane_exactly() {
+        // A straight lane at 30° (tangent (cos30, sin30) = (0.866, 0.5)) — the
+        // frame BUILDS regardless of straightness (engagement is gated
+        // elsewhere), and a rotated tangent makes the velocity-resolution signs
+        // load-bearing (a +X lane would zero the lateral term and hide mutants).
+        let h = std::f64::consts::FRAC_PI_6;
+        let (tx, ty) = (h.cos(), h.sin());
+        // Left/right boundaries offset ±2 m along the left normal (-sin, cos).
+        let (nx, ny) = (-ty, tx);
+        let center = |s: f64| Point { x_m: tx * s, y_m: ty * s };
+        let off = |p: Point, k: f64| Point { x_m: p.x_m + k * nx, y_m: p.y_m + k * ny };
+        let left: Vec<Point> = (0..=20).map(|i| off(center(i as f64), 2.0)).collect();
+        let right: Vec<Point> = (0..=20).map(|i| off(center(i as f64), -2.0)).collect();
+        let frenet = CenterlineFrenet::from_boundaries(&left, &right).unwrap();
+
+        // Ego at s = 5, 0.5 m to the RIGHT of the centerline; object at s = 12,
+        // 1.0 m to the LEFT. A non-zero ego offset makes `o.d - ego.d`
+        // load-bearing (an ego ON the centerline would let a `-`→`+` mutant pass).
+        let ego_w = off(center(5.0), -0.5);
+        let obj_w = off(center(12.0), 1.0);
+        let (vx, vy) = (2.0_f64, 3.0_f64);
+        let f = rss_frenet_frame(
+            &frenet,
+            &traj_point(ego_w.x_m, ego_w.y_m, h),
+            &obj_at(obj_w.x_m, obj_w.y_m, vx, vy),
+        )
+        .expect("both points project onto the lane");
+        // Arc gap 12 - 5 = 7; lateral offset 1.0 - (-0.5) = 1.5.
+        assert!((f.lon_gap - 7.0).abs() < 1e-6, "lon_gap {}", f.lon_gap);
+        assert!((f.lat_off - 1.5).abs() < 1e-6, "lat_off {}", f.lat_off);
+        // Velocity resolved against the lane tangent at the object.
+        assert!((f.obj_lon_v - (tx * vx + ty * vy)).abs() < 1e-6, "obj_lon_v {}", f.obj_lon_v);
+        assert!((f.obj_lat_v - (-ty * vx + tx * vy)).abs() < 1e-6, "obj_lat_v {}", f.obj_lat_v);
+        // The lateral component is non-zero (≈ 1.598) — the sign/product mutants
+        // in the `-ty*vx + tx*vy` resolution cannot hide.
+        assert!(f.obj_lat_v.abs() > 1.0);
+    }
+
+    #[test]
+    fn frenet_frame_falls_back_when_a_point_cannot_project() {
+        // A degenerate (single-point-after-collapse) frame is unbuildable, so
+        // instead pin the None path via a non-finite object position: project
+        // returns None → the caller uses the tangent frame for that pair.
+        let (l, r) = (
+            vec![Point { x_m: 0.0, y_m: 2.0 }, Point { x_m: 40.0, y_m: 2.0 }],
+            vec![Point { x_m: 0.0, y_m: -2.0 }, Point { x_m: 40.0, y_m: -2.0 }],
+        );
+        let frenet = CenterlineFrenet::from_boundaries(&l, &r).unwrap();
+        let bad = obj_at(f64::NAN, 0.0, 1.0, 0.0);
+        assert!(rss_frenet_frame(&frenet, &traj_point(5.0, 0.0, 0.0), &bad).is_none());
     }
 }

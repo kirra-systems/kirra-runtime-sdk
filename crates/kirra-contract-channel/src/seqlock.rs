@@ -215,7 +215,10 @@ mod tests {
         // would break the invariant; the seqlock must guarantee every coherent
         // snapshot the reader accepts is internally consistent.
         let region = Arc::new(InProcessRegion::new());
-        const N: u64 = 20_000;
+        // Miri interprets ~3 orders of magnitude slower; a reduced count still
+        // exercises the same acquire/release protocol (Miri's value is the
+        // memory-model checking, not the iteration volume).
+        const N: u64 = if cfg!(miri) { 200 } else { 20_000 };
 
         let w = Arc::clone(&region);
         let writer = thread::spawn(move || {

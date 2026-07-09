@@ -24,7 +24,7 @@ use crate::state::TrajectoryPoint;
 /// # Returns
 ///
 /// `None` if valid (times strictly increasing).
-/// `Some(violation_index)` if non-monotonic (times[i] ≥ times[i+1] at index i).
+/// `Some(violation_index)` if non-monotonic (`times[i] >= times[i+1]` at index i).
 ///
 /// # Example
 ///
@@ -53,7 +53,7 @@ pub fn validate_trajectory_time_monotonicity(trajectory: &[TrajectoryPoint]) -> 
 /// # Returns
 ///
 /// `None` if valid (max spacing ≤ max_spacing_s).
-/// `Some((index, spacing_s))` if violated (spacing[i] > max at segment i).
+/// `Some((index, spacing_s))` if violated (`spacing[i] > max` at segment i).
 ///
 /// # Certification Notes
 ///
