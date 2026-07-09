@@ -112,9 +112,10 @@ TR covers the transport-contract instantiation** the harness exercises.
 
 ## 3. Coverage gaps surfaced (the held line)
 
-The harness traces **9 transport-contract fault classes**; against the **current**
-kernel RTM, exactly **one** (over-envelope → SG-001/TR-001, proxy) has a real TR
-home. The other **seven** are genuine **`NO-RTM-ID`** gaps:
+The harness traces **9 rows — 8 transport-contract fault classes plus a
+clean-accept control (SG-00–SG-08)**; against the **current** kernel RTM,
+exactly **one** fault class (over-envelope → SG-001/TR-001, proxy) has a real
+TR home. The other **seven** are genuine **`NO-RTM-ID`** gaps:
 
 | Gap | Fault class | Principle precedent | Candidate new TR home |
 |---|---|---|---|

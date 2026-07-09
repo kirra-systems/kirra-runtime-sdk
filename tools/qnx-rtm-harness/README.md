@@ -2,7 +2,8 @@
 
 C++ **shim** (driver) → Rust **judge** (checker) over a frozen `extern "C"`
 contract ABI, with an automated **FDIT / RTM fault-injection** matrix that proves
-**verdict correctness** across nine fault classes. Part of **EPIC #270**
+**verdict correctness** across **9 rows — 8 injected fault classes plus a
+clean-accept control (SG-00–SG-08)**. Part of **EPIC #270**
 (iceoryx2 transport / QNX governor lane). Each row is **traced to the kernel RTM**
 (**#272** — see `QNX_MAPPING.md`): one genuine hit (SG-001/TR-001, proxy), seven
 honest `NO-RTM-ID` transport-contract gaps, one control.

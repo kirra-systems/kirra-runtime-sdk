@@ -40,7 +40,7 @@ safety-state gap (the verdict path is store-free). See
 | Fault | Detection | Response | Resulting state | Availability impact |
 |---|---|---|---|---|
 | Process death (panic=abort, crash) | no valid verdict at actuator; HA heartbeat loss | fail-closed: no Accept emitted → actuator safe-stops *(assumption of use, §6)*; HA promotes standby | **MRC immediately**; normal ops resume on promotion | up to ~10 s **in MRC** before normal-ops recovery (PROMOTION_TIMEOUT_MS) — not 10 s uncontrolled |
-| Verdict WCET / cycle timeout | SG9 in-process timeout (bound = measured WCET, S3) | fail-closed: Reject → MRC for that cycle | MRC | per-cycle, transient |
+| Verdict WCET / cycle timeout | SG9 in-process timeout (bound = host-indicative p99.9, S3 — not certified WCET; re-measured on target under S8) | fail-closed: Reject → MRC for that cycle | MRC | per-cycle, transient |
 | Compute / SoC fault (D3 element) | HA heartbeat loss / health monitor | fail-closed + HA failover | MRC then recovery | ~10 s as above |
 | Mutex poisoned | detected at lock acquisition | fail-closed, logged *distinctly* from writer-gone | MRC / degraded | operator-visible |
 | Audit write-queue full | try_send → Full | drop deny-audit record + loud log; verdict still returns | **no safety impact** (verdict is already Deny); forensic gap, sequence-detectable | none (forensic only) |

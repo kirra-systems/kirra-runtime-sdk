@@ -13,7 +13,7 @@
 
 The KIRRA governor runs as the **safety-domain payload directly on QNX Hypervisor 8.0 for Safety**. The Autoware / ROS 2 Jazzy / Occy planning stack (the *doer*) runs **unmodified as an isolated Ubuntu guest VM** on the same SoC. The certified virtual machine manager provides the ASIL-D freedom-from-interference boundary between them.
 
-The governor is implemented in **Rust, built with the Ferrocene qualified toolchain** targeting QNX Neutrino. The **certified artifact is the minimal `no_std` verdict core** (the kinematic contract and its gates), not the full governor process.
+The governor is implemented in **Rust** targeting QNX Neutrino — built with upstream `rustc` today and **Ferrocene-ready**; qualified-toolchain productization is tracked in **#132**. The **certified artifact is the minimal `no_std` verdict core** (the kinematic contract and its gates), not the full governor process.
 
 PikeOS and INTEGRITY are **not** build targets. They remain roadmap-only, activated solely by a named customer whose platform is already certified on them (aerospace / defense / space / rail).
 
