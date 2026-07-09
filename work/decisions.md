@@ -826,7 +826,7 @@ in tests.
 
 ### Both targets confirmed available in SDP 2.0.4
 - `gcc_ntox86_64_cxx` → x86_64 QNX (laptop/VM/x86 target)
-- `gcc_ntoaarch64le_cxx` → AArch64 (Jetson Orin NX — the cert target)
+- `gcc_ntoaarch64le_cxx` → AArch64 (DRIVE AGX Orin — the cert target per ADR-0032 / AOU-HW-QNX-TARGET-001; QNX does not run on the Jetson line)
 - AArch64 cross-compile uses identical process: swap target triple to
   `aarch64-unknown-nto-qnx800` and variant to `gcc_ntoaarch64le_cxx`
 
@@ -839,7 +839,7 @@ ADR-0006 Constraints stands — this finding confirms it is a real gap, not a
 theoretical one.
 
 ### Remaining for full #36 closure
-1. Deploy binary to a running QNX instance (VM or Jetson hardware)
+1. Deploy binary to a running QNX instance (x86_64 VM now; DRIVE AGX Orin at Phase II — QNX does not run on Jetson hardware)
 2. Confirm `/health` returns 200 on QNX
 3. Document POSIX findings (signal handling, threading, filesystem, dynamic
    linking) → flip PENDING rows in parko/QNX_BACKEND_SELECTION.md to

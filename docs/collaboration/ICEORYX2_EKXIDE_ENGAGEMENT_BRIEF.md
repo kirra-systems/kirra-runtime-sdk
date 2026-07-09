@@ -206,7 +206,9 @@ transport-independent** (ADR-0006 asymmetry); iceoryx2 is the **carrier**.
 1. **In-partition, both partitions (Clause 1) — the firm ask.** Native iceoryx2
    zero-copy pub/sub, **Rust end-to-end**, **zero-allocation in steady state**
    (pools sized once, no late discovery on the hot path), **no-FFI / no-unsafe**
-   command path, and a **bounded, measured WCET under FIFO scheduling** on QNX 8.0.
+   command path, and a **bounded WCET, to be measured under FIFO scheduling on
+   QNX 8.0** (the acceptance bar for this clause — not yet demonstrated; today's
+   timing evidence is VM-indicative only, per `tools/qnx-rtm-harness/results/`).
    This carries sensor/planner data within each partition.
 
 2. **Across the boundary (Clause 2) — two acceptable shapes:**

@@ -112,8 +112,8 @@ case is invariant to the doer; that is the whole game.
 
 ## 4. Where it lags — prioritized gaps (with codebase-tied fixes)
 
-1. **Occlusion / limited-visibility reasoning (RSS Rule 4) — missing.** KIRRA plans and
-   checks against a perception *snapshot*; it does not reason about *occluded* space (a
+1. **Occlusion / limited-visibility reasoning (RSS Rule 4) — missing.** KIRRA checks
+   against a perception *snapshot*; it does not reason about *occluded* space (a
    pedestrian who could emerge from behind a parked car). The benchmark vendor's RSS Rule 4 mandates
    exactly this. **Fix:** a visibility-aware speed bound — treat occluded regions as
    potential worst-case agents and cap admissible speed accordingly. This is a
