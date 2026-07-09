@@ -366,57 +366,66 @@ impl EpochFence for InMemoryEpochFence {
     }
 }
 
+/// The full fence contract, driven through the [`EpochFence`] trait so it runs
+/// IDENTICALLY against every backend. Proves the one load-bearing property —
+/// **at most one writer** — end to end: a lost claim never advances the epoch,
+/// the winner holds the fence, a stale/never-claimed/future holder is fenced,
+/// and a second instance's claim supersedes the first.
+///
+/// `pub` (not `#[cfg(test)]`) by design: this is the shared backend-conformance
+/// suite. The in-crate tests below run it against the SQLite and in-memory
+/// backends; an external backend crate (EP-10: `crates/kirra-verifier-pg`
+/// against a live Postgres server) runs the SAME function, so every backend is
+/// held to the identical contract. Panics on any violation (assert-based) —
+/// call it from a test.
+///
+/// PRECONDITION: `f` must be at genesis (epoch 0, no holder).
+pub fn assert_fence_contract<F: EpochFence>(f: &mut F)
+where
+    F::Error: core::fmt::Debug,
+{
+    // Genesis: epoch 0, no holder.
+    assert_eq!(f.current_epoch().unwrap(), 0);
+    assert_eq!(f.current_active_holder().unwrap(), (0, None));
+
+    // A claim on a WRONG observed epoch loses and never advances the counter.
+    assert_eq!(f.try_claim_epoch(7, "A", 1).unwrap(), None);
+    assert_eq!(f.current_epoch().unwrap(), 0, "a lost claim must not advance the epoch");
+
+    // The correct claim wins and records the holder.
+    assert_eq!(f.try_claim_epoch(0, "A", 10).unwrap(), Some(1));
+    assert_eq!(f.current_active_holder().unwrap(), (1, Some("A".to_string())));
+
+    // The winner (held == durable == 1) holds the fence.
+    assert_eq!(f.assert_actuator_epoch_held(1), Ok(()));
+    // A stale holder (old epoch), a never-claimed holder (held == 0), and a
+    // future epoch are all fenced.
+    assert_eq!(
+        f.assert_actuator_epoch_held(0),
+        Err(FenceError::EpochSuperseded { held: 0, durable: 1 })
+    );
+    assert_eq!(
+        f.assert_actuator_epoch_held(2),
+        Err(FenceError::EpochSuperseded { held: 2, durable: 1 })
+    );
+
+    // A second instance observing epoch 1 claims → exactly one writer moves on,
+    // and instance A is now fenced.
+    assert_eq!(f.try_claim_epoch(1, "B", 20).unwrap(), Some(2));
+    assert_eq!(
+        f.assert_actuator_epoch_held(1),
+        Err(FenceError::EpochSuperseded { held: 1, durable: 2 }),
+        "A is superseded by B's claim"
+    );
+    assert_eq!(f.assert_actuator_epoch_held(2), Ok(()), "B now holds the fence");
+
+    // A double-claim on the already-consumed observed epoch loses (idempotent CAS).
+    assert_eq!(f.try_claim_epoch(1, "C", 30).unwrap(), None);
+}
+
 #[cfg(test)]
 mod fence_contract_tests {
     use super::*;
-
-    /// The full fence contract, driven through the [`EpochFence`] trait so it runs
-    /// IDENTICALLY against every backend. Proves the one load-bearing property —
-    /// **at most one writer** — end to end: a lost claim never advances the epoch,
-    /// the winner holds the fence, a stale/never-claimed/future holder is fenced,
-    /// and a second instance's claim supersedes the first.
-    fn assert_fence_contract<F: EpochFence>(f: &mut F)
-    where
-        F::Error: core::fmt::Debug,
-    {
-        // Genesis: epoch 0, no holder.
-        assert_eq!(f.current_epoch().unwrap(), 0);
-        assert_eq!(f.current_active_holder().unwrap(), (0, None));
-
-        // A claim on a WRONG observed epoch loses and never advances the counter.
-        assert_eq!(f.try_claim_epoch(7, "A", 1).unwrap(), None);
-        assert_eq!(f.current_epoch().unwrap(), 0, "a lost claim must not advance the epoch");
-
-        // The correct claim wins and records the holder.
-        assert_eq!(f.try_claim_epoch(0, "A", 10).unwrap(), Some(1));
-        assert_eq!(f.current_active_holder().unwrap(), (1, Some("A".to_string())));
-
-        // The winner (held == durable == 1) holds the fence.
-        assert_eq!(f.assert_actuator_epoch_held(1), Ok(()));
-        // A stale holder (old epoch), a never-claimed holder (held == 0), and a
-        // future epoch are all fenced.
-        assert_eq!(
-            f.assert_actuator_epoch_held(0),
-            Err(FenceError::EpochSuperseded { held: 0, durable: 1 })
-        );
-        assert_eq!(
-            f.assert_actuator_epoch_held(2),
-            Err(FenceError::EpochSuperseded { held: 2, durable: 1 })
-        );
-
-        // A second instance observing epoch 1 claims → exactly one writer moves on,
-        // and instance A is now fenced.
-        assert_eq!(f.try_claim_epoch(1, "B", 20).unwrap(), Some(2));
-        assert_eq!(
-            f.assert_actuator_epoch_held(1),
-            Err(FenceError::EpochSuperseded { held: 1, durable: 2 }),
-            "A is superseded by B's claim"
-        );
-        assert_eq!(f.assert_actuator_epoch_held(2), Ok(()), "B now holds the fence");
-
-        // A double-claim on the already-consumed observed epoch loses (idempotent CAS).
-        assert_eq!(f.try_claim_epoch(1, "C", 30).unwrap(), None);
-    }
 
     #[test]
     fn sqlite_backend_satisfies_the_epoch_fence_contract() {

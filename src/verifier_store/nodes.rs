@@ -191,7 +191,8 @@ impl VerifierStore {
 // is untouched and the SQLite impl delegates via `self.method()` WITHOUT
 // recursion), and a second in-memory backend + a shared conformance test prove
 // the contract is genuinely backend-portable (SQLite realizes it over the `nodes`
-// table; a future Postgres backend over the same schema).
+// table; EP-10's `crates/kirra-verifier-pg` realizes it over the same schema on
+// a LIVE Postgres server, running this same conformance suite in CI).
 // ---------------------------------------------------------------------------
 
 /// The node-registry storage contract — persist a registered node and read it
@@ -277,10 +278,23 @@ impl NodeStore for InMemoryNodeStore {
     }
 }
 
-#[cfg(test)]
-mod node_store_contract_tests {
-    use super::*;
-
+/// The node-registry contract, driven through the [`NodeStore`] trait so it runs
+/// IDENTICALLY against every backend: empty reads, save→load roundtrip (id +
+/// status preserved), existence + count, bulk load, and the UPSERT invariant
+/// (re-saving an id overwrites, never duplicates).
+///
+/// `pub` (not `#[cfg(test)]`) by design: this is the shared backend-conformance
+/// suite. The in-crate tests below run it against the SQLite and in-memory
+/// backends; an external backend crate (EP-10: `crates/kirra-verifier-pg`
+/// against a live Postgres server) runs the SAME function, so every backend is
+/// held to the identical contract. Panics on any violation (assert-based) —
+/// call it from a test.
+///
+/// PRECONDITION: `store` must start empty.
+pub fn assert_node_store_contract<S: NodeStore>(store: &S)
+where
+    S::Error: core::fmt::Debug,
+{
     fn node(id: &str, status: NodeTrustState) -> RegisteredNode {
         RegisteredNode {
             node_id: id.to_string(),
@@ -293,45 +307,40 @@ mod node_store_contract_tests {
             firmware_version: None,
         }
     }
+    // Empty registry.
+    assert_eq!(store.count_nodes().unwrap(), 0);
+    assert!(store.load_node("n1").unwrap().is_none());
+    assert!(!store.node_exists("n1").unwrap());
 
-    /// The node-registry contract, driven through the [`NodeStore`] trait so it runs
-    /// IDENTICALLY against every backend: empty reads, save→load roundtrip (id +
-    /// status preserved), existence + count, bulk load, and the UPSERT invariant
-    /// (re-saving an id overwrites, never duplicates).
-    fn assert_node_store_contract<S: NodeStore>(store: &S)
-    where
-        S::Error: core::fmt::Debug,
-    {
-        // Empty registry.
-        assert_eq!(store.count_nodes().unwrap(), 0);
-        assert!(store.load_node("n1").unwrap().is_none());
-        assert!(!store.node_exists("n1").unwrap());
+    // Save + read back (id + status preserved).
+    store.save_node(&node("n1", NodeTrustState::Trusted)).unwrap();
+    assert!(store.node_exists("n1").unwrap());
+    assert_eq!(store.count_nodes().unwrap(), 1);
+    let loaded = store.load_node("n1").unwrap().expect("n1 present");
+    assert_eq!(loaded.node_id, "n1");
+    assert_eq!(loaded.status, NodeTrustState::Trusted);
 
-        // Save + read back (id + status preserved).
-        store.save_node(&node("n1", NodeTrustState::Trusted)).unwrap();
-        assert!(store.node_exists("n1").unwrap());
-        assert_eq!(store.count_nodes().unwrap(), 1);
-        let loaded = store.load_node("n1").unwrap().expect("n1 present");
-        assert_eq!(loaded.node_id, "n1");
-        assert_eq!(loaded.status, NodeTrustState::Trusted);
+    // A second node; bulk load sees both.
+    store.save_node(&node("n2", NodeTrustState::Unknown)).unwrap();
+    assert_eq!(store.count_nodes().unwrap(), 2);
+    let ids: Vec<String> = store.load_nodes().unwrap().into_iter().map(|n| n.node_id).collect();
+    assert!(ids.contains(&"n1".to_string()) && ids.contains(&"n2".to_string()));
 
-        // A second node; bulk load sees both.
-        store.save_node(&node("n2", NodeTrustState::Unknown)).unwrap();
-        assert_eq!(store.count_nodes().unwrap(), 2);
-        let ids: Vec<String> = store.load_nodes().unwrap().into_iter().map(|n| n.node_id).collect();
-        assert!(ids.contains(&"n1".to_string()) && ids.contains(&"n2".to_string()));
+    // UPSERT: re-saving n1 with a new status overwrites, count stays 2.
+    store.save_node(&node("n1", NodeTrustState::Untrusted("fault".to_string()))).unwrap();
+    assert_eq!(store.count_nodes().unwrap(), 2, "upsert must not duplicate");
+    assert_eq!(
+        store.load_node("n1").unwrap().unwrap().status,
+        NodeTrustState::Untrusted("fault".to_string())
+    );
 
-        // UPSERT: re-saving n1 with a new status overwrites, count stays 2.
-        store.save_node(&node("n1", NodeTrustState::Untrusted("fault".to_string()))).unwrap();
-        assert_eq!(store.count_nodes().unwrap(), 2, "upsert must not duplicate");
-        assert_eq!(
-            store.load_node("n1").unwrap().unwrap().status,
-            NodeTrustState::Untrusted("fault".to_string())
-        );
+    // An unregistered id stays absent.
+    assert!(store.load_node("ghost").unwrap().is_none());
+}
 
-        // An unregistered id stays absent.
-        assert!(store.load_node("ghost").unwrap().is_none());
-    }
+#[cfg(test)]
+mod node_store_contract_tests {
+    use super::*;
 
     #[test]
     fn sqlite_backend_satisfies_the_node_store_contract() {
