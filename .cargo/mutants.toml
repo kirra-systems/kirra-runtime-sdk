@@ -2,11 +2,13 @@
 #
 # SCOPE. Mutation runs target the CHECKER crate (`-p kirra-trajectory`,
 # passed on the command line by the CI lane / the baseline scripts). The
-# checker's DEEPEST tests live in `crates/kirra-ros2-adapter/tests/
-# validation_tests.rs` (the Option-B re-export wiring), so the mutation
-# harness MUST run that package's tests too — otherwise it understates kill
-# rates badly (measured 2026-07-07: 318 survivors own-tests-only vs 202 with
-# the adapter suite; see docs/testing/MUTATION_BASELINE.md).
+# checker's slow-loop test battery now lives WITH the checker code
+# (`crates/kirra-trajectory/tests/validation_tests.rs`, relocated from the
+# adapter alongside the code it covers); the adapter crate is kept in scope
+# because its conformance / perception-gate / cited-copy suites still exercise
+# the checker through the Option-B re-export wiring, catching mutants the unit
+# tests alone would not (measured 2026-07-07: 318 survivors own-tests-only vs
+# 202 with the adapter suite; see docs/testing/MUTATION_BASELINE.md).
 #
 # `test_package` is the CORRECT mechanism for this. cargo-mutants defaults to
 # running ONLY the mutated package's own tests; `test_package` (CLI
@@ -21,3 +23,33 @@ test_package = ["kirra-trajectory", "kirra-ros2-adapter"]
 # the suite itself runs in seconds, so 300 s cleanly separates "hung mutant"
 # (caught as timeout) from slow CI I/O.
 minimum_test_timeout = 300
+
+# EQUIVALENT-MUTANT exclusions (EP-08 Frenet / curved-RSS geometry). Each entry
+# below is a mutation that CANNOT be killed by any test because it does not
+# change observable behaviour — cargo-mutants cannot detect equivalence, so it
+# is excluded here with a written justification (mirrors the accept-with-reason
+# policy in docs/testing/MUTATION_BASELINE.md §3/§6). These are precise
+# function+operator patterns, NOT blanket operator excludes: the ONLY `<`/`-`
+# operators remaining in `from_boundaries` after its redundant length guards
+# were removed ARE the duplicate-collapse predicate, and the two RSS gates each
+# have exactly one in-diff `<` (the EP-08 per-class overlap comparison).
+exclude_re = [
+    # Duplicate-midpoint collapse in the centerline builder: a defensive guard
+    # whose only effect is to drop a zero-length centerline segment. Every
+    # downstream traversal (project, tangent_at, total_heading_change_rad)
+    # already skips a zero-length segment, so mutating the collapse predicate or
+    # its coordinate subtraction produces byte-identical projections/tangents for
+    # every corridor the resampler can produce — output-equivalent.
+    "replace < with (==|<=|>) in CenterlineFrenet::from_boundaries",
+    "replace - with (\\+|/) in CenterlineFrenet::from_boundaries",
+    # Nearest-segment retention in `project`: `dist2 < best` vs `<=` differ only
+    # when two segments are EXACTLY equidistant, where either choice yields the
+    # same projected (s, d) — a measure-zero, output-equivalent boundary.
+    "replace < with <= in CenterlineFrenet::project",
+    # EP-08 per-class longitudinal-overlap gate (snapshot :553 + predictive
+    # :911): `|dy| < overlap` vs `|dy| <= overlap` differ only at exact float
+    # equality (|dy| == overlap to the bit) — a measure-zero boundary that is
+    # behaviourally identical for any real perception input.
+    "replace < with <= in validate_trajectory_slow_capped",
+    "replace < with <= in predictive_rss_breach",
+]

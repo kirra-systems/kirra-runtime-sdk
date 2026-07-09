@@ -132,9 +132,12 @@ impl CenterlineFrenet {
     /// relaxation; it is exactly today's behaviour.
     #[must_use]
     pub fn from_boundaries(left: &[Point], right: &[Point]) -> Option<Self> {
-        if left.len() < 2 || right.len() < 2 {
-            return None;
-        }
+        // `cumulative_arc` is the fail-closed backstop for a too-short boundary:
+        // a polyline with fewer than two vertices produces no segment, so its
+        // total length is 0 and it returns `None` here — no separate `len < 2`
+        // pre-check is needed (it could reject nothing the arc-length guard does
+        // not), and `sample_at_fraction` below is only reached once both
+        // boundaries are known to have ≥ 2 vertices.
         let cum_l = cumulative_arc(left)?;
         let cum_r = cumulative_arc(right)?;
 
@@ -153,9 +156,9 @@ impl CenterlineFrenet {
             }
             pts.push(mid);
         }
-        if pts.len() < 2 {
-            return None;
-        }
+        // Again `cumulative_arc` is the backstop: a centerline that collapsed to
+        // a single point (a fully pinched corridor) has zero total length and
+        // returns `None` — so no separate `pts.len() < 2` pre-check is needed.
         let cum_s = cumulative_arc(&pts)?;
         Some(Self { pts, cum_s })
     }
