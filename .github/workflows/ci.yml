@@ -510,6 +510,37 @@ jobs:
         # --locked: build the committed lockfile exactly; fail if it would drift.
         run: cd crates/kirra-loom-models && RUSTFLAGS="--cfg loom" cargo test --release --locked
 
+  # EP-15 — Kani model-checking proofs on the checker cores. Machine-checks the
+  # `verification/kani/` harnesses: the HA lease split-brain algebra (all u64),
+  # the frozen kinematics-contract fail-closed guards + P2 ceiling + Degraded
+  # decel-to-stop denials (f64 is_finite case-split), and the RSS longitudinal
+  # totality + the closing-speed monotonicity `occlusion_limited_speed`'s
+  # bisection relies on (integer-scaled grids). The crate is workspace-detached
+  # (like loom/fuzz) and `#[path]`-includes the shipped sources VERBATIM, so
+  # the file under proof IS the file that ships.
+  #
+  # NON-BLOCKING for now (`continue-on-error`), per the EP-15 plan: the lane
+  # flips to blocking once it has a stable run history. The mirror tests of
+  # every property already run BLOCKING in this lane's first step (they need
+  # no Kani), so a property regression still fails CI today.
+  kani-proofs:
+    name: Kani proofs (EP-15, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Proof-property mirror tests (BLOCKING; includes compile + concrete mirrors)
+        run: cd verification/kani && cargo test --locked
+      - name: Install Kani
+        id: kani-install
+        continue-on-error: true
+        run: cargo install kani-verifier --locked && cargo kani setup
+      - name: Run Kani proofs (non-blocking until the lane stabilizes)
+        if: steps.kani-install.outcome == 'success'
+        continue-on-error: true
+        run: cd verification/kani && cargo kani
+
   # M5 — fuzz-target build + bounded run guard. Compiles every cargo-fuzz
   # target in `fuzz/` against the current decoder APIs so the harnesses cannot
   # bitrot as the untrusted-input decoders evolve, then (WP-04 / MGA G-6) runs

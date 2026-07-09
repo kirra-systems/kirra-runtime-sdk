@@ -1,0 +1,51 @@
+# EP-15 — Kani proof harnesses over the checker cores.
+#
+# Kani (model-checking Rust via CBMC) PROVES a property for ALL inputs — not the
+# samples a proptest happens to draw. The harnesses here machine-check invariants
+# on the actuation-path checker cores:
+#
+#   * `src/lease.rs`            — HA lease algebra (split-brain non-overlap), all u64
+#   * `kirra-core kinematics_contract` — fail-closed NaN/dt guards, the P2 speed
+#                                 ceiling, the Degraded decel-to-stop denials
+#   * `parko-core rss.rs`       — longitudinal-safe-distance totality + the
+#                                 monotonicity `occlusion_limited_speed`'s bisection
+#                                 RELIES on, over integer-scaled input grids
+#
+# FIDELITY: the sources under proof are `#[path]`-included VERBATIM from their
+# shipped locations (the kinematics contract is the FROZEN talisman, git blob
+# ed00f4da… — it must not be edited, so its proofs live here, not inline).
+# `cargo test` in this crate compiles those same files and runs BOTH their own
+# unit tests AND concrete mirror tests of every proof property, so the harness
+# logic is validated even on machines without Kani.
+#
+# RUN:   cargo kani                      (inside verification/kani/)
+#        cargo kani --harness <name>     (one property)
+# CI:    the `kani-proofs` lane installs Kani on the runner and runs the full
+#        set — NON-BLOCKING until the lane has a stable history (EP-15 plan).
+#
+# The empty `[workspace]` table detaches this crate from the parent workspace
+# (like `fuzz/` and `crates/kirra-loom-models`): Kani never enters the root
+# Cargo.lock, the MSRV lane, or a normal `cargo build --workspace`.
+[package]
+name = "kirra-kani-proofs"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[lints.rust]
+# `--cfg kani` is set by the cargo-kani driver, not by any Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[dependencies]
+# The included kinematics-contract talisman derives serde on its wire types.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The included parko rss.rs test module uses proptest.
+proptest = "1"
+
+# Kani injects its own `kani` crate when driving the build; no dependency is
+# declared for it, and every proof module is gated `#[cfg(kani)]` so normal
+# builds compile none of it.
