@@ -2309,6 +2309,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-replay"
+version = "0.1.0"
+dependencies = [
+ "kirra-capture-schema",
+ "kirra-core",
+ "kirra-verifier",
+ "serde_json",
+]
+
+[[package]]
 name = "kirra-ros2-adapter"
 version = "0.1.0"
 dependencies = [
